@@ -34,6 +34,14 @@ Configure via the `AXIAM__GRPC__*` env vars (see
 [`docs/deployment/README.md`](../deployment/README.md) for the full
 deployment env-var reference).
 
+Rate limiting is **per method family**, not server-wide:
+`AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
+`AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService` +
+`TokenService`, `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and
+gRPC reflection/health are never limited. All three are per second per
+client IP; leaving the last two unset derives them from the authz ceiling.
+See [Sizing your rate limits § 3.1](../deployment/rate-limit-sizing.md).
+
 ## Consuming the API
 
 Client stubs are pre-generated and committed per SDK; you do not need to

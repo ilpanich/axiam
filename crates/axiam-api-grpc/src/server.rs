@@ -45,7 +45,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use crate::config::GrpcConfig;
 use crate::middleware::auth::AuthInterceptor;
 use crate::middleware::rate_limit::{
-    GrpcSharedRateLimitLayer, build_grpc_governor_layer, trusted_hops_from_env,
+    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
 };
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
@@ -60,10 +60,16 @@ use crate::services::{
 /// Applies two cooperating rate-limit layers (SECHRD-03, D-01a/b/c — gap
 /// closure for 24-07): the [`GrpcSharedRateLimitLayer`] cross-replica
 /// pre-check runs FIRST (outermost), failing OPEN to the per-replica in-memory
-/// `GovernorLayer` (per D-10) built via `grpc_authz_per_sec` from
-/// `GrpcConfig`. Both layers derive their client-IP key from the SAME
-/// `trusted_hops` value so gRPC keying stays in lockstep across the shared
-/// counter and the in-memory fallback.
+/// governor stack (per D-10). Both layers derive their client-IP key from the
+/// SAME `trusted_hops` value so gRPC keying stays in lockstep across the
+/// shared counter and the in-memory fallback, and both are sized from the
+/// same per-second [`crate::middleware::rate_limit::GrpcRateLimits`] value.
+///
+/// Since I1/I2 the ceilings are **per method family**, not server-wide:
+/// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
+/// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService`/`TokenService`,
+/// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and gRPC
+/// reflection/health are never limited.
 ///
 /// Since the H2 performance fix the shared pre-check performs NO synchronous
 /// datastore write: it is backed by the process-wide write-behind
@@ -99,9 +105,13 @@ where
     U: UserRepository + Clone + 'static,
     C: Connection + 'static,
 {
+    // I2: per-family ceilings (unset knobs derived from the authz ceiling).
+    let rate_limits = grpc_config.rate_limits();
     tracing::info!(
         bind = %addr,
-        grpc_authz_per_sec = grpc_config.grpc_authz_per_sec,
+        grpc_authz_per_sec = rate_limits.authz_per_sec,
+        grpc_identity_per_sec = rate_limits.identity_per_sec,
+        grpc_admin_per_sec = rate_limits.admin_per_sec,
         "Starting gRPC server",
     );
 
@@ -116,13 +126,16 @@ where
     // this runtime). Cloning the LAYER is fine — the counter inside is an
     // `Arc` handle, so every clone shares the same local counts. Building a
     // second layer would create a second, independent counter.
-    let shared_rate_limit_layer = GrpcSharedRateLimitLayer::new(
-        db,
-        "grpc_authz",
-        grpc_config.grpc_authz_per_sec,
-        trusted_hops,
-    );
-    let governor_layer = build_grpc_governor_layer(grpc_config.grpc_authz_per_sec);
+    //
+    // I1 (units) + I2 (scope): both layers are now built from the SAME
+    // per-second `GrpcRateLimits` value. `new_method_scoped` converts each
+    // per-second ceiling into the shared layer's 60-second window budget
+    // itself (`per_sec_to_window_limit`) — previously the per-second number
+    // was passed to a per-minute window verbatim, which made the effective
+    // gRPC ceiling 1/60th of the configured one.
+    let shared_rate_limit_layer =
+        GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
+    let governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
         AuthorizationServiceImpl::new(engine, batch_max_concurrency),

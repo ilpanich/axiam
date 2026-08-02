@@ -715,6 +715,27 @@ async fn main() -> std::io::Result<()> {
         "Rate-limit posture active"
     );
 
+    // I3: should the machine-traffic throttling advisory be armed on the
+    // shared rate-limit counter built further down? Only when the shipped
+    // `internet` defaults are what this process is actually enforcing —
+    // i.e. no posture preset was applied AND no machine limit was pinned by
+    // hand. An operator who chose `gateway`/`mesh`, or who set the numbers
+    // themselves, has already made this sizing decision.
+    let arm_machine_traffic_advisory = {
+        use axiam_api_rest::config::rate_limit::{
+            ENV_AUTHZ_CHECK_PER_MIN, ENV_INTROSPECT_PER_MIN, ENV_REVOKE_PER_MIN, ENV_TOKEN_PER_MIN,
+        };
+        config.rate_limit.profile == axiam_api_rest::config::rate_limit::RateLimitProfile::Internet
+            && ![
+                ENV_TOKEN_PER_MIN,
+                ENV_INTROSPECT_PER_MIN,
+                ENV_REVOKE_PER_MIN,
+                ENV_AUTHZ_CHECK_PER_MIN,
+            ]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+    };
+
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
     // Direct-TLS is opt-in (default: terminate at the proxy layer). Cloned out
@@ -1092,6 +1113,17 @@ async fn main() -> std::io::Result<()> {
     let shared_rate_limit_counter = axiam_db::SharedRateLimitCounter::from_env(Arc::new(
         axiam_db::SurrealRateLimitBucketRepository::new(db_handle.clone()),
     ));
+
+    // I3: arm the machine-traffic throttling advisory ONLY when the shipped
+    // `internet` defaults are the active posture AND the operator has not
+    // pinned any machine limit by hand. Anyone who deliberately selected
+    // `gateway`/`mesh`, or set the numbers themselves, has already made this
+    // sizing decision and does not need to be told about it. Riding on the
+    // write-behind counter's existing flusher — no extra task, no extra
+    // timer.
+    if arm_machine_traffic_advisory {
+        shared_rate_limit_counter.arm_machine_traffic_advisory();
+    }
 
     // QUAL-01: single composition root — one AppState<C> built here and
     // registered once per worker below, replacing the ~49 individual

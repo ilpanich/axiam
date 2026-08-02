@@ -266,17 +266,27 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 |---|---|
 | `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `20`). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `10`). |
-| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `10`). |
-| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `300`). |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `600`). |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `60`). |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `1800`). |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
 | `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` | Write-behind flush interval for the shared counter, in milliseconds (default `1000`, clamped `50`–`60000`). Directly scales the cross-replica overshoot bound — see [Shared-store consistency model](#shared-store-consistency-model-write-behind) below. |
+
+The gRPC listener has its own per-second ceilings, one bucket per gRPC
+**method family** (reflection and health are never limited):
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | Max `axiam.v1.AuthorizationService` requests per second per IP (default `100`). |
+| `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | Max `axiam.v1.UserInfoService` + `axiam.v1.TokenService` requests per second per IP. Unset = 5x the authz ceiling (default `500`). |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` requests per second per IP. Unset = the authz ceiling (default `100`). `ValidateCredentials` is Argon2id-bound, so this is a CPU guard. |
+| `AXIAM__GRPC__KEY` | Reserved for D8 parity; currently a no-op (the gRPC limiters are always per-IP — see [Sizing your rate limits § 5](rate-limit-sizing.md)). |
 
 > **Which numbers should you actually run?** See
 > **[Sizing your rate limits](rate-limit-sizing.md)** — the measured hardware

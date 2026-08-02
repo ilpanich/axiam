@@ -44,13 +44,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- gRPC rate limits are now scoped **per method family** instead of server-wide (I2). One
+  bucket each for authz-check (`axiam.v1.AuthorizationService`), identity-read
+  (`axiam.v1.UserInfoService`, `axiam.v1.TokenService`) and admin
+  (`axiam.v1.UserService`), with gRPC reflection and health explicitly never limited and
+  an unrecognized path failing safe into the strictest bucket. Two new knobs,
+  `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` (default 5x the authz ceiling = 500/s) and
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (default 1x = 100/s); leaving them unset derives both
+  from `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, so a posture preset still moves the whole family
+  with one variable. Previously a `GetUserInfo` read — measured at 12 665/s — was throttled
+  by the *authz* ceiling, because a single server-wide bucket made an authorization sizing
+  decision into a userinfo sizing decision
+- Startup advisory for mis-sized machine limits: when the shipped `internet` defaults are
+  what a process is actually enforcing (no posture preset, no machine limit pinned by
+  hand) and the sustained 429 ratio on the machine endpoints exceeds ~50% over a 5-minute
+  interval, the server logs "your limits are throttling what looks like legitimate machine
+  traffic; see rate-limit-sizing". Built on the write-behind rate-limit counter's existing
+  flusher pass — no new background task, no new timer, and human endpoints are excluded
+  from the ratio by construction (a 429 storm on `/auth/login` is a credential-stuffing
+  signal, not a sizing signal)
 - Benchmark dry-run mode (`just bench-dry-run`, `just dry=1 bench-run`) — rehearses the
   whole target × profile matrix over the same bring-up/seed/run/tear-down path in minutes,
   grading each cell on the k6 client contract (connect, request, expected response) instead
   of on performance, so a break surfaces before an hours-long matrix commits to it
 
+### Changed
+
+- Revised the shipped `internet` machine-endpoint rate-limit defaults (I3), sized from the
+  run-4 measured capacity of each endpoint: `TOKEN_PER_MIN` 20 → **120**,
+  `INTROSPECT_PER_MIN` 10 → **600**, `AUTHZ_CHECK_PER_MIN` 300 → **1800**,
+  `REVOKE_PER_MIN` 10 → **60**. The old numbers sat four to five orders of magnitude below
+  the machine's ceiling (token 20/min against ~163 000/min of capacity) and broke the first
+  healthy integration behind a NAT without protecting anything the new ones fail to
+  protect; every revised value still stays 25–2 700x below measured capacity. **Human
+  endpoints (login, register, password-reset, MFA) are unchanged** — they are sized against
+  credential guessing, never against capacity. The `gateway`/`mesh` presets are unchanged.
+  If you pinned any of these with an env var, nothing changes for you: explicit env still
+  beats both the preset and the shipped default
+
 ### Fixed
 
+- gRPC rate limits were enforced at **1/60th of the configured rate** (I1). The gRPC
+  ceiling is per second, but the cross-replica shared pre-check runs the same fixed
+  60-second window as the REST limiter and was handed the per-second number verbatim; since
+  the stricter of the two cooperating layers wins, `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100`
+  admitted ~100 requests per *minute*. The per-second → per-window conversion now happens
+  once, at the layer boundary, with a saturating multiply, and the production constructor
+  takes per-second ceilings so a caller cannot get the units wrong again. Found by benchmark
+  run 4's production-posture pass
 - Stale DB handles after a reconnect: every repository was built at boot from a one-time
   `pool.handle_for_repo()` **clone** of the pooled SurrealDB connection, so when the pool's
   reconnect loop evicted a poisoned connection (observed ~7 minutes into a sustained load

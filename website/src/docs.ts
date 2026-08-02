@@ -694,7 +694,7 @@ export const DOC_PAGES: DocPage[] = [
         rows: [
           ["AXIAM__RATE_LIMIT__LOGIN_PER_MIN", "Max /auth/login per minute per key.", "10"],
           ["AXIAM__RATE_LIMIT__REGISTER_PER_MIN", "Max register requests per minute.", "5"],
-          ["AXIAM__RATE_LIMIT__TOKEN_PER_MIN", "Max /oauth2/token per minute.", "20"],
+          ["AXIAM__RATE_LIMIT__TOKEN_PER_MIN", "Max /oauth2/token per minute.", "120"],
           [
             "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN",
             "Max password-reset requests per minute.",
@@ -704,13 +704,13 @@ export const DOC_PAGES: DocPage[] = [
           [
             "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN",
             "Max /oauth2/introspect per minute.",
-            "10",
+            "600",
           ],
-          ["AXIAM__RATE_LIMIT__REVOKE_PER_MIN", "Max /oauth2/revoke per minute.", "10"],
+          ["AXIAM__RATE_LIMIT__REVOKE_PER_MIN", "Max /oauth2/revoke per minute.", "60"],
           [
             "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN",
             "Max authz-check requests per minute.",
-            "300",
+            "1800",
           ],
           [
             "AXIAM__RATE_LIMIT__TRUSTED_HOPS",
@@ -785,23 +785,23 @@ export const DOC_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__TOKEN_PER_MIN",
-            "20",
-            "60–120",
+            "120",
+            "keep 120",
             "per-client peak RPS × 60 × 2 (a 2-core server sustains ~163k issuances/min total)",
             "budget per tenant SLA",
           ],
           [
             "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN",
-            "10",
-            "60",
+            "600",
+            "keep 600",
             "10–20× your token limit (resource servers introspect per request)",
             "same rule",
           ],
           [
             "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN",
-            "300",
-            "600",
-            "6,000–60,000 per client — checks are cheap reads; 300/min starves any real service",
+            "1800",
+            "keep 1800",
+            "6,000–60,000 per client — checks are cheap reads; the pre-revision 300/min starved any real service",
             "size to the cache-ON ceiling",
           ],
           [

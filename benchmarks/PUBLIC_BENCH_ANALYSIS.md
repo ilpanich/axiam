@@ -252,22 +252,27 @@ not an expectation — the realistic-keyspace measurement from draft 4
 logs its live hit rate so you can measure your own workload before opting
 in. The REST-path session cost is now a tracked optimization target.
 
-**Production rate-limit posture.** With shipped (`internet`) limits, a
-single-IP 50-VU flood is throttled to the configured trickle on every
-limited REST endpoint (token 20/min, introspect 10/min, authz 300/min,
-login 10/min — all enforced within measurement error) while unlimited
-paths run at full speed beside it (userinfo 4 572/s, jwks 26 324/s — the
-429 path is cheap). Two findings from this pass:
+**Production rate-limit posture.** With the `internet` limits as they
+shipped *at the time of this run* (token 20/min, introspect 10/min, authz
+300/min, login 10/min), a single-IP 50-VU flood is throttled to the
+configured trickle on every limited REST endpoint — all enforced within
+measurement error — while unlimited paths run at full speed beside it
+(userinfo 4 572/s, jwks 26 324/s — the 429 path is cheap). Two findings
+from this pass, **both since acted on**:
 
-1. The defaults do their abuse-stopping job, and remain far too strict for
-   real machine fleets — §7 gives the numbers-backed sizing guidance.
-2. **It caught a real bug: the gRPC limiter admits ~1/60th of its
-   configured rate** (a per-second limit is enforced against a per-minute
+1. The defaults did their abuse-stopping job and were far too strict for
+   real machine fleets. The machine-endpoint defaults have been revised as
+   a result (token 120/min, introspect 600/min, authz 1 800/min, revoke
+   60/min; human endpoints unchanged) — §7.2. The measurements above
+   describe the pre-revision numbers, which is what makes them the
+   evidence for the change.
+2. **It caught a real bug: the gRPC limiter admitted ~1/60th of its
+   configured rate** (a per-second limit enforced against a per-minute
    window by one of the two cooperating limiter layers). Found by this
-   benchmark, root-caused in code, fix tracked. Until it ships, treat
-   `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` as effectively per-minute in
-   production postures — or keep gRPC behind the neutral default and limit
-   at the mesh/gateway layer.
+   benchmark, root-caused in code, and **fixed** —
+   `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100` now really admits 100/s. The same
+   fix scoped the gRPC ceilings per method family, so an identity read is
+   no longer throttled by the authz limit (§7.2).
 
 ## 5. Resource usage during the tests (new in this draft — graph-ready)
 
@@ -334,8 +339,10 @@ cpu·ms/request grouped bars, (c) a scatter of throughput vs stack RAM
 - **Batch cells this run measured the non-default strategy** due to a
   benchmark-harness pin (now fixed); the shipped default's number remains
   draft 4's 4.98× table until run 5 re-measures it (§1).
-- **The gRPC production rate limiter under-admits ×60** (units bug, found
-  by this run's posture pass, fix tracked) — §4/§7.
+- **The gRPC production rate limiter under-admitted ×60** (units bug,
+  found by this run's posture pass) — **fixed since this run**, along with
+  the server-wide scope that made the authz ceiling throttle identity
+  reads; the measurements in this draft predate both fixes — §4/§7.2.
 - **Keycloak's login cells are excluded by our validity gate at 2 GiB**;
   next run gives them 4 GiB, labeled. Zitadel's login/refresh exclusions
   are its default bcrypt cost / a missing harness flow — stated, not
@@ -363,17 +370,20 @@ This run measured both the enforcement (§4) and — for the first time on a
 clean build — the actual capacity headroom behind those limits on a modest
 2-core envelope:
 
-| endpoint | shipped default (`internet`, per-IP) | measured capacity (this run, 2c server / 2c DB) | default as % of capacity |
-|---|---|---|---|
-| `POST /oauth2/token` | 20/min | ~2 727/s ≈ 163 000/min | 0.012% |
-| `POST /oauth2/introspect` | 10/min | ~4 387/s ≈ 263 000/min | 0.004% |
-| `POST /api/v1/authz/check` | 300/min | ~753/s ≈ 45 000/min (REST) | 0.7% |
-| gRPC authz | 100/s | ~887/s (checks), 12 665/s (reads) | 11% (nominal — see bug note §4) |
-| `POST /api/v1/auth/login` | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% |
+| endpoint | shipped default (`internet`, per-IP) | previous default | measured capacity (this run, 2c server / 2c DB) | default as % of capacity |
+|---|---|---|---|---|
+| `POST /oauth2/token` | 120/min | 20/min | ~2 727/s ≈ 163 000/min | 0.07% |
+| `POST /oauth2/introspect` | 600/min | 10/min | ~4 387/s ≈ 263 000/min | 0.23% |
+| `POST /oauth2/revoke` | 60/min | 10/min | (tracks issuance) | — |
+| `POST /api/v1/authz/check` | 1 800/min | 300/min | ~753/s ≈ 45 000/min (REST) | 4% |
+| gRPC authz | 100/s | 100/s | ~887/s (checks), 12 665/s (reads) | 11% |
+| `POST /api/v1/auth/login` | 10/min | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% |
 
-The gap is deliberate on an internet edge — but it means the defaults
-*will* throttle any legitimate machine fleet, and a NAT'd fleet shares one
-IP bucket. Recommendations, updated for run 4:
+The "shipped default" column is the **current** shipped value; the
+"previous default" column is what shipped before this run's revision
+(§7.2). The gap to capacity is still deliberate on an internet edge — but
+note that even after the revision a NAT'd fleet shares one IP bucket, so
+the posture advice below is unchanged. Recommendations, updated for run 4:
 
 ### 7.1 Pick a posture first (one variable)
 
@@ -387,21 +397,32 @@ Human endpoints (login, register, password-reset, MFA) stay at their
 strict per-IP defaults in **every** profile, by design — raise those
 individually and deliberately or not at all.
 
-### 7.2 Suggested revisions to the shipped defaults (proposal, sized from this run)
+### 7.2 The revised machine-endpoint defaults (shipped, sized from this run)
 
-The measured data supports modestly raising the machine-endpoint
-`internet` defaults — each suggestion stays ≥ 500× below measured capacity
-(so the abuse posture is intact) while no longer breaking a single healthy
+This run's measurements were used to raise the machine-endpoint `internet`
+defaults. **These numbers are now shipped**, not a proposal — the "was"
+column records what shipped before. Each value stays far below measured
+capacity (25× at the tightest, authz; 400–2 700× on the rest), so the
+abuse posture is intact while no longer breaking a single healthy
 integration:
 
-| knob | today | suggested | why (measured) |
+| knob | shipped default | was | why (measured) |
 |---|---|---|---|
-| `TOKEN_PER_MIN` | 20 | **120** | one service refreshing a 15-min token for a handful of workers exhausts 20/min behind NAT; 120/min is 0.07% of measured capacity |
-| `INTROSPECT_PER_MIN` | 10 | **600** | resource servers introspect per *request*; 10/min breaks the first real API behind AXIAM; 600/min = 10/s = 0.2% of capacity |
-| `AUTHZ_CHECK_PER_MIN` | 300 | **1 800** | 300/min = 5/s starves a single modest service; 1 800/min = 30/s = 4% of a 2-core envelope |
-| `REVOKE_PER_MIN` | 10 | **60** | logout bursts from one gateway IP hit 10/min immediately |
-| `GRPC_AUTHZ_PER_SEC` | 100/s | keep value; **fix enforcement first** and scope it to authz methods | currently admits ~100/min (×60 units bug, §4) and throttles non-authz gRPC (userinfo) under the same server-wide bucket |
-| login / register / password-reset / MFA | 10 / 5 / 3 / 5 per min | **unchanged** | these gate credential-guessing; capacity is irrelevant to their sizing |
+| `TOKEN_PER_MIN` | **120** | 20 | one service refreshing a 15-min token for a handful of workers exhausts 20/min behind NAT; 120/min is 0.07% of measured capacity |
+| `INTROSPECT_PER_MIN` | **600** | 10 | resource servers introspect per *request*; 10/min breaks the first real API behind AXIAM; 600/min = 10/s = 0.23% of capacity |
+| `AUTHZ_CHECK_PER_MIN` | **1 800** | 300 | 300/min = 5/s starves a single modest service; 1 800/min = 30/s = 4% of a 2-core envelope |
+| `REVOKE_PER_MIN` | **60** | 10 | logout bursts from one gateway IP hit 10/min immediately |
+| `GRPC_AUTHZ_PER_SEC` | 100/s | 100/s | value kept; the ×60 units bug (§4) is **fixed** — 100/s now really admits 100/s — and the ceiling is now scoped to the authz methods instead of every gRPC surface (new: `GRPC_IDENTITY_PER_SEC` 500/s, `GRPC_ADMIN_PER_SEC` 100/s) |
+| login / register / password-reset / MFA | 10 / 5 / 3 / 5 per min | 10 / 5 / 3 / 5 per min | **unchanged** — these gate credential-guessing; capacity is irrelevant to their sizing |
+
+If you pinned any of these with an env var, nothing changes for you:
+explicit env always beats both the preset and the shipped default. When the
+shipped `internet` numbers are what a deployment is actually enforcing, the
+server now also watches the sustained 429 ratio on the four machine
+endpoints and logs one advisory per 5-minute interval if more than half of
+that traffic is being rejected — "your limits are throttling what looks
+like legitimate machine traffic; see rate-limit-sizing". Human endpoints
+are excluded from that ratio by construction.
 
 Sizing rule for your own values: take your real per-key peak (per IP or
 per client_id, whichever mode you run), double it, and check it against
@@ -522,13 +543,14 @@ cap doubled.
 **Weaknesses, stated as plainly.** The TLS client-credentials plateau
 (−57%) remains the one open performance mystery; batch cells this run
 measured the non-default strategy through a harness slip (default's
-verdict unchanged, re-measurement queued); the gRPC prod rate limiter has
-a ×60 units bug (found by this run, fix tracked); Keycloak's login cells
+verdict unchanged, re-measurement queued); the gRPC prod rate limiter had
+a ×60 units bug (found by this run, fixed since); Keycloak's login cells
 need a 4 GiB labeled envelope to be fair; everything is still
 laptop-hosted.
 
-**Next round:** run 5 with the batch default actually exercised, the gRPC
-limiter fixed, a 4 GiB Keycloak login cell, the SDK wire-baseline and
+**Next round:** run 5 with the batch default actually exercised, the fixed
+and per-method-scoped gRPC limiter re-measured, the revised `internet`
+machine defaults confirmed, a 4 GiB Keycloak login cell, the SDK wire-baseline and
 median-of-3 SDK repeats — and, budget permitting, the long-promised
 server-class hardware re-run.
 

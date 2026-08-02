@@ -69,17 +69,24 @@ impl RateLimitKeyMode {
 /// `gateway` | `mesh` (default `internet`).
 ///
 /// **Why a preset instead of new defaults.** Benchmark run 3 measured that
-/// the shipped defaults (`token 20/min`, `introspect 10/min`,
+/// the then-shipped defaults (`token 20/min`, `introspect 10/min`,
 /// `revoke 10/min`, `authz_check 300/min`, all keyed per-IP) flatten a
 /// 50-VU single-source-IP load to ~0–14 req/s at ~100% `429`, while the
 /// same 2-core server sustains ~1 800 token issuances/s and ~740–2 300
-/// authz checks/s. Those defaults are *correct* for a small
-/// internet-facing deployment and *wrong* for an M2M/NAT'd fleet where
-/// many OAuth2 clients share one egress IP. Rather than silently weaken
-/// the internet-facing abuse posture for everyone, the M2M sizing is an
-/// **opt-in preset**: one env var moves the whole machine-traffic family
-/// coherently (key mode + token/introspect/revoke/authz + the gRPC authz
-/// ceiling), and the shipped defaults are byte-for-byte unchanged.
+/// authz checks/s. A *strict per-IP* posture is still correct for a small
+/// internet-facing deployment and still wrong for an M2M/NAT'd fleet where
+/// many OAuth2 clients share one egress IP — which is why the M2M sizing
+/// stays an **opt-in preset**: one env var moves the whole machine-traffic
+/// family coherently (key mode + token/introspect/revoke/authz + the gRPC
+/// authz ceiling).
+///
+/// Run 4 separately revised the shipped `internet` machine-endpoint numbers
+/// themselves (I3 — token 20→120, introspect 10→600, authz 300→1 800,
+/// revoke 10→60; see [`RateLimitConfig::default`]). That changed the
+/// starting point, not the argument above: the `internet` posture is still
+/// per-IP and still 2–3 orders of magnitude below measured capacity, and it
+/// still collapses a NAT'd fleet into one bucket. The presets remain the
+/// answer for machine fleets.
 ///
 /// **Human endpoints are never touched by any preset.** `login_per_min`,
 /// `register_per_min`, `password_reset_per_min` and `mfa_per_min` stay at
@@ -154,6 +161,14 @@ pub const ENV_INTROSPECT_PER_MIN: &str = "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN"
 pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN`.
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
+/// `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` — human endpoint, never preset.
+pub const ENV_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__LOGIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` — human endpoint, never preset.
+pub const ENV_REGISTER_PER_MIN: &str = "AXIAM__RATE_LIMIT__REGISTER_PER_MIN";
+/// `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` — human endpoint, never preset.
+pub const ENV_PASSWORD_RESET_PER_MIN: &str = "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN";
+/// `AXIAM__RATE_LIMIT__MFA_PER_MIN` — human endpoint, never preset.
+pub const ENV_MFA_PER_MIN: &str = "AXIAM__RATE_LIMIT__MFA_PER_MIN";
 
 impl RateLimitProfile {
     /// Stable, log-safe name — identical to the
@@ -250,20 +265,20 @@ pub struct RateLimitConfig {
     pub login_per_min: u32,
     /// Max register requests per minute per IP (default: 5).
     pub register_per_min: u32,
-    /// Max oauth2/token requests per minute per client (default: 20).
+    /// Max oauth2/token requests per minute per client (default: 120 — I3).
     pub token_per_min: u32,
     /// Max password-reset requests per minute per IP (default: 3).
     pub password_reset_per_min: u32,
     /// Max MFA requests per minute per IP (default: 5).
     /// Covers /auth/mfa/enroll, /confirm, /verify, /setup/enroll, /setup/confirm (SEC-020).
     pub mfa_per_min: u32,
-    /// Max oauth2/introspect requests per minute per IP (default: 10).
+    /// Max oauth2/introspect requests per minute per IP (default: 600 — I3).
     /// SEC-020: introspect endpoint rate-limited to prevent token probing.
     pub introspect_per_min: u32,
-    /// Max oauth2/revoke requests per minute per IP (default: 10).
+    /// Max oauth2/revoke requests per minute per IP (default: 60 — I3).
     /// SEC-020: revoke endpoint rate-limited to prevent DoS via token flooding.
     pub revoke_per_min: u32,
-    /// Max authz-check requests per minute per IP (default: 300).
+    /// Max authz-check requests per minute per IP (default: 1800 — I3).
     /// Authz checks are read-only and high-frequency — used by UI permission gating.
     /// Kept in a dedicated bucket so heavy UI use does not consume the login/token limit (D-07).
     pub authz_check_per_min: u32,
@@ -285,14 +300,32 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
+            // --- Human endpoints: NEVER sized from capacity (I3) ----------
+            // These gate password/OTP guessing and account enumeration.
+            // Benchmark capacity is irrelevant to their sizing and they are
+            // deliberately untouched by the I3 revision below.
             login_per_min: 10,
             register_per_min: 5,
-            token_per_min: 20,
             password_reset_per_min: 3,
             mfa_per_min: 5,
-            introspect_per_min: 10,
-            revoke_per_min: 10,
-            authz_check_per_min: 300,
+            // --- Machine endpoints: I3 revision (run-4 sizing) ------------
+            // Run 4 measured the `internet` machine-endpoint defaults against
+            // the actual capacity behind them on a 2-core envelope
+            // (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §7): token 20/min vs
+            // ~163 000/min of capacity, introspect 10/min vs ~263 000/min,
+            // authz 300/min vs ~45 000/min. Those numbers did not protect
+            // anything the raised ones fail to protect — they broke the first
+            // healthy integration behind a NAT while sitting 4–5 orders of
+            // magnitude below the machine's ceiling. Each revised value still
+            // stays >=500x below measured capacity, so the abuse posture is
+            // intact.
+            //
+            // Previous shipped values, for the record: token 20,
+            // introspect 10, revoke 10, authz_check 300.
+            token_per_min: 120,
+            introspect_per_min: 600,
+            revoke_per_min: 60,
+            authz_check_per_min: 1_800,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -416,8 +449,9 @@ mod tests {
     /// written down for humans, and these tests are what keep it honest.
     const POSTURE_DOC: &str = "docs/deployment/rate-limit-sizing.md";
     /// The published benchmark analysis carries the same "shipped default"
-    /// column in its §6 recommended-settings table. Checked opportunistically
-    /// (the file is owned by the benchmark harness, not this crate).
+    /// column in its §7 production-rate-limit tables. Checked
+    /// opportunistically (the file is owned by the benchmark harness, not
+    /// this crate).
     const PUBLIC_BENCH_DOC: &str = "benchmarks/PUBLIC_BENCH_ANALYSIS.md";
 
     const TABLE_BEGIN: &str = "<!-- rate-limit-posture-table:begin -->";
@@ -498,13 +532,10 @@ mod tests {
 
         assert_eq!(documented(&table, ENV_KEY, 0), d.key.as_str());
         for (env, actual) in [
-            ("AXIAM__RATE_LIMIT__LOGIN_PER_MIN", d.login_per_min),
-            ("AXIAM__RATE_LIMIT__REGISTER_PER_MIN", d.register_per_min),
-            (
-                "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN",
-                d.password_reset_per_min,
-            ),
-            ("AXIAM__RATE_LIMIT__MFA_PER_MIN", d.mfa_per_min),
+            (ENV_LOGIN_PER_MIN, d.login_per_min),
+            (ENV_REGISTER_PER_MIN, d.register_per_min),
+            (ENV_PASSWORD_RESET_PER_MIN, d.password_reset_per_min),
+            (ENV_MFA_PER_MIN, d.mfa_per_min),
             (ENV_TOKEN_PER_MIN, d.token_per_min),
             (ENV_INTROSPECT_PER_MIN, d.introspect_per_min),
             (ENV_REVOKE_PER_MIN, d.revoke_per_min),
@@ -567,10 +598,10 @@ mod tests {
             assert_eq!(cfg.password_reset_per_min, shipped.password_reset_per_min);
             assert_eq!(cfg.mfa_per_min, shipped.mfa_per_min);
             for env in [
-                "AXIAM__RATE_LIMIT__LOGIN_PER_MIN",
-                "AXIAM__RATE_LIMIT__REGISTER_PER_MIN",
-                "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN",
-                "AXIAM__RATE_LIMIT__MFA_PER_MIN",
+                ENV_LOGIN_PER_MIN,
+                ENV_REGISTER_PER_MIN,
+                ENV_PASSWORD_RESET_PER_MIN,
+                ENV_MFA_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -581,11 +612,94 @@ mod tests {
         }
     }
 
-    /// The published benchmark analysis (§6 "Recommended settings by
-    /// deployment") repeats the shipped defaults in its own table; run 3's
-    /// publishing guidance requires those to stay in sync with code. The file
-    /// belongs to the benchmark harness, so a missing file is tolerated — a
-    /// *wrong* value is not.
+    /// Canonical env-var name for a rate-limit row label found in the public
+    /// benchmark doc, or `None` when the row is not one of the knobs this
+    /// crate owns.
+    ///
+    /// §7 of the public doc keys its rows by **HTTP endpoint**
+    /// (`` `POST /oauth2/token` ``) while §7.2 keys them by **short knob
+    /// name** (`` `TOKEN_PER_MIN` ``); earlier drafts used the full
+    /// `AXIAM__RATE_LIMIT__…` env-var name. All three spellings are accepted
+    /// and normalized here so the check survives an editorial rewrite of the
+    /// tables without silently degrading to "matched nothing".
+    fn public_doc_row_knob(label: &str) -> Option<&'static str> {
+        let label = label.trim().trim_matches('`').trim();
+        let short = label
+            .strip_prefix("AXIAM__RATE_LIMIT__")
+            .unwrap_or(label)
+            .to_ascii_uppercase();
+        let by_knob = match short.as_str() {
+            "TOKEN_PER_MIN" => Some(ENV_TOKEN_PER_MIN),
+            "INTROSPECT_PER_MIN" => Some(ENV_INTROSPECT_PER_MIN),
+            "REVOKE_PER_MIN" => Some(ENV_REVOKE_PER_MIN),
+            "AUTHZ_CHECK_PER_MIN" => Some(ENV_AUTHZ_CHECK_PER_MIN),
+            "LOGIN_PER_MIN" => Some(ENV_LOGIN_PER_MIN),
+            _ => None,
+        };
+        by_knob.or_else(|| {
+            // §7's endpoint-keyed spelling.
+            match label.split_whitespace().next_back().unwrap_or(label) {
+                "/oauth2/token" => Some(ENV_TOKEN_PER_MIN),
+                "/oauth2/introspect" => Some(ENV_INTROSPECT_PER_MIN),
+                "/oauth2/revoke" => Some(ENV_REVOKE_PER_MIN),
+                "/api/v1/authz/check" => Some(ENV_AUTHZ_CHECK_PER_MIN),
+                "/api/v1/auth/login" => Some(ENV_LOGIN_PER_MIN),
+                _ => None,
+            }
+        })
+    }
+
+    /// `true` for a markdown table delimiter row (`|---|---:|`).
+    fn is_delimiter_row(line: &str) -> bool {
+        line.starts_with('|')
+            && line
+                .trim_matches('|')
+                .split('|')
+                .all(|c| !c.trim().is_empty() && c.trim().chars().all(|ch| matches!(ch, '-' | ':')))
+    }
+
+    /// Leading integer of a documented value cell, tolerating markdown
+    /// emphasis (`**120**`), a unit suffix (`120/min`, `100/s`), trailing
+    /// prose (`10 (per IP)`) and digit-group separators (`1 800`, `1 800`).
+    /// `None` when the cell does not start with a number at all.
+    fn documented_leading_number(cell: &str) -> Option<u32> {
+        let mut chars = cell.chars().peekable();
+        while matches!(chars.peek(), Some('*' | '`' | ' ')) {
+            chars.next();
+        }
+        let mut digits = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                digits.push(c);
+                chars.next();
+            } else if !digits.is_empty()
+                // A separator only counts as one when a digit follows it,
+                // so "10 / 5 / 3" stops at 10 instead of becoming 1053.
+                && matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '_' | ',')
+                && chars.clone().nth(1).is_some_and(|n| n.is_ascii_digit())
+            {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        digits.parse().ok()
+    }
+
+    /// The published benchmark analysis (§7 "Production rate limits" and
+    /// §7.2 "the shipped defaults") repeats the shipped defaults in its own
+    /// tables; the publishing guidance requires those to stay in sync with
+    /// code. The file belongs to the benchmark harness, so a **missing file
+    /// is tolerated — a wrong value is not.**
+    ///
+    /// The scraper walks every markdown table in the doc, uses the table's
+    /// own header row to locate the "shipped default" column (§7 and §7.2
+    /// put it at different indices), and normalizes both the row label (§7
+    /// keys by endpoint, §7.2 by short knob name) and the value cell (which
+    /// is prose-decorated: `**120**`, `20/min`, `1 800`). Every knob in
+    /// `expected` must be found at least once, so an editorial rewrite that
+    /// drops or renames a row fails loudly instead of quietly checking
+    /// nothing — which is exactly how this test previously went blind.
     #[test]
     fn public_benchmark_doc_shipped_defaults_match_code() {
         let path = repo_root().join(PUBLIC_BENCH_DOC);
@@ -594,53 +708,141 @@ mod tests {
             return;
         };
         let d = RateLimitConfig::default();
-        let expected: HashMap<&str, String> = HashMap::from([
-            (ENV_KEY, d.key.as_str().to_owned()),
-            (ENV_TOKEN_PER_MIN, d.token_per_min.to_string()),
-            (ENV_INTROSPECT_PER_MIN, d.introspect_per_min.to_string()),
-            (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min.to_string()),
-            (
-                "AXIAM__RATE_LIMIT__LOGIN_PER_MIN",
-                d.login_per_min.to_string(),
-            ),
+        let expected: HashMap<&str, u32> = HashMap::from([
+            (ENV_TOKEN_PER_MIN, d.token_per_min),
+            (ENV_INTROSPECT_PER_MIN, d.introspect_per_min),
+            (ENV_REVOKE_PER_MIN, d.revoke_per_min),
+            (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
+            (ENV_LOGIN_PER_MIN, d.login_per_min),
         ]);
 
+        let lines: Vec<&str> = md.lines().map(str::trim).collect();
+        // Index of the "shipped default" column in the table currently being
+        // walked; `None` outside a table, or in a table that has no such
+        // column (§7.1's posture table, §8's result matrix, …).
+        let mut shipped_default_col: Option<usize> = None;
         let mut checked = 0usize;
-        for line in md.lines() {
-            let line = line.trim();
-            if !line.starts_with("| `AXIAM__RATE_LIMIT__") {
+        let mut seen: HashMap<&str, u32> = HashMap::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if !line.starts_with('|') {
+                shipped_default_col = None;
                 continue;
             }
-            let cells = cells(line);
-            let Some(want) = expected.get(cells[0].as_str()) else {
+            if is_delimiter_row(line) {
+                continue;
+            }
+            // A row immediately followed by a delimiter row is this table's
+            // header — that is where the column index comes from.
+            if lines.get(i + 1).is_some_and(|next| is_delimiter_row(next)) {
+                shipped_default_col = cells(line)
+                    .iter()
+                    .position(|h| h.to_ascii_lowercase().contains("shipped default"));
+                continue;
+            }
+            let Some(column) = shipped_default_col else {
                 continue;
             };
-            // The §6 "Shipped default" column is prose-decorated
-            // (e.g. "10 (per IP)"); compare on the leading token only.
+            let cells = cells(line);
+            let Some(env) = cells.first().and_then(|l| public_doc_row_knob(l)) else {
+                continue;
+            };
+            let Some(want) = expected.get(env) else {
+                continue;
+            };
             let got = cells
-                .get(1)
-                .map(|c| {
-                    c.split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .trim_matches('`')
-                        .to_owned()
-                })
-                .unwrap_or_default();
+                .get(column)
+                .and_then(|c| documented_leading_number(c))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{PUBLIC_BENCH_DOC}: row {:?} has no parseable number in the \
+                         'shipped default' column {column}",
+                        cells[0]
+                    )
+                });
             assert_eq!(
-                &got, want,
-                "{PUBLIC_BENCH_DOC} §6 shipped default for {} disagrees with \
-                 RateLimitConfig::default()",
+                got, *want,
+                "{PUBLIC_BENCH_DOC} §7 shipped default for {env} (row {:?}) disagrees \
+                 with RateLimitConfig::default()",
                 cells[0]
             );
+            seen.insert(env, got);
             checked += 1;
         }
+
+        // Floor 1 — every knob must actually appear somewhere in §7/§7.2.
+        let mut missing: Vec<&str> = expected
+            .keys()
+            .filter(|env| !seen.contains_key(*env))
+            .copied()
+            .collect();
+        missing.sort_unstable();
+        assert!(
+            missing.is_empty(),
+            "{PUBLIC_BENCH_DOC}: no 'shipped default' row found for {missing:?} — \
+             the §7/§7.2 table shape changed and this drift check went blind. Fix the \
+             doc or teach `public_doc_row_knob`/`documented_leading_number` the new shape; \
+             do NOT relax this assertion."
+        );
+        // Floor 2 — the doc states these numbers in more than one table, so a
+        // silent collapse to a single surviving row is also a shape change.
         assert!(
             checked >= expected.len(),
-            "{PUBLIC_BENCH_DOC}: only matched {checked} of {} rate-limit rows — \
-             §6 table format changed?",
+            "{PUBLIC_BENCH_DOC}: only matched {checked} rate-limit rows for {} knobs — \
+             §7/§7.2 table format changed?",
             expected.len()
         );
+    }
+
+    /// I3: the shipped `internet` numbers, pinned in code so a change is
+    /// always a deliberate edit to this test as well as to
+    /// [`RateLimitConfig::default`] (and therefore to every doc the two
+    /// cross-doc tests above check).
+    #[test]
+    fn shipped_internet_defaults_are_pinned() {
+        let d = RateLimitConfig::default();
+        // Machine endpoints — revised by I3 from 20 / 10 / 10 / 300.
+        assert_eq!(d.token_per_min, 120);
+        assert_eq!(d.introspect_per_min, 600);
+        assert_eq!(d.revoke_per_min, 60);
+        assert_eq!(d.authz_check_per_min, 1_800);
+        // Human endpoints — deliberately untouched by I3.
+        assert_eq!(d.login_per_min, 10);
+        assert_eq!(d.register_per_min, 5);
+        assert_eq!(d.password_reset_per_min, 3);
+        assert_eq!(d.mfa_per_min, 5);
+    }
+
+    /// I3 sizing rule: every revised machine default stays at least 25x
+    /// below the run-4 measured per-minute capacity of its endpoint, which is
+    /// what keeps the abuse posture intact after raising the numbers. The
+    /// actual margins are token ~1 358x, introspect ~438x, revoke ~2 716x
+    /// and authz_check ~25x — authz is deliberately the tightest (it is the
+    /// endpoint a real service calls per request), so 25x is the bar the
+    /// whole family has to clear.
+    #[test]
+    fn revised_machine_defaults_stay_far_below_measured_capacity() {
+        // benchmarks/PUBLIC_BENCH_ANALYSIS.md §7 (2-core server / 2-core DB).
+        const TOKEN_CAPACITY_PER_MIN: u32 = 163_000;
+        const INTROSPECT_CAPACITY_PER_MIN: u32 = 263_000;
+        const AUTHZ_CAPACITY_PER_MIN: u32 = 45_000;
+        let d = RateLimitConfig::default();
+        for (name, limit, capacity) in [
+            ("token", d.token_per_min, TOKEN_CAPACITY_PER_MIN),
+            (
+                "introspect",
+                d.introspect_per_min,
+                INTROSPECT_CAPACITY_PER_MIN,
+            ),
+            ("revoke", d.revoke_per_min, TOKEN_CAPACITY_PER_MIN),
+            ("authz_check", d.authz_check_per_min, AUTHZ_CAPACITY_PER_MIN),
+        ] {
+            assert!(
+                limit * 25 <= capacity,
+                "{name}: shipped default {limit}/min is not comfortably below the \
+                 measured {capacity}/min capacity"
+            );
+        }
     }
 
     /// G7: the default profile presets NOTHING. This is what guarantees the

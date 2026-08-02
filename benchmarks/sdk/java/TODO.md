@@ -50,3 +50,34 @@ genuine bug in `AxiamClient`'s OkHttp/`SSLContext` wiring
 issue, and needs an SDK-side investigation this task's scope didn't cover
 (TLS-internals debugging, not a mechanical harness fix). p0 is unaffected
 and fully validated (`ok`, double-run-clean).
+
+## p3-mtls (CONTRACT.md §6.1)
+
+Wired: `newClientBuilder()` — the single builder factory behind both the shared
+client and the per-iteration `login` client — reads `BENCH_CLIENT_CERT`/
+`BENCH_CLIENT_KEY` (file paths) and applies
+`clientCertificate(byte[] certPem, byte[] keyPem)`.
+
+Two blockers had to be cleared first, and both are worth knowing about:
+
+1. **The bench was compiling against a stale SDK.** `pom.xml` pinned
+   `1.0.0-alpha2` while the sibling checkout was at `1.0.0-alpha21`, and
+   `run.sh` only installed the sibling when the dependency failed to *resolve*
+   — which a stale jar in `~/.m2` never does. §6.1's `clientCertificate(...)`
+   did not exist in alpha2. The version is now a `${axiam.sdk.version}`
+   property that `run.sh` overrides with the version the sibling checkout
+   actually declares, installing it to `~/.m2` on demand
+   (`-DskipTests -Djacoco.skip=true`; the jacoco coverage gate fails a
+   test-skipping install otherwise).
+2. **The bench CA lacked `keyUsage=keyCertSign`** (`runner/gen-certs.sh`), so
+   strict-X.509 TLS stacks rejected the chain. This is very likely the same
+   root cause as the p2-tls13 "SSL handshake" failure described above — that
+   note predates the fix; re-verify before treating it as an SDK bug.
+
+```
+cd benchmarks && just target=axiam profile=p3-mtls sdk=java sdk-bench
+just sdk-bench-test java   # proves the cert reaches the wire, no stack needed
+```
+
+Verified: phase A (half-configured pair -> `status:"error"` naming both vars)
+and phase B (stub mTLS server observes `CN=bench-client`) both pass.

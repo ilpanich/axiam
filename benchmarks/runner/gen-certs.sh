@@ -23,22 +23,36 @@ echo "[gen-certs] generating test CA + server + client certs in $DIR"
 # everywhere keeps the head-to-head TLS-handshake cost comparable.
 
 # CA
+#
+# keyUsage=keyCertSign,cRLSign is REQUIRED, not decoration. `openssl req -x509`
+# adds basicConstraints=CA:TRUE on its own but NOT keyUsage, and RFC 5280
+# §4.2.1.3 says a CA certificate's keyUsage SHOULD assert keyCertSign. TLS
+# stacks that enforce strict X.509 (OpenSSL's X509_V_FLAG_X509_STRICT — on by
+# default in Python 3.13+'s ssl module, among others) therefore REJECT a chain
+# signed by a CA without it: "CA cert does not include key usage extension".
+# The k6 scenarios and seed.sh never noticed because they pass -k / skip server
+# verification (BENCH_VERIFY_TLS=false — we measure TLS cost, not trust), but
+# the SDK benches DO verify: every one of them trusts this CA via
+# BENCH_CA_CERT, so without this line the whole p2/p3 SDK matrix fails at the
+# first HTTPS call with an error that reads like an SDK bug.
 openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 30 \
-  -subj "/CN=AXIAM Bench Test CA/O=axiam-benchmark"
+  -subj "/CN=AXIAM Bench Test CA/O=axiam-benchmark" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
 
 # Server cert (SAN: localhost) signed by CA
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
   -subj "/CN=localhost/O=axiam-benchmark"
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 30 \
-  -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth")
+  -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\nbasicConstraints=critical,CA:FALSE")
 
 # Client cert for mTLS signed by CA
 openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr \
   -subj "/CN=bench-client/O=axiam-benchmark"
 openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out client.crt -days 30 \
-  -extfile <(printf "extendedKeyUsage=clientAuth")
+  -extfile <(printf "extendedKeyUsage=clientAuth\nkeyUsage=critical,digitalSignature\nbasicConstraints=critical,CA:FALSE")
 
 rm -f server.csr client.csr
 chmod 600 ./*.key

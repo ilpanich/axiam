@@ -16,6 +16,12 @@
 # 'pending' record instead of crashing, per HARNESS-SPEC.md.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
+# BENCH_CLIENT_CERT/BENCH_CLIENT_KEY) to absolute paths before `cd "$HERE"` —
+# profiles/*.env sets them relative to benchmarks/ (the caller's cwd), and
+# Gradle runs the bench JVM with its own cwd here in sdk/kotlin/.
+# shellcheck disable=SC1091
+source "$HERE/../_tlspaths.sh"; absolutize_tls_paths
 cd "$HERE"
 
 command -v java >/dev/null || { source "$HERE/../_pending.sh"; emit_pending kotlin; exit 0; }

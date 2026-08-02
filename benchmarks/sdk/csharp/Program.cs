@@ -41,6 +41,15 @@ string username = Env("BENCH_USERNAME", "benchuser");
 string password = Env("BENCH_PASSWORD", "Bench@User123!");
 string action = Env("BENCH_ACTION", "read");
 string resourceIdRaw = Env("BENCH_RESOURCE_ID", "");
+// TLS inputs (HARNESS-SPEC.md), all file PATHS: BENCH_CA_CERT is the trusted
+// custom CA under every TLS profile, BENCH_CLIENT_CERT/BENCH_CLIENT_KEY the
+// p3-mtls client identity (CONTRACT.md §6.1). AxiamClientOptions wants PEM
+// BYTES, so the files are read below — inside the setup try/catch, so an
+// unreadable path becomes the contractual status:"error" record rather than
+// an unhandled exception with no record at all.
+string caCertPath = Env("BENCH_CA_CERT", "");
+string clientCertPath = Env("BENCH_CLIENT_CERT", "");
+string clientKeyPath = Env("BENCH_CLIENT_KEY", "");
 
 string[] OP_KEYS = { "login", "refresh", "check_access", "batch_check" };
 
@@ -149,11 +158,36 @@ async Task<Dictionary<string, object?>> TimeOp(Func<Task> fn, int concurrency)
 Guid resourceId;
 AxiamClient client;
 List<AccessCheck> checks;
+
+// One options factory for every client this bench builds — the shared one and
+// the fresh one `login` builds per iteration. Configuring only the shared
+// client would pass three ops and fail `login` at the TLS handshake, which
+// reads like a server problem rather than a harness one.
+AxiamClientOptions NewOptions()
+{
+    if (string.IsNullOrEmpty(clientCertPath) != string.IsNullOrEmpty(clientKeyPath))
+    {
+        // The SDK validates this too (§6.1 rule 1), but failing here names the
+        // env var the operator actually got wrong.
+        throw new InvalidOperationException(
+            $"BENCH_CLIENT_CERT=\"{clientCertPath}\" and BENCH_CLIENT_KEY=\"{clientKeyPath}\" must be set together — mTLS needs both (CONTRACT.md §6.1 rule 1)");
+    }
+    return new AxiamClientOptions
+    {
+        BaseUrl = new Uri(baseUrl),
+        TenantId = tenantSlug,
+        OrgSlug = orgSlug,
+        CustomCaPem = caCertPath.Length > 0 ? File.ReadAllBytes(caCertPath) : null,
+        ClientCertificatePem = clientCertPath.Length > 0 ? File.ReadAllBytes(clientCertPath) : null,
+        ClientKeyPem = clientKeyPath.Length > 0 ? File.ReadAllBytes(clientKeyPath) : null,
+    };
+}
+
 try
 {
     resourceId = Guid.Parse(resourceIdRaw); // FormatException -> status "error"
 
-    client = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
+    client = new AxiamClient(new Uri(baseUrl), tenantSlug, NewOptions());
     await client.LoginAsync(username, password);
 
     // Batch of 3 checks, all against the SAME resource (no per-item suffixing —
@@ -181,7 +215,7 @@ var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
 {
     ["login"] = (async () =>
     {
-        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
+        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, NewOptions());
         try { await fresh.LoginAsync(username, password); }
         finally { fresh.Dispose(); }
     }, CONC),

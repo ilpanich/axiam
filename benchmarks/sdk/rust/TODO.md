@@ -57,3 +57,18 @@ both p0-plaintext and p2-tls13 against a live seeded target. This also
 required a companion fix in the sibling `axiam-rust-sdk` (the
 `REFRESH_PATH`-scoped-cookie bug — see that repo's own commit log — without
 it every `refresh()` failed regardless of TLS profile).
+
+## p3-mtls (CONTRACT.md §6.1)
+
+Wired: `Cfg::from_env` reads `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` (file
+paths) into `client_identity_pem`, and `build_client` — the single constructor
+behind both the shared client and `Op::Login`'s throwaway one — applies
+`builder.with_client_cert(cert_pem, key_pem)`.
+
+```
+cd benchmarks && just target=axiam profile=p3-mtls sdk=rust sdk-bench
+just sdk-bench-test rust   # proves the cert reaches the wire, no stack needed
+```
+
+Verified: phase A (half-configured pair -> `status:"error"` naming both vars)
+and phase B (stub mTLS server observes `CN=bench-client`) both pass.

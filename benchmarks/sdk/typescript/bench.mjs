@@ -25,6 +25,38 @@ const CONC = Number(env("SDK_BENCH_CONCURRENCY", "16"));
 const caCertPath = env("BENCH_CA_CERT", "");
 const customCa = caCertPath ? readFileSync(caCertPath, "utf8") : undefined;
 
+// p3-mtls client identity (CONTRACT.md §6.1). HARNESS-SPEC.md documents
+// BENCH_CLIENT_CERT/BENCH_CLIENT_KEY as file PATHS (the same pair k6 hands to
+// `tlsAuth` and seed.sh to `curl --cert`); AxiamClientOptions.clientCert/
+// clientKey want PEM *strings*, so read them here — same shape as customCa
+// above. Both `undefined` when unset, which leaves the SDK's default
+// bearer-cookie behavior untouched (§6.1 rule 5: mTLS is opt-in), so p0/p1/p2
+// runs are unaffected. Node-only, which is exactly this bench's persona.
+//
+// Called lazily from buildOps() (inside main()'s try), NOT at module scope: a
+// bad/unreadable path must surface as this harness' contractual
+// status:"error" record with the reason in `notes` (HARNESS-SPEC.md), not as
+// an uncaught throw that emits no record at all.
+let clientIdentity;
+function readClientIdentity() {
+  if (clientIdentity) return clientIdentity;
+  const certPath = env("BENCH_CLIENT_CERT", "");
+  const keyPath = env("BENCH_CLIENT_KEY", "");
+  if (!certPath !== !keyPath) {
+    // The SDK validates this too (§6.1 rule 1), but failing here names the
+    // env var the operator actually got wrong.
+    throw new Error(
+      `BENCH_CLIENT_CERT and BENCH_CLIENT_KEY must be set together `
+      + `(cert=${JSON.stringify(certPath)}, key=${JSON.stringify(keyPath)}) `
+      + `— mTLS needs both (CONTRACT.md §6.1 rule 1)`);
+  }
+  clientIdentity = {
+    clientCert: certPath ? readFileSync(certPath, "utf8") : undefined,
+    clientKey: keyPath ? readFileSync(keyPath, "utf8") : undefined,
+  };
+  return clientIdentity;
+}
+
 const cfg = {
   scheme: env("BENCH_SCHEME", "http"),
   host: env("BENCH_HOST", "localhost"),
@@ -77,7 +109,22 @@ async function buildOps() {
   const { createNodeClient } = await import("axiam-sdk/node");
   const baseUrl = `${cfg.scheme}://${cfg.host}:${cfg.port}`;
 
-  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
+  // One construction site for the TLS wiring (custom CA + §6.1 client
+  // identity) so it cannot drift between the shared client and the fresh one
+  // the `login` op builds per iteration — under p3-mtls a client built
+  // without the identity fails the handshake, which would have surfaced as
+  // `login` errors only.
+  const { clientCert, clientKey } = readClientIdentity();
+  const newClient = () => createNodeClient({
+    baseUrl,
+    tenantSlug: cfg.tenantSlug,
+    orgSlug: cfg.orgSlug,
+    customCa: cfg.customCa,
+    clientCert,
+    clientKey,
+  });
+
+  const client = newClient();
   await client.login(cfg.username, cfg.password);
 
   // Every check reuses the one seeded resource UUID: the server rejects
@@ -98,7 +145,7 @@ async function buildOps() {
 
   return {
     login: async () => {
-      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
+      const fresh = newClient();
       await fresh.login(cfg.username, cfg.password);
     },
     refresh: () => client.refresh(),

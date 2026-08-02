@@ -5,12 +5,12 @@
 # run `mvn install` in ../../../../axiam-java-sdk first to populate the local ~/.m2.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# H8: resolve BENCH_CA_CERT to an absolute path before `cd "$HERE"` below —
-# profiles/*.env sets it relative to benchmarks/ (the caller's cwd), which
-# no longer resolves once this script cds into sdk/java/.
-if [ -n "${BENCH_CA_CERT:-}" ] && [ -f "$BENCH_CA_CERT" ]; then
-  export BENCH_CA_CERT="$(cd "$(dirname "$BENCH_CA_CERT")" && pwd)/$(basename "$BENCH_CA_CERT")"
-fi
+# H8: resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
+# BENCH_CLIENT_CERT/BENCH_CLIENT_KEY) to absolute paths before `cd "$HERE"`
+# below — profiles/*.env sets them relative to benchmarks/ (the caller's cwd),
+# which no longer resolves once this script cds into sdk/java/.
+# shellcheck disable=SC1091
+source "$HERE/../_tlspaths.sh"; absolutize_tls_paths
 cd "$HERE"
 command -v mvn >/dev/null || { source "$HERE/../_pending.sh"; emit_pending java; exit 0; }
 
@@ -21,11 +21,38 @@ command -v mvn >/dev/null || { source "$HERE/../_pending.sh"; emit_pending java;
 # itself can't be resolved (not yet on Maven Central / not yet installed to
 # the local ~/.m2), install it from the sibling checkout first.
 SIBLING_SDK="${AXIAM_JAVA_SDK_DIR:-$HERE/../../../../axiam-java-sdk}"
-if ! mvn -q -e dependency:resolve >/dev/null 2>&1; then
-  if [ -f "$SIBLING_SDK/pom.xml" ]; then
-    echo "[java] axiam-sdk dependency not resolvable — installing from $SIBLING_SDK" >&2
-    mvn -q -f "$SIBLING_SDK/pom.xml" install -DskipTests >&2
+
+# Build against the version the SIBLING CHECKOUT actually declares, not a
+# version literal frozen in pom.xml. The old code only installed the sibling
+# when the dependency failed to RESOLVE — but a stale jar in ~/.m2 always
+# resolves, so the bench kept compiling against whatever ancient SDK had been
+# installed once (observed: pom pinned 1.0.0-alpha2 while the checkout was at
+# 1.0.0-alpha21, hiding CONTRACT.md §6.1's clientCertificate() entirely).
+# Reading the version straight out of the sibling pom means a checkout bump is
+# picked up automatically, with no pom.xml edit here.
+MVN_ARGS=()
+if [ -f "$SIBLING_SDK/pom.xml" ]; then
+  # First <version> under <project> (the sibling's own), not a dependency's:
+  # stop at the first match, which in a standard pom is the project version.
+  SDK_VERSION="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$SIBLING_SDK/pom.xml" | head -1)"
+  if [ -n "$SDK_VERSION" ]; then
+    MVN_ARGS+=("-Daxiam.sdk.version=$SDK_VERSION")
+    # Install that exact version into ~/.m2 if it isn't there yet. Cheap when
+    # it already is (a single directory test), and it is what makes a fresh
+    # laptop work with no manual `mvn install` step.
+    M2_JAR="$HOME/.m2/repository/io/github/ilpanich/axiam-sdk/$SDK_VERSION"
+    if [ ! -d "$M2_JAR" ]; then
+      echo "[java] axiam-sdk $SDK_VERSION not in ~/.m2 — installing from $SIBLING_SDK" >&2
+      mvn -q -f "$SIBLING_SDK/pom.xml" install -DskipTests -Djacoco.skip=true >&2
+    fi
   fi
 fi
 
-exec mvn -q -e compile exec:java
+if ! mvn -q -e "${MVN_ARGS[@]}" dependency:resolve >/dev/null 2>&1; then
+  if [ -f "$SIBLING_SDK/pom.xml" ]; then
+    echo "[java] axiam-sdk dependency not resolvable — installing from $SIBLING_SDK" >&2
+    mvn -q -f "$SIBLING_SDK/pom.xml" install -DskipTests -Djacoco.skip=true >&2
+  fi
+fi
+
+exec mvn -q -e "${MVN_ARGS[@]}" compile exec:java

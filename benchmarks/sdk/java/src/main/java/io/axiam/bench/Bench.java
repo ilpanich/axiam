@@ -52,17 +52,44 @@ public final class Bench {
     // HTTPS call against the profile's throwaway CA. Empty under
     // p0/plaintext (BENCH_CA_CERT unset).
     private static final String CA_CERT_PATH = env("BENCH_CA_CERT", "");
+    // p3-mtls client identity (CONTRACT.md §6.1) — the same cert/key pair k6
+    // hands to `tlsAuth` and seed.sh to `curl --cert`. Both empty on p0/p1/p2,
+    // where no builder call is made and the SDK's default bearer-cookie
+    // behavior is untouched (§6.1 rule 5: mTLS is opt-in).
+    private static final String CLIENT_CERT_PATH = env("BENCH_CLIENT_CERT", "");
+    private static final String CLIENT_KEY_PATH = env("BENCH_CLIENT_KEY", "");
 
     /** {@link AxiamClient.Builder} pre-seeded with org context and — under a
-     * TLS profile — the trusted custom CA. Reads BENCH_CA_CERT lazily (not
-     * at class-init time) so an unreadable path surfaces through main()'s
-     * existing try/catch as a normal `status:"error"` record instead of an
-     * uncaught ExceptionInInitializerError crashing the JVM before any
-     * HARNESS-SPEC-conformant output is printed. */
+     * TLS profile — the trusted custom CA plus, under p3-mtls, the §6.1
+     * client-certificate identity. Reads BENCH_CA_CERT/BENCH_CLIENT_CERT/
+     * BENCH_CLIENT_KEY lazily (not at class-init time) so an unreadable path
+     * surfaces through main()'s existing try/catch as a normal
+     * `status:"error"` record instead of an uncaught
+     * ExceptionInInitializerError crashing the JVM before any
+     * HARNESS-SPEC-conformant output is printed.
+     *
+     * <p>Every client this bench builds — the long-lived shared one AND the
+     * fresh one the {@code login} op builds per iteration — comes from here,
+     * so the TLS wiring cannot drift between them; a login client missing the
+     * identity would fail the p3 handshake while the other three ops
+     * succeeded. */
     private static AxiamClient.Builder newClientBuilder() throws IOException {
         AxiamClient.Builder b = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG);
         if (!CA_CERT_PATH.isEmpty()) {
             b = b.customCa(Files.readAllBytes(Path.of(CA_CERT_PATH)));
+        }
+        if (CLIENT_CERT_PATH.isEmpty() != CLIENT_KEY_PATH.isEmpty()) {
+            // The SDK validates this too (§6.1 rule 1), but failing here names
+            // the env var the operator actually got wrong.
+            throw new IOException(
+                "BENCH_CLIENT_CERT=\"" + CLIENT_CERT_PATH + "\" and BENCH_CLIENT_KEY=\""
+                + CLIENT_KEY_PATH + "\" must be set together — mTLS needs both"
+                + " (CONTRACT.md §6.1 rule 1)");
+        }
+        if (!CLIENT_CERT_PATH.isEmpty()) {
+            b = b.clientCertificate(
+                Files.readAllBytes(Path.of(CLIENT_CERT_PATH)),
+                Files.readAllBytes(Path.of(CLIENT_KEY_PATH)));
         }
         return b;
     }

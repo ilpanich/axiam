@@ -17,6 +17,22 @@
     <maven.compiler.target>17</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <exec.mainClass>io.axiam.bench.Bench</exec.mainClass>
+    <!--
+      Version of the AXIAM Java SDK to build against. run.sh OVERRIDES this
+      with -Daxiam.sdk.version=<the sibling checkout's own version>, so the
+      bench always compiles against the SDK sources that are actually on this
+      machine. The literal below is only the fallback for a bare
+      `mvn compile` with no sibling checkout.
+
+      Why a property and not a hardcoded version: this was pinned at
+      1.0.0-alpha2 while the sibling checkout had moved to 1.0.0-alpha21, and
+      run.sh only installed the sibling when the dependency failed to RESOLVE
+      at all. Since the stale alpha2 jar sat in ~/.m2 it always resolved, so
+      the bench silently kept compiling against an SDK that predated
+      CONTRACT.md §6.1 — `clientCertificate(byte[], byte[])` did not exist
+      there, and mTLS could never have been wired.
+    -->
+    <axiam.sdk.version>1.0.0-alpha21</axiam.sdk.version>
   </properties>
 
   <dependencies>
@@ -32,7 +48,7 @@
     <dependency>
       <groupId>io.github.ilpanich</groupId>
       <artifactId>axiam-sdk</artifactId>
-      <version>1.0.0-alpha2</version>
+      <version>${axiam.sdk.version}</version>
     </dependency>
   </dependencies>
 

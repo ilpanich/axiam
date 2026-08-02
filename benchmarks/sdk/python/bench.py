@@ -10,6 +10,7 @@ measured here. Keep the stdout JSON contract (axiam.sdk-bench/v1) intact.
 Run: python3 bench.py   (or: just sdk=python sdk-bench)
 """
 import concurrent.futures as cf
+import functools
 import json
 import os
 import platform
@@ -29,14 +30,53 @@ def _read_custom_ca():
     AxiamClient's `custom_ca` accepts EITHER a file path or inline PEM text
     (`_looks_like_pem()` in _session.py) when a client cert is also supplied
     (the mTLS-context branch), but the plain server-trust-only branch
-    (`self._verify = custom_ca if custom_ca else True`, no client cert —
-    this bench's case) hands the value straight to httpx's `verify=`, which
-    only accepts a bool/SSLContext/file-path — NOT inline PEM content (that
-    raises 'File name too long' since it tries to stat() the huge string as
-    a path). Pass BENCH_CA_CERT's path through unchanged rather than reading
-    it, since this bench never sets a client cert."""
+    (`self._verify = custom_ca if custom_ca else True`, no client cert)
+    hands the value straight to httpx's `verify=`, which only accepts a
+    bool/SSLContext/file-path — NOT inline PEM content (that raises 'File
+    name too long' since it tries to stat() the huge string as a path).
+    Pass BENCH_CA_CERT's PATH through unchanged: it is valid input to BOTH
+    branches, so this stays correct whether or not the p3 client identity
+    below is configured."""
     path = os.environ.get("BENCH_CA_CERT", "")
     return path or None
+
+
+@functools.lru_cache(maxsize=1)
+def _read_client_identity():
+    """Read the p3-mtls client identity (CONTRACT.md §6.1).
+
+    HARNESS-SPEC.md documents BENCH_CLIENT_CERT/BENCH_CLIENT_KEY as file
+    PATHS (the same pair k6 hands to `tlsAuth` and seed.sh to `curl --cert`),
+    but `AxiamClient(client_cert=…, client_key=…)` wants PEM *content* (str
+    or bytes — see the SDK's `_tls_identity.normalize_pem`), so read them
+    here. Returns (None, None) when unset, leaving the SDK's default
+    bearer-cookie behavior untouched (§6.1 rule 5: mTLS is opt-in), so p0/p1/
+    p2 runs are byte-for-byte unaffected.
+
+    The pair is all-or-nothing: the SDK itself raises ValueError on a
+    half-configured identity (§6.1 rule 1), but failing here names the env
+    var the operator actually got wrong instead of surfacing an SDK-internal
+    Called lazily from :func:`new_client` (i.e. inside ``build_ops``' try
+    block), NOT at import time: a bad/unreadable path must surface as this
+    harness' contractual ``status:"error"`` record with the reason in
+    ``notes`` (HARNESS-SPEC.md), not as an import-time traceback that emits
+    no record at all. ``lru_cache`` keeps the files off the per-iteration
+    ``login`` path.
+    """
+    cert_path = os.environ.get("BENCH_CLIENT_CERT", "")
+    key_path = os.environ.get("BENCH_CLIENT_KEY", "")
+    if not cert_path and not key_path:
+        return None, None
+    if bool(cert_path) != bool(key_path):
+        raise RuntimeError(
+            "BENCH_CLIENT_CERT and BENCH_CLIENT_KEY must be set together "
+            f"(cert={cert_path!r}, key={key_path!r}) — mTLS needs both "
+            "(CONTRACT.md §6.1 rule 1)")
+    with open(cert_path, "rb") as fh:
+        cert_pem = fh.read()
+    with open(key_path, "rb") as fh:
+        key_pem = fh.read()
+    return cert_pem, key_pem
 
 
 CFG = {
@@ -50,6 +90,26 @@ CFG = {
     "resource_id": os.environ.get("BENCH_RESOURCE_ID", "bench-resource"),
     "custom_ca": _read_custom_ca(),
 }
+
+
+def new_client():
+    """Construct an AxiamClient from CFG.
+
+    Single construction site so the TLS wiring (custom CA + §6.1 client
+    identity) cannot drift between the shared client and the fresh one the
+    `login` op builds per iteration — under p3-mtls a client built without
+    the identity fails the handshake, which would have shown up as `login`
+    errors only.
+    """
+    client_cert, client_key = _read_client_identity()
+    return AxiamClient(
+        base_url=CFG["base_url"],
+        tenant_slug=CFG["tenant_slug"],
+        org_slug=CFG["org_slug"],
+        custom_ca=CFG["custom_ca"],
+        client_cert=client_cert,
+        client_key=client_key,
+    )
 
 OP_KEYS = ("login", "refresh", "check_access", "batch_check")
 
@@ -82,7 +142,7 @@ def build_ops():
     already-authenticated client — refresh is routed through the SDK's
     single-flight guard, so concurrent callers are safe.
     """
-    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"], custom_ca=CFG["custom_ca"])
+    client = new_client()
     client.login(CFG["username"], CFG["password"])
     # Every check reuses the one seeded resource UUID: the server rejects
     # non-UUID resource_ids, so the old `${resource}-${i}` suffixing would 400.
@@ -100,7 +160,7 @@ def build_ops():
             "(see runner/seed.sh)")
 
     def do_login():
-        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"], custom_ca=CFG["custom_ca"])
+        fresh = new_client()
         try:
             fresh.login(CFG["username"], CFG["password"])
         finally:

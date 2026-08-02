@@ -13,7 +13,7 @@
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
 import { cfg, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
-import { m } from './lib/metrics.js';
+import { m, recordGrpcResult } from './lib/metrics.js';
 import { mintUserToken } from './lib/auth.js';
 
 const client = new grpc.Client();
@@ -87,16 +87,17 @@ export default function (data) {
     { metadata: { authorization: `Bearer ${data.access_token}` } },
   );
   const ok = check(res, { 'grpc status OK': (r) => r && r.status === grpc.StatusOK });
-  // D11: record the raw gRPC status code (e.g. 7=PermissionDenied,
-  // 16=Unauthenticated) so a 100%-non-OK run is diagnosable from the summary
-  // alone, not just a failed-checks count with no hint why.
-  // Number() is required: k6 hands `res.status` to JS as a wrapped Go value
-  // (typeof === "object"), and Trend.add() coerces any object to 1 rather than
-  // reading it — so the raw value silently recorded 1 for EVERY code, including
-  // StatusOK (0). `===` against grpc.StatusOK is unaffected, which is why the
-  // checks stayed correct while this metric was uniformly 1.
-  m.grpcStatus.add(res && res.status != null ? Number(res.status) : -1);
-  m.latency.add(Date.now() - start);
-  m.errorRate.add(!ok);
-  if (ok) m.ok.add(1); else m.failed.add(1);
+  // I17(c) (improvement-after-run4-benchmark.md §D): this scenario used to
+  // hand-roll grpcStatus/latency/errorRate/ok/failed recording and, in doing
+  // so, dropped `bench_http_proto` entirely — report.py's h1-vs-h2 column
+  // read blank for every zitadel_userinfo_grpc cell (gRPC is HTTP/2 by
+  // definition, but k6/net/grpc exposes no proto field to read back, so
+  // nothing records it unless a call site does so explicitly). Switched to
+  // the shared `recordGrpcResult()` helper (lib/metrics.js) — the same one
+  // scenarios/authz_check_grpc.js already uses — which records
+  // grpcStatus/httpProto(20)/latency/errorRate/ok-or-failed (plus the
+  // RESOURCE_EXHAUSTED=8 throttled split) from ONE call, so this scenario
+  // can no longer drift out of sync with the others on which metrics a gRPC
+  // result emits.
+  recordGrpcResult(res, Date.now() - start, ok);
 }

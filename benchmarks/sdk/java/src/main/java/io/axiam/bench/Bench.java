@@ -18,6 +18,7 @@ package io.axiam.bench;
 import io.axiam.sdk.AxiamClient;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -111,6 +112,39 @@ public final class Bench {
         int errors;
     }
 
+    // I9 (improvement-after-run4-benchmark.md §C): a floor below which a
+    // measured `refresh` latency is not plausibly a real HTTP round trip. The
+    // C# bench recorded p50 1.2 microseconds ("752 k rps") because its SDK's
+    // RefreshGuard cached a completed token result on a shared client for up
+    // to ~15 minutes (wall-clock freshness, no observed-token check), so only
+    // the FIRST refresh in a ~2200-call run ever touched the wire. This SDK's
+    // io.axiam.sdk.internal.RefreshGuard keys on the caller's currently
+    // observed access token instead, which this bench's client::refresh call
+    // updates after every real refresh — so a same-client loop keeps hitting
+    // the wire — but this floor is kept as a language-agnostic regression
+    // guard against that class of bug reappearing here too (a cache hit
+    // completes in low single-digit microseconds; every genuine wire call
+    // recorded across this harness' 11 languages averages ~17 ms, so 0.2 ms
+    // leaves a wide margin).
+    private static final double MIN_PLAUSIBLE_REFRESH_MS = 0.2;
+
+    /** I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+     * instead of silently publishing a fake number if {@code refresh} looks
+     * like it never left the process. */
+    private static void assertRefreshHitTheWire(Stats refresh, int iterations) {
+        boolean hadSamples = refresh.errors < iterations;
+        if (hadSamples && refresh.p50 < MIN_PLAUSIBLE_REFRESH_MS) {
+            System.err.printf(
+                "[java] I9 guard: refresh p50=%.4fms is below the %.1fms plausible-wire-call "
+                    + "floor despite successful samples — this looks like a cached no-op "
+                    + "(CONTRACT.md §9 guard reuse), not a real HTTP round trip. Failing the "
+                    + "bench run instead of publishing a fake number "
+                    + "(see improvement-after-run4-benchmark.md I9).%n",
+                refresh.p50, MIN_PLAUSIBLE_REFRESH_MS);
+            System.exit(1);
+        }
+    }
+
     public static void main(String[] args) {
         // A logged-in client shared by refresh/check_access/batch_check; login
         // builds its own fresh client per iteration below.
@@ -160,6 +194,7 @@ public final class Bench {
         }
 
         System.out.println(render("ok", results, ITER, CONC, ""));
+        assertRefreshHitTheWire(results.get(1), ITER); // OP_KEYS[1] == "refresh"
     }
 
     private static Stats timeOp(Op fn, int concurrency) {
@@ -239,7 +274,49 @@ public final class Bench {
         return zeros;
     }
 
+    // I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+    // `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler
+    // was never wired. `com.sun.management.OperatingSystemMXBean` (a
+    // de-facto-standard OpenJDK/HotSpot JMX extension, present in every JDK
+    // this bench realistically runs under) gives the JVM's cumulative CPU
+    // time (getProcessCpuTime(), ns) directly — no polling thread needed.
+    // The JVM exposes no standard peak-RSS API, so peak resident set size is
+    // read from /proc/self/status's VmHWM (Linux-only, matching this
+    // harness' Docker/K8s deployment target per CLAUDE.md); returns 0 for
+    // either metric if the corresponding source is unavailable rather than
+    // throwing.
+    private static double[] clientResourceUsage() {
+        double cpuMsTotal = 0.0;
+        try {
+            Object osBean = ManagementFactory.getOperatingSystemMXBean();
+            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
+                long cpuNs = sunBean.getProcessCpuTime(); // -1 if unsupported
+                if (cpuNs >= 0) {
+                    cpuMsTotal = cpuNs / 1_000_000.0;
+                }
+            }
+        } catch (Throwable ignored) {
+            // Best-effort telemetry only — never fail the bench over it.
+        }
+        double rssMiBPeak = 0.0;
+        try {
+            for (String line : Files.readAllLines(Path.of("/proc/self/status"))) {
+                if (line.startsWith("VmHWM:")) {
+                    String[] parts = line.trim().split("\\s+");
+                    if (parts.length >= 2) {
+                        rssMiBPeak = Double.parseDouble(parts[1]) / 1024.0; // kB -> MiB
+                    }
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+            // /proc unavailable (non-Linux) — leave at 0.
+        }
+        return new double[] {cpuMsTotal, rssMiBPeak};
+    }
+
     private static String render(String status, List<Stats> ops, int iterations, int concurrency, String notes) {
+        double[] resourceUsage = clientResourceUsage();
         StringBuilder sb = new StringBuilder();
         sb.append("{\n");
         sb.append("  \"schema\": \"axiam.sdk-bench/v1\",\n");
@@ -257,8 +334,8 @@ public final class Bench {
             sb.append(i < OP_KEYS.length - 1 ? ",\n" : "\n");
         }
         sb.append("  },\n");
-        sb.append("  \"client_cpu_ms_total\": 0,\n");
-        sb.append("  \"client_rss_mib_peak\": 0,\n");
+        sb.append("  \"client_cpu_ms_total\": ").append(num(resourceUsage[0])).append(",\n");
+        sb.append("  \"client_rss_mib_peak\": ").append(num(resourceUsage[1])).append(",\n");
         sb.append("  \"notes\": ").append(jsonString(notes)).append("\n");
         sb.append("}");
         return sb.toString();

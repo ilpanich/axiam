@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	axiam "github.com/ilpanich/axiam-go-sdk"
@@ -102,6 +103,28 @@ type opResult struct {
 	Errors        int     `json:"errors"`
 }
 
+// clientResourceUsage is I13's (improvement-after-run4-benchmark.md §C)
+// sampler: `client_cpu_ms_total`/`client_rss_mib_peak` recorded 0.0 for
+// every SDK bench before this — the sampler was never wired.
+// syscall.Getrusage(RUSAGE_SELF) gives an exact, cheap high-water-mark read
+// with no polling goroutine needed: Maxrss is already a lifetime peak (not
+// a snapshot), and Utime/Stime are cumulative CPU time since process start
+// — so one read right before emit() captures the whole bench's client-side
+// cost. Linux reports Maxrss in KiB (matches this harness' Docker/K8s Linux
+// deployment target per CLAUDE.md); this is a Linux-only syscall (the build
+// still succeeds elsewhere via the darwin/other Rusage field, but the KiB
+// assumption below is Linux-specific — acceptable since this harness only
+// ever runs in Linux containers).
+func clientResourceUsage() (cpuMsTotal float64, rssMiBPeak float64) {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0, 0
+	}
+	utimeMs := float64(ru.Utime.Sec)*1000.0 + float64(ru.Utime.Usec)/1000.0
+	stimeMs := float64(ru.Stime.Sec)*1000.0 + float64(ru.Stime.Usec)/1000.0
+	return utimeMs + stimeMs, float64(ru.Maxrss) / 1024.0
+}
+
 // output is the single JSON object emitted to stdout (the stable contract).
 type output struct {
 	Schema           string              `json:"schema"`
@@ -114,8 +137,8 @@ type output struct {
 	Iterations       int                 `json:"iterations"`
 	Concurrency      int                 `json:"concurrency"`
 	Ops              map[string]opResult `json:"ops"`
-	ClientCPUMsTotal int                 `json:"client_cpu_ms_total"`
-	ClientRSSMiBPeak int                 `json:"client_rss_mib_peak"`
+	ClientCPUMsTotal float64             `json:"client_cpu_ms_total"`
+	ClientRSSMiBPeak float64             `json:"client_rss_mib_peak"`
 	Notes            string              `json:"notes"`
 }
 
@@ -146,6 +169,7 @@ func zeroOps() map[string]opResult {
 }
 
 func emit(status string, ops map[string]opResult, iterations, concurrency int, notes string) {
+	cpuMs, rssMiB := clientResourceUsage()
 	out := output{
 		Schema:           "axiam.sdk-bench/v1",
 		SDK:              "go",
@@ -157,8 +181,8 @@ func emit(status string, ops map[string]opResult, iterations, concurrency int, n
 		Iterations:       iterations,
 		Concurrency:      concurrency,
 		Ops:              ops,
-		ClientCPUMsTotal: 0,
-		ClientRSSMiBPeak: 0,
+		ClientCPUMsTotal: cpuMs,
+		ClientRSSMiBPeak: rssMiB,
 		Notes:            notes,
 	}
 	b, err := json.MarshalIndent(out, "", "  ")
@@ -344,6 +368,39 @@ func timeOp(ctx context.Context, fn opFn, iter, warmup, conc int) opResult {
 	}
 }
 
+// minPlausibleRefreshMs is I9's (improvement-after-run4-benchmark.md §C)
+// floor below which a measured `refresh` latency is not plausibly a real
+// HTTP round trip. The C# bench recorded p50 1.2 microseconds ("752 k rps")
+// because its SDK's RefreshGuard cached a completed token result on a shared
+// client for up to ~15 minutes (wall-clock freshness, no observed-token
+// check), so only the FIRST refresh in a ~2200-call run ever touched the
+// wire. This SDK's internal/refreshguard.Guard keys on the caller's
+// currently observed access token instead (see login.go's Refresh, which
+// re-reads the client's cookie on every call), which this bench's
+// client.Refresh(ctx) call updates after every real refresh — so a
+// same-client loop keeps hitting the wire — but this floor is kept as a
+// language-agnostic regression guard against that class of bug reappearing
+// here too (a cache hit completes in low single-digit microseconds; every
+// genuine wire call recorded across this harness' 11 languages averages
+// ~17 ms, so 0.2 ms leaves a wide margin).
+const minPlausibleRefreshMs = 0.2
+
+// assertRefreshHitTheWire is I9's shared-driver-style regression guard:
+// fail loudly (non-zero exit) instead of silently publishing a fake number
+// if `refresh` looks like it never left the process.
+func assertRefreshHitTheWire(refresh opResult, iterations int) {
+	hadSamples := refresh.Errors < iterations
+	if hadSamples && refresh.P50Ms < minPlausibleRefreshMs {
+		fmt.Fprintf(os.Stderr,
+			"[go] I9 guard: refresh p50=%.4fms is below the %.1fms plausible-wire-call floor "+
+				"despite successful samples — this looks like a cached no-op (CONTRACT.md §9 "+
+				"guard reuse), not a real HTTP round trip. Failing the bench run instead of "+
+				"publishing a fake number (see improvement-after-run4-benchmark.md I9).\n",
+			refresh.P50Ms, minPlausibleRefreshMs)
+		os.Exit(1)
+	}
+}
+
 func main() {
 	cfg := loadConfig()
 	iter := envInt("SDK_BENCH_ITERATIONS", 2000)
@@ -373,4 +430,5 @@ func main() {
 	}
 
 	emit("ok", results, iter, conc, "")
+	assertRefreshHitTheWire(results["refresh"], iter)
 }

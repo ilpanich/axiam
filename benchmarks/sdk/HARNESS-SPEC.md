@@ -207,6 +207,55 @@ aggregator (`sdk/collect.py`) reads them and folds them into the main report's
 bench glue not yet wired"; the report lists these as not-yet-measured rather than
 failures.
 
+## The `refresh` op must hit the wire (I9)
+
+`refresh` is single-flight-guarded in every SDK (CONTRACT.md §9), and every
+bench times it against a **shared, already-logged-in client** at concurrency
+1 (see above). Run 4's C# bench recorded `refresh` p50 1.2 microseconds
+("752 k rps") because Axiam.Sdk's `RefreshGuard` reuses a completed token
+result whenever it is still fresh (a wall-clock check against the ~15-minute
+access-token TTL, with no per-call "is this observation stale" comparison) —
+so only the very first call on a shared client ever reached the wire; every
+call after it was a cache hit. The Go/Python/Rust/Java/Kotlin/PHP/C SDKs'
+guards instead key off the caller's *currently observed* access token, which
+updates on the shared bench client after every real refresh, so a same-client
+loop keeps hitting the wire on every call — that design difference, not a
+harness bug, is why those SDKs' benches never showed this. The C# bench fix
+(`sdk/csharp/Program.cs`, `TimeForcedRefreshOp`) builds a fresh client + login
+(both untimed) on every `refresh` iteration instead of reusing the shared one,
+so a brand-new `RefreshGuard` — with nothing cached — always performs the real
+`POST /api/v1/auth/refresh` call; only that call is timed.
+
+Every `sdk/<lang>` bench now also asserts, after computing the `refresh` op's
+stats and after printing the JSON record (so the numbers are still on stdout
+for a human to inspect even when this fires), that the measurement is
+plausibly a real HTTP round trip — and **exits non-zero** if not, so a
+regression of this class fails `run-all.sh` (`[sdk] $sdk FAILED`) instead of
+silently publishing a fake number:
+
+- **C** (`sdk/c/bench.c`) has the exact check: the sibling SDK exposes
+  `axiam_client_refresh_count()`, an observability counter incremented once
+  per real transport round trip, so the bench asserts it equals
+  `warmup + iterations` exactly (this bench's ops are all serial — see
+  "Running a wired SDK bench").
+- The other ten benches have no such counter available without modifying
+  their SDK (out of this repo's scope — the SDKs live in separate
+  `axiam-<lang>-sdk` repos), so each instead asserts the op's `p50_ms` is not
+  implausibly fast: `MIN_PLAUSIBLE_REFRESH_MS = 0.2` (0.2 ms), a floor picked
+  to sit ~85x below the ~17 ms average genuine wire call recorded across this
+  harness while still catching a cache-hit measurement in the low
+  single-digit-microsecond range (the C# bug measured 0.0012 ms) outright.
+  The check only fires when the op had at least one successful (non-error)
+  sample, so a genuinely broken/unreachable refresh endpoint is reported as
+  errors, not misdiagnosed as a cache hit.
+
+A literal per-language HTTP-call counter (matching the C SDK's) would be the
+more precise fix for the other ten, but needs either an SDK-exposed counter
+(an `axiam-<lang>-sdk` change, out of scope here) or a transport-injection
+seam the bench can wrap (e.g. Go's `axiam.WithHTTPClient`, OkHttp
+interceptors in Java/Kotlin) wired per language — worth doing if this class
+of bug recurs in a language the floor doesn't catch cleanly.
+
 ## Comparing SDK overhead to the wire baseline
 
 For a given op + profile, the **SDK overhead** is:
@@ -232,6 +281,46 @@ A well-built SDK adds only serialization + connection-pooling overhead (typicall
 sub-millisecond p95 on localhost). Large positive overhead points at a per-call
 cost the SDK should amortize (e.g. re-creating TLS connections, re-parsing JWKS,
 no keep-alive).
+
+## C++ bimodal tail — root-caused and fixed upstream (I11)
+
+Run 4 found the C++ bench's `check`/`batch` ops paying a bimodal tail (p50
+~3.3 ms, excellent — but a subset of iterations at ~264–336 ms) at every
+profile. The original hypothesis (`Expect: 100-continue` on POST bodies) was
+**wrong**: libcurl 8.5's `Expect` threshold is 1 MiB, not 1 KiB, so this
+harness' check/batch request bodies never trigger it. The actual root cause,
+found and fixed in the `axiam-cplusplus-sdk` repo (not this one), was
+`CURLOPT_MAXAGE_CONN` (libcurl's default is 118 s, so a worker held open
+across a long bench run silently reconnects) compounding with
+`CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS` (default 200 ms, burned on every fresh
+connection whenever AAAA resolves but IPv6 is unroutable in the target
+environment) — each silent reconnect paid a ~200 ms+ Happy-Eyeballs stall on
+top of the new TCP/TLS handshake.
+
+**Run 5 should confirm** C++ p95 is within 3x p50 at p0 (the I11 acceptance
+bar) now that the upstream SDK fix has landed. If a residual tail is still
+observed after that fix, look at **server-side** idle timeouts or
+`Connection: close` behavior next — connection *age* is no longer a credible
+suspect once `CURLOPT_MAXAGE_CONN` is addressed upstream.
+
+## Wire baseline + median-of-3 (I15)
+
+`just sdk-bench-all` now wires the k6 wire baseline back in automatically
+(improvement-after-run4-benchmark.md §D): before the SDK pass, it runs
+`oauth2_password_login.js`, `authz_check_rest.js`, and `authz_batch_rest.js`
+at `BENCH_VUS=$SDK_BENCH_CONCURRENCY` (default 16, matched to the SDK bench's
+own concurrency — the draft-4 lesson that an unmatched-VU baseline, e.g. the
+default 50-VU ramp, produces bogus, often negative, "overhead" purely from
+the load-shape mismatch). Set `SDK_BENCH_SKIP_WIRE=1` to skip it (e.g. a
+quick re-run when a fresh baseline already exists on disk for that
+target/profile).
+
+`just repeat=N sdk-bench-all` (default `repeat=3`, same knob/default as the
+server-side matrix's C1 median-of-N) runs the SDK pass N times into
+`results/sdk-run-<i>/` and medians each op's numbers across the "ok" passes
+via `sdk/median.py`, writing the merged record to the usual
+`results/sdk/<profile>/<lang>.json` location. `repeat=1` keeps the old
+single-pass behavior.
 
 ## Running a wired SDK bench
 

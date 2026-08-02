@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""rl_prod_check.py — I19 (improvement-after-run4-benchmark.md §D): per-endpoint
+expected-admission assertions for a `rl=prod` (shipped rate-limit posture)
+sensitivity pass.
+
+Before this script, the "admitted ≈ configured" check that caught I1's gRPC
+×60 units bug was done BY HAND by an analyst reading k6 summaries. This
+script automates exactly that comparison — configured limit vs. measured
+admission rate, per endpoint — for a results tree produced by a `rl=prod`
+pass (`just rl=prod target=axiam ... bench-run` / `bench-matrix`), and:
+
+  - prints PASS/FAIL per endpoint (exit 1 if any FAIL, so a units-bug class
+    of regression fails the harness/CI instead of an analyst's manual read),
+  - writes a small `rl-prod-summary.md` (configured vs. admitted, per
+    endpoint) into the results dir.
+
+Configured limits are NOT hardcoded here — hardcoding them would silently go
+stale the next time someone tunes a default. Instead this script extracts
+the current numeric defaults directly (regex, READ-ONLY) from the two files
+that actually own them:
+
+  - crates/axiam-api-rest/src/config/rate_limit.rs
+    (`impl Default for RateLimitConfig`: login/register/password_reset/mfa/
+    token/introspect/revoke/authz_check, each already expressed per-minute)
+  - crates/axiam-api-grpc/src/config.rs + .../middleware/rate_limit.rs
+    (`default_grpc_authz_per_sec()`, `IDENTITY_PER_SEC_MULTIPLE`, the fixed
+    admin=authz 1:1 ratio, and `WINDOW_SECS` — the I1 fix means gRPC admits
+    `per_sec * WINDOW_SECS` per window, not `per_sec` per window)
+
+This only reflects the shipped `internet` posture defaults (no
+`AXIAM__RATE_LIMIT__*` override, no `gateway`/`mesh` preset) — pass
+--configured-json to override any field for a run against a different
+posture/override set (e.g. a `gateway`-preset rl=prod pass).
+
+Usage:
+    python3 rl_prod_check.py --results results --target axiam --profile p0-plaintext
+    python3 rl_prod_check.py --results results --target axiam --profile p0-plaintext \\
+        --configured-json '{"token_per_min": 6000}'   # e.g. gateway preset override
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))  # runner/ -> benchmarks/ -> repo root
+
+REST_RATE_LIMIT_RS = os.path.join(
+    REPO_ROOT, "crates", "axiam-api-rest", "src", "config", "rate_limit.rs")
+GRPC_CONFIG_RS = os.path.join(REPO_ROOT, "crates", "axiam-api-grpc", "src", "config.rs")
+GRPC_RATE_LIMIT_RS = os.path.join(
+    REPO_ROOT, "crates", "axiam-api-grpc", "src", "middleware", "rate_limit.rs")
+
+# I1's own acceptance bar ("admitted-per-minute ≈ configured×60 (±10%)"),
+# reused uniformly here for every endpoint, REST and gRPC alike.
+TOLERANCE = 0.10
+
+# endpoint key -> (k6 scenario filename, human label). Endpoints with no k6
+# scenario in this harness (revoke_per_min: no dedicated scenario;
+# grpc_admin: no ValidateCredentials scenario) are listed with scenario=None
+# and reported as "no scenario — not checked" rather than silently omitted.
+ENDPOINTS = {
+    "login_per_min": ("oauth2_password_login.js", "POST /api/v1/auth/login"),
+    "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
+    "introspect_per_min": ("token_introspection.js", "POST /oauth2/introspect"),
+    "revoke_per_min": (None, "POST /oauth2/revoke"),
+    "authz_check_per_min": ("authz_check_rest.js", "POST /api/v1/authz/check"),
+    "authz_batch_per_min": ("authz_batch_rest.js", "POST /api/v1/authz/check/batch (shares authz_check_per_min)"),
+    "grpc_authz_per_min": ("authz_check_grpc.js", "gRPC AuthzService/Check (grpc_authz family)"),
+    "grpc_identity_per_min": ("userinfo_grpc.js", "gRPC UserInfoService/GetUserInfo (grpc_identity family)"),
+    "grpc_admin_per_min": (None, "gRPC UserService/ValidateCredentials (grpc_admin family)"),
+}
+
+
+def _extract_int(text, pattern, label, path):
+    m = re.search(pattern, text)
+    if not m:
+        raise RuntimeError(f"could not find {label} in {path} (pattern: {pattern!r}) — "
+                            "the source may have moved; update rl_prod_check.py's extraction")
+    return int(m.group(1).replace("_", ""))
+
+
+def _extract_default_impl_block(path):
+    """Isolate ONLY the `impl Default for RateLimitConfig { ... }` block's
+    text. The file also defines `gateway`/`mesh` PRESET struct literals
+    earlier (RateLimitProfile::Gateway/::Mesh apply_rate_limit_preset
+    tables) that reuse the SAME field names with different numbers — a
+    plain whole-file regex search finds whichever occurrence comes first in
+    the file, which is one of the presets, not the shipped `internet`
+    default. Scoping to this block is what makes the extraction correct."""
+    with open(path) as f:
+        text = f.read()
+    m = re.search(r"impl Default for RateLimitConfig\s*\{.*?\n\}\n", text, re.DOTALL)
+    if not m:
+        raise RuntimeError(
+            f"could not find 'impl Default for RateLimitConfig' in {path} — "
+            "the source may have moved; update rl_prod_check.py's extraction")
+    return m.group(0)
+
+
+def read_configured_defaults():
+    """READ-ONLY extraction of the current shipped `internet` posture
+    defaults from the two rate-limit config files. Never writes to either
+    file."""
+    default_block = _extract_default_impl_block(REST_RATE_LIMIT_RS)
+    rest_defaults = {}
+    for field in ("login_per_min", "register_per_min", "password_reset_per_min",
+                  "mfa_per_min", "token_per_min", "introspect_per_min",
+                  "revoke_per_min", "authz_check_per_min"):
+        rest_defaults[field] = _extract_int(
+            default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
+
+    with open(GRPC_CONFIG_RS) as f:
+        grpc_config_text = f.read()
+    with open(GRPC_RATE_LIMIT_RS) as f:
+        grpc_rate_limit_text = f.read()
+
+    grpc_authz_per_sec = _extract_int(
+        grpc_config_text, r"fn default_grpc_authz_per_sec\(\)\s*->\s*u32\s*\{\s*([0-9_]+)\s*\}",
+        "default_grpc_authz_per_sec", GRPC_CONFIG_RS)
+    identity_multiple = _extract_int(
+        grpc_rate_limit_text, r"IDENTITY_PER_SEC_MULTIPLE:\s*u32\s*=\s*([0-9_]+)",
+        "IDENTITY_PER_SEC_MULTIPLE", GRPC_RATE_LIMIT_RS)
+    window_secs = _extract_int(
+        grpc_rate_limit_text, r"WINDOW_SECS:\s*i64\s*=\s*([0-9_]+)", "WINDOW_SECS", GRPC_RATE_LIMIT_RS)
+    # admin_per_sec tracks authz_per_sec 1:1 (GrpcRateLimits::from_authz_per_sec).
+    grpc_identity_per_sec = grpc_authz_per_sec * identity_multiple
+    grpc_admin_per_sec = grpc_authz_per_sec
+
+    configured = dict(rest_defaults)
+    configured["authz_batch_per_min"] = rest_defaults["authz_check_per_min"]
+    # I1 fix: the gRPC shared window admits per_sec * WINDOW_SECS per window,
+    # i.e. per-minute admission == per_sec * 60 (WINDOW_SECS is 60 today but
+    # read from source rather than assumed, in case it ever changes).
+    configured["grpc_authz_per_min"] = grpc_authz_per_sec * window_secs
+    configured["grpc_identity_per_min"] = grpc_identity_per_sec * window_secs
+    configured["grpc_admin_per_min"] = grpc_admin_per_sec * window_secs
+    return configured
+
+
+def load_k6_admitted_per_min(results, target, profile, scenario_file):
+    """Best-effort: ops/min actually admitted (bench_ok), read via the same
+    report.py helper report.py itself uses, so this script can never drift
+    from how the main report computes throughput."""
+    sys.path.insert(0, HERE)
+    try:
+        import report as bench_report  # runner/report.py
+    finally:
+        if HERE in sys.path:
+            sys.path.remove(HERE)
+    meta_path = os.path.join(results, target, profile, f"{scenario_file[:-3]}.meta.json")
+    if not os.path.exists(meta_path):
+        return None
+    with open(meta_path) as f:
+        meta = json.load(f)
+    k6_path = os.path.join(results, target, profile, meta.get("k6_summary_file", ""))
+    if not os.path.exists(k6_path):
+        return None
+    perf = bench_report.load_k6_summary(k6_path)
+    return perf["throughput"] * 60.0  # ops/s -> ops/min
+
+
+def check(results, target, profile, configured_overrides):
+    configured = read_configured_defaults()
+    configured.update(configured_overrides or {})
+
+    rows = []
+    any_fail = False
+    for field, (scenario_file, label) in ENDPOINTS.items():
+        configured_limit = configured[field]
+        if scenario_file is None:
+            rows.append((label, configured_limit, None, "no scenario — not checked"))
+            continue
+        admitted = load_k6_admitted_per_min(results, target, profile, scenario_file)
+        if admitted is None:
+            rows.append((label, configured_limit, None, "no data (run this cell under rl=prod first)"))
+            continue
+        low, high = configured_limit * (1 - TOLERANCE), configured_limit * (1 + TOLERANCE)
+        verdict = "PASS" if low <= admitted <= high else "FAIL"
+        if verdict == "FAIL":
+            any_fail = True
+        rows.append((label, configured_limit, admitted, verdict))
+    return rows, any_fail
+
+
+def write_summary(results, profile, rows):
+    lines = [
+        "# rl-prod sensitivity summary (I19)",
+        "",
+        f"Profile: `{profile}`. Configured limits extracted read-only from "
+        "`crates/axiam-api-rest/src/config/rate_limit.rs` and "
+        "`crates/axiam-api-grpc/src/{config.rs,middleware/rate_limit.rs}` "
+        f"(shipped `internet` posture unless overridden). Tolerance: ±{int(TOLERANCE * 100)}% "
+        "(I1's own acceptance bar).",
+        "",
+        "| endpoint | configured (per min) | admitted (per min) | verdict |",
+        "|---|---|---|---|",
+    ]
+    for label, configured_limit, admitted, verdict in rows:
+        admitted_str = f"{admitted:.0f}" if admitted is not None else "—"
+        lines.append(f"| {label} | {configured_limit} | {admitted_str} | {verdict} |")
+    lines += ["", "A `FAIL` here is exactly the shape of bug I1 was — a units/scoping "
+              "mismatch between the configured limit and what the server actually "
+              "admits — caught by this script instead of a by-hand k6-summary read."]
+    out_path = os.path.join(results, "rl-prod-summary.md")
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--results", required=True)
+    ap.add_argument("--target", default="axiam")
+    ap.add_argument("--profile", default="p0-plaintext")
+    ap.add_argument("--configured-json", default=None,
+                     help="JSON object overriding any configured-limit field "
+                          "(e.g. a gateway/mesh preset's numbers)")
+    args = ap.parse_args()
+
+    overrides = json.loads(args.configured_json) if args.configured_json else {}
+    rows, any_fail = check(args.results, args.target, args.profile, overrides)
+    out_path = write_summary(args.results, args.profile, rows)
+
+    print(f"wrote {out_path}")
+    for label, configured_limit, admitted, verdict in rows:
+        admitted_str = f"{admitted:.0f}" if admitted is not None else "—"
+        print(f"  [{verdict:>4}] {label}: configured={configured_limit}/min "
+              f"admitted={admitted_str}/min")
+
+    if any_fail:
+        print("[rl-prod-check] FAIL: at least one endpoint's admission rate is outside "
+              f"±{int(TOLERANCE * 100)}% of its configured limit — see rl-prod-summary.md", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

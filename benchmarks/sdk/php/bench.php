@@ -103,8 +103,36 @@ function sdk_version(): string
     return '1.0.0-alpha2';
 }
 
+/**
+ * I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+ * `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+ * never wired. PHP core ships `getrusage()` (POSIX `RUSAGE_SELF` under the
+ * hood) directly — no polling needed: `ru_maxrss` is already a lifetime
+ * peak (not a snapshot), and `ru_utime`/`ru_stime` are cumulative CPU time
+ * since process start. `ru_maxrss` is in KiB on Linux (matches this
+ * harness' Docker/K8s deployment target per CLAUDE.md).
+ *
+ * @return array{0: float, 1: float} [cpu_ms_total, rss_mib_peak]
+ */
+function client_resource_usage(): array
+{
+    if (!function_exists('getrusage')) {
+        return [0.0, 0.0];
+    }
+    $ru = getrusage();
+    $cpu_ms_total = (
+        ($ru['ru_utime.tv_sec'] ?? 0) + ($ru['ru_stime.tv_sec'] ?? 0)
+    ) * 1000.0 + (
+        ($ru['ru_utime.tv_usec'] ?? 0) + ($ru['ru_stime.tv_usec'] ?? 0)
+    ) / 1000.0;
+    $rss_mib_peak = ($ru['ru_maxrss'] ?? 0) / 1024.0; // KiB -> MiB (Linux)
+
+    return [$cpu_ms_total, $rss_mib_peak];
+}
+
 function emit(string $status, array $ops, int $iterations, int $concurrency, string $notes): void
 {
+    [$cpu_ms_total, $rss_mib_peak] = client_resource_usage();
     echo json_encode([
         'schema' => 'axiam.sdk-bench/v1',
         'sdk' => 'php',
@@ -116,8 +144,8 @@ function emit(string $status, array $ops, int $iterations, int $concurrency, str
         'iterations' => $iterations,
         'concurrency' => $concurrency,
         'ops' => $ops,
-        'client_cpu_ms_total' => 0,
-        'client_rss_mib_peak' => 0,
+        'client_cpu_ms_total' => $cpu_ms_total,
+        'client_rss_mib_peak' => $rss_mib_peak,
         'notes' => $notes,
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), PHP_EOL;
 }
@@ -199,6 +227,42 @@ function build_ops(array $cfg): array
     ];
 }
 
+// I9 (improvement-after-run4-benchmark.md §C): a floor below which a
+// measured `refresh` latency is not plausibly a real HTTP round trip. The
+// C# bench recorded p50 1.2 microseconds ("752 k rps") because its SDK's
+// RefreshGuard cached a completed token result on a shared client for up to
+// ~15 minutes (wall-clock freshness, no observed-token check), so only the
+// FIRST refresh in a ~2200-call run ever touched the wire. This SDK's
+// Axiam\Sdk\Auth\RefreshGuard clears its promise slot on both the success
+// and failure path of every refresh (see Session.php), so a same-client
+// loop keeps hitting the wire on every sequential call — but this floor is
+// kept as a language-agnostic regression guard against that class of bug
+// reappearing here too (a cache hit completes in low single-digit
+// microseconds; every genuine wire call recorded across this harness' 11
+// languages averages ~17 ms, so 0.2 ms leaves a wide margin).
+const MIN_PLAUSIBLE_REFRESH_MS = 0.2;
+
+/**
+ * I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+ * instead of silently publishing a fake number if `refresh` looks like it
+ * never left the process.
+ */
+function assert_refresh_hit_the_wire(array $refresh_op, int $iterations): void
+{
+    $had_samples = $refresh_op['errors'] < $iterations;
+    if ($had_samples && $refresh_op['p50_ms'] < MIN_PLAUSIBLE_REFRESH_MS) {
+        fwrite(STDERR, sprintf(
+            "[php] I9 guard: refresh p50=%.4fms is below the %.1fms plausible-wire-call floor "
+                . "despite successful samples — this looks like a cached no-op (CONTRACT.md §9 "
+                . "guard reuse), not a real HTTP round trip. Failing the bench run instead of "
+                . "publishing a fake number (see improvement-after-run4-benchmark.md I9).\n",
+            $refresh_op['p50_ms'],
+            MIN_PLAUSIBLE_REFRESH_MS,
+        ));
+        exit(1);
+    }
+}
+
 function time_op(callable $fn, int $warmup, int $iter): array
 {
     $errors = 0;
@@ -274,3 +338,4 @@ emit(
     'single-process synchronous PHP SDK — all ops timed serially (concurrency pinned to 1); '
         . 'SDK_BENCH_CONCURRENCY is ignored.',
 );
+assert_refresh_hit_the_wire($ops['refresh'], $ITER);

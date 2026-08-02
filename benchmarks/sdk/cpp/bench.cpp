@@ -28,6 +28,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
@@ -164,6 +165,27 @@ double pct(std::vector<double> s, double p) {
     return s[lo] + (s[hi] - s[lo]) * (k - static_cast<double>(lo));
 }
 
+// ---- I13 (improvement-after-run4-benchmark.md §C) client resource sampler:
+// `client_cpu_ms_total`/`client_rss_mib_peak` recorded 0.0 for every SDK
+// bench — the sampler was never wired. POSIX `getrusage(RUSAGE_SELF, ...)`
+// gives an exact, cheap high-water-mark read with no polling thread needed:
+// `ru_maxrss` is already a lifetime peak (not a snapshot), and
+// `ru_utime`/`ru_stime` are cumulative CPU time since process start.
+// `ru_maxrss` is in KiB on Linux (matches this harness' Docker/K8s
+// deployment target per CLAUDE.md). ----------------------------------------
+
+void client_resource_usage(double& cpu_ms_total, double& rss_mib_peak) {
+    cpu_ms_total = 0.0;
+    rss_mib_peak = 0.0;
+    struct rusage ru {};
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return;
+    cpu_ms_total = static_cast<double>(ru.ru_utime.tv_sec) * 1000.0 +
+                   static_cast<double>(ru.ru_utime.tv_usec) / 1000.0 +
+                   static_cast<double>(ru.ru_stime.tv_sec) * 1000.0 +
+                   static_cast<double>(ru.ru_stime.tv_usec) / 1000.0;
+    rss_mib_peak = static_cast<double>(ru.ru_maxrss) / 1024.0;  // KiB -> MiB (Linux)
+}
+
 // ---- JSON output (fixed axiam.sdk-bench/v1 shape; hand-rolled to avoid a
 // second JSON dependency — the SDK's nlohmann/json.hpp is a private
 // implementation detail, not part of its public include/ surface) ---------
@@ -227,6 +249,8 @@ std::vector<std::pair<std::string, OpResult>> zero_ops() {
 
 void emit(const std::string& status, const std::vector<std::pair<std::string, OpResult>>& ops,
           int iterations, int concurrency, const std::string& notes) {
+    double cpu_ms_total = 0.0, rss_mib_peak = 0.0;
+    client_resource_usage(cpu_ms_total, rss_mib_peak);
     std::ostringstream j;
     j << "{\n"
       << "  \"schema\": \"axiam.sdk-bench/v1\",\n"
@@ -242,8 +266,8 @@ void emit(const std::string& status, const std::vector<std::pair<std::string, Op
       << "  \"iterations\": " << iterations << ",\n"
       << "  \"concurrency\": " << concurrency << ",\n"
       << "  \"ops\": " << ops_json(ops) << ",\n"
-      << "  \"client_cpu_ms_total\": 0,\n"
-      << "  \"client_rss_mib_peak\": 0,\n"
+      << "  \"client_cpu_ms_total\": " << cpu_ms_total << ",\n"
+      << "  \"client_rss_mib_peak\": " << rss_mib_peak << ",\n"
       << "  \"notes\": \"" << json_escape(notes) << "\"\n"
       << "}";
     std::cout << j.str() << std::endl;
@@ -359,6 +383,38 @@ std::vector<std::pair<std::string, OpFn>> build_ops(const Config& cfg) {
     return ops;
 }
 
+// I9 (improvement-after-run4-benchmark.md §C): a floor below which a
+// measured `refresh` latency is not plausibly a real HTTP round trip. The
+// C# bench recorded p50 1.2 microseconds ("752 k rps") because its SDK's
+// RefreshGuard cached a completed token result on a shared client for up to
+// ~15 minutes (wall-clock freshness, no observed-token check), so only the
+// FIRST refresh in a ~2200-call run ever touched the wire. This SDK's
+// refresh_guard.hpp keys on the caller's currently observed access token
+// instead, which this bench's `client.refresh()` call updates after every
+// real refresh — so a same-client loop keeps hitting the wire — but this
+// floor is kept as a language-agnostic regression guard against that class
+// of bug reappearing here too (a cache hit completes in low single-digit
+// microseconds; every genuine wire call recorded across this harness' 11
+// languages averages ~17 ms, so 0.2 ms leaves a wide margin).
+constexpr double kMinPlausibleRefreshMs = 0.2;
+
+// I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+// instead of silently publishing a fake number if `refresh` looks like it
+// never left the process.
+void assert_refresh_hit_the_wire(const OpResult& refresh, int iterations) {
+    const bool had_samples = refresh.errors < iterations;
+    if (had_samples && refresh.p50_ms < kMinPlausibleRefreshMs) {
+        std::cerr << "[cpp] I9 guard: refresh p50=" << refresh.p50_ms << "ms is below the "
+                  << kMinPlausibleRefreshMs
+                  << "ms plausible-wire-call floor despite successful samples — this looks "
+                     "like a cached no-op (CONTRACT.md §9 guard reuse), not a real HTTP round "
+                     "trip. Failing the bench run instead of publishing a fake number "
+                     "(see improvement-after-run4-benchmark.md I9)."
+                  << std::endl;
+        std::exit(1);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -388,5 +444,8 @@ int main() {
     }
 
     emit("ok", results, iter, conc, "");
+    for (const auto& [key, r] : results) {
+        if (key == "refresh") assert_refresh_hit_the_wire(r, iter);
+    }
     return 0;
 }

@@ -23,6 +23,11 @@ target := "axiam"
 profile := "p0-plaintext"
 scenario := "all"
 sdk := "python"
+# I19: optional JSON override for `rl-prod-check`'s configured-limit table
+# (e.g. a gateway/mesh preset's numbers instead of the shipped `internet`
+# defaults it reads by default). Empty means "use the read-only extracted
+# defaults unmodified".
+configured := ""
 targets := "axiam keycloak"
 profiles := "p0-plaintext p2-tls13"
 # build=1 forces a local source build of the AXIAM image; default (0) uses the
@@ -402,6 +407,24 @@ bench-down:
 bench-report:
     python3 runner/report.py --results results
 
+# I19 (improvement-after-run4-benchmark.md §D): per-endpoint configured-vs-
+# admitted assertions for an `rl=prod` sensitivity pass — automates the
+# by-hand k6-summary read that caught I1's gRPC ×60 units bug. Run this
+# after a `just rl=prod target=axiam ... bench-run`/`bench-matrix` pass, once
+# results for the relevant scenarios exist under the given profile. Exits
+# non-zero (and prints which endpoint(s)) if any admission rate is outside
+# ±10% of its configured limit. Writes results/rl-prod-summary.md.
+# Pass configured=<json> to override a field (e.g. a gateway/mesh preset's
+# numbers instead of the shipped `internet` defaults this reads by default).
+rl-prod-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ARGS=(--results "${BENCH_RESULTS_DIR:-results}" --target {{target}} --profile {{profile}})
+    if [ -n "{{configured}}" ]; then
+      ARGS+=(--configured-json '{{configured}}')
+    fi
+    python3 runner/rl_prod_check.py "${ARGS[@]}"
+
 # Full unattended matrix: every target × profile × scenario, with up/seed/run/down.
 # repeat=N (default 3, see `repeat` above): runs the whole matrix N times,
 # each pass writing into its own results/run-<i>/ subtree using the SAME flat
@@ -603,6 +626,7 @@ sdk-bench-all:
     source profiles/{{profile}}.env
     export BENCH_PROFILE="{{profile}}"
     export BENCH_TARGET="{{target}}"
+    RESULTS_ROOT="${BENCH_RESULTS_DIR:-$PWD/results}"
     # p3-mtls presents a client certificate on every request (CONTRACT.md
     # §6.1). Every language bench is wired for it; `just sdk-bench-test`
     # verifies that without a live stack.
@@ -613,9 +637,49 @@ sdk-bench-all:
     # eleven differently-worded copies of the same "server unreachable".
     # shellcheck disable=SC1091
     source sdk/_preflight.sh; preflight_target || exit 1
-    echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under ${BENCH_RESULTS_DIR:-results}/sdk/{{profile}}/)"
-    bash sdk/run-all.sh
-    python3 sdk/collect.py --results "${BENCH_RESULTS_DIR:-results}"
+
+    # I15 (improvement-after-run4-benchmark.md §D): wire the k6 baseline back
+    # in — collect.py's "p95 overhead vs wire" column (OP_TO_SCENARIO) reads
+    # results/<target>/<profile>/<scenario>.meta.json for exactly these three
+    # scenarios, and was empty in run 4 because no matched-concurrency k6 pass
+    # had been captured. BENCH_VUS is set equal to SDK_BENCH_CONCURRENCY (the
+    # draft-4 lesson: an unmatched-VU baseline, e.g. the default 50-VU ramp,
+    # produces bogus — often negative — "overhead" purely from the load-shape
+    # mismatch, not genuine SDK cost). Skippable with SDK_BENCH_SKIP_WIRE=1
+    # (e.g. a quick re-run when a fresh baseline already exists on disk).
+    SDK_BENCH_CONCURRENCY="${SDK_BENCH_CONCURRENCY:-16}"
+    if [ "${SDK_BENCH_SKIP_WIRE:-0}" != "1" ]; then
+      echo "[sdk-bench-all] wire baseline: oauth2_password_login/authz_check_rest/authz_batch_rest @ BENCH_VUS=$SDK_BENCH_CONCURRENCY (matches SDK_BENCH_CONCURRENCY)" >&2
+      for s in oauth2_password_login.js authz_check_rest.js authz_batch_rest.js; do
+        BENCH_VUS="$SDK_BENCH_CONCURRENCY" BENCH_RESULTS_DIR="$RESULTS_ROOT" \
+          bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario "$s"
+      done
+    else
+      echo "[sdk-bench-all] SDK_BENCH_SKIP_WIRE=1 — skipping the k6 wire-baseline pass" >&2
+    fi
+
+    # I15: repeat=N (default 3, same knob/default as the server-side matrix's
+    # C1 median-of-N) runs the SDK pass N times and medians per-op numbers
+    # across the "ok" passes (sdk/median.py) — one bad pass (e.g. transient
+    # network blip) no longer produces the SDK section's number of record.
+    # repeat=1 keeps the old single-pass behavior, writing straight into
+    # $RESULTS_ROOT/sdk/{{profile}}/ with no merge step.
+    REPEAT="{{repeat}}"
+    if [ "$REPEAT" -le 1 ] 2>/dev/null; then
+      echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under $RESULTS_ROOT/sdk/{{profile}}/)"
+      BENCH_RESULTS_DIR="$RESULTS_ROOT" bash sdk/run-all.sh
+    else
+      echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (median of $REPEAT passes -> $RESULTS_ROOT/sdk/{{profile}}/)"
+      PASS_DIRS=()
+      for i in $(seq 1 "$REPEAT"); do
+        PASS_DIR="$RESULTS_ROOT/sdk-run-$i"
+        echo "[sdk-bench-all] pass $i/$REPEAT -> $PASS_DIR" >&2
+        BENCH_RESULTS_DIR="$PASS_DIR" bash sdk/run-all.sh
+        PASS_DIRS+=("$PASS_DIR")
+      done
+      python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT"
+    fi
+    python3 sdk/collect.py --results "$RESULTS_ROOT"
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the

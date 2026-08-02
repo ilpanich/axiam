@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha23] - 2026-08-02
+
+### Added
+
+- Rust benchmark improved release build optimizations
+- Present the client certificate in the PHP SDK bench
+- Wire TLS into the C# SDK bench (CA + client certificate)
+- Present the client certificate in the TypeScript SDK bench
+- Wire TLS into the Kotlin SDK bench (CA + client certificate)
+- Present the client certificate in the Java SDK bench
+- Present the client certificate in the Python SDK bench
+- Present the client certificate in the Rust SDK bench
+- Present the client certificate in the Go SDK bench
+
+### Changed
+
+- All eleven SDK benches now pass the client-cert gate
+- Complete the STRIDE threat model in Threat Dragon format
+
+### Fixed
+
+- Make the p2-tls13 and p3-mtls SDK matrices pass
+- Make the p3-mtls path actually reachable end to end
+
 ## [1.0.0-alpha22] - 2026-07-31
 
 ### Added

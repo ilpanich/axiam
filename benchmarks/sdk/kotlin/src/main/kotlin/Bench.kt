@@ -28,6 +28,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -48,6 +49,48 @@ private val RESOURCE_ID = env("BENCH_RESOURCE_ID", "bench-resource")
 private val TARGET = env("BENCH_TARGET", "axiam")
 private val PROFILE = env("BENCH_PROFILE", "p0-plaintext")
 
+// TLS inputs (HARNESS-SPEC.md). BENCH_CA_CERT is the trusted custom CA under
+// every TLS profile; BENCH_CLIENT_CERT/BENCH_CLIENT_KEY are the p3-mtls client
+// identity (CONTRACT.md §6.1) — the same pair k6 hands to `tlsAuth` and
+// seed.sh to `curl --cert`. All three are file PATHS, and all three are empty
+// under p0-plaintext.
+private val CA_CERT_PATH = env("BENCH_CA_CERT", "")
+private val CLIENT_CERT_PATH = env("BENCH_CLIENT_CERT", "")
+private val CLIENT_KEY_PATH = env("BENCH_CLIENT_KEY", "")
+
+/**
+ * An [AxiamClient.Builder] pre-seeded with org context, the trusted custom CA
+ * under a TLS profile, and the §6.1 client-certificate identity under p3-mtls.
+ *
+ * Both client construction sites below — the long-lived shared client AND the
+ * fresh one the `login` op builds per iteration — go through here, so the TLS
+ * wiring cannot drift between them; a login client missing the identity would
+ * fail the p3 handshake while the other three ops succeeded.
+ *
+ * The files are read here (lazily, at call time) rather than in a top-level
+ * `val`, so an unreadable path surfaces through main()'s existing try/catch as
+ * a normal `status:"error"` record instead of an ExceptionInInitializerError
+ * that would print no HARNESS-SPEC-conformant output at all.
+ */
+private fun newClientBuilder(): AxiamClient.Builder {
+    var b = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG)
+    if (CA_CERT_PATH.isNotEmpty()) {
+        b = b.customCa(File(CA_CERT_PATH).readBytes())
+    }
+    if (CLIENT_CERT_PATH.isEmpty() != CLIENT_KEY_PATH.isEmpty()) {
+        // The SDK validates this too (§6.1 rule 1), but failing here names the
+        // env var the operator actually got wrong.
+        throw IllegalArgumentException(
+            "BENCH_CLIENT_CERT=\"$CLIENT_CERT_PATH\" and BENCH_CLIENT_KEY=\"$CLIENT_KEY_PATH\" " +
+                "must be set together — mTLS needs both (CONTRACT.md §6.1 rule 1)",
+        )
+    }
+    if (CLIENT_CERT_PATH.isNotEmpty()) {
+        b = b.clientCertificate(File(CLIENT_CERT_PATH).readBytes(), File(CLIENT_KEY_PATH).readBytes())
+    }
+    return b
+}
+
 private val OP_KEYS = listOf("login", "refresh", "check_access", "batch_check")
 
 /** Latency stats for one op (matches the JSON contract's per-op object). */
@@ -65,7 +108,7 @@ fun main() = runBlocking {
     val client: AxiamClient
     val checks: List<AccessCheck>
     try {
-        client = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build()
+        client = newClientBuilder().build()
         client.login(USERNAME, PASSWORD)
         // Batch of 3 checks, all against the SAME resource id (no suffix) — the server
         // rejects non-UUID resource_ids, so per-index suffixing would 400.
@@ -87,7 +130,7 @@ fun main() = runBlocking {
     }
 
     suspend fun doLogin() {
-        AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build().use { fresh ->
+        newClientBuilder().build().use { fresh ->
             fresh.login(USERNAME, PASSWORD)
         }
     }

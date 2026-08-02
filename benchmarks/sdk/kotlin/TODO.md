@@ -27,3 +27,27 @@ The Kotlin bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk-ko
   will build wherever that egress is open). `Bench.kt` itself emits a spec-conformant
   `status: "error"` record (not a crash) when the build succeeds but the target is
   unreachable or login/the warm-up `check_access` grant fails.
+
+## p3-mtls (CONTRACT.md §6.1)
+
+Wired via a new `newClientBuilder()` used by both client construction sites
+(the shared client and the per-iteration `login` client). It adds two things
+this bench was missing entirely:
+
+- **`BENCH_CA_CERT` -> `customCa(...)`.** The Kotlin bench never read it, so it
+  could not have completed a run under *any* TLS profile, p2 included — the
+  gap was invisible because only p0 had ever been run.
+- **`BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` -> `clientCertificate(certPem, keyPem)`**
+  for p3-mtls.
+
+The composite build (`settings.gradle.kts` `includeBuild`) means the sibling
+SDK is always compiled from source, so unlike the Java bench there is no stale
+published-artifact hazard here.
+
+```
+cd benchmarks && just target=axiam profile=p3-mtls sdk=kotlin sdk-bench
+just sdk-bench-test kotlin  # proves the cert reaches the wire, no stack needed
+```
+
+Verified: phase A (half-configured pair -> `status:"error"` naming both vars)
+and phase B (stub mTLS server observes `CN=bench-client`) both pass.

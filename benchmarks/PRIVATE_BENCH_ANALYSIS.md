@@ -1,520 +1,389 @@
 # PRIVATE — Benchmark Post-Mortem & Improvement Plan
 
 > Internal working document. Companion to `PUBLIC_BENCH_ANALYSIS.md`.
-> **Updated 2026-07-26** for **run 3** — the first *serious* run: full
-> median-of-3 capped matrix (AXIAM **1.0.0-alpha19** pulled ghcr image,
-> digest-recorded, vs Keycloak 26.7.0 vs Zitadel v4.15.2; p0-plaintext +
-> p2-tls13; 50 VUs; 2 CPU / 1024 MiB caps) **plus** the full labeled
-> sensitivity set: B2 h1-isolation cell, batch-strategy A/B
-> (`sens-batch-coalesced`), DB-pool A/B (`sens-pool-4`,
-> `sens-pool-4-inflight-64`), native mTLS (`sens-p3-mtls`), prod rate-limit
-> posture (`sens-rl-prod`), all-targets DB-uncapped (`sens-uncapped`),
-> decision-cache ON (`sens-cache-on`), and the F3 expiry soak (cargo test —
-> **PASS**, 10.53 s). Same Dell XPS 15 9570. Run-2 findings that are resolved
-> are compressed; everything still open is carried forward. The executable
+> **Updated 2026-08-02 for run 4** — the first run executed *after* the shared
+> rate-limit write-behind fix, on the post-fix image (build_ref `6875e4b`),
+> G-box (Dell XPS 15 9570, i7-8750H, 12 logical CPUs, ~31 GiB), Docker 29.6.2,
+> k6 v2.1.0. Full median-of-3 capped matrix (AXIAM vs Keycloak vs Zitadel;
+> p0-plaintext + p2-tls13; 50 VUs; 2 CPU per server container, **2048 MiB**
+> per server container — raised from 1024, see §2.3 — DBs at 2 CPU / 1024 MiB),
+> plus sensitivity passes (`sens-db-uncapped`, `sens-cache-on`, `sens-p3-mtls`,
+> `sens-rl-prod`, `sens-batch-concurrent`) and the **first full 11-language SDK
+> pass at three profiles (p0/p2/p3)**. Run-3 findings that are resolved are
+> compressed; everything still open is carried forward. The executable
 > follow-up plan derived from this document is
-> [`claude_dev/improvement-after-serious-benchmark.md`](../claude_dev/improvement-after-serious-benchmark.md).
+> [`claude_dev/improvement-after-run4-benchmark.md`](../claude_dev/improvement-after-run4-benchmark.md).
 
-## 0. Run-3 executive summary
+## 0. Run-4 executive summary
 
-Median-of-3, capped p0, vs run 2 (single-run):
+**The headline: the H2 write-behind rate-limit fix is verified at matrix
+scale.** Run 4 is the re-measurement that `rate-limit-fix-verification.md`
+promised, and it is unambiguous — every endpoint the synchronous
+`rate_limit_bucket` UPSERT used to clamp is now dramatically faster, the
+settle gate cleared in 15–16 s on every session (no timeouts, **zero refused
+cells** — first run ever), and 42/48 matrix cells are valid with every
+invalid cell explained (§2).
 
-| Area | Run 2 | Run 3 (median-of-3) | Verdict |
+Median-of-3, capped, p0, vs run 3 (also median-of-3):
+
+| Scenario | Run 3 | **Run 4** | Δ | Note |
+|---|---|---|---|---|
+| oauth2_client_credentials | 1823 | **2727** (±0.4%) | **+50%** | 7.7× KC, 6.4× Zitadel |
+| token_introspection | 2230 | **4387** (±0.6%) | **+97%** | 2.4× KC, 4.7× Zitadel |
+| authz_check_rest | 737 | **753** (±1.0%) | +2% | DB-pegged, as before |
+| authz_check_grpc | 603 | **887** (±0.3%) | **+47%** | gRPC now BEATS REST +17.8% — G8 inverted (§3.2) |
+| userinfo (REST) | 5008 | 4547 (±0.3%) | −9% | see §2.5 (mem-cap change, run variance) |
+| userinfo_grpc | 3294 | **12665** (±0.4%) | **+284%** | tower-layer write removed from EVERY gRPC call |
+| jwks_fetch | 27784 | 26371 (±1.2%) | −5% | generator-limited, unchanged story |
+| oauth2_password_login | 69 | **69** (±1.8%) | 0% | Argon2id-bound by design — the right result |
+| token_refresh (AXIAM) | fallback-op | **839 real** (±0.4%) | n/a | G4 fix holds at matrix scale, protocol-variant label |
+| authz_batch_rest | invalid | 199 ops/s | — | ⚠ ran `concurrent`, NOT the shipped default (§1) |
+
+Everything that improved is exactly the set of endpoints the H2 fix
+targeted; everything else is flat within noise. The fix costs nothing
+anywhere. **`rate-limit-fix-verification.md` can be closed as CONFIRMED at
+matrix scale.**
+
+Three new discoveries this run, in descending order of importance:
+
+1. **The gRPC production rate limiter over-throttles ×60 — a real product
+   bug found by `sens-rl-prod`** (§1.2). Root-caused to a units mismatch in
+   code, not just observed.
+2. **The bench compose still pins `AXIAM__AUTHZ__BATCH_STRATEGY=concurrent`**,
+   so every run-4 batch cell measured the non-default strategy; the shipped
+   `coalesced` default was never exercised this run (§1.1).
+3. **Decision cache post-fix asymmetry**: with the clamp gone, cache-ON now
+   lifts gRPC checks **13.1×** (887 → 11 598/s) but REST checks only +5%
+   (753 → 791) — the REST authz path has its own non-cache serialization,
+   almost certainly per-request session validation (§3.3).
+
+## 1. ⚠ Run-4 discoveries
+
+### 1.1 Batch cells measured `concurrent`, not the shipped `coalesced` default
+
+`benchmarks/targets/axiam/docker-compose.yml:90` still reads:
+
+```yaml
+AXIAM__AUTHZ__BATCH_STRATEGY: "${AXIAM__AUTHZ__BATCH_STRATEGY:-concurrent}"
+```
+
+That `:-concurrent` fallback predates the H3 decision that made `coalesced`
+the product default, and the runbook
+(`claude_dev/run-4-benchmark-instructions.md` §1) explicitly predicted batch
+"should be ~5× singles, not ~1.4×". It came out at ~1.3× (batch REST 199
+ops/s = 995 checks/s vs 753 singles) — because the harness silently
+overrode the product default back to `concurrent`. Confirmation: the
+`sens-batch-concurrent` pass is **numerically identical to the matrix**
+(198.7 vs 199 REST, 214 vs 175 gRPC — the intended A/B had no B).
+
+Consequences:
+
+- **No run-4 cell measures the shipped batch default.** The G3 settled
+  numbers (`coalesced`: 744 REST ops/s = 3 721 checks/s = 4.98× singles;
+  866–872 gRPC ops/s) remain the only valid coalesced measurements and stay
+  the published verdict for the default.
+- The run-4 matrix batch cells are still *valid measurements of
+  `concurrent`* (0% err, 3/3 runs, DB pegged at 2.0) — publish them only as
+  the labeled non-default strategy.
+- **Fixed in this branch**: the compose fallback is now `coalesced` so run 5
+  measures the real default (and the sensitivity pass becomes a true A/B).
+
+### 1.2 gRPC prod rate limiter admits 1/60th of its configured limit — units-mismatch bug (root-caused)
+
+`sens-rl-prod` (shipped `internet` posture, single-IP 50-VU generator) shows
+the REST limits enforcing **exactly** as configured — and the gRPC limit
+enforcing at 1/60th of configured:
+
+| Scenario | Configured limit | Admitted (bench_ok over the whole session) | Verdict |
 |---|---|---|---|
-| client_credentials | 1788 | **1823** (±0.1%) | ✅ stable; 5.2× KC, 4.3× Zitadel |
-| introspection | 2229 | **2230** (±0.3%) | ✅ stable; KC closed to 1.17× (1908) |
-| jwks | 27059 | **27784** | ✅ stable; generator-limited |
-| userinfo | 5457 | **5008** | ✅ valid 3-way, AXIAM leads 1.3×/5.3× |
-| login (B1) | 67.5, p95 907 | **69, p95 774** | ✅ best-in-field; KC p0 now *valid* (52/s, see §2.4) |
-| token_refresh AXIAM | fallback | **still fallback-op (100%)** | ❌ A8 did NOT take effect for AXIAM (§2.1) |
-| token_refresh KC | fallback | **REAL rotation: 379/s, 0 fallback** | ✅ A8 works for KC |
-| Zitadel gRPC (D11) | 100% errors | **valid, 0% err — 183/s** | ✅ fixed; magnitude prediction was wrong (§2.5) |
-| B2 TLS on CC | −49% | **−50.5%** (1823→903) | ❌ open; h1 conviction cell INVALID (§1) |
-| authz batch | 46/23, "serialized DB" | **matrix cells INVALID — order artifact** (§1) | ⚠ verdict changes completely |
-| authz single REST/gRPC | 745 / 722 | **737 / 603** | ✅ reproduced on pinned image (gRPC −16% vs REST, §3.6) |
-| D3 native mTLS | not run | **parity with p2 across the board, no nginx** | ✅ D3 acceptance PASSED (§3.4) |
-| D7 cache ON | not run | **check REST 2322 (+3.1×), gRPC 1822 (+3.0×)** | ✅ big, ship-decision pending (§3.2) |
-| F2/F3 pool | not run | **pool 4: CC +7%, rest neutral; soak PASS** | ✅ CQ-B48 closed; default stays 1 (§3.3) |
-| A9 provenance | digests unknown | **real digests everywhere, build_ref stamped** | ✅ closed |
-| C1 median-of-3 | not used | **used; spreads ±0.1–2.8%** | ✅ machinery works, noise is small |
+| authz_check_rest | 300/min/IP | 1200 ≈ 300/min | ✅ as configured |
+| oauth2_client_credentials | 20/min/IP | 75 | ✅ as configured (incl. ramp) |
+| token_introspection | 10/min/IP | 27 | ✅ |
+| oauth2_password_login | 10/min/IP | 39 | ✅ |
+| authz_check_grpc | **100/s** (`GRPC_AUTHZ_PER_SEC`) | **400 ≈ 100/min** | ❌ ×60 too strict |
+| authz_batch_grpc | 100/s | 300 ≈ 100/min | ❌ |
+| userinfo_grpc | 100/s (server-wide layer) | 400 ≈ 100/min | ❌ (and see below) |
 
-Note the runbook said alpha17; the run actually used the released
-**1.0.0-alpha19** image (digest `4590…`, build_ref `678f601`) — fine, and now
-provable thanks to A9.
+Root cause, found in code while writing this document
+(`crates/axiam-api-grpc/src/middleware/rate_limit.rs`): the server wires
+**two** cooperating layers —
 
-## 1. ⚠ THE run-3 discovery: a post-seed serialized-DB transient invalidates every "first cell after seed"
+1. `build_grpc_governor_layer(authz_per_sec)` — the in-memory governor,
+   correctly quota'd at `Quota::per_second(authz_per_sec)` (this one was
+   already fixed once, see the module's own comments);
+2. `GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, …)`
+   — the cross-replica write-behind pre-check, which enforces its `limit`
+   over `WINDOW_SECS = 60` (the REST per-**minute** window) but is handed
+   the per-**second** number verbatim.
 
-**This is the most important finding of the run and rewrites two long-standing
-conclusions (D1/D10 batch slowness, and the B2 h1 cell).**
+So the shared pre-check clamps to `100 per 60 s` before the correctly
+configured governor ever sees the request. The observed ~100 admitted per
+60-s window across all three gRPC scenarios matches exactly. Fix is a
+one-liner conceptually (`limit × 60` at the call site, or a per-second
+window for this layer) plus a regression test asserting admitted ≈
+configured under sustained overload. **Task I1 — this blocks advertising
+any gRPC prod posture.** Note also the pre-existing design smell it
+re-confirms: the layer is server-wide, so `userinfo_grpc` (not an authz
+call) is throttled by the *authz* limit even at correct units (I2).
 
-> **UPDATE (H2, 2026-07-28): this was never post-seed, and "transient" is
-> wrong too.** `claude_dev/postseed-transient-investigation.md` traced the
-> effect to a permanent, product-relevant design property: six endpoints
-> (`POST /api/v1/authz/check`, `POST /oauth2/token`, `POST /oauth2/introspect`,
-> `POST /oauth2/revoke`, `POST /api/v1/auth/login`, and — as a bug —
-> `GET /api/v1/users`) are wrapped with `RateLimitShared`, which performs one
-> synchronous SurrealDB write (the shared rate-limit bucket) before the
-> handler runs. That single round trip — not seeding, not compaction, not
-> data volume — is the "~22 ms serialized unit": it survives idle time,
-> server restarts, datastore restarts, `POOL_SIZE` changes, and even swapping
-> the storage backend to pure in-memory. Structurally identical endpoints
-> without the wrap are unaffected. §1.1–§1.4 below are kept as the *run-3*
-> observation (accurate to what run 3 saw and how the harness was built in
-> response — the settle gate + rotation in §2 of methodology.md are still
-> exactly the right countermeasure), but read "post-seed window" throughout
-> as "the window this particular host's write-cost happened to clear in
-> during run 3", not a seeding effect. On the H2 investigation host the
-> effect never clears at all (16–21 ops/s at any concurrency, indefinitely) —
-> see that document §6 for the reconciliation with run 3's recovery cliff,
-> which remains only partially explained. The G-box's "recovers after ~6 min"
-> and this host's "never recovers" are two datastores paying a different
-> price for the same synchronous write, not two different bugs.
->
-> **UPDATE (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`): both asks
-> from `postseed-transient-investigation.md` §7.1 are now FIXED, not just
-> root-caused.** `GET /api/v1/users`'s registration-bucket bug is fixed
-> (method-guarded resource split). The synchronous per-request UPSERT is
-> replaced by a write-behind design
-> (`axiam_db::rate_limit_counter::SharedRateLimitCounter`, commits `5212912`,
-> `0fbbd5e`, `1f3da2f`, `7167c18`): the request path decides synchronously
-> in-memory and a background flusher coalesces one datastore write per
-> bucket per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000 ms) instead of
-> one per request. What this buys and what it costs is written up in full in
-> `claude_dev/rate-limit-posture-decision.md` §8 (chosen design, alternatives
-> considered, and why) and quoted precisely in the
-> `axiam_db::rate_limit_counter` module docs: cross-replica enforcement
-> becomes eventual, bounded by `(replicas − 1) × arrival_rate_per_replica ×
-> sync_interval` and zero on a single replica, instead of the old design's
-> zero-overshoot-at-any-replica-count bound. **This has NOT yet been
-> re-measured on the H2 investigation host or any other host** — no throughput
-> number anywhere in this document has changed. The re-measurement is tracked
-> as its own artifact, `claude_dev/rate-limit-fix-verification.md`, produced
-> by a separate concurrent task; do not fold numbers from that file into this
-> one without also updating the run/commit provenance this document is keyed
-> on.
+### 1.3 Prod-posture refresh errors (minor)
 
-### 1.1 The signature
+`token_refresh` under prod limits: 111 045 ok / 2 833 failed (2.4%) at
+694/s vs 839 neutralized. Refresh itself is not in the limited set; the
+failures are consistent with the harness's periodic re-login hitting the
+10/min login bucket mid-run and the affected VUs erroring until re-seeded.
+Harness-side follow-up (I13): make the refresh scenario's re-login budget
+fit inside the login limit, or label the cell.
 
-A window of roughly **5–7 minutes after `bench-up` + `bench-seed`** in which
-the AXIAM stack serves requests with:
+## 2. Data-validity notes
 
-- SurrealDB pinned at almost exactly **~1.0–1.3 cores** (never its 2.0 cap),
-- the AXIAM server nearly idle (0.05–0.11 cores),
-- throughput clamped to **~45 req/s** with p50 ≈ `50 VUs × ~22 ms` ≈ 1.05–1.1 s
-  — the classic closed-loop queue on a ~22 ms *serialized* unit of DB work.
+### 2.1 Settle gate & refusals — clean across the board
 
-### 1.2 The evidence (all from this archive)
+Every session's gate cleared on the first probe (15–16 s wait, threshold
+400 ops/s); `settle_timeout` false everywhere; zero refused cells. The H1/H10
+machinery finally had nothing to do — consistent with the H2 fix being real.
 
-1. **Scenario-independence.** In `sens-batch-coalesced` the cells ran in the
-   order check_rest → batch_rest → check_grpc → batch_grpc. The first two
-   cells clamp at **45.4 / 45.2 req/s** — including plain
-   `authz_check_rest`, which the matrix measures at **737 req/s**. The last
-   two cells are healthy (676.6 and — see below — **852.7**).
-2. **Mid-cell recovery caught live.** In `run-1/axiam/p0`, cell 3
-   (`authz_check_grpc`, ~7.4 min after seed) shows SurrealDB at 1.51 cores in
-   the first quarter of the measure window and **2.01 in the last quarter** —
-   the transient *ended during the cell*.
-3. **The B2 h1 cell reproduces it on a different scenario.** The
-   nginx-h1 `oauth2_client_credentials` cell (run first after its own seed)
-   clamps at **44.7 req/s, p50 1105 ms** with nginx at 0.01 cores, server at
-   0.05, SurrealDB at 1.03 — identical signature, nothing to do with TLS.
-4. **The matrix ran scenarios alphabetically**, so `authz_batch_grpc` and
-   `authz_batch_rest` were *always* cells 1–2 after seed — in run 1, run 2
-   (single-run) and all three run-3 repeats. Their suspicious stability
-   (22/41 req/s, ±0.5–0.9%) is the stability of the artifact, not of the
-   batch path.
+### 2.2 Invalid cells — 6/48, all explained, none AXIAM's
 
-### 1.3 What it invalidates
+- KC login p0 **and** p2: only 1/3 valid runs each (single valid runs: 44/s
+  p0, 53/s p2). Still memory-instability at the raised 2048 MiB cap — the H7
+  diagnosis stands: KC needs ~3.5–4 GiB for sustained hashing load (§2.3).
+- Zitadel login p0+p2 (0/3): bcrypt at default cost, p50 ≈ 22 s — known,
+  expected, kept-with-label.
+- Zitadel refresh p0+p2 (0/3): no `offline_access` flow in the harness —
+  known `fallback-op`, excluded from head-to-heads.
 
-- **All matrix batch cells, in every run so far.** The two-run-old
-  "batch is serialized in the DB" narrative (D1 → D10) was measuring the
-  transient. The only *clean* batch cell ever collected is
-  `sens-batch-coalesced`'s cell 4: **authz_batch_grpc (coalesced) =
-  852.7 batches/s = ~4 264 checks/s, p50 49 ms, p95 75 ms** — batch is
-  **6.3× more efficient per check than single checks** once the DB is
-  healthy. There is **no clean cell at all** for: batch REST (either
-  strategy), batch gRPC with the `concurrent` default. D10's A/B is
-  therefore still unfinished — but the prior is now inverted: nothing is
-  wrong with batch; `coalesced` looks excellent.
-- **The B2 h1-isolation cell.** It ran first-after-seed and measured the
-  transient, not HTTP/1.1-over-TLS. ~~**B2 remains open**~~; the native p2 CC
-  halving (1823→903, −50.5%) is confirmed real by the clean matrix cells.
-  **UPDATE (H6, 2026-07-29): B2 is closed as framed — the −50.5% is real but
-  is not a transport cost.** HTTP/2 is acquitted by direct measurement (the
-  "all clients collapse onto one h2 connection" premise never held: 10/50/100
-  concurrent clients open 10/50/100 connections over h2, and both actix
-  workers stay balanced), and h1-vs-h2 over an otherwise identical TLS edge is
-  a wash. TLS 1.3 itself is priced at −13%/−2% on jwks and −8%/−13% on
-  userinfo depending on load. That leaves the CC penalty endpoint-specific,
-  not transport-specific. Full evidence and the one remaining follow-up in
-  `claude_dev/b2-tls-h2-investigation.md`. Note also that the G8 h1 cell's
-  1 059 failed ops had a mundane cause found in H6: **none** of the nginx edge
-  confs declared an `upstream ... keepalive`, so the edge opened and closed a
-  fresh backend TCP connection per proxied request.
-- Probably the low `authz_check_grpc` in `sens-pool-4*` (537 vs 603 —
-  it was cell 3, the recovery window).
+AXIAM: **24/24 valid cells** including, for the first time, refresh
+(protocol-variant-labeled) and both batch cells (labeled `concurrent`, §1.1).
 
-### 1.4 What it might be (to investigate, not assume)
+### 2.3 The 1024→2048 MiB server-cap raise — why, and what it did
 
-Prime suspects, in order: SurrealDB/SurrealKV **post-ingest background work**
-(compaction/index build after the seed's writes) holding a lock that
-serializes foreground queries; the audit/AMQP ingestion backlog from seeding
-draining through serialized DB writes (RabbitMQ shows 0.8–1.0-core spikes in
-some affected cells); something in the server's DB session warm-up. Two facts
-to hold onto: the unit cost is ~22 ms and constant; and recovery is
-spontaneous after ~5–7 min. **If this is SurrealDB compaction, production
-cold-starts and bulk-import windows will exhibit the same behavior — this is
-potentially a product issue, not just a bench artifact.** Top-priority task
-(G1) in the follow-up plan, together with harness countermeasures (settle
-gate + cell-order rotation, G2).
+Run-3's KC login instability was diagnosed (H7) as OOM-driven. For run 4 the
+per-server-container memory cap was raised 1024 → 2048 MiB **for all three
+targets equally** (DBs stay at 1024). Measured effect:
 
-## 2. Harness bugs & data-validity issues
+- Keycloak's container peaked at **1070 MiB** during the run — i.e. above
+  the old 1024 cap; the raise was necessary for KC to survive at all.
+  KC p2 login went from 0/3 to 1/3 valid; p0 stayed 1/3. **2048 is still
+  not enough for sustained-login KC** — run 5 should use 4096 for login
+  cells only (per H7's measured 3.28 GiB peak), labeled.
+- AXIAM's server peaked at **172 MiB** (8.4% of its cap) across the entire
+  run — the jemalloc fix (H4) is confirmed at matrix scale; the old ~490 MiB
+  post-login retention is gone (login cell avg 131 MiB, later cells ~100–110).
+- Zitadel peaked at 216 MiB.
 
-### 2.1 ❌ A8 regression/failure — AXIAM `token_refresh` is STILL fallback-op
+Comparability note: run-4 vs run-3 mem columns are not cap-identical;
+throughput comparisons are unaffected (no target was memory-starved in
+valid run-3 cells except KC login, which was invalid there anyway).
 
-`bench_fallback` fired on **100% of iterations** in every AXIAM refresh cell
-(e.g. run-1 p0: 9 774/9 774; 2 HTTP reqs per iteration — the CC-fallback
-signature), while **Keycloak's cells show zero fallback and real rotation**
-(379/367 req/s p0/p2, one request per iteration). So the A8 code path works
-(KC proves it) but the AXIAM login-first mint is falling back — the
-`axiam_refresh` cookie extraction presumably fails against alpha19 (or login
-succeeded but the refresh grant rejected the cookie-sourced token). The AXIAM
-refresh columns (62/61 req/s) measure the fallback op and are correctly
-excluded from head-to-heads. **Follow-up task G4**; also note the AXIAM
-refresh cells burn the highest server memory of the session (566–606 MiB —
-double-issuance + retention, see §3.5).
+### 2.4 Provenance gap: `build_ref 6875e4b` is not on `main`
 
-### 2.2 ⚠ Sensitivity-pass knobs are not recorded in meta.json
+Every AXIAM cell records `build_ref 6875e4be733e…`, which is **not an
+ancestor of current `origin/main`** (checked 2026-08-02). The run
+presumably used an image built from the merged fix branch before a
+rebase/squash. Nothing suggests the binary differs materially from main's
+content, but A9 provenance discipline says: run 5 must use an image whose
+build_ref is a real main commit (I14).
 
-`sens-pool-4`'s meta.json is indistinguishable from the baseline's — the
-`AXIAM__DB__POOL_SIZE=4` / `BATCH_STRATEGY` / `DECISION_CACHE` exports that
-defined the pass are nowhere in the metadata (only the results-dir name says
-what it was). A5/A9 follow-up (G2): dump the `AXIAM__*` env the compose
-actually received into each cell's meta.json so labeled passes are
-self-describing.
+### 2.5 userinfo REST −9% vs run 3
 
-### 2.3 Invalid cells, all explained
+4547 vs 5008 (both tight medians). Not investigated; plausibly the
+different mem-cap envelope, image differences, thermal variance (this run
+recorded temp_max 96–100 °C on hot cells), or SurrealDB version drift.
+Since the cell is DB-pegged in both runs, park unless run 5 confirms a
+trend (I15). Its gRPC sibling tripled, so nothing product-alarming.
 
-7/48 matrix cells invalid, every one for a known reason: 2× AXIAM batch_grpc
-(p95 > 2 s — and now known-corrupted anyway, §1), 2× Zitadel login + 2×
-Zitadel refresh (bcrypt cost / no offline_access flow — expected,
-kept-with-labels), 1× KC p2 login (§2.4).
+### 2.6 SDK pass — 33/33 records, but the overhead column is empty
 
-### 2.4 ⚠ Keycloak login anomaly: p0 now valid and 2.3× faster than run 2, p2 unchanged-slow
+All 11 SDKs (rust, python, typescript, go, java, csharp, php, c, cpp,
+kotlin, swift) produced ok records at all three profiles — first time ever,
+including first-ever c/cpp/kotlin/swift data. But:
 
-KC p0 login: **52 req/s, p50 919 ms, p95 1070** (2/3 valid runs, ±7.8% — the
-widest spread in the matrix) vs run-2's 22.3/s, p50 2139. But KC **p2** login
-stayed at 23 req/s, p95 2249 (0/3 valid). Same image digest for both
-profiles. No explanation yet — possibly KC hashing-iteration warm-up
-interacting with run order, possibly a real TLS interaction. Don't publish a
-KC-login-got-faster claim; publish p0 as measured (valid) and p2 as
-gate-invalid, and note the asymmetry. Worth one diagnostic run if time
-permits; not AXIAM work.
+- **No wire-baseline was captured** (`wire p95 = —` everywhere), so the E1.3
+  headline metric — p95 overhead vs matched-concurrency wire — could not be
+  computed. The SDK table is real but only intra-SDK comparable (I8).
+- **csharp `refresh` is a no-op measurement**: p50 1.2 µs, "752 361 rps" —
+  the .NET auth helper returns the still-valid cached token without a
+  network call; the bench never forces expiry. Data quirk, not an SDK
+  defect per se — but the harness must force a real refresh (I9).
+- **c and php run at concurrency 1** (single-threaded harnesses; all others
+  16) — their lower latencies AND lower throughputs are load-shape, not SDK
+  quality. Label or fix (I10).
+- **cpp has a bimodal tail**: check p50 3.3 ms / p95 283–336 ms at every
+  profile. Signature of a connection being re-established on a subset of
+  iterations (curl handle churn / no keep-alive on some path). Worth an SDK
+  fix (I11).
+- **python check_access p50 ~30 ms** vs 10–11 ms for go/java/rust/etc. at
+  the same concurrency — asyncio/GIL overhead, worth a look (I12).
+- Client RSS/CPU columns recorded 0.0 — sampler not wired (I8).
 
-#### 2.4.1 H7 diagnostic run (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`) — fairness hygiene only, no KC fixes
+Otherwise the cross-language picture is remarkably consistent: login p50
+228–256 ms across all concurrency-16 SDKs (server Argon2 dominates),
+refresh p50 17.3±0.2 ms across ten SDKs — the server, not the SDKs, sets
+the floor. TLS and mTLS profiles cost the SDKs nothing measurable (matches
+the server-side p2/p3 parity).
 
-One `oauth2_password_login.js` pass each way, per the written procedure in
-`claude_dev/grpc-vs-rest-authz-analysis.md` §2 (single repro run each way,
-per that section's own acceptance bar). `BENCH_MEM` raised from the target's
-compose default (1024m) to **4096m** for this diagnostic only (env override,
-no compose file change) — see why below; `docker stats` sampled every 3 s
-throughout each measured window.
+## 3. What the sensitivity passes taught (run-4 edition)
 
-| profile | result | throughput | p50 | p95 | error | KC CPU (2-core cap) | KC mem peak |
-|---|---|---:|---:|---:|---:|---|---|
-| p0-plaintext | ✅ 100% valid | **27.93 req/s** | 1.63 s | 2.28 s | 0.00% | ~195–200% (saturated) | 3.28 GiB / 4 GiB (82%) |
-| p2-tls13 | ✅ 100% valid | **13.55 req/s** (−51%) | 3.45 s | 4.00 s | 0.00% | ~197–202% (saturated) | 1.48 GiB / 4 GiB (37%) |
+### 3.1 DB-uncapped: the DB is now *the* bottleneck almost everywhere
 
-Both cells are clean 0%-error, 100%-`checks` passes — **not gate-invalid** —
-answering procedure item 3 directly: on this box, with adequate memory
-headroom, p2 is not failing the validity gate at all; it is legitimately
-slower. That reframes the original matrix's "p0 52/s valid vs p2 23/s,
-0/3 valid": **at the target's own compose default of `BENCH_MEM=1024m`, this
-diagnostic reproduced an outright `OOMKilled: true` on `bench-keycloak` twice**
-(once at 1024m, once again at 2560m) before a 4096m cap let the container
-survive a full 50-VU sustained-login window — Keycloak 26 on Quarkus simply
-needs more headroom than the shared 1 GiB per-container default under
-sustained Argon2/PBKDF2-class hashing load. The original run's "0/3 valid"
-for p2 is therefore plausibly **OOM-driven instability**, not a TLS-specific
-gate failure — a harness sizing gap, not a Keycloak or TLS defect. (Not
-re-verified against the original run's exact `BENCH_MEM`; flagged as the
-most likely explanation, not confirmed root cause — the original run's
-containers are gone.)
+With the rate-limit write gone, uncapping the DB (2→4 cores) buys much more
+than it did in run 3:
 
-Procedure item 2 (isolate TLS overhead from KC's own request handling): KC's
-CPU is pegged at the **same** ~195–202% (i.e., the full 2-core cap) in
-**both** profiles, not "idle at p0, pegged at p2" — Argon2/PBKDF2 password
-hashing already saturates the CPU budget at p0 by itself. p2's TLS
-handshake/cipher cost is therefore not new, unused headroom being consumed;
-it is **additional CPU work landing on an already-fully-booked budget**,
-directly cannibalizing hashing throughput — consistent with the −51%
-measured, and a cleaner mechanism than "TLS is expensive in the abstract."
-Procedure item 1 (run-order/warm-up): only one order was run (p0 then p2,
-per the "one diagnostic run each way is sufficient" bar) — not re-tested in
-the opposite order; if the 30% budget affords it, a p2→p0 repeat would
-further separate order effects from the CPU-contention mechanism above, but
-was not required to close this item.
+| cell (p0) | capped → uncapped | Δ | limiter after |
+|---|---|---|---|
+| authz_check_rest | 753 → **1434** | **+90%** | still DB-side latency |
+| authz_check_grpc | 887 → **1678** | **+89%** | 〃 |
+| oauth2_client_credentials | 2727 → **4484** | **+64%** | 〃 |
+| token_introspection | 4387 → **6249** | **+42%** | 〃 |
+| userinfo | 4547 → **7215** | **+59%** | server approaching cap |
+| token_refresh | 839 → **1089** | +30% | 〃 |
+| authz_batch_rest/grpc (`concurrent`) | 199/175 → 379/400 | +91–129% | DB |
+| jwks / login / userinfo_grpc | ±1% | — | generator / Argon2 / server |
 
-**Verdict:** fairness hygiene closed. No AXIAM or Keycloak code was touched.
-Recommendation for any future publication of this pair: size the Keycloak
-container's memory to at least ~3.5–4 GiB before trusting *any* sustained-load
-login cell from it (current target compose default of `BENCH_MEM=1024m` is
-too small and risks silently reporting an OOM-churn number as a TLS
-penalty).
+Run-3's headline ratios were ~+37/+18% on checks; post-fix they are ~+90%.
+The product message: **AXIAM's ceiling now scales with DB CPU on every
+DB-bound path** — good for the "spend hardware on the DB first" guidance,
+and it sharpens the case for SurrealDB tuning / read-scaling work (I5).
 
-### 2.5 ✅ D11 Zitadel gRPC — fixed, but the run-2 magnitude prediction was wrong
+### 3.2 gRPC vs REST inverted (G8 closed in the right direction)
 
-Valid 0%-error cells at last: **183/187 req/s (p0/p2), p50 233 ms**,
-`cc-token-setup` labeled. Run 2 predicted ~1.7–2 k/s from the error-path
-resource profile — real `GetMyUser` calls are ~9× more expensive than the
-auth-rejection path was. Lesson recorded: never extrapolate a valid-cell
-magnitude from an error path. The protocol-efficiency pairing is now
-publishable: Zitadel gRPC is **−80% vs its own REST userinfo** (both
-cc-token-setup), while AXIAM's gRPC userinfo is −34% throughput but **−29%
-cpu·ms/req** vs REST (closed-loop artifact: gRPC p50 14 ms vs REST 4.8 ms,
-but gRPC is cheaper per request and its p95 is 2.3× better).
+Run 3: gRPC checks −18% vs REST (603 vs 737). Run 4: **+17.8%** (887 vs
+753) with p50 38 vs 74 ms. The old deficit was mostly the tower-wide
+rate-limit write (paid by every gRPC call, amortized differently on REST).
+userinfo gRPC vs REST: **+179%** (12 665 vs 4 547) at less CPU — gRPC is
+now unambiguously the low-latency recommendation for service-mesh authz.
+G8 closed.
 
-### 2.6 ✅ Closed this run
+### 3.3 Decision cache post-fix: gRPC 13.1×, REST +5% — new asymmetry
 
-- **A9 provenance:** every container in every cell has a real digest; AXIAM
-  cells carry `build_ref`; the pulled ghcr alpha19 image is what ran
-  (first run on a non-locally-built, digest-pinned binary).
-- **C1 median-of-3:** worked as designed; per-cell throughput spreads
-  ±0.1–2.8% (login/KC cells widest). Single-run deltas ≥ ~5% are now
-  resolvable signal on this laptop.
-- **A7/bench-pack:** shared archive verified secret-free again.
-- **F3 expiry soak:** `pooled_handles_survive_token_expiry_without_restart`
-  **ok** in 10.53 s against a live DB — CQ-B48 stays closed under the pool.
+`sens-cache-on` (K=1-ish bench keyspace, TTL 5 s, `concurrent` batch):
 
-## 3. Sensitivity passes — what each one taught
+- authz_check_grpc 887 → **11 598/s** (13.1×), DB freed.
+- authz_batch_grpc 175 → 8 956 ops/s; batch_rest 199 → 5 240 ops/s
+  (~26 000 checks/s) — cache mostly bypasses the batch-strategy question.
+- **authz_check_rest 753 → 791 (+5%)** despite p50 halving (73.6 → 31.5).
+- token_introspection read −21% in this pass (3 438 vs 4 387) — cache does
+  not touch introspection; treat as run-order/DB variance but re-check (I15).
 
-### 3.1 DB-uncapped (now all three targets — C2 complete)
+The REST asymmetry hypothesis: the REST authz path authenticates via
+**session cookie + CSRF**, which costs a per-request session lookup in
+SurrealDB that the decision cache does not (and should not) cover; the gRPC
+path authenticates via JWT (no DB). With the decision read cached, REST's
+remaining ~1.25 ms/req of serialized DB work is the session read. If
+confirmed, a session-validation cache (or JWT-auth parity for the REST
+check endpoint) is worth ~10× on REST checks for cache users (I4).
+**H5's stays-opt-in decision is unchanged** — the K=1 bench keyspace is
+still a ceiling, not an expectation — but the post-fix ceiling is now 13×,
+so the "measure your own hit rate" guidance got more valuable, and the
+K-sweep should be re-run post-fix before v1.0 (I4).
 
-| cell | capped → uncapped | limiter after uncapping |
-|---|---|---|
-| AXIAM authz_check_rest | 737 → **1013** (+37%) | nothing pegged; round-trip latency (DB 2.83/4) |
-| AXIAM authz_check_grpc | 603 → **712** (+18%) | same |
-| AXIAM userinfo | 5008 → **7457** (+49%) | **AXIAM server pegged (2.05/2)** — its ceiling found |
-| AXIAM CC / introspection / jwks | ±1% | latency-structured / generator |
-| Keycloak (all cells) | ±2% (e.g. CC 351→329) | **KC server pegged in every cell; DB CPU irrelevant to it** |
-| Zitadel jwks | 2071 → **3510** (+70%) | PG at 3.83/4 |
-| Zitadel userinfo | 943 → **1749** (+85%) | PG at 4.01/4 |
-| Zitadel introspection | 910 → **1032** (+13%) | Zitadel server ~pegged |
+### 3.4 Native mTLS (p3): parity again, now post-fix
 
-Keycloak's flat uncapped pass completes the picture: KC is purely
-server-bound, Zitadel purely Postgres-bound, AXIAM DB-bound on authz/userinfo
-and latency-bound on tokens. The public "req/s per *server* core" framing is
-fair to all three.
+CC 1177 (p2: 1180), check_rest 755 (760), check_grpc 894 (892),
+introspection 4313 (4316), userinfo 4421 (4439), userinfo_grpc 12 266
+(12 148), jwks 23 333 (23 716), login 67.3 (67), refresh 828 (834).
+Client-cert verification remains free on top of TLS 1.3 — the IoT headline
+survives the fix. (This pass also validated the two p3 harness fixes on
+main: gRPC-over-TLS dialing and CWD-independent cert paths.)
 
-### 3.2 Decision cache ON (D7) — the single biggest lever measured
+### 3.5 TLS on client_credentials — the plateau narrows the B2 question
 
-`AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`, TTL 5 s, single-tenant bench
-key space:
+Post-fix: p0 2727 → p2 1180 (**−57%**), while introspection loses 1.6%,
+refresh 0.6%, checks ±1%, jwks −10%, userinfo −2.4%. New and diagnostic:
+the p2 CC cell shows **bottleneck: none** with an eerily flat latency
+distribution — p50 42.6 / p95 43.9 / p99 44.8 ms — i.e. every request pays
+a near-constant ~43 ms, nothing saturates, and throughput is exactly
+50 VUs / 43 ms. That is a *serialization/latency plateau*, not a CPU cost —
+and the rate-limit write can no longer be the suspect (it's gone, and p0 CC
+runs 2 727/s through the same middleware). Something on the CC-under-TLS
+path serializes at ~40 ms. Suspects, in order: per-request client-secret
+Argon2/bcrypt verification interacting with TLS-session-bound connection
+behavior (are p2 connections being torn down and re-handshaked per token?
+`http 2.0` is recorded, but k6's connection reuse per VU under h2 with
+short responses deserves a direct look); a lock around the TLS session
+cache; the token-persist write path batching differently under h2 framing.
+The B2/H6 VU-sweep is finally runnable on this host since nothing else
+clamps: sweep VUs 1→100 at p0 and p2 (I3). A constant-per-request cost will
+scale throughput linearly with VUs; a serialization point will pin it.
 
-- authz_check_rest **737 → 2322 (+215%)**, p50 68→19.6 ms; SurrealDB drops
-  from pegged-2.0 to 1.30 cores.
-- authz_check_grpc **603 → 1822 (+202%)**, p50 62→21 ms; DB 0.54 cores.
-- Every non-authz cell within noise of the matrix (cache is scoped
-  correctly). Batch cells corrupted by §1 (ran first), no conclusion.
+### 3.6 Prod-limit posture (beyond the gRPC bug)
 
-Caveats for the ship-decision (G5): the bench's hit rate is optimistic
-(50 VUs hammering one subject/resource set); the security bound (stale-allow
-≤ TTL even if invalidation is missed) is already documented and
-revocation-tested. Recommendation to take to the plan: **default ON for
-v1.0-beta with TTL 5 s**, prominently documented, off-switch retained.
+REST enforcement is exact (§1.2 table). Unlimited paths are unaffected
+(userinfo 4 572/s, jwks 26 324/s — matrix-identical while the limited
+endpoints 429 at ~28 k attempts/s: the 429 path is cheap, no collateral
+damage). The maintainer's run-3 observation still stands and now has
+sharper numbers behind it: shipped machine-endpoint defaults are 3–5
+orders of magnitude below measured capacity (token 20/min vs ~163 000/min
+measured; authz 300/min vs ~45 000/min). The public doc's §6 now carries
+concrete revised guidance and a proposed-defaults table (see
+`claude_dev/improvement-after-run4-benchmark.md` I6/I7 for the code-side
+proposal).
 
-> **UPDATE (H5, 2026-07-29): decision recorded — stays opt-in (`false`).**
-> `claude_dev/decision-cache-decision.md` walked the clean K-sweep (K=1
-> 3.0–3.15×, K=10 000 +32%, K=100 now measured) against the seven pre-agreed
-> criteria after fixing the three defects the run-3/G5 data had surfaced
-> (unbounded `order` growth, O(shard) `invalidate_subject` under a global
-> mutex, and documenting the process-local revocation bound). The flip is
-> blocked on C1/C2/C4 — see that document for the full criteria table. The
-> recommendation written here (default ON) is superseded.
+## 4. Memory & CPU (run-4, now a first-class publishable story)
 
-### 3.3 DB pool A/B (F2/F3)
+Server-container medians across the p0 matrix (avg during measure window;
+peak = median across runs of per-run peak):
 
-`pool_size=4`: CC **1823 → 1955 (+7.2%)**; `+ max_in_flight=64` changes
-nothing further (the cap never binds at 50 VUs). Everything else within
-noise or transient-affected (§1.3). Introspection −2.5% (noise-level),
-userinfo/login/jwks flat. With the soak green, the honest F3 conclusion:
-**keep `pool_size=1` as the shipped default** (the byte-identical safe
-rollout), document `pool_size=4` as a token-issuance-heavy tuning
-(it buys ~7% there and nothing else at this concurrency), revisit after G1
-removes the transient and an open-loop harness exists (§5.3 of run-2 doc —
-still true).
+| target | server avg RSS | server peak RSS | server avg CPU | cap use (mem) |
+|---|---|---|---|---|
+| **AXIAM** | 97–132 MiB | **≤ 140 MiB** (worst cell: login) | 0.33–1.80 cores | ≤ 7% of 2 GiB |
+| Keycloak | 726–900 MiB | **up to 1 070 MiB** | pegged 2.00 in every valid cell | 52% |
+| Zitadel | 131–165 MiB | 216 MiB | 0.41–2.00 | 11% |
 
-> **UPDATE (H9, 2026-07-29): closed negative — default stays `pool_size=1`.**
-> The pre-agreed ≥5%-on-CC confirm cell turned out to be **unsatisfiable on
-> this host**: H2 found `POST /oauth2/token` permanently clamped to
-> 16–21 ops/s by the `RateLimitShared` write, so there is no settled CC cell
-> to confirm against here. Two independent lines of evidence say the G-box
-> G-run's "+7%" (1955 vs 1823) was noise rather than a `pool_size` effect
-> anyway: `AXIAM__DB__POOL_SIZE` 1→8 changed authz throughput by 0 ops/s at
-> both 1 and 20 VUs (H2 §5.2 — the shared-router mechanism means more pooled
-> handles buy no DB concurrency), and the G-run CC cells were never proven
-> to run outside the settle-gate-blind window in the first place. No code
-> change needed — `pool_size=1` was already the default.
-> `claude_dev/db-pool-design.md` §11 records the full verdict.
+Whole-stack (server+DB+broker) mem: AXIAM 415–590 MiB (SurrealDB 202–356 +
+RabbitMQ ~105–128), Keycloak 814–1129, Zitadel 293–443. Per-request CPU
+(whole stack, p0): CC 1.20 vs KC 5.84 vs Zit 8.20 cpu·ms/req; introspection
+0.78/1.27/4.00; jwks 0.06/0.44/1.42; userinfo 0.73/0.53/2.88 (KC wins that
+one whole-stack; server-only AXIAM 0.25 vs 0.53 — publish both).
+Throughput per stack-GiB (p0): jwks 60 723 vs 5 741 vs 7 330; CC 5 988 vs
+338 vs 1 218; userinfo 8 948 vs 3 999 vs 2 312.
 
-### 3.4 Native mTLS (D3) — acceptance PASSED
+Honesty notes for the public doc: AXIAM's whole-stack RAM sits between
+Zitadel's (smaller) and Keycloak's (larger) because SurrealDB+RabbitMQ ride
+along; the *server* comparison and the per-request/thr-per-GiB measures are
+where AXIAM's efficiency story is unambiguous, so publish per-container
+bars, not just stack totals. Also publish the thermal caveat: laptop hit
+96–100 °C on hot cells; mhz_avg varied 3.16–3.87 GHz across cells.
 
-p3-mtls ran with **no nginx container** (meta: 3 containers, `client_auth:
-x509`, scheme https): CC 903.6 (native p2: 903), check_rest 741 (747),
-introspection 2201 (2225), userinfo 4826 (4822), jwks 24146 (24309),
-login 68.1 (69), userinfo_grpc 3231 (3254). **Client-certificate
-verification costs nothing measurable on top of TLS 1.3** — an excellent
-IoT-story headline, and the proxy-header identity surface is gone from the
-p3 path. (The CC cell still carries the TLS-vs-p0 halving, same as p2 —
-B2 is orthogonal.)
+## 5. Work items (evidence-ranked, post-run-4)
 
-### 3.5 Memory (B1/D9 watch)
+Full specs in
+[`claude_dev/improvement-after-run4-benchmark.md`](../claude_dev/improvement-after-run4-benchmark.md).
 
-Server container RSS across each session: ~75–127 MiB before the login cell;
-**~490 MiB from the login burst onward** (login cell avg 489; every later
-cell ~447–490); refresh cells push to 566–606. Retention confirmed on
-alpha19: ~360 MiB of the burst never returns. The D9 A/B is now fully
-scripted — `benchmarks/run-memory-experiment.sh` builds both images (default
-vs `--features jemalloc`), runs baseline → burst → 10-min watch per variant,
-and emits `results/d9-summary.md` with the ≥30%-gap-closure verdict. Run it
-(G6); until then AXIAM's published mem column for post-login cells stays
-inflated and the doc says so.
+1. **I1 — Fix gRPC shared-limiter ×60 units bug** (§1.2). Product bug,
+   blocks gRPC prod posture. + regression test.
+2. **I2 — Scope gRPC limiter per-method** (server-wide authz limit throttles
+   userinfo/reflection too).
+3. **I3 — CC-under-TLS plateau VU sweep** (§3.5) — last open perf mystery.
+4. **I4 — REST-check session-read serialization** (§3.3) + post-fix cache
+   K-sweep re-run.
+5. **I5 — SurrealDB scaling work** (uncapped +42–90% says DB CPU is the
+   product's ceiling).
+6. **I6/I7 — Rate-limit default revision + sizing docs** (public §6;
+   proposed internet-profile machine-endpoint raises).
+7. **I8–I12 — SDK harness/SDK fixes**: wire baseline, csharp forced
+   refresh, c/php concurrency parity, cpp tail, python asyncio look.
+8. **I13 — refresh-under-prod re-login budget** (§1.3).
+9. **I14 — provenance: build from main** (§2.4).
+10. **I15 — watch items**: userinfo REST −9%, cache-pass introspection −21%.
+11. **Harness (done this branch)**: compose batch default → `coalesced`.
 
-> **UPDATE (H4/G6, 2026-07-28/29): fixed — jemalloc is the release default.**
-> The A/B ran: default malloc retained 376 MiB above baseline (peak 491);
-> jemalloc retained 86 MiB (peak 126) — **94% of the gap closed**, no
-> throughput or latency cost recorded. `crates/axiam-server` ships jemalloc
-> as the release-container default allocator as of H4 (a
-> `--no-default-features` escape hatch stays documented for musl/platform
-> edge cases). The "stays inflated" line above is stale — see
-> `claude_dev/memory-retention-experiment.md` §6 for the full numbers.
+## 6. Publishing guidance for the site (run-4 deliverables)
 
-### 3.6 gRPC-vs-REST authz gap (new, now that both are clean)
-
-Single check: gRPC 603 vs REST 737 (−18%, p0) with *lower* p50 (62 vs 68).
-Not the transient (cells 3–4). Not TLS (identical at p2). Small, real,
-unexplained — parked as a low-priority item (G8); suspect per-call
-UUID-parse/validation or tonic service overhead. The p99 tail from run 1
-(850 ms) remains gone (p99 112–217 ms).
-
-### 3.7 Prod rate-limit posture (C4) — ran; framing matters
-
-With shipped defaults (`token 20/min/IP`, `introspect 10/min/IP`,
-`authz_check 300/min/IP`, `login 10/min/IP`…), a single-IP 50-VU generator
-is — by design — throttled to ~zero on every limited endpoint (CC 0.9/s,
-introspection 0.4/s, ~100% 429s; unlimited paths unaffected: jwks 27.7 k/s,
-userinfo 5 994/s). report.py's posture-mixing guard worked (separate
-subtree, never merged into head-to-heads). Two outputs: (a) the public
-"AXIAM ships default abuse limits; competitors don't" evidence, now
-measured; (b) **the maintainer's observation stands — the defaults are far
-too strict for any M2M/NAT topology**, so the public doc now carries a
-"recommended settings by deployment" section (§6 of the public doc) and G7
-tracks revisiting the shipped defaults + docs.
-
-## 4. Product work items (evidence-ranked, post-run-3)
-
-Full task specs with models and acceptance criteria live in
-[`claude_dev/improvement-after-serious-benchmark.md`](../claude_dev/improvement-after-serious-benchmark.md).
-Ranked summary:
-
-1. **G1 — Root-cause the post-seed serialized-DB transient** (§1). Biggest
-   validity issue *and* a potential production cold-start defect. Everything
-   batch- and B2-related is downstream of it. **Root-caused: DONE (H2).
-   Fixed: DONE (`claude/g-benchmark-improvements-n5mjmj`, see the §1 UPDATE
-   above and `claude_dev/rate-limit-posture-decision.md` §8) — not yet
-   re-measured (`claude_dev/rate-limit-fix-verification.md`).**
-2. **G2 — Harness countermeasures + self-describing meta**: settle gate
-   before the first cell, cell-order rotation per run, record `AXIAM__*`
-   knobs in meta.json, re-run the four batch cells clean (both strategies)
-   and the B2 h1 cell mid-session.
-3. ~~**G3 — B2**: still −50.5% on CC at p2. Clean h1 cell first; then h2
-   stream/flow-control tuning on the actix listener or an accepted,
-   documented position.~~ **DONE (H6) — documented position published, and it
-   is not the position this line anticipated: the transport is exonerated
-   entirely, so there is no listener tuning to do.** What replaces it is one
-   narrow follow-up for the server-class re-run (E3): on a host where
-   `/oauth2/token` is **not** clamped, sweep VUs at p0 and p2 on CC. A cost
-   that scales with VU count is per-request; a throughput that stays pinned
-   regardless of VU count is a serialization point (and `RateLimitShared`'s
-   bucket write is the only one known on that path). See
-   `claude_dev/b2-tls-h2-investigation.md` §6.
-4. **G4 — A8 residual**: AXIAM refresh cookie extraction (harness) — last
-   invalid AXIAM-controlled cell.
-5. **G5 — D7 ship-decision**: default-ON proposal + combined cache+pool
-   cell + realistic-hit-rate caveat work.
-6. **G6 — D9**: run `run-memory-experiment.sh`, decide jemalloc.
-7. **G7 — Rate-limit defaults & tuning guide** (from §3.7 / maintainer note).
-8. **G8 — Small investigations**: gRPC −16% authz gap; KC p0/p2 login
-   asymmetry (diagnostic only); Zitadel offline_access refresh.
-9. **G9 — SDK benches (E1)**: still never run against a live target — the
-   harness exists (7 code-bearing + 4 stubs implemented); wire them into the
-   run-4 protocol so the SDK-overhead table finally exists.
-
-## 5. Security-hardening notes (updated)
-
-1. **B1 stands** (login p95 774 ms, RSS bounded, 0 errors at 50 VUs, OWASP
-   params). D9 retention is the remaining memory item (script ready).
-2. **mTLS native path measured at parity** — the p3 nginx/proxy-header
-   surface is retired for real (§3.4).
-3. **Rate limits**: shipped defaults are effective abuse-stoppers (measured:
-   they flatten a 50-VU single-IP flood) and unsuitable as-is for M2M
-   fleets — hence the public tuning guidance and G7. `key=client_id` mode
-   (D8) is the right default candidate for token endpoints; login stays
-   per-IP.
-4. **Decision cache**: if G5 flips it on by default, the public docs must
-   state the ≤TTL stale-allow bound next to the default, not in a footnote.
-5. **TLS 0-RTT stays off**; resumption verified again at p2/p3.
-
-## 6. Publishing guidance for the site (run-3 deliverables)
-
-- Publish medians + spreads; headline multiples (p0): CC **5.2×/4.3×**,
-  introspection **1.17×/2.45×**, jwks **7.4×/13.4×**, userinfo
-  **1.34×/5.3×**, login: only valid cell at 50 VUs (KC p0 now also valid at
-  52/s — say so; it strengthens rather than weakens the comparison).
-- Publish the mTLS-parity table (§3.4) — it's the IoT differentiator.
-- Publish cache-ON as a labeled sensitivity row with the TTL caveat, never
-  in the default head-to-head.
-- **Do NOT publish any batch number as a verdict** — publish the artifact
-  discovery + the one clean 852-batches/s cell as "measurement corrected,
-  full re-measurement in progress". This *retracts* the draft-1/2 "batch is
-  slow" caveat in the honest direction.
-  > **UPDATE (H3/G3, 2026-07-28): superseded — the re-measurement happened
-  > and the verdict shipped.** On settled cells (G3 run 2–3), `coalesced`
-  > batch REST measured **744 ops/s = 3 721 checks/s = 4.98× singles**;
-  > gRPC coalesced **866–872 ops/s ≈ 4 330 checks/s**, p95 74 ms. `coalesced`
-  > is now the shipped default (`crates/axiam-authz/src/config.rs`,
-  > `concurrent` stays selectable). Publish the G3 table as the batch
-  > verdict, not as "in progress" — see `claude_dev/authz-batch-investigation.md`
-  > for the closing data. On *this* investigation host (H2/H10) batch cells
-  > are still clamped by the `RateLimitShared` write and must be published as
-  > refused, same as every other clamped cell — that is a host limitation,
-  > not a reopening of the G3 decision.
-  > **UPDATE (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`): the
-  > `RateLimitShared` write named above is fixed** (write-behind counter, §1
-  > UPDATE). Any *new* H2-host pass run against this branch is no longer
-  > expected to hit that specific clamp on these six endpoints, but this
-  > document's own H2/H10 numbers above were captured pre-fix and are
-  > unchanged — do not retroactively read them as un-clamped. Whether a
-  > future pass on this host settles cleanly is an open question for
-  > `claude_dev/rate-limit-fix-verification.md`, not asserted here.
-- **Publish the shared rate-limit fix as a closed product item, not a
-  performance number.** `claude_dev/postseed-transient-investigation.md`
-  §7.1's two asks (the `GET /api/v1/users` bucket bug and the synchronous
-  shared-store write) are both implemented on
-  `claude/g-benchmark-improvements-n5mjmj` — see the §1 UPDATE above and
-  `claude_dev/rate-limit-posture-decision.md` §8 for the design rationale.
-  **Do NOT publish any post-fix throughput number yet** — none has been
-  measured; it lands in `claude_dev/rate-limit-fix-verification.md` first,
-  produced by a separate task, and only then flows into a future draft of
-  the public matrix.
-- Do NOT chart: AXIAM/Zitadel refresh (fallback), Zitadel/KC-p2 login
-  (gate), any first-cell-after-seed number (§1), the B2 h1 cell.
-- The new "recommended production settings" section (public §6) is the
-  maintainer-requested addition; keep values in sync with code defaults.
-
-## 7. Order of execution
-
-G1 → G2 (they unblock clean batch/B2 data) → re-measure the 5 corrupted
-cells → G3/G4/G5 in parallel → G6/G7 → run-4 full protocol (matrix +
-sensitivity + SDK benches, G9) → E4 public refresh v4. Details, models and
-acceptance criteria: `claude_dev/improvement-after-serious-benchmark.md`.
+- Publish the run-4 matrix as **the** headline numbers (first uncontaminated
+  run): CC 7.7×/6.4×, introspection 2.4×/4.7×, jwks 5.8×/12.6×, userinfo
+  1.2×/4.5× (+ AXIAM gRPC userinfo 12.7 k/s), login only-valid-at-both-
+  profiles, refresh under protocol-variant label.
+- Publish the **resource-usage story with graphs** (server RSS bars, peak
+  RSS, cpu·ms/req, thr/GiB) — it is now AXIAM's cleanest differentiator
+  (≤140 MiB server vs 1 070 MiB KC at higher throughput).
+- Publish batch ONLY as: matrix = labeled `concurrent` (non-default,
+  harness pin, now fixed); default's verdict remains G3's coalesced
+  4.98× table. Do not chart run-4 batch as the default.
+- Publish the gRPC prod-limiter bug openly (found by our own bench, fix
+  tracked) — same honesty pattern as the H2 write.
+- Do NOT chart: Zitadel login/refresh (gate/fallback), KC login (1/3 valid;
+  say why + the 4 GiB plan), cache-ON in head-to-heads (labeled pass only).
+- Refresh comparability, cc-token-setup, and protocol-confound (h1→h2)
+  labels: carry over verbatim from draft-4 practice.

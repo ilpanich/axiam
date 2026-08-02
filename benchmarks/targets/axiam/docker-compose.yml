@@ -83,11 +83,13 @@ services:
       AXIAM__AUTHZ__DECISION_CACHE_ENABLED: "${AXIAM__AUTHZ__DECISION_CACHE_ENABLED:-false}"
       AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS: "${AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS:-5}"
       AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES: "${AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES:-10000}"
-      # --- Authz batch strategy (D10) ---------------------------------------------
-      # Default `concurrent` (per-item parallel evaluation — the run-2 fix for the
-      # coalesced path's DB serialization). Set `coalesced` for the labeled A/B
-      # sensitivity pass; decisions are identical either way.
-      AXIAM__AUTHZ__BATCH_STRATEGY: "${AXIAM__AUTHZ__BATCH_STRATEGY:-concurrent}"
+      # --- Authz batch strategy (D10/H3) ------------------------------------------
+      # Default `coalesced` — MUST track the product default decided in H3/G3
+      # (crates/axiam-authz/src/config.rs). The old `concurrent` fallback here
+      # silently overrode the shipped default for the whole run-4 matrix (see
+      # PRIVATE_BENCH_ANALYSIS.md §1.1 / task I14). Set `concurrent` only for
+      # the labeled A/B sensitivity pass; decisions are identical either way.
+      AXIAM__AUTHZ__BATCH_STRATEGY: "${AXIAM__AUTHZ__BATCH_STRATEGY:-coalesced}"
       AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY: "${AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY:-16}"
       # --- SurrealDB connection pool (F2/F3) --------------------------------------
       # Defaults (1 handle, cap disabled) are byte-for-byte the pre-pool behavior.

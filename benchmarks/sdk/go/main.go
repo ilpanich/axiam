@@ -42,6 +42,12 @@ type config struct {
 	// but this bench never read it — every p2 run failed at the first
 	// HTTPS call against the profile's throwaway CA. Empty under p0.
 	caCertPath string
+	// p3-mtls client identity (CONTRACT.md §6.1) — the same cert/key pair k6
+	// hands to `tlsAuth` and seed.sh to `curl --cert`. Both empty on
+	// p0/p1/p2, where no client option is added and the SDK's default
+	// bearer-cookie behavior is untouched (§6.1 rule 5: mTLS is opt-in).
+	clientCertPath string
+	clientKeyPath  string
 }
 
 func env(key, def string) string {
@@ -79,6 +85,9 @@ func loadConfig() config {
 		action:     env("BENCH_ACTION", "read"),
 		resourceID: env("BENCH_RESOURCE_ID", "bench-resource"),
 		caCertPath: env("BENCH_CA_CERT", ""),
+
+		clientCertPath: env("BENCH_CLIENT_CERT", ""),
+		clientKeyPath:  env("BENCH_CLIENT_KEY", ""),
 	}
 }
 
@@ -179,6 +188,29 @@ func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
 			return nil, fmt.Errorf("BENCH_CA_CERT=%q could not be read: %w", cfg.caCertPath, err)
 		}
 		opts = append(opts, axiam.WithCustomCA(pem))
+	}
+	// p3-mtls: present the client identity (CONTRACT.md §6.1). Appending to
+	// the same `opts` slice both construction sites below already share means
+	// the identity cannot drift between the shared client and the fresh one
+	// `login` builds per iteration — a login client without it would fail the
+	// handshake while the others succeeded.
+	if (cfg.clientCertPath == "") != (cfg.clientKeyPath == "") {
+		// The SDK validates this too (§6.1 rule 1), but failing here names the
+		// env var the operator actually got wrong.
+		return nil, fmt.Errorf(
+			"BENCH_CLIENT_CERT=%q and BENCH_CLIENT_KEY=%q must be set together — mTLS needs both (CONTRACT.md §6.1 rule 1)",
+			cfg.clientCertPath, cfg.clientKeyPath)
+	}
+	if cfg.clientCertPath != "" {
+		certPEM, err := os.ReadFile(cfg.clientCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("BENCH_CLIENT_CERT=%q could not be read: %w", cfg.clientCertPath, err)
+		}
+		keyPEM, err := os.ReadFile(cfg.clientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("BENCH_CLIENT_KEY=%q could not be read: %w", cfg.clientKeyPath, err)
+		}
+		opts = append(opts, axiam.WithClientCertificate(certPEM, keyPEM))
 	}
 	client, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, opts...)
 	if err != nil {

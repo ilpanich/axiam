@@ -43,3 +43,18 @@ the four canonical CONTRACT.md §1 ops (`login`, `refresh`, `check_access`,
   a live seeded target, after the H8(2) server-side CSRF-header-echo fix
   (`crates/axiam-api-rest`) unblocked check_access/refresh in the first
   place.
+
+## p3-mtls (CONTRACT.md §6.1)
+
+Wired: `loadConfig` reads `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` (file paths)
+and `buildOps` appends `axiam.WithClientCertificate(certPEM, keyPEM)` to the
+same `opts` slice both the shared client and the per-iteration `login` client
+are built from, so the identity cannot drift between them.
+
+```
+cd benchmarks && just target=axiam profile=p3-mtls sdk=go sdk-bench
+just sdk-bench-test go     # proves the cert reaches the wire, no stack needed
+```
+
+Verified: phase A (half-configured pair -> `status:"error"` naming both vars)
+and phase B (stub mTLS server observes `CN=bench-client`) both pass.

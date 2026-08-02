@@ -741,7 +741,7 @@ export const DOC_PAGES: DocPage[] = [
       { type: "h", id: "sizing", text: "Suggested settings by deployment (benchmark-derived)" },
       {
         type: "p",
-        text: "The shipped defaults are tuned for one thing: blunting single-source abuse on a small internet-facing deployment. The benchmark's production-posture run showed exactly that — and also that those defaults are far too strict for machine-to-machine topologies, where many clients share one source IP behind a NAT or gateway. The recommendations below derive directly from the run-3 measurements (median-of-3, 2-CPU/1-GiB-per-container envelope) in `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §6.",
+        text: "The shipped defaults are tuned for one thing: blunting single-source abuse on a small internet-facing deployment. The benchmark's production-posture run showed exactly that — and also that those defaults are far too strict for machine-to-machine topologies, where many clients share one source IP behind a NAT or gateway. The recommendations below derive directly from the run-4 measurements (median-of-3, 2-CPU-per-container envelope) in `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §7.",
       },
       {
         type: "warn",
@@ -750,15 +750,19 @@ export const DOC_PAGES: DocPage[] = [
       { type: "h", id: "sizing-throughput", text: "What a given envelope sustains" },
       {
         type: "p",
-        text: "Measured per-path ceilings, useful for sizing both hardware and limits. Authorization checks and userinfo scale with database CPU; token issuance and introspection are latency-structured (more DB CPU doesn't move them); logins scale with server CPU at fixed Argon2id cost.",
+        text: "Measured per-path ceilings, useful for sizing both hardware and limits. Post rate-limit fix, database CPU is the main ceiling: authorization checks, introspection, token issuance and userinfo all gain 42–90% from a second pair of DB cores. Logins scale with server CPU at fixed Argon2id cost, and JWKS is limited by the load generator rather than by the server.",
       },
       {
         type: "table",
-        headers: ["Envelope (server / DB)", "Token issuance", "Introspection", "Authz checks (cache off / on)", "Userinfo", "Logins"],
+        headers: ["Envelope (server / DB)", "Token issuance", "Introspection", "Authz checks REST / gRPC", "Userinfo REST / gRPC", "Logins"],
         rows: [
-          ["2 cores / 2 cores", "~1,800/s", "~2,200/s", "~740 / ~2,300/s", "~5,000/s", "~69/s"],
-          ["2 cores / 4 cores", "~1,800/s", "~2,200/s", "~1,000/s / higher", "~7,500/s (server-bound)", "~69/s"],
+          ["2 cores / 2 cores", "~2,700/s", "~4,400/s", "~750 / ~890/s", "~4,500 / ~12,700/s", "~69/s"],
+          ["2 cores / 4 cores", "~4,500/s", "~6,200/s", "~1,430 / ~1,680/s", "~7,200/s (server-bound) / ~12,700/s", "~69/s"],
         ],
+      },
+      {
+        type: "p",
+        text: "The optional decision cache sits on top of these: at a ~100% hit rate it lifts gRPC checks to ~11,600/s, but REST checks gain only ~5% because their per-request session-cookie validation is a database read the cache does not cover. Size for the cache-off numbers and treat the cache as headroom.",
       },
       { type: "h", id: "sizing-knobs", text: "Recommended values per scenario" },
       {
@@ -783,7 +787,7 @@ export const DOC_PAGES: DocPage[] = [
             "AXIAM__RATE_LIMIT__TOKEN_PER_MIN",
             "20",
             "60–120",
-            "per-client peak RPS × 60 × 2 (a 2-core server sustains ~108k issuances/min total)",
+            "per-client peak RPS × 60 × 2 (a 2-core server sustains ~163k issuances/min total)",
             "budget per tenant SLA",
           ],
           [
@@ -811,7 +815,7 @@ export const DOC_PAGES: DocPage[] = [
             "AXIAM__AUTHZ__DECISION_CACHE_ENABLED",
             "false",
             "true",
-            "true — measured 3× on checks, DB load down 40–75%",
+            "true if your checks go over gRPC — measured 13× there at a favourable keyspace, ~+32% at a realistic one; REST checks gain only ~5%",
             "true",
           ],
           [
@@ -823,10 +827,10 @@ export const DOC_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTHZ__BATCH_STRATEGY",
-            "concurrent",
+            "coalesced",
             "default",
-            "default for now — a clean A/B is in progress; `coalesced` showed 852 batches/s on a settled stack",
-            "follow the next benchmark draft",
+            "default — `coalesced` measured 744 batch ops/s ≈ 3,721 checks/s, about 5× single checks; a full-matrix re-measurement is queued",
+            "default",
           ],
           [
             "AXIAM__DB__POOL_SIZE",
@@ -861,7 +865,7 @@ export const DOC_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database and enable the decision cache before anything else; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
+        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database first (those paths gained ~90% from a second pair of DB cores), then try the decision cache and measure its logged hit rate — it is transformative on gRPC checks and marginal on REST ones; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {

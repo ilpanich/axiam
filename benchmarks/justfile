@@ -578,12 +578,11 @@ sdk-bench-all:
     source profiles/{{profile}}.env
     export BENCH_PROFILE="{{profile}}"
     export BENCH_TARGET="{{target}}"
-    # p3-mtls needs a client cert on every request (CONTRACT.md §6.1). Wired
-    # in c/cpp/go/java/kotlin/python/rust/swift/typescript; csharp and php read
-    # BENCH_CA_CERT but not BENCH_CLIENT_CERT/KEY yet, so they fail at the
-    # handshake. Name them up front rather than let them look like an outage.
+    # p3-mtls presents a client certificate on every request (CONTRACT.md
+    # §6.1). Every language bench is wired for it; `just sdk-bench-test`
+    # verifies that without a live stack.
     if [ "{{profile}}" = "p3-mtls" ]; then
-      echo "[sdk-bench-all] NOTE: p3-mtls presents a client certificate (CONTRACT.md §6.1). The csharp and php benches do not read BENCH_CLIENT_CERT/KEY yet and will report 'server unreachable' — every other language is wired. Verify the wiring without a live stack: just sdk-bench-test" >&2
+      echo "[sdk-bench-all] p3-mtls: every bench presents profiles/certs/client.crt (CONTRACT.md §6.1). Verify the wiring without a live stack: just sdk-bench-test" >&2
     fi
     echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under ${BENCH_RESULTS_DIR:-results}/sdk/{{profile}}/)"
     bash sdk/run-all.sh

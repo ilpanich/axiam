@@ -42,26 +42,23 @@ BENCH="$(cd "$HERE/.." && pwd)"
 CERTS="${BENCH_CERTS_DIR:-$BENCH/profiles/certs}"
 
 # The languages whose benches read BENCH_CLIENT_CERT/BENCH_CLIENT_KEY. c/cpp/
-# swift implement it too but are not listed here: their toolchains are absent
-# on most dev machines and phase B would report SKIP for all three anyway —
-# add them here once cmake/swift are part of the expected setup.
-ALL_SDKS=(go java kotlin python rust typescript)
+# swift implement it too but are not listed here: their benches predate this
+# test and have their own build requirements (cmake, a Swift toolchain) — add
+# them once those are part of the expected setup. A language whose toolchain
+# is missing reports SKIP, never FAIL, so listing one is safe either way.
+ALL_SDKS=(csharp go java kotlin php python rust typescript)
 if [ "$#" -gt 0 ]; then SDKS=("$@"); else SDKS=("${ALL_SDKS[@]}"); fi
 
 # Languages blocked by a defect OUTSIDE this harness. Their phase-B failure is
 # reported in full but does not fail the run, so this test stays usable as a
 # gate for everything else. Set STRICT=1 to make them hard failures again —
-# which is how you check whether the upstream fix has landed.
+# which is how you check whether an upstream fix has landed.
 #
-#   typescript: axiam-typescript-sdk's Node ESM bundle builds its https.Agent
-#     through a lazily-`require()`d 'node:https' (a deliberate pattern so a
-#     BROWSER bundle of the same shared file never statically resolves a
-#     Node-only builtin). tsup's ESM output ships a `require` shim that throws
-#     'Dynamic require of "https" is not supported' under genuine Node ESM, so
-#     every call needing customCa or a client cert dies BEFORE the handshake.
-#     The bench wiring here is complete and correct — it is the SDK that
-#     cannot use it. See sdk/typescript/TODO.md.
-KNOWN_BLOCKED=(typescript)
+# Empty: `typescript` lived here until axiam-typescript-sdk fixed the two
+# defects that made customCa/clientCert unusable in its Node persona (the ESM
+# `require` shim, and axios-cookiejar-support's interceptor rejecting any
+# externally-supplied agent). Both are fixed; it passes under STRICT=1.
+KNOWN_BLOCKED=()
 STRICT="${STRICT:-0}"
 
 is_known_blocked() {

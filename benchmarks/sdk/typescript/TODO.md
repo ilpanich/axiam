@@ -40,7 +40,27 @@ install + `tsup`) if its `dist/` is missing, then `npm install`s it here as a
 cd benchmarks && just sdk=typescript sdk-bench
 ```
 
-## p3-mtls (CONTRACT.md §6.1) — bench wired, SDK still blocked
+## p3-mtls (CONTRACT.md §6.1) — wired and verified
+
+**Update: the SDK-side blocker below is FIXED** (axiam-typescript-sdk), and
+this bench passes `STRICT=1 just sdk-bench-test typescript` — phase A and
+phase B both green. Two separate defects had to go:
+
+1. The ESM `require` shim described below. `src/rest/session.ts` now resolves
+   `node:https` via `process.getBuiltinModule`, which loads a builtin
+   synchronously with no module system involved, so nothing is left for a
+   bundler to rewrite and the browser-safety property is preserved (the
+   browser-facing bundles still contain no static `node:` import).
+2. A second, deeper one the first fix exposed: the Node persona's
+   `axios-cookiejar-support` wrapper **throws** on any externally-supplied
+   `http(s).Agent` ("does not support for use with other http(s).Agent") and
+   otherwise replaces it — so `customCa` and `clientCert` were unusable under
+   `createNodeClient` regardless. The SDK now builds one `HttpsCookieAgent`
+   that is both jar-aware and TLS-configured.
+
+The historical detail below is kept for context.
+
+## p3-mtls — original blocker (historical)
 
 `readClientIdentity()` reads `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` (file
 paths) and passes them as `clientCert`/`clientKey` PEM strings to every

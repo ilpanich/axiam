@@ -94,10 +94,8 @@ throwaway client the `login` op builds per iteration. A bench that configures
 only its long-lived client passes three ops and fails `login` at the handshake,
 which reads like a server problem rather than a harness one.
 
-Wired in: c, cpp, go, java, kotlin, python, rust, swift, typescript.
-Not yet wired: **csharp, php** (their toolchains are absent on the reference
-host, so the wiring cannot be verified there — the `justfile`'s p3 recipe warns
-about them by name).
+Wired in **all eleven** languages: c, cpp, csharp, go, java, kotlin, php,
+python, rust, swift, typescript.
 
 `sdk/test-client-cert-wiring.sh` proves this end-to-end without a live AXIAM
 stack: it runs each bench against a stub HTTPS server that requires a client

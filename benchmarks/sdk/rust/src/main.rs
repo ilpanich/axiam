@@ -51,6 +51,12 @@ struct Cfg {
     /// first HTTPS call with a certificate-verification error against the
     /// profile's throwaway CA. `None` under p0/plaintext (unset).
     custom_ca_pem: Option<Vec<u8>>,
+    /// p3-mtls client identity as `(cert_pem, key_pem)` — CONTRACT.md §6.1.
+    /// Read from BENCH_CLIENT_CERT/BENCH_CLIENT_KEY (file PATHS, the same
+    /// pair k6 hands to `tlsAuth` and seed.sh to `curl --cert`). `None` on
+    /// p0/p1/p2, where no builder call is made and the SDK's default
+    /// bearer-cookie behavior is untouched (§6.1 rule 5: mTLS is opt-in).
+    client_identity_pem: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Cfg {
@@ -89,6 +95,30 @@ impl Cfg {
             })?)
         };
 
+        // p3-mtls client identity (CONTRACT.md §6.1). The pair is
+        // all-or-nothing: the SDK's builder rejects a half-configured
+        // identity too (§6.1 rule 1), but failing here names the env var the
+        // operator actually got wrong.
+        let cert_path = env("BENCH_CLIENT_CERT", "");
+        let key_path = env("BENCH_CLIENT_KEY", "");
+        if cert_path.is_empty() != key_path.is_empty() {
+            return Err(format!(
+                "BENCH_CLIENT_CERT={cert_path:?} and BENCH_CLIENT_KEY={key_path:?} must be \
+                 set together — mTLS needs both (CONTRACT.md §6.1 rule 1)"
+            ));
+        }
+        let client_identity_pem = if cert_path.is_empty() {
+            None
+        } else {
+            let cert = std::fs::read(&cert_path).map_err(|e| {
+                format!("BENCH_CLIENT_CERT={cert_path:?} could not be read: {e}")
+            })?;
+            let key = std::fs::read(&key_path).map_err(|e| {
+                format!("BENCH_CLIENT_KEY={key_path:?} could not be read: {e}")
+            })?;
+            Some((cert, key))
+        };
+
         Ok(Cfg {
             base_url,
             tenant_slug: env("BENCH_TENANT_SLUG", "default"),
@@ -103,6 +133,7 @@ impl Cfg {
             target: env("BENCH_TARGET", "axiam"),
             profile: env("BENCH_PROFILE", "p0-plaintext"),
             custom_ca_pem,
+            client_identity_pem,
         })
     }
 }
@@ -130,6 +161,14 @@ fn build_client(cfg: &Cfg) -> Result<AxiamClient, AxiamError> {
     // H8 fix: trust BENCH_CA_CERT (the p2 profile's throwaway CA) when set.
     if let Some(pem) = &cfg.custom_ca_pem {
         builder = builder.with_custom_ca(pem)?;
+    }
+    // p3-mtls: present the client identity (CONTRACT.md §6.1). Doing it here,
+    // in the single shared constructor, means the identity cannot drift
+    // between the long-lived client and the fresh one `Op::Login` builds per
+    // iteration — a login client without it would fail the handshake while
+    // the other three ops succeeded.
+    if let Some((cert_pem, key_pem)) = &cfg.client_identity_pem {
+        builder = builder.with_client_cert(cert_pem, key_pem)?;
     }
     builder.build()
 }

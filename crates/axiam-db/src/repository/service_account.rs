@@ -1,5 +1,6 @@
 //! SurrealDB implementation of [`ServiceAccountRepository`].
 
+use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::service_account::{
@@ -9,7 +10,6 @@ use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountRepository};
 use chrono::{DateTime, Utc};
 use rand::RngExt;
-use sha2::{Digest, Sha256};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -26,17 +26,26 @@ fn generate_client_id() -> String {
 }
 
 /// Generate a random client secret (64 hex chars = 32 bytes of entropy).
+///
+/// Every client secret in AXIAM originates here or in the equivalent function
+/// in [`super::oauth2_client`] — there is no operator-supplied-secret path.
+/// The stored hash is nevertheless **keyed** (see
+/// [`axiam_auth::client_secret`]) so the security of the at-rest
+/// representation no longer rests on that property alone (OBS-1).
 fn generate_client_secret() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 32] = rng.random();
     hex::encode(bytes)
 }
 
-/// Hash a client secret using SHA-256.
-pub fn hash_client_secret(secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hex::encode(hasher.finalize())
+/// Hash a client secret for storage, in the current (v2) scheme.
+///
+/// Resolves the process-wide keyed hasher, so this **fails closed** when no
+/// pepper is configured in a release build rather than degrading to an unkeyed
+/// digest (OBS-1). See [`axiam_auth::client_secret::install_from_config`] for
+/// the startup gate.
+fn hash_client_secret(secret: &str) -> AxiamResult<String> {
+    Ok(client_secret::global()?.hash(secret))
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -125,7 +134,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let client_id = generate_client_id();
         let raw_secret = generate_client_secret();
-        let secret_hash = hash_client_secret(&raw_secret);
+        let secret_hash = hash_client_secret(&raw_secret)?;
 
         let result = self
             .db
@@ -382,7 +391,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         let id_str = id.to_string();
 
         let raw_secret = generate_client_secret();
-        let secret_hash = hash_client_secret(&raw_secret);
+        let secret_hash = hash_client_secret(&raw_secret)?;
 
         let result = self
             .db

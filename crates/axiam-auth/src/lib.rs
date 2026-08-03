@@ -1,6 +1,7 @@
 //! AXIAM Auth — Password authentication, JWT issuance/validation,
 //! and MFA (TOTP).
 
+pub mod client_secret;
 pub mod config;
 pub mod crypto;
 pub mod crypto_gate;
@@ -17,6 +18,7 @@ pub mod totp;
 pub mod verification;
 pub mod webauthn;
 
+pub use client_secret::{ClientSecretHasher, ClientSecretVerdict};
 pub use config::AuthConfig;
 pub use error::AuthError;
 pub use hibp_breaker::HibpBreaker;

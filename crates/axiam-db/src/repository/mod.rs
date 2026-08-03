@@ -66,7 +66,7 @@ pub use resource::SurrealResourceRepository;
 pub use role::SurrealRoleRepository;
 pub use saml_replay::SurrealAssertionReplayRepository;
 pub use scope::SurrealScopeRepository;
-pub use service_account::{SurrealServiceAccountRepository, hash_client_secret};
+pub use service_account::SurrealServiceAccountRepository;
 pub use session::SurrealSessionRepository;
 pub use settings::SurrealSettingsRepository;
 pub use tenant::SurrealTenantRepository;

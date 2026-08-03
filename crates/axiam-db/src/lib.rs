@@ -47,8 +47,13 @@ pub use repository::{
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
-    hash_client_secret,
 };
+
+/// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because
+/// every stored `client_secret_hash` in this crate is produced by it, and
+/// because it replaces the former `axiam_db::hash_client_secret` free
+/// function — which could hash without a key and is therefore gone.
+pub use axiam_auth::client_secret::{self, ClientSecretHasher, ClientSecretVerdict};
 pub use schema::{run_migrations, schema_v1};
 pub use seeder::{
     SeedRolesResult, SeederStateRow, mint_bootstrap_setup_token_if_needed,

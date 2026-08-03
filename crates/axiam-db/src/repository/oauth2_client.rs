@@ -1,5 +1,6 @@
 //! SurrealDB implementation of [`OAuth2ClientRepository`].
 
+use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
@@ -97,7 +98,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let client_id = generate_client_id();
         let raw_secret = generate_client_secret();
-        let secret_hash = super::service_account::hash_client_secret(&raw_secret);
+        let secret_hash = client_secret::global()?.hash(&raw_secret);
 
         let result = self
             .db
@@ -346,5 +347,43 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(paginate(items, count_rows, &pagination))
+    }
+
+    /// Compare-and-swap upgrade of a legacy `client_secret_hash` (OBS-1).
+    ///
+    /// `WHERE ... AND client_secret_hash = $expected_hash` is the CAS: if a
+    /// secret rotation landed between the read that produced `expected_hash`
+    /// and this write, no row matches, nothing is written, and `false` is
+    /// returned — the rotated secret is never clobbered back to the old one.
+    async fn upgrade_client_secret_hash(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+    ) -> AxiamResult<bool> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_client SET \
+                 client_secret_hash = $new_hash \
+                 WHERE tenant_id = $tenant_id \
+                 AND client_id = $client_id \
+                 AND client_secret_hash = $expected_hash",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("expected_hash", expected_hash.to_string()))
+            .bind(("new_hash", new_hash.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
     }
 }

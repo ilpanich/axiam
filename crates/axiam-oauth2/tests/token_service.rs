@@ -5,6 +5,7 @@
 //! All repository dependencies are replaced with in-memory mocks whose
 //! behaviour is configured per-test, so no database is required.
 
+use axiam_auth::client_secret::{self, V2_PREFIX};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, generate_refresh_token, hash_refresh_token, issue_access_token};
 use axiam_core::error::{AxiamError, AxiamResult};
@@ -18,9 +19,9 @@ use axiam_core::repository::{
     AuthorizationCodeRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
     RefreshTokenRepository, TenantRepository, UserRepository,
 };
-use axiam_db::hash_client_secret;
 use axiam_oauth2::token::{IntrospectRequest, RevokeRequest, TokenRequest, TokenService};
 use chrono::Utc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 const SECRET: &str = "correct-client-secret";
@@ -88,8 +89,13 @@ enum ClientOutcome {
     Db,
 }
 
+/// One recorded call to `upgrade_client_secret_hash`:
+/// `(client_id, expected_hash, new_hash)`.
+type UpgradeCall = (String, String, String);
+type UpgradeLog = Arc<Mutex<Vec<UpgradeCall>>>;
+
 #[derive(Clone)]
-struct MockClientRepo(ClientOutcome);
+struct MockClientRepo(ClientOutcome, UpgradeLog);
 
 impl OAuth2ClientRepository for MockClientRepo {
     async fn create(&self, _i: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
@@ -118,6 +124,20 @@ impl OAuth2ClientRepository for MockClientRepo {
     }
     async fn list(&self, _t: Uuid, _p: Pagination) -> AxiamResult<PaginatedResult<OAuth2Client>> {
         unimplemented!()
+    }
+    async fn upgrade_client_secret_hash(
+        &self,
+        _t: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+    ) -> AxiamResult<bool> {
+        self.1.lock().unwrap().push((
+            client_id.to_string(),
+            expected_hash.to_string(),
+            new_hash.to_string(),
+        ));
+        Ok(true)
     }
 }
 
@@ -374,6 +394,20 @@ impl UserRepository for MockUserRepo {
 // Builders
 // ---------------------------------------------------------------------------
 
+/// Hash a secret in the current (v2, peppered HMAC-SHA256) scheme.
+fn hash_client_secret(secret: &str) -> String {
+    client_secret::global()
+        .expect("debug-build test binary resolves the dev-default pepper")
+        .hash(secret)
+}
+
+/// The exact pre-OBS-1 storage format: unsalted single-round SHA-256, hex.
+/// Used to plant a legacy row and prove it still authenticates.
+fn legacy_client_secret_hash(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(secret.as_bytes()))
+}
+
 fn make_client(grants: &[&str], scopes: &[&str]) -> OAuth2Client {
     OAuth2Client {
         id: Uuid::new_v4(),
@@ -430,15 +464,29 @@ fn build(
     tenant: TenantOutcome,
     refresh: MockRefreshRepo,
 ) -> Svc {
-    TokenService::new(
-        MockClientRepo(client),
+    build_with_upgrade_log(client, code, tenant, refresh).0
+}
+
+/// Same as [`build`], but also hands back the log of
+/// `upgrade_client_secret_hash` calls so a test can assert that a legacy row
+/// was (or was not) migrated.
+fn build_with_upgrade_log(
+    client: ClientOutcome,
+    code: MockCodeRepo,
+    tenant: TenantOutcome,
+    refresh: MockRefreshRepo,
+) -> (Svc, UpgradeLog) {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let svc = TokenService::new(
+        MockClientRepo(client, log.clone()),
         code,
         MockTenantRepo(tenant),
         refresh,
         MockUserRepo,
         test_config(),
         2_592_000,
-    )
+    );
+    (svc, log)
 }
 
 fn base_req(grant: &str) -> TokenRequest {
@@ -1675,4 +1723,133 @@ fn error_hash_refresh_and_client_secret_are_stable() {
     // Sanity: helper hashing used across the service is deterministic.
     assert_eq!(hash_refresh_token("abc"), hash_refresh_token("abc"));
     assert_eq!(hash_client_secret("abc"), hash_client_secret("abc"));
+    // ...and the client-secret hash carries the scheme marker (OBS-1).
+    assert!(hash_client_secret("abc").starts_with(V2_PREFIX));
+    assert_ne!(hash_client_secret("abc"), legacy_client_secret_hash("abc"));
+}
+
+// ---------------------------------------------------------------------------
+// OBS-1 — client-secret hash scheme migration
+// ---------------------------------------------------------------------------
+
+/// A row still stored in the pre-OBS-1 unsalted-SHA-256 scheme must keep
+/// authenticating — there is no backfill possible, the secret was never
+/// stored — and must be transparently rewritten in the keyed scheme.
+#[tokio::test]
+async fn legacy_sha256_client_secret_still_authenticates_and_is_upgraded() {
+    let mut client = make_client(&["client_credentials"], &["api:read"]);
+    client.client_secret_hash = legacy_client_secret_hash(SECRET);
+    let legacy_hash = client.client_secret_hash.clone();
+
+    let (svc, log) = build_with_upgrade_log(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let res = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"))
+        .await;
+    assert!(res.is_ok(), "legacy row must still authenticate: {res:?}");
+
+    let calls = log.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "exactly one upgrade write: {calls:?}");
+    let (client_id, expected, new_hash) = &calls[0];
+    assert_eq!(client_id, "client-1");
+    assert_eq!(
+        expected, &legacy_hash,
+        "the upgrade must compare-and-swap against the hash that was read"
+    );
+    assert!(
+        new_hash.starts_with(V2_PREFIX),
+        "the replacement must be in the current scheme: {new_hash}"
+    );
+    assert_eq!(new_hash, &hash_client_secret(SECRET));
+}
+
+/// A *failed* verification against a legacy row must never rehash and never
+/// write — otherwise a wrong secret could rewrite the stored hash.
+#[tokio::test]
+async fn failed_verification_against_a_legacy_row_writes_nothing() {
+    let mut client = make_client(&["client_credentials"], &["api:read"]);
+    client.client_secret_hash = legacy_client_secret_hash(SECRET);
+
+    let (svc, log) = build_with_upgrade_log(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let mut req = base_req("client_credentials");
+    req.client_secret = Some("wrong-secret".into());
+    let err = svc
+        .exchange(Uuid::new_v4(), req)
+        .await
+        .expect_err("a wrong secret must be rejected under the legacy scheme too");
+    assert_eq!(err.error_code(), "invalid_client");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a failed verification must never trigger a rehash write"
+    );
+}
+
+/// A row already in the current scheme authenticates with no migration write
+/// at all — the hot path stays read-only.
+#[tokio::test]
+async fn current_scheme_client_authenticates_without_any_write() {
+    let (svc, log) = build_with_upgrade_log(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api:read"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    assert!(
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+            .await
+            .is_ok()
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a v2 row must not be rewritten on every authentication"
+    );
+}
+
+/// A wrong secret against a current-scheme row is rejected, and nothing is
+/// written.
+#[tokio::test]
+async fn wrong_secret_under_the_current_scheme_is_rejected() {
+    let (svc, log) = build_with_upgrade_log(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api:read"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let mut req = base_req("client_credentials");
+    req.client_secret = Some("wrong-secret".into());
+    let err = svc.exchange(Uuid::new_v4(), req).await.unwrap_err();
+    assert_eq!(err.error_code(), "invalid_client");
+    assert!(log.lock().unwrap().is_empty());
+}
+
+/// The migration is wired into every grant that authenticates a client, not
+/// just client_credentials.
+#[tokio::test]
+async fn legacy_rows_are_upgraded_on_the_refresh_token_grant_too() {
+    let mut client = make_client(&["refresh_token"], &["api:read"]);
+    client.client_secret_hash = legacy_client_secret_hash(SECRET);
+
+    let (svc, log) = build_with_upgrade_log(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["api:read"])),
+    );
+
+    let res = svc.exchange(Uuid::new_v4(), refresh_req("tok")).await;
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(log.lock().unwrap().len(), 1);
 }

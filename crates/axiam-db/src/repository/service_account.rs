@@ -423,4 +423,44 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         Ok(raw_secret)
     }
+
+    /// Compare-and-swap upgrade of a stored `client_secret_hash` (§13.4
+    /// observation 4).
+    ///
+    /// Scoped by `tenant_id` as well as `client_id` — the tenant predicate is
+    /// not redundant defensive noise here, it is what stops a `client_id`
+    /// colliding across tenants from letting one tenant's successful
+    /// authentication rewrite another tenant's stored hash.
+    async fn upgrade_client_secret_hash(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+    ) -> AxiamResult<bool> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE service_account SET \
+                 client_secret_hash = $new_hash, \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id \
+                 AND client_id = $client_id \
+                 AND client_secret_hash = $expected_hash",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("expected_hash", expected_hash.to_string()))
+            .bind(("new_hash", new_hash.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
+    }
 }

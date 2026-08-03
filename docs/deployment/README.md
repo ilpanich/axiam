@@ -118,11 +118,38 @@ never in git):
 | `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting SAML/OIDC federation client secrets at rest (SECHRD-09). Generate with `openssl rand -hex 32`. |
 | `AXIAM__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
 | `AXIAM__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
-| `AXIAM__AUTH__PEPPER` | Password pepper (plain string) prepended before Argon2id hashing. Generate a long random string, e.g. `openssl rand -base64 32`. |
+| `AXIAM__AUTH__PEPPER` | Server pepper (plain string). Prepended before Argon2id password hashing, **and** keys client-secret hashing (OBS-1). **Mandatory in a release build** — the server refuses to start without it. Generate a long random string, e.g. `openssl rand -base64 32`. |
+| `AXIAM__AUTH__PEPPER_PREVIOUS` | Outgoing pepper, **verify-only**, set for the duration of a pepper rotation. Unset outside a rotation. See below. |
 
 Set every value to a placeholder such as `<set-in-secret-manager>` in any
 example or template you author — never commit real key material, and never
 reuse the same value across environments.
+
+### ⚠ Rotating `AXIAM__AUTH__PEPPER`
+
+**Read this before rotating.** The pepper is not only a password pepper: it
+**keys the hash of every client secret** — every OAuth2 client and every service
+account. Rotating it changes the key those hashes were computed under, so
+without the procedure below, **every client secret in the deployment stops
+verifying at once** and every one of them has to be re-issued.
+
+`AXIAM__AUTH__PEPPER_PREVIOUS` makes the rotation drainable:
+
+1. **Set** `AXIAM__AUTH__PEPPER` to the new value and `AXIAM__AUTH__PEPPER_PREVIOUS`
+   to the outgoing one. Roll the fleet. Both are now accepted for verification;
+   only the new one is ever written.
+2. **Wait.** Each client secret is silently rewritten under the new pepper the
+   first time its owner authenticates. Nothing has to be re-issued, and no
+   downtime window is needed.
+3. **Unset** `AXIAM__AUTH__PEPPER_PREVIOUS` once every client has authenticated
+   at least once. Any client that has not will need its secret rotated normally.
+
+Do **not** skip step 1 by rotating the value in place: there is no way to
+recover a hash written under a pepper you no longer hold — only the digest was
+ever stored, never the secret.
+
+Password hashes are unaffected by this procedure: an Argon2id hash records its
+own parameters and is verified against the presented password directly.
 
 The AMQP connection string is not itself a `secret.yml` key; it is assembled
 from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see

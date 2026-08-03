@@ -45,6 +45,7 @@ fn test_config() -> AuthConfig {
         refresh_token_lifetime_secs: 2_592_000,
         jwt_issuer: "axiam-test".into(),
         pepper: None,
+        pepper_previous: None,
         min_password_length: 12,
         hibp_breaker_threshold: 5,
         hibp_breaker_cooldown_secs: 30,

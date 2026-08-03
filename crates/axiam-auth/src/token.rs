@@ -436,6 +436,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             refresh_token_lifetime_secs: 2_592_000,
             jwt_issuer: "axiam-test".into(),
             pepper: None,
+            pepper_previous: None,
             min_password_length: 12,
             mfa_encryption_key: None,
             federation_encryption_key: None,

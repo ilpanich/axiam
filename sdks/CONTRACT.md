@@ -751,6 +751,23 @@ would never have honoured.
 | 5 | `iss` | **Checked when the SDK is configured with an expected issuer**; absent configuration means no check. When configured, a mismatch MUST be rejected. |
 | 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`. |
 | 7 | clock skew | Rules 2 and 3 MAY allow a **small, named, documented** leeway (RECOMMENDED 60 s). It MUST be a named constant, not an inline literal, and MUST NOT be operator-configurable to an unbounded value. |
+| 8 | subject of the decision | The guard MUST decide on **the caller's credential and no other**. When that credential fails any rule above, the guard MUST reject. It MUST NOT retry, refresh, or fall back to a *different* credential — in particular not the SDK client's own session — and MUST NOT admit the request under any identity other than the one the caller presented. |
+
+**Rule 8 is about control flow, not claims.** Rules 1–7 ask *"is this token
+good?"*; rule 8 asks *"is this the token the decision is about?"*. A guard can
+satisfy all seven and still be an authentication bypass if a failed verification
+routes into a second, successful one — which is exactly `SEC-085`: the PHP
+framework bridges called a local-verify-**or-refresh-fallback** helper, so a
+caller with an expired, foreign-tenant or forged token was admitted as the
+*application's own* AXIAM principal, typically a service account with more
+privilege than the user whose request it replaced.
+
+A reactive-refresh helper of that shape is legitimate — but only for the SDK's
+**outbound** calls, where the token being refreshed genuinely is the client's
+own. Where an SDK ships both, the two MUST be separate methods, the no-fallback
+one MUST be the documented guard entry point, and the fallback one MUST carry an
+explicit warning against guard use (the PHP SDK's `verifyLocally()` versus
+`verifyLocallyOrFallback()` is the reference spelling).
 
 **Fail-closed is the default for every rule.** A claim that is required and
 absent, unparseable, or of the wrong JSON type MUST cause rejection. An SDK MUST
@@ -767,7 +784,10 @@ The SDK's own guards MUST route through the full set.
 token with **no** `exp`; token with a non-numeric `exp`; token whose `nbf` is in
 the future; token for a **different tenant**; token with no `tenant_id`; and
 `alg: none` plus an HS-signed token bearing an EdDSA key id. Where the SDK
-supports issuer/audience configuration, add a mismatch case for each.
+supports issuer/audience configuration, add a mismatch case for each. For rule 8,
+where the SDK ships a request guard: a failing caller token MUST still yield 401
+**while the client's own session is healthy and verifiable** — a test whose
+client session is unusable passes vacuously and does not satisfy this clause.
 
 > **Compatibility note.** Rule 3 (`nbf`) and the required-`exp` half of rule 2
 > tighten acceptance in SDKs that previously ignored those claims. A token the

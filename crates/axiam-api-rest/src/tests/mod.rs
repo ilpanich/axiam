@@ -4,3 +4,4 @@
 
 pub mod authz_check_test;
 pub mod route_openapi_parity_test;
+pub mod user_invalidation_test;

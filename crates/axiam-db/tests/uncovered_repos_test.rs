@@ -10,19 +10,20 @@ use axiam_core::models::federation::{
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, UpdateOAuth2Client};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
+use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook};
 use axiam_core::repository::{
     EmailVerificationTokenRepository, FederationConfigRepository, FederationLinkRepository,
     OAuth2ClientRepository, OrganizationRepository, Pagination, PasswordResetTokenRepository,
-    TenantRepository, UserRepository, WebhookRepository,
+    ServiceAccountRepository, TenantRepository, UserRepository, WebhookRepository,
 };
 use axiam_db::repository::{
     SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealOAuth2ClientRepository, SurrealOrganizationRepository,
-    SurrealPasswordResetTokenRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    SurrealPasswordResetTokenRepository, SurrealServiceAccountRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -662,4 +663,114 @@ async fn password_reset_token_lifecycle() {
 
     repo.consume(tenant_id, hash).await.unwrap();
     assert!(repo.consume(tenant_id, hash).await.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Service-account client-secret migration (§13.4 observation 4)
+// ---------------------------------------------------------------------------
+
+/// Service accounts write the current hash scheme on create/rotate, but had no
+/// `upgrade_client_secret_hash`, so an existing row never migrated no matter how
+/// often it authenticated. The consequence was structural: the v1 arm of the
+/// verifier could not be retired on the strength of "no v1 `oauth2_client` rows
+/// remain", because the `service_account` table was silently accumulating rows
+/// the migration never reached.
+#[tokio::test]
+async fn service_account_client_secret_hash_migrates_with_a_compare_and_swap() {
+    use axiam_db::client_secret::{self, ClientSecretVerdict, V2_PREFIX};
+
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealServiceAccountRepository::new(db.clone());
+    let hasher = client_secret::global().unwrap();
+
+    let (sa, secret) = repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "svc-migrating".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+
+    // Force the row back to a legacy (v1) hash, as a pre-OBS-1 deployment holds.
+    let legacy = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(secret.as_bytes()))
+    };
+    db.query("UPDATE service_account SET client_secret_hash = $h WHERE client_id = $c")
+        .bind(("h", legacy.clone()))
+        .bind(("c", sa.client_id.clone()))
+        .await
+        .unwrap();
+
+    let stored = repo
+        .get_by_client_id(tenant_id, &sa.client_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.client_secret_hash, legacy);
+
+    let upgraded_hash = match hasher.verify(&secret, &stored.client_secret_hash) {
+        ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => upgraded_hash,
+        other => panic!("expected MatchNeedsUpgrade, got {other:?}"),
+    };
+
+    assert!(
+        repo.upgrade_client_secret_hash(tenant_id, &sa.client_id, &legacy, &upgraded_hash)
+            .await
+            .unwrap(),
+        "the compare-and-swap must match the row it read"
+    );
+
+    let migrated = repo
+        .get_by_client_id(tenant_id, &sa.client_id)
+        .await
+        .unwrap();
+    assert!(migrated.client_secret_hash.starts_with(V2_PREFIX));
+    assert_eq!(
+        hasher.verify(&secret, &migrated.client_secret_hash),
+        ClientSecretVerdict::Match,
+        "the migrated row verifies with no further upgrade"
+    );
+
+    // A replayed upgrade (as a racing request would issue) is a no-op.
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(tenant_id, &sa.client_id, &legacy, &upgraded_hash)
+            .await
+            .unwrap(),
+        "a stale compare-and-swap must not clobber the row"
+    );
+
+    // A rotation racing the upgrade must win — otherwise a late migration would
+    // silently resurrect the previous secret.
+    let rotated_secret = repo.rotate_secret(tenant_id, sa.id).await.unwrap();
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(tenant_id, &sa.client_id, &legacy, &upgraded_hash)
+            .await
+            .unwrap()
+    );
+    let after = repo
+        .get_by_client_id(tenant_id, &sa.client_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        hasher.verify(&rotated_secret, &after.client_secret_hash),
+        ClientSecretVerdict::Match,
+        "a concurrent rotation must never be clobbered by a late migration"
+    );
+
+    // Tenant scoping: `client_id` alone must not be enough. Another tenant
+    // cannot drive a rewrite of this row's stored hash.
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(
+                Uuid::new_v4(),
+                &sa.client_id,
+                &after.client_secret_hash,
+                &hasher.hash("attacker"),
+            )
+            .await
+            .unwrap()
+    );
 }

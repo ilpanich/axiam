@@ -12,7 +12,10 @@ pub mod messages;
 pub mod notification_publisher;
 pub mod webhook_publisher;
 
-pub use cache_invalidation::{CacheInvalidationPublisher, run_cache_invalidation_consumer};
+pub use cache_invalidation::{
+    CacheInvalidationPublisher, HEARTBEAT_MISS_THRESHOLD, InvalidationLiveness,
+    PublisherChannelFactory, run_cache_invalidation_consumer,
+};
 pub use config::AmqpConfig;
 pub use connection::AmqpManager;
 pub use connection::{exchanges, queues};

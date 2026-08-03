@@ -50,6 +50,31 @@
 //! The label keeps this key independent of the pepper's other use (Argon2id
 //! password peppering), so the two never share key material directly.
 //!
+//! ## Pepper rotation (§13.4 observation 3)
+//!
+//! The `v2.hs256$` tag versions the **algorithm**, not the **key**. Rotating
+//! `AXIAM__AUTH__PEPPER` therefore used to be an unversioned hard break: every
+//! stored hash became unverifiable at once, so every service account and OAuth2
+//! client had to be re-issued in lockstep with the restart. The AMQP path
+//! carries a `key_version` on the wire for exactly this reason.
+//!
+//! Set `AXIAM__AUTH__PEPPER_PREVIOUS` to the outgoing value for the duration of
+//! a rotation. Verification then tries the current key and, failing that, the
+//! previous one; a match under the previous key returns
+//! [`ClientSecretVerdict::MatchNeedsUpgrade`] carrying the hash under the
+//! *current* key, so each secret is rewritten the first time its owner
+//! authenticates and the rotation drains itself. Nothing is ever *written*
+//! under the previous key. Unset it once the fleet has drained.
+//!
+//! **Why not a stored key id.** The obvious alternative — derive a kid from the
+//! pepper and store it beside the hash — would hand anyone holding a table dump
+//! an offline oracle for testing pepper guesses directly, which does not exist
+//! today (testing a guess currently requires a known secret/hash pair). Trying
+//! both keys costs one extra HMAC on rotation-era rows and adds no new verifier
+//! for an attacker. Both candidates are computed unconditionally while a
+//! rotation is configured, so the response time does not reveal which pepper era
+//! a row is in.
+//!
 //! # Fail-closed posture
 //!
 //! The pepper is **mandatory** for client-secret hashing. There is no
@@ -136,6 +161,15 @@ impl ClientSecretVerdict {
 #[derive(Clone)]
 pub struct ClientSecretHasher {
     key: [u8; 32],
+    /// Key derived from the **previous** pepper, for verify only (§13.4
+    /// observation 3). `None` when no rotation is in progress.
+    ///
+    /// Never used to *produce* a hash — [`ClientSecretHasher::hash`] always
+    /// writes under the current key — so a row that verifies under the previous
+    /// pepper is handed back as
+    /// [`ClientSecretVerdict::MatchNeedsUpgrade`] and migrates forward through
+    /// the same compare-and-swap the v1→v2 migration already uses.
+    previous_key: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for ClientSecretHasher {
@@ -147,6 +181,9 @@ impl std::fmt::Debug for ClientSecretHasher {
 impl Drop for ClientSecretHasher {
     fn drop(&mut self) {
         self.key.zeroize();
+        if let Some(previous) = &mut self.previous_key {
+            previous.zeroize();
+        }
     }
 }
 
@@ -170,12 +207,48 @@ impl ClientSecretHasher {
                  bytes of CSPRNG output"
             );
         }
+        Ok(Self {
+            key: Self::derive_key(pepper),
+            previous_key: None,
+        })
+    }
+
+    /// Attach a **previous** pepper, so hashes written before a rotation still
+    /// verify (§13.4 observation 3).
+    ///
+    /// Rotating `AXIAM__AUTH__PEPPER` used to be an unversioned hard break: the
+    /// `v2.hs256$` tag versions the *algorithm*, not the *key*, so there was no
+    /// dual read and a rotation permanently invalidated **every** client secret
+    /// — every service account and OAuth2 client had to be re-issued in
+    /// lockstep with the restart. The AMQP path carries a `key_version` on the
+    /// wire for exactly this reason.
+    ///
+    /// A stored kid was deliberately **not** added instead. Deriving a key id
+    /// from the pepper and writing it beside the hash would let anyone holding a
+    /// table dump test pepper guesses directly against that tag — an offline
+    /// oracle that does not exist today, because testing a pepper guess
+    /// currently requires a known (secret, hash) pair. Trying both keys costs
+    /// one extra HMAC on the rare rotation-era row and introduces no new
+    /// verifier for an attacker.
+    pub fn with_previous_pepper(mut self, pepper: &[u8]) -> Result<Self, AxiamError> {
+        if pepper.is_empty() {
+            return Err(AxiamError::ServiceUnavailable(
+                "previous client-secret pepper is empty (AXIAM__AUTH__PEPPER_PREVIOUS) — unset it \
+                 entirely to disable dual-read rather than setting it to an empty value"
+                    .to_string(),
+            ));
+        }
+        self.previous_key = Some(Self::derive_key(pepper));
+        Ok(self)
+    }
+
+    fn derive_key(pepper: &[u8]) -> [u8; 32] {
         let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(pepper)
             .expect("HMAC-SHA256 accepts a key of any length");
         mac.update(KEY_DERIVATION_LABEL);
         let mut key = [0u8; 32];
         key.copy_from_slice(&mac.finalize().into_bytes());
-        Ok(Self { key })
+        key
     }
 
     /// Resolve a hasher from the authentication configuration, failing closed
@@ -190,10 +263,24 @@ impl ClientSecretHasher {
     /// weakening the control when unconfigured is the exact failure mode OBS-1
     /// objected to.
     pub fn from_auth_config(config: &AuthConfig) -> Result<Self, AxiamError> {
-        Self::resolve(
+        let hasher = Self::resolve(
             config.pepper.as_ref().map(|p| p.expose_secret()),
             cfg!(debug_assertions),
-        )
+        )?;
+
+        // §13.4 observation 3: attach the outgoing pepper, if a rotation is in
+        // progress, so pre-rotation hashes still verify and migrate forward.
+        match config.pepper_previous.as_ref().map(|p| p.expose_secret()) {
+            Some(previous) if !previous.is_empty() => {
+                tracing::info!(
+                    "AXIAM__AUTH__PEPPER_PREVIOUS is set — client-secret verification will \
+                     dual-read during the rotation, rewriting each secret under the current \
+                     pepper as its owner authenticates. Unset it once the fleet has drained."
+                );
+                hasher.with_previous_pepper(previous.as_bytes())
+            }
+            _ => Ok(hasher),
+        }
     }
 
     /// Core resolution, with the debug-build fallback lifted into a parameter
@@ -233,7 +320,13 @@ impl ClientSecretHasher {
     /// client-credentials hot path free of the per-request `String` the old
     /// `hash_client_secret` allocated.
     fn hash_into(&self, secret: &str, out: &mut [u8; V2_HASH_LEN]) {
-        let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&self.key)
+        self.hash_into_with(&self.key, secret, out);
+    }
+
+    /// [`Self::hash_into`] under an explicit key, so the rotation dual-read can
+    /// reuse the exact same encoding rather than reimplementing it.
+    fn hash_into_with(&self, key: &[u8; 32], secret: &str, out: &mut [u8; V2_HASH_LEN]) {
+        let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(key)
             .expect("HMAC-SHA256 accepts a 32-byte key");
         mac.update(secret.as_bytes());
         let tag = mac.finalize().into_bytes();
@@ -274,11 +367,36 @@ impl ClientSecretHasher {
             }
         } else {
             let mut candidate = [0u8; V2_HASH_LEN];
-            self.hash_into(presented, &mut candidate);
-            let matched = bool::from(candidate[..].ct_eq(stored.as_bytes()));
+            self.hash_into_with(&self.key, presented, &mut candidate);
+            let matched = candidate[..].ct_eq(stored.as_bytes());
             candidate.zeroize();
-            if matched {
+
+            // §13.4 observation 3 — rotation dual-read. Both candidates are
+            // computed and compared unconditionally whenever a previous pepper
+            // is configured: branching on the current key's result would make
+            // the response time reveal which pepper era a row is in.
+            let matched_previous = match &self.previous_key {
+                Some(previous) => {
+                    let mut candidate = [0u8; V2_HASH_LEN];
+                    self.hash_into_with(previous, presented, &mut candidate);
+                    let m = candidate[..].ct_eq(stored.as_bytes());
+                    candidate.zeroize();
+                    m
+                }
+                None => subtle::Choice::from(0u8),
+            };
+
+            if bool::from(matched) {
                 ClientSecretVerdict::Match
+            } else if bool::from(matched_previous) {
+                // Verified under the OLD pepper. Authentication succeeds and the
+                // row is handed back for migration under the current one — the
+                // same lazy compare-and-swap the v1→v2 path uses, so a rotation
+                // drains itself as clients authenticate instead of invalidating
+                // every secret at once.
+                ClientSecretVerdict::MatchNeedsUpgrade {
+                    upgraded_hash: self.hash(presented),
+                }
             } else {
                 ClientSecretVerdict::Mismatch
             }
@@ -511,5 +629,171 @@ mod tests {
         let b = global().unwrap();
         assert_eq!(a.hash("x"), b.hash("x"));
         assert!(a.hash("x").starts_with(V2_PREFIX));
+    }
+
+    // -----------------------------------------------------------------
+    // Pepper rotation dual-read (§13.4 observation 3)
+    // -----------------------------------------------------------------
+
+    const OLD_PEPPER: &[u8] = b"outgoing-pepper-0123456789abcdef";
+    const NEW_PEPPER: &[u8] = b"incoming-pepper-fedcba9876543210";
+
+    /// The defect: rotating the pepper permanently invalidated every stored
+    /// client secret, because the `v2.hs256$` tag versions the algorithm, not
+    /// the key. Without a dual read there is no path back.
+    #[test]
+    fn rotating_the_pepper_without_a_dual_read_invalidates_every_secret() {
+        let old = ClientSecretHasher::from_pepper(OLD_PEPPER).unwrap();
+        let stored = old.hash("s3cret");
+
+        let new_only = ClientSecretHasher::from_pepper(NEW_PEPPER).unwrap();
+        assert_eq!(
+            new_only.verify("s3cret", &stored),
+            ClientSecretVerdict::Mismatch,
+            "this is the hard break the observation describes — pinned so the \
+             dual-read test below cannot pass vacuously"
+        );
+    }
+
+    /// With the outgoing pepper attached, a pre-rotation secret still verifies
+    /// and is handed back for rewriting under the current pepper.
+    #[test]
+    fn a_pre_rotation_secret_verifies_and_migrates_forward() {
+        let old = ClientSecretHasher::from_pepper(OLD_PEPPER).unwrap();
+        let stored = old.hash("s3cret");
+
+        let rotating = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(OLD_PEPPER)
+            .unwrap();
+
+        match rotating.verify("s3cret", &stored) {
+            ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
+                let new_only = ClientSecretHasher::from_pepper(NEW_PEPPER).unwrap();
+                assert_eq!(
+                    new_only.verify("s3cret", &upgraded_hash),
+                    ClientSecretVerdict::Match,
+                    "the replacement must be written under the CURRENT pepper, so \
+                     the row stops depending on the outgoing one"
+                );
+                assert_ne!(upgraded_hash, stored);
+            }
+            other => panic!("expected MatchNeedsUpgrade, got {other:?}"),
+        }
+    }
+
+    /// A secret already stored under the current pepper needs no migration —
+    /// otherwise every authentication would trigger a pointless write.
+    #[test]
+    fn a_post_rotation_secret_needs_no_upgrade() {
+        let rotating = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(OLD_PEPPER)
+            .unwrap();
+        let stored = rotating.hash("s3cret");
+
+        assert_eq!(
+            rotating.verify("s3cret", &stored),
+            ClientSecretVerdict::Match
+        );
+    }
+
+    /// The dual read must widen which *pepper* verifies a secret, never which
+    /// *secret* is accepted.
+    #[test]
+    fn the_dual_read_never_accepts_a_wrong_secret() {
+        let old = ClientSecretHasher::from_pepper(OLD_PEPPER).unwrap();
+        let stored = old.hash("s3cret");
+
+        let rotating = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(OLD_PEPPER)
+            .unwrap();
+
+        assert_eq!(
+            rotating.verify("wrong", &stored),
+            ClientSecretVerdict::Mismatch
+        );
+        assert_eq!(rotating.verify("", &stored), ClientSecretVerdict::Mismatch);
+        // And a wrong secret must never produce a rehash to persist.
+        assert!(!rotating.verify("wrong", &stored).is_match());
+    }
+
+    /// A third, unrelated pepper must not verify. Guards against the dual read
+    /// degenerating into "any key will do".
+    #[test]
+    fn an_unrelated_pepper_still_fails() {
+        let stranger = ClientSecretHasher::from_pepper(b"some-entirely-different-pepper").unwrap();
+        let stored = stranger.hash("s3cret");
+
+        let rotating = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(OLD_PEPPER)
+            .unwrap();
+
+        assert_eq!(
+            rotating.verify("s3cret", &stored),
+            ClientSecretVerdict::Mismatch
+        );
+    }
+
+    /// v1 legacy rows keep migrating exactly as before — the rotation path is
+    /// additive and must not disturb the OBS-1 migration.
+    #[test]
+    fn legacy_v1_still_migrates_while_a_rotation_is_in_progress() {
+        let mut legacy = [0u8; V1_HASH_LEN];
+        legacy_v1_into("s3cret", &mut legacy);
+        let stored = String::from_utf8(legacy.to_vec()).unwrap();
+
+        let rotating = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(OLD_PEPPER)
+            .unwrap();
+
+        match rotating.verify("s3cret", &stored) {
+            ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
+                assert!(upgraded_hash.starts_with(V2_PREFIX));
+                let new_only = ClientSecretHasher::from_pepper(NEW_PEPPER).unwrap();
+                assert_eq!(
+                    new_only.verify("s3cret", &upgraded_hash),
+                    ClientSecretVerdict::Match
+                );
+            }
+            other => panic!("expected MatchNeedsUpgrade, got {other:?}"),
+        }
+    }
+
+    /// An empty previous pepper is a configuration error, not "disable the
+    /// dual read" — silently ignoring it would leave an operator believing a
+    /// rotation was safe when it was not.
+    #[test]
+    fn an_empty_previous_pepper_is_rejected() {
+        let result = ClientSecretHasher::from_pepper(NEW_PEPPER)
+            .unwrap()
+            .with_previous_pepper(b"");
+        assert!(result.is_err());
+    }
+
+    /// `from_auth_config` wires the config field through, so the knob is not
+    /// merely present but inert.
+    #[test]
+    fn from_auth_config_attaches_the_previous_pepper() {
+        let old = ClientSecretHasher::from_pepper(b"cfg-old-pepper-value").unwrap();
+        let stored = old.hash("s3cret");
+
+        let config = AuthConfig {
+            pepper: Some(SecretString::from("cfg-new-pepper-value")),
+            pepper_previous: Some(SecretString::from("cfg-old-pepper-value")),
+            ..AuthConfig::default()
+        };
+        let h = ClientSecretHasher::from_auth_config(&config).unwrap();
+
+        assert!(
+            matches!(
+                h.verify("s3cret", &stored),
+                ClientSecretVerdict::MatchNeedsUpgrade { .. }
+            ),
+            "AXIAM__AUTH__PEPPER_PREVIOUS must reach the hasher"
+        );
     }
 }

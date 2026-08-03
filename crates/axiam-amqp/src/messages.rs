@@ -313,11 +313,31 @@ pub struct CacheInvalidationMessage {
     /// so it is inside the signed HMAC body.
     #[serde(default = "default_issued_at")]
     pub issued_at: DateTime<Utc>,
+    /// Marks this message as a **liveness heartbeat**, not an invalidation
+    /// (§13.4 observation 1). A heartbeat is published by a replica to itself:
+    /// receiving its own back proves the whole publish → exchange → binding →
+    /// queue → consumer loop is intact, which plain consumer liveness does not.
+    /// A heartbeat NEVER touches the cache, in either direction.
+    ///
+    /// `skip_serializing_if` is load-bearing, not tidiness. The signature is
+    /// computed over this struct with `hmac_signature` absent, so any field that
+    /// serialized unconditionally would change the canonical bytes and break
+    /// verification of messages produced by a replica running the previous
+    /// version. Omitting `false` keeps an ordinary invalidation byte-identical
+    /// to what pre-heartbeat replicas sign and verify, so a rolling upgrade is
+    /// safe in both directions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub heartbeat: bool,
     /// HMAC-SHA256 over the JSON body with this field set to null, using the
     /// per-tenant subkey from [`derive_tenant_key`]. Mandatory — consumers
     /// reject unsigned and invalid-signature messages alike; no fail-open path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_signature: Option<String>,
+}
+
+/// `skip_serializing_if` predicate for [`CacheInvalidationMessage::heartbeat`].
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Webhook delivery message carried on the `axiam.webhook` /

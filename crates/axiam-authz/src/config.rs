@@ -11,6 +11,10 @@ use crate::decision_cache::{DecisionCache, DecisionCacheConfig};
 /// (§4.2). See [`AuthzConfig::decision_cache_broadcast_skew_secs`].
 pub const DEFAULT_BROADCAST_SKEW_SECS: u64 = 30;
 
+/// Default interval between self-addressed liveness heartbeats (§13.4
+/// observation 1). See [`AuthzConfig::decision_cache_broadcast_heartbeat_secs`].
+pub const DEFAULT_BROADCAST_HEARTBEAT_SECS: u64 = 10;
+
 /// Strategy for evaluating a `BatchCheckAccess` call (REST + gRPC).
 ///
 /// Both strategies produce **byte-identical decisions in the same order** —
@@ -138,6 +142,32 @@ pub struct AuthzConfig {
     /// synchronised — a skew larger than the true clock spread buys nothing.
     pub decision_cache_broadcast_skew_secs: u64,
 
+    /// Interval, in seconds, between the self-addressed liveness heartbeats a
+    /// replica publishes to prove its own queue is still bound to the fanout
+    /// exchange (§13.4 observation 1).
+    ///
+    /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_HEARTBEAT_SECS`
+    /// (default `10`). Only has any effect when
+    /// [`Self::decision_cache_broadcast_enabled`] is on.
+    ///
+    /// **What this buys.** The cache's trust flag otherwise follows *consumer*
+    /// liveness alone. A party with broker `configure` rights can `queue.unbind`
+    /// a replica's queue: the consumer stays subscribed to a queue nothing
+    /// routes to, trust stays on, and the replica serves cached allows it will
+    /// never be told to invalidate — while the publisher sees nothing, because
+    /// `mandatory` is off and the broker acks an unroutable message. A heartbeat
+    /// that has to come back to us tests the whole loop, so an unbound queue is
+    /// detected within
+    /// `decision_cache_broadcast_heartbeat_secs × HEARTBEAT_MISS_THRESHOLD`.
+    ///
+    /// Set to `0` to disable heartbeats. That restores the pre-§13.4 behaviour
+    /// and is **not** recommended: it re-opens the suppression window this
+    /// closes, leaving `decision_cache_ttl_secs` as the only bound.
+    ///
+    /// Raising it weakens detection linearly and saves almost nothing — one
+    /// transient 200-byte message per replica per interval.
+    pub decision_cache_broadcast_heartbeat_secs: u64,
+
     /// TTL, in seconds, for a cached decision (D7). Bounds worst-case
     /// revocation latency if an invalidation event is ever missed — and, on a
     /// multi-replica deployment, bounds the *actual* revocation latency on
@@ -163,6 +193,7 @@ impl Default for AuthzConfig {
             decision_cache_enabled: false,
             decision_cache_broadcast_enabled: false,
             decision_cache_broadcast_skew_secs: DEFAULT_BROADCAST_SKEW_SECS,
+            decision_cache_broadcast_heartbeat_secs: DEFAULT_BROADCAST_HEARTBEAT_SECS,
             decision_cache_ttl_secs: 5,
             decision_cache_max_entries: 10_000,
         }
@@ -210,6 +241,23 @@ impl AuthzConfig {
     /// `chrono::Duration`, mirroring `AmqpConfig::replay_skew`.
     pub fn decision_cache_broadcast_skew(&self) -> chrono::Duration {
         chrono::Duration::seconds(self.decision_cache_broadcast_skew_secs as i64)
+    }
+
+    /// The configured heartbeat interval, or `None` when heartbeats are disabled
+    /// (`0`) or cross-replica invalidation is not active at all.
+    ///
+    /// Returning `None` rather than a zero `Duration` keeps "disabled" a state
+    /// the caller must destructure, so a heartbeat loop cannot be started with a
+    /// zero-length interval and spin.
+    pub fn decision_cache_broadcast_heartbeat(&self) -> Option<chrono::Duration> {
+        if !self.cross_replica_invalidation_enabled()
+            || self.decision_cache_broadcast_heartbeat_secs == 0
+        {
+            return None;
+        }
+        Some(chrono::Duration::seconds(
+            self.decision_cache_broadcast_heartbeat_secs as i64,
+        ))
     }
 }
 

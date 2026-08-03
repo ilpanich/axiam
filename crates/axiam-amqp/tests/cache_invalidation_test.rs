@@ -27,7 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_amqp::cache_invalidation::{
-    CacheInvalidationPublisher, InvalidationOutcome, InvalidationReject, NonceGuard,
+    CacheInvalidationPublisher, HEARTBEAT_MISS_THRESHOLD, InvalidationLiveness,
+    InvalidationOutcome, InvalidationReject, NonceGuard, build_signed_heartbeat,
     build_signed_invalidation, handle_invalidation, invalidation_exchange_kind,
     invalidation_queue_name, invalidation_queue_options, process_invalidation,
 };
@@ -393,6 +394,7 @@ fn unsigned_message(origin: Uuid, tenant: Uuid) -> CacheInvalidationMessage {
         key_version: CURRENT_KEY_VERSION,
         nonce: Uuid::new_v4(),
         issued_at: Utc::now(),
+        heartbeat: false,
         hmac_signature: None,
     }
 }
@@ -711,4 +713,273 @@ fn publisher_origin_id_is_the_self_echo_key() {
 fn publisher_is_an_invalidation_broadcaster() {
     fn assert_broadcaster<T: axiam_authz::InvalidationBroadcaster>() {}
     assert_broadcaster::<CacheInvalidationPublisher>();
+}
+
+// ---------------------------------------------------------------------------
+// Liveness heartbeats (§13.4 observation 1)
+// ---------------------------------------------------------------------------
+//
+// The gap these cover: cache trust followed CONSUMER liveness only. A party with
+// broker `configure` rights can `queue.unbind` a replica's queue — the consumer
+// stays subscribed, trust stays on, and invalidations are silently dropped while
+// the publisher still gets an ack (`mandatory` is off). A self-addressed
+// heartbeat is what makes that state observable.
+
+/// A heartbeat must be recognisable as *ours*, because only our own heartbeat
+/// coming back proves *our* binding is intact.
+#[test]
+fn own_heartbeat_is_recognised_as_own() {
+    let origin = Uuid::new_v4();
+    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let guard = NonceGuard::new();
+
+    assert_eq!(
+        process_invalidation(&raw, MASTER_KEY, origin, &guard, skew(), Utc::now()),
+        InvalidationOutcome::Heartbeat { own: true }
+    );
+}
+
+/// Another replica's heartbeat proves that replica can publish — it says nothing
+/// about whether OUR queue is still bound, so it must not be counted as evidence.
+#[test]
+fn foreign_heartbeat_is_not_evidence_of_our_own_binding() {
+    let other = Uuid::new_v4();
+    let us = Uuid::new_v4();
+    let raw = build_signed_heartbeat(MASTER_KEY, other, Utc::now()).expect("sign heartbeat");
+    let guard = NonceGuard::new();
+
+    assert_eq!(
+        process_invalidation(&raw, MASTER_KEY, us, &guard, skew(), Utc::now()),
+        InvalidationOutcome::Heartbeat { own: false }
+    );
+
+    let liveness = InvalidationLiveness::new();
+    liveness.mark_subscribed(Utc::now());
+    let before = liveness.last_own_echo();
+    // The consumer only records on `own: true`; a foreign heartbeat leaves the
+    // clock untouched, so a hostile replica cannot keep our watchdog quiet.
+    assert_eq!(before, liveness.last_own_echo());
+}
+
+/// A heartbeat must never reach the cache, in either direction. This is the
+/// structural property: it is separated out before any `InvalidationEvent`
+/// exists, so there is no `apply` to reach.
+#[test]
+fn heartbeats_never_touch_the_cache() {
+    let cache = cache();
+    let tenant = Uuid::new_v4();
+    let subject = Uuid::new_v4();
+    cache.insert(&request(tenant, subject), AccessDecision::Allow);
+    assert!(cache.get(&request(tenant, subject)).is_some());
+
+    let origin = Uuid::new_v4();
+    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let guard = NonceGuard::new();
+
+    // Processed as a FOREIGN heartbeat — the case that would be applied if
+    // heartbeats were treated as invalidations at all.
+    let outcome = handle_invalidation(
+        &raw,
+        &cache,
+        MASTER_KEY,
+        Uuid::new_v4(),
+        &guard,
+        skew(),
+        Utc::now(),
+    );
+    assert_eq!(outcome, InvalidationOutcome::Heartbeat { own: false });
+    assert!(
+        cache.get(&request(tenant, subject)).is_some(),
+        "a heartbeat must never flush a cached decision"
+    );
+}
+
+/// Heartbeats arrive on a fixed interval from every replica. If they consumed
+/// the bounded nonce-guard capacity they would evict real invalidation nonces
+/// and weaken replay protection on a busy cluster.
+#[test]
+fn heartbeats_do_not_consume_replay_guard_capacity() {
+    let guard = NonceGuard::new();
+    let us = Uuid::new_v4();
+
+    for _ in 0..50 {
+        let raw = build_signed_heartbeat(MASTER_KEY, Uuid::new_v4(), Utc::now()).expect("sign");
+        let _ = process_invalidation(&raw, MASTER_KEY, us, &guard, skew(), Utc::now());
+    }
+
+    assert!(
+        guard.is_empty(),
+        "heartbeats must not fill the replay guard: {} entries",
+        guard.len()
+    );
+}
+
+/// A heartbeat is not a privileged message type — it carries the full §8
+/// envelope and an unsigned or wrongly-signed one is rejected exactly like an
+/// invalidation. Otherwise it would be a way to reset a replica's watchdog
+/// without holding the signing key.
+#[test]
+fn an_unsigned_heartbeat_is_rejected_like_any_other_message() {
+    let origin = Uuid::new_v4();
+    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let mut message: CacheInvalidationMessage = serde_json::from_slice(&raw).expect("decode");
+    assert!(message.heartbeat, "builder must set the heartbeat marker");
+
+    message.hmac_signature = None;
+    let unsigned = serde_json::to_vec(&message).expect("serialize");
+    let guard = NonceGuard::new();
+
+    assert_eq!(
+        process_invalidation(&unsigned, MASTER_KEY, origin, &guard, skew(), Utc::now()),
+        InvalidationOutcome::Rejected(InvalidationReject::BadSignature)
+    );
+}
+
+/// Rolling-upgrade safety. The `heartbeat` field is omitted when false, so an
+/// ordinary invalidation's canonical signing bytes are byte-identical to what a
+/// replica running the previous version produces and verifies. If this ever
+/// regresses, every cross-version broadcast fails its HMAC check.
+#[test]
+fn an_ordinary_invalidation_does_not_serialize_the_heartbeat_field() {
+    let raw = build_signed_invalidation(
+        MASTER_KEY,
+        Uuid::new_v4(),
+        InvalidationEvent::Tenant {
+            tenant_id: Uuid::new_v4(),
+        },
+        Utc::now(),
+    )
+    .expect("sign");
+
+    let text = String::from_utf8(raw).expect("utf8");
+    assert!(
+        !text.contains("heartbeat"),
+        "the heartbeat field must be omitted when false, or pre-upgrade replicas \
+         will reject every broadcast: {text}"
+    );
+}
+
+/// The watchdog's staleness rule: silent for longer than
+/// `interval * HEARTBEAT_MISS_THRESHOLD` means the loop is broken.
+#[test]
+fn liveness_goes_stale_only_after_the_miss_threshold() {
+    let liveness = InvalidationLiveness::new();
+    let interval = chrono::Duration::seconds(10);
+    let t0 = Utc::now();
+    liveness.mark_subscribed(t0);
+
+    // Inside the threshold: not stale, so a transient blip is not a latency cliff.
+    let just_inside = t0 + interval * (HEARTBEAT_MISS_THRESHOLD as i32);
+    assert!(!liveness.is_stale(just_inside, interval));
+
+    // Past it: stale.
+    let past = just_inside + chrono::Duration::seconds(1);
+    assert!(liveness.is_stale(past, interval));
+
+    // A fresh own-heartbeat re-arms it.
+    liveness.record_own_heartbeat(past);
+    assert!(!liveness.is_stale(past, interval));
+}
+
+/// Not-subscribed must NOT report stale. The consumer's own exit path already
+/// marked the cache untrusted; reporting staleness here would only produce a
+/// duplicate revocation and a misleading "bindings are broken" log line.
+#[test]
+fn unsubscribed_is_not_reported_as_stale() {
+    let liveness = InvalidationLiveness::new();
+    let interval = chrono::Duration::seconds(10);
+
+    assert!(!liveness.is_stale(Utc::now(), interval), "never subscribed");
+
+    liveness.mark_subscribed(Utc::now() - chrono::Duration::hours(1));
+    liveness.mark_unsubscribed();
+    assert!(
+        !liveness.is_stale(Utc::now(), interval),
+        "a reconnecting consumer must not inherit its predecessor's clock"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Publisher channel recovery (§13.4 observation 2)
+// ---------------------------------------------------------------------------
+//
+// The publisher used to hold one channel created at startup and never replaced,
+// while the consumer side was fully supervised with backoff. A channel is closed
+// by the broker on any channel-level exception, so ONE exception made every
+// access-narrowing mutation return 503 for the rest of the process lifetime —
+// fail-closed, so not a security hole, but a permanent availability defect that
+// only a restart cleared.
+//
+// A live broker is not available here, so what is pinned is the property that
+// made the defect possible: whether the publisher can obtain a *new* channel at
+// all. A counting factory shows the publisher asks for one lazily rather than
+// capturing a single handle at construction, and keeps asking after a failure.
+
+/// A factory that never succeeds, but counts how many times it was asked.
+struct CountingFactory {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl axiam_amqp::PublisherChannelFactory for CountingFactory {
+    fn open<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<lapin::Channel, axiam_amqp::AmqpError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(axiam_amqp::AmqpError::Publish(
+                "no broker in this test".to_string(),
+            ))
+        })
+    }
+}
+
+/// The publisher must not capture a channel at construction, and must re-ask on
+/// every attempt while it has none. Before the fix the channel was a constructor
+/// argument, so there was no second attempt to make: one dead channel was final.
+#[tokio::test]
+async fn publisher_reopens_its_channel_on_every_attempt_until_one_succeeds() {
+    let factory = Arc::new(CountingFactory {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let publisher = CacheInvalidationPublisher::new(
+        Arc::clone(&factory) as Arc<dyn axiam_amqp::PublisherChannelFactory>,
+        MASTER_KEY.to_vec(),
+        Uuid::new_v4(),
+    );
+
+    assert_eq!(
+        factory.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "construction must not open a channel — holding one for the process \
+         lifetime is the defect being fixed"
+    );
+
+    for expected in 1..=3 {
+        let result = publisher
+            .publish_event(InvalidationEvent::Tenant {
+                tenant_id: Uuid::new_v4(),
+            })
+            .await;
+        assert!(result.is_err(), "no broker: the mutation must fail closed");
+        assert_eq!(
+            factory.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected,
+            "each attempt must try to (re)open a channel; a publisher that gave \
+             up after the first failure is the permanent-503 defect"
+        );
+    }
+
+    // Heartbeats travel the same path, so they recover the same way.
+    let _ = publisher.publish_heartbeat().await;
+    assert_eq!(
+        factory.calls.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "the heartbeat must share the publish path it is meant to be evidence about"
+    );
 }

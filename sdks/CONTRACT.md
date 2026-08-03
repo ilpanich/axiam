@@ -728,6 +728,54 @@ Per-framework expectations:
 - The middleware MUST NOT cache session verification results longer than the token's remaining TTL.
 - The middleware MUST surface `AuthError` as HTTP 401 and `AuthzError` as HTTP 403 to the end-user with a standardized JSON error body.
 
+### §10.1 Minimum local-verification set (normative)
+
+Wherever an SDK verifies an AXIAM access token **locally** — a route guard, a
+middleware, a `§10` authenticator, or any helper that turns a token into an
+identity without asking the server — it MUST apply **every** rule below. This
+section exists because the same defect recurred independently in two SDKs
+(`SEC-071`, `SEC-080`): each verified a *different subset* of the token, and
+each subset looked complete in isolation. A guard that checks the signature and
+stops is not a weaker guard, it is not a guard.
+
+`§10` verification is a **relying-party** control. The server enforces its own
+side; these rules are what stops an SDK from accepting something the server
+would never have honoured.
+
+| # | Claim | Rule |
+|---|---|---|
+| 1 | signature | Verify against the org JWKS with `alg` **pinned to EdDSA before key lookup**. `alg: none` and HS-family confusion MUST be rejected without consulting a key. |
+| 2 | `exp` | **REQUIRED.** A token with no `exp`, or a non-numeric `exp`, MUST be rejected. An absent `exp` is a *permanent* credential and MUST NOT be treated as "no expiry constraint". |
+| 3 | `nbf` | **Honoured when present.** A token whose `nbf` is in the future MUST be rejected. Absent `nbf` is valid. |
+| 4 | `tenant_id` | **REQUIRED and asserted.** MUST equal the client's configured tenant. Absent claim, or no configured tenant to compare against, MUST fail closed. The JWKS trust anchor is **organization-wide**, so signature validity alone does not bound a token to a tenant. |
+| 5 | `iss` | **Checked when the SDK is configured with an expected issuer**; absent configuration means no check. When configured, a mismatch MUST be rejected. |
+| 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`. |
+| 7 | clock skew | Rules 2 and 3 MAY allow a **small, named, documented** leeway (RECOMMENDED 60 s). It MUST be a named constant, not an inline literal, and MUST NOT be operator-configurable to an unbounded value. |
+
+**Fail-closed is the default for every rule.** A claim that is required and
+absent, unparseable, or of the wrong JSON type MUST cause rejection. An SDK MUST
+NOT treat "the claim was missing so there was nothing to check" as success —
+that is precisely the `SEC-080` defect.
+
+**A raw signature-only primitive MAY be exposed**, for integrators who are
+deliberately implementing their own policy, but it MUST NOT be the documented
+guard entry point and its name MUST make the omission obvious at the call site
+(the C++ SDK's `verify_signature_only_unchecked` is the reference spelling).
+The SDK's own guards MUST route through the full set.
+
+**Required negative tests**, per SDK, each asserting rejection: expired token;
+token with **no** `exp`; token with a non-numeric `exp`; token whose `nbf` is in
+the future; token for a **different tenant**; token with no `tenant_id`; and
+`alg: none` plus an HS-signed token bearing an EdDSA key id. Where the SDK
+supports issuer/audience configuration, add a mismatch case for each.
+
+> **Compatibility note.** Rule 3 (`nbf`) and the required-`exp` half of rule 2
+> tighten acceptance in SDKs that previously ignored those claims. A token the
+> AXIAM server minted is unaffected — it always carries `exp` and never a future
+> `nbf` — but a guard fed tokens from another signer sharing the org JWKS may
+> start rejecting what it used to accept. That is the intent, and it MUST be
+> called out as a breaking change in each SDK's CHANGELOG.
+
 ---
 
 ## §11 Declarative Authorization Helpers

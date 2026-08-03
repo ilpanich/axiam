@@ -47,14 +47,16 @@ services:
       # at startup (no unsigned code path), so this fails closed if unset. `just
       # bench-up` generates a stable hex key under docker/.secrets/ automatically.
       AXIAM__AMQP__SIGNING_KEY: "${AXIAM__AMQP__SIGNING_KEY:?run via 'just bench-up' which generates it under docker/.secrets/}"
-      # Optional subsystem secrets (all set by 'just bench-up'). The AES-256-GCM
-      # keys + GDPR HMAC pepper fail closed on a malformed value, so they are
-      # required (bench-up always provides them); the auth pepper (plain) and the
-      # OIDC issuer URL are optional — empty means "feature off".
+      # Subsystem secrets (all set by 'just bench-up'). The AES-256-GCM keys +
+      # GDPR HMAC pepper fail closed on a malformed value; the auth pepper is
+      # mandatory at startup in the release image (OBS-1 — client secrets are a
+      # keyed HMAC-SHA256 tag with no unkeyed fallback), so it fails closed too
+      # and is NOT optional. Only the OIDC issuer URL is optional — empty means
+      # "feature off".
       AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?run via 'just bench-up'}"
-      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:-}"
+      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?run via 'just bench-up' which generates it under docker/.secrets/ (OBS-1: mandatory in the release image)}"
       AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-}"
       # --- Argon2id hash gate (B1) ------------------------------------------------
       # Bounds concurrent Argon2id hash/verify ops (each ~19 MiB arena) to cap peak

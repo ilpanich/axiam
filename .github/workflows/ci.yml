@@ -316,6 +316,13 @@ jobs:
           # the server panics on startup (exit 101). Hex-encoded, 32 bytes.
           AXIAM__AMQP__SIGNING_KEY="$(openssl rand -hex 32)"
           export AXIAM__AMQP__SIGNING_KEY
+          # OBS-1: the auth pepper is mandatory in a release build — client
+          # secrets are a keyed HMAC-SHA256 tag with no unkeyed fallback, so
+          # install_from_config() fails closed and the server panics on startup
+          # (exit 101) when it is unset. A fresh pepper per run is correct: E2E
+          # starts from an empty database, so no v2 hash outlives the run.
+          AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
+          export AXIAM__AUTH__PEPPER
           docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
         # The release build alone now takes ~14-15 min (grown with recent phases:
         # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,

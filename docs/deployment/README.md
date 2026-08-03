@@ -227,6 +227,8 @@ performance only, never the decision an endpoint returns.
 | `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `false` — the authorization path is then byte-for-byte identical to a build without the cache. Set `true` to enable. |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | Cached-decision TTL in seconds (default `5`). Also the upper bound on revocation latency if an invalidation event is ever missed — keep it short. |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | Max cached decisions **per tenant** before FIFO eviction (default `10000`). Memory bound. |
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | Cross-replica invalidation over RabbitMQ. Default `false`. See [below](#cross-replica-invalidation-42). Requires the cache to be enabled. |
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS` | Freshness window for an inbound invalidation broadcast (default `30`). Only used when the broadcast channel is on. |
 
 **Security posture (safe under AXIAM's additive allow-wins / default-deny
 model):** every access-*narrowing* mutation (role/grant/group/resource change)
@@ -237,18 +239,77 @@ self-heals within `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and
 the per-mutation invalidation table are in the
 [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
 
-> **⚠ Multi-replica caveat — read before enabling.** The cache and its
-> invalidation are **process-local**; there is no cross-replica invalidation
-> channel. "Revocation is immediate" is a **single-process** property. Run two
-> or more replicas and a revocation handled by one replica leaves the others
-> serving the pre-revocation decision until their entries expire, so the
-> **deployment's worst-case revocation latency becomes
+> **⚠ Multi-replica caveat — read before enabling, unless you also enable the
+> broadcast channel below.** On its own the cache and its invalidation are
+> **process-local**. "Revocation is immediate" is then a **single-process**
+> property. Run two or more replicas and a revocation handled by one replica
+> leaves the others serving the pre-revocation decision until their entries
+> expire, so the **deployment's worst-case revocation latency becomes
 > `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default 5 s)** — on every read path,
 > including the `RequirePermission` guard on the admin endpoints, and with no
 > audit signal distinguishing a cached allow from a fresh one. In the
-> Kubernetes manifests under `k8s/` (multi-replica by default) leave
-> `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` unless a ≤ TTL revocation window
-> is an accepted risk.
+> Kubernetes manifests under `k8s/` (multi-replica by default) either set
+> `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` or leave
+> `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`, unless a ≤ TTL revocation
+> window is an accepted risk.
+
+### Cross-replica invalidation (§4.2)
+
+`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` (default `false`;
+requires `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`) removes the multi-replica
+window above. Every invalidation a mutation triggers is published, HMAC-signed,
+to the **fanout** exchange `axiam.authz.cache.invalidate`; each replica binds
+its own exclusive auto-delete queue `axiam.authz.cache.invalidate.<replica-uuid>`
+and applies what it receives. A revocation then propagates to *all* replicas in
+broker-latency time instead of being bounded by the TTL — the TTL stays as the
+backstop it always was.
+
+**Requirements.** RabbitMQ must be reachable (it already is: AXIAM will not
+start without it) and `AXIAM__AMQP__SIGNING_KEY` must be set — the same
+mandatory §8 master key the authz/audit consumers use, from which a per-tenant
+HKDF-SHA256 subkey is derived per message. Every replica must share that key.
+No new broker credentials, exchange configuration or ports are needed beyond
+permission to declare and bind on that exchange.
+
+**Two behaviour changes you must plan for before flipping this on:**
+
+| When | What happens | Why |
+|---|---|---|
+| The broker does not confirm an invalidation broadcast | The **mutation returns 503** (`service_unavailable`) | The database write is durable, but the other replicas were not told. Reporting success would be a lie, and would silently hand back the TTL window you enabled this to remove. These mutations are idempotent in the narrowing direction — **retry is safe**. |
+| A replica's invalidation consumer is not connected (startup, broker outage, network partition) | That replica **stops serving from its cache** and evaluates every check against the database — correct, just slower — until it reconnects | Serving allows it can no longer invalidate is the security hole; hard-failing every authorization check would be a worse availability regression than the slowdown. |
+
+**Both degraded modes are loud, not silent:**
+
+* Losing the consumer logs `AuthZ decision cache UNTRUSTED …` at **ERROR**, and
+  regaining it logs the matching INFO.
+* The periodic `AuthZ decision cache stats (D7)` line carries `trusted=` and
+  `bypassed=`. **`trusted=false`, or a rising `bypassed`, is the alert
+  condition**: that replica is running uncached. Expect its authorization
+  latency to return to the uncached numbers in
+  [the authz read path guide](authz-read-path.md) while it is in that state.
+* A 503 from a role/permission/group/resource/scope mutation with
+  `"could not be broadcast to other replicas"` in the body means the broker,
+  not the database, is the problem.
+
+**Capacity.** One small transient message per access-narrowing mutation,
+fanned out to N replicas. Administrative mutation rates are orders of magnitude
+below authorization check rates, so this is negligible next to the existing
+authz/audit/webhook traffic on the same broker.
+
+**Clock sync.** Inbound broadcasts are rejected if their `issued_at` is outside
+±`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS` (default 30 s) of the
+receiving replica's clock. Replicas should be NTP-synchronised (they already
+must be for JWT `exp` handling). Raise the skew only if the true clock spread
+is larger; a skew wider than necessary only lengthens the window in which a
+captured message stays replay-eligible.
+
+**What an attacker with publish rights to the exchange can do:** nothing but
+evict cache entries, and only if they can forge a valid HMAC under the tenant's
+derived subkey — messages are signed, version-floored (`key_version >= 2`),
+freshness-gated and nonce-deduplicated per replica, so a captured broadcast
+cannot be replayed for a thundering herd. A rejected message is logged and
+counted but can **never** disable a replica's cache: trust follows the
+consumer's connection state and nothing that arrives on the wire.
 
 ## Session-validation cache (optional, I6)
 

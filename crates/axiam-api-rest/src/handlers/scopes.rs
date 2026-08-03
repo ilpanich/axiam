@@ -195,7 +195,11 @@ pub async fn update<C: Connection + Clone>(
     // D7 (REVOCATION — security critical): decisions are cached by scope *name*.
     // Renaming a scope narrows access for requests using the old name — flush
     // the tenant so no scoped allow can survive under the stale name.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::Ok().json(scope))
 }
 
@@ -240,6 +244,10 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     // D7 (REVOCATION — security critical): deleting a scope removes it from
     // grants that referenced it, narrowing scoped access — flush the tenant.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

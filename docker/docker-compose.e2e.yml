@@ -77,6 +77,15 @@ services:
       # CI E2E job generates an ephemeral 32-byte key per run and exports it
       # before `docker compose up`; never committed.
       AXIAM__AMQP__SIGNING_KEY: "${AXIAM__AMQP__SIGNING_KEY:-}"
+      # OBS-1: the auth pepper is MANDATORY in a release build (this image) —
+      # client secrets are stored as a keyed HMAC-SHA256 tag with no unkeyed
+      # fallback, so install_from_config() fails closed and the server panics on
+      # startup (exit 101) when it is unset. Same posture and same reason as
+      # AXIAM__AMQP__SIGNING_KEY above. The CI E2E job generates an ephemeral
+      # pepper per run and exports it before `docker compose up`; never
+      # committed. A fresh pepper per run is correct here: E2E starts from an
+      # empty database, so there are no v2 hashes to carry across runs.
+      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:-}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s

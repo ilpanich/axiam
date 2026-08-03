@@ -266,9 +266,21 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Auth pepper loaded");
     } else {
         tracing::info!(
-            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper"
+            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper; \
+             client-secret hashing is mandatory-keyed and will fail closed in a release build \
+             (OBS-1)"
         );
     }
+
+    // OBS-1: install the process-wide client-secret hasher. Client secrets are
+    // stored as a keyed HMAC-SHA256 tag under the pepper — there is no unkeyed
+    // fallback — so an unset pepper must be a *startup* failure in a release
+    // build, not a first-request failure. Same posture as the mandatory AMQP
+    // master signing key (SECHRD-08 / D-05c); a debug build resolves the
+    // documented dev-only pepper with a warning.
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("client-secret pepper must resolve (OBS-1) — see AXIAM__AUTH__PEPPER");
+    tracing::info!("Client-secret hasher installed (OBS-1)");
 
     // Load allow_missing_aud_as_user override (bool, default true).
     // The serde default already sets it to true; this allows an operator to
@@ -741,6 +753,16 @@ async fn main() -> std::io::Result<()> {
         "Rate-limit posture active"
     );
 
+    // §4 item 1 (security-analysis-2026-08-02): the bucket key for
+    // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
+    // BEFORE the credential check, so under `AXIAM__RATE_LIMIT__KEY=client_id`
+    // it is attacker-mintable. Silent for the shipped default (`ip`); `warn!`
+    // for `client_id`; a softer `info!` note for the partially-mintable
+    // `ip_client_id`. Same shape as the I3 advisory below and the
+    // session-validation cache's startup `warn!` — announce the opt-in mode
+    // that carries the caveat, say nothing when the safe default is active.
+    config.rate_limit.warn_on_mintable_key();
+
     // I3: should the machine-traffic throttling advisory be armed on the
     // shared rate-limit counter built further down? Only when the shipped
     // `internet` defaults are what this process is actually enforcing —
@@ -794,11 +816,16 @@ async fn main() -> std::io::Result<()> {
         tracing::info!(
             ttl_secs = config.authz.decision_cache_ttl_secs,
             max_entries = config.authz.decision_cache_max_entries,
-            // Multi-replica caveat stated at the point of enablement, not only
-            // in the docs: invalidation is process-local, so on any deployment
-            // with more than one replica the worst-case revocation latency for
-            // the deployment is the TTL. See the `decision_cache` module docs.
-            revocation_scope = "process-local: other replicas stay stale up to ttl_secs",
+            // Multi-replica posture stated at the point of enablement, not
+            // only in the docs. Without the §4.2 broadcast channel,
+            // invalidation is process-local, so on any deployment with more
+            // than one replica the worst-case revocation latency for the
+            // deployment is the TTL. See the `decision_cache` module docs.
+            revocation_scope = if config.authz.decision_cache_broadcast_enabled {
+                "cross-replica: invalidations fan out over AMQP (§4.2)"
+            } else {
+                "process-local: other replicas stay stale up to ttl_secs"
+            },
             "AuthZ decision cache ENABLED (D7)"
         );
         // Observability for the cache's own bounds (plan H5 item 4): without
@@ -831,12 +858,130 @@ async fn main() -> std::io::Result<()> {
                         } else {
                             (s.hits as f64 / total as f64) * 100.0
                         },
+                        // §4.2: `trusted=false` / a rising `bypassed` means this
+                        // replica cannot hear cross-replica invalidations and is
+                        // evaluating everything against the database.
+                        trusted = s.trusted,
+                        bypassed = s.bypassed,
                         "AuthZ decision cache stats (D7)"
                     );
                 }
             });
         }
     }
+
+    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
+    // debug build this falls back to a documented dev-only default when
+    // unset; in a release build (the production container image) an unset
+    // key fails closed at startup — there is no unsigned code path (D-05c).
+    //
+    // Resolved here (before the engines are built) because §4.2's
+    // cross-replica cache-invalidation publisher signs with the same key and
+    // has to be attached to every engine.
+    let amqp_signing_key: Vec<u8> = config
+        .amqp
+        .resolve_signing_key()
+        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
+    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
+    // NEW-4: freshness skew window shared by both consumers.
+    let amqp_replay_skew = config.amqp.replay_skew();
+
+    // §4.2: cross-replica decision-cache invalidation over the existing
+    // RabbitMQ transport. Requires BOTH the decision cache and the broadcast
+    // switch; with either off this is `None` and every `invalidate_*` stays
+    // local-only and infallible, exactly as documented before §4.2.
+    //
+    // `replica_id` is fresh per process: it names this replica's own fanout
+    // queue and is stamped into every broadcast so the publisher recognises
+    // (and ignores) its own echo.
+    let invalidation_broadcaster: Option<Arc<dyn axiam_authz::InvalidationBroadcaster>> = match (
+        config.authz.cross_replica_invalidation_enabled(),
+        decision_cache.as_ref(),
+    ) {
+        (true, Some(cache)) => {
+            let replica_id = uuid::Uuid::new_v4();
+            let broadcast_skew = config.authz.decision_cache_broadcast_skew();
+
+            // Publisher confirms are mandatory here: without them the broker
+            // answers `NotRequested` and a broadcast the broker never accepted
+            // would be reported as success — the exact silent failure §4.2
+            // exists to remove.
+            let publish_channel = amqp
+                .create_publisher_channel()
+                .await
+                .expect("Failed to create AMQP cache-invalidation publisher channel");
+            let publisher = Arc::new(axiam_amqp::CacheInvalidationPublisher::new(
+                publish_channel,
+                amqp_signing_key.clone(),
+                replica_id,
+            ));
+
+            // Consumer supervisor. The consumer marks the cache TRUSTED once it
+            // is subscribed and UNTRUSTED on every exit path, so a replica that
+            // cannot hear invalidations falls back to full DB evaluation
+            // (correct, slower) instead of serving allows it can no longer
+            // invalidate. It must NOT take the process down: that would turn a
+            // broker blip into an availability outage, which is precisely the
+            // trade §4.2 refuses to make.
+            let consumer_amqp = Arc::clone(&amqp);
+            let consumer_cache = Arc::clone(cache);
+            let consumer_key = amqp_signing_key.clone();
+            tokio::spawn(async move {
+                let mut backoff = Duration::from_secs(1);
+                let max_backoff = Duration::from_secs(30);
+                loop {
+                    match consumer_amqp.create_channel().await {
+                        Ok(channel) => {
+                            backoff = Duration::from_secs(1);
+                            if let Err(e) = axiam_amqp::run_cache_invalidation_consumer(
+                                channel,
+                                Arc::clone(&consumer_cache),
+                                consumer_key.clone(),
+                                replica_id,
+                                broadcast_skew,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    error = %e,
+                                    "AuthZ cache-invalidation consumer failed — the decision \
+                                     cache is now UNTRUSTED on this replica; reconnecting"
+                                );
+                            } else {
+                                tracing::error!(
+                                    "AuthZ cache-invalidation consumer exited — the decision \
+                                     cache is now UNTRUSTED on this replica; reconnecting"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to (re)create the AuthZ cache-invalidation channel — the \
+                                 decision cache stays UNTRUSTED on this replica; retrying"
+                            );
+                        }
+                    }
+                    // Belt and braces: the consumer's own Drop guard already did
+                    // this, but a failure to even open a channel never reached it.
+                    consumer_cache.set_trusted(false);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+            });
+
+            tracing::info!(
+                replica_id = %replica_id,
+                exchange = axiam_amqp::exchanges::AUTHZ_CACHE_INVALIDATE,
+                skew_secs = config.authz.decision_cache_broadcast_skew_secs,
+                "Cross-replica AuthZ decision-cache invalidation ENABLED (§4.2, fanout) — a \
+                 mutation whose broadcast the broker does not confirm now returns 503, and this \
+                 replica will not serve from cache while its invalidation consumer is down"
+            );
+            Some(publisher as Arc<dyn axiam_authz::InvalidationBroadcaster>)
+        }
+        _ => None,
+    };
 
     // Build REST-facing authorization checker (D-01, D-02).
     let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> = {
@@ -851,8 +996,12 @@ async fn main() -> std::io::Result<()> {
             config.authz.batch_strategy,
             config.authz.batch_max_concurrency,
         );
-        Arc::new(match decision_cache.as_ref() {
+        let engine = match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        Arc::new(match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
             None => engine,
         })
     };
@@ -875,22 +1024,15 @@ async fn main() -> std::io::Result<()> {
             config.authz.batch_strategy,
             config.authz.batch_max_concurrency,
         );
-        match decision_cache.as_ref() {
+        let engine = match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
             None => engine,
         }
     };
-    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
-    // debug build this falls back to a documented dev-only default when
-    // unset; in a release build (the production container image) an unset
-    // key fails closed at startup — there is no unsigned code path (D-05c).
-    let amqp_signing_key: Vec<u8> = config
-        .amqp
-        .resolve_signing_key()
-        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
-    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
-    // NEW-4: freshness skew window shared by both consumers.
-    let amqp_replay_skew = config.amqp.replay_skew();
     let amqp_signing_key_clone = amqp_signing_key.clone();
     let authz_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
@@ -1041,8 +1183,12 @@ async fn main() -> std::io::Result<()> {
             config.authz.batch_strategy,
             config.authz.batch_max_concurrency,
         );
-        match decision_cache.as_ref() {
+        let engine = match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
             None => engine,
         }
     };

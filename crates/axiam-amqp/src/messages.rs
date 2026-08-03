@@ -261,6 +261,65 @@ pub struct NotificationEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Cross-replica authorization **decision-cache invalidation** broadcast
+/// (§4.2), carried on the `axiam.authz.cache.invalidate` **fanout** exchange.
+///
+/// This is a control-plane instruction, not data: it tells every replica to
+/// drop cached authorization decisions for a tenant (or for one subject within
+/// a tenant) so a revocation takes effect everywhere instead of only on the
+/// replica that handled the mutation. It therefore carries the **same §8
+/// signed envelope as [`AuthzRequest`] / [`AuditEventMessage`]** — per-tenant
+/// HKDF subkey, `key_version >= 2`, per-message `nonce`, `issued_at` freshness
+/// — rather than trusting the broker's ACLs alone. The threat is not
+/// escalation (the worst a verified message can do is evict entries) but a
+/// cheap cache-eviction / thundering-herd lever, and, if the payload is ever
+/// extended, worse.
+///
+/// **Wire order is load-bearing** (the HMAC is over these bytes in declaration
+/// order, exactly as for `AuthzRequest`):
+/// `origin_id, tenant_id, subject_id?, key_version, nonce, issued_at,
+/// hmac_signature?`.
+///
+/// `origin_id` identifies the **publishing replica** and exists solely for
+/// self-echo suppression: a fanout exchange delivers the message back to the
+/// publisher's own queue, and re-applying an invalidation the publisher
+/// already applied locally is pure waste. It is not a security boundary —
+/// claiming someone else's `origin_id` can only suppress your *own* message.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheInvalidationMessage {
+    /// Publishing replica's process-unique id (self-echo suppression).
+    pub origin_id: Uuid,
+    /// Tenant whose cached decisions are invalidated. Also selects the
+    /// per-tenant HKDF subkey, so a message signed for tenant A can never be
+    /// replayed as tenant B's.
+    pub tenant_id: Uuid,
+    /// Subject to narrow the invalidation to. Absent = flush the whole tenant.
+    /// These are the only two granularities the decision cache supports; no
+    /// finer key is invented here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<Uuid>,
+    /// HKDF master-key rotation version (SECHRD-08 / D-05b).
+    #[serde(default = "default_key_version")]
+    pub key_version: u8,
+    /// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
+    /// so it is inside the signed HMAC body. Deduplicated **per replica, in
+    /// memory** — never against the shared durable nonce store, which would be
+    /// catastrophic here: on a fanout every replica sees the same nonce, so a
+    /// shared store would let exactly one replica win and make all the others
+    /// reject the invalidation as a replay.
+    #[serde(default = "default_nonce")]
+    pub nonce: Uuid,
+    /// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
+    /// so it is inside the signed HMAC body.
+    #[serde(default = "default_issued_at")]
+    pub issued_at: DateTime<Utc>,
+    /// HMAC-SHA256 over the JSON body with this field set to null, using the
+    /// per-tenant subkey from [`derive_tenant_key`]. Mandatory — consumers
+    /// reject unsigned and invalid-signature messages alike; no fail-open path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_signature: Option<String>,
+}
+
 /// Webhook delivery message carried on the `axiam.webhook` /
 /// `axiam.webhook.retry` queues (CORR-03/D-07).
 ///

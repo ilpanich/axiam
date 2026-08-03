@@ -46,6 +46,19 @@ pub mod queues {
     pub const WEBHOOK_DLQ: &str = "axiam.webhook.dlq";
 }
 
+/// Well-known exchange names used by AXIAM.
+pub mod exchanges {
+    /// **Fanout** exchange carrying cross-replica authorization
+    /// decision-cache invalidations (§4.2).
+    ///
+    /// Fanout, not a work queue: every replica binds its **own** exclusive
+    /// auto-delete queue (`<this>.<replica_uuid>`) so every replica receives
+    /// every invalidation. A shared queue would deliver each message to
+    /// exactly one consumer and leave the rest serving stale allows. See
+    /// [`crate::cache_invalidation`].
+    pub const AUTHZ_CACHE_INVALIDATE: &str = "axiam.authz.cache.invalidate";
+}
+
 /// Queues declared via the plain durable loop (no special arguments).
 ///
 /// These are declared first so that the DLQ targets already exist when the

@@ -353,7 +353,7 @@ Both commits landed after §9 and change security-relevant behaviour.
 
 1. **`member_of` is never tenant-filtered at read time** (`role.rs:551-586`) — pre-existing, not introduced by the rewrite. Currently unreachable because `group.rs:355-389` validates both endpoints against the tenant at write time, and the outer `out.tenant_id` predicate still confines the resulting role. But it leaves group-inherited roles as the one authz edge with no read-time tenant check, so a migration or bulk-import that writes `member_of` directly would bypass it. Adding `AND out.tenant_id = $tenant_id` inside the `LET` is index-served and free.
 2. **Session-cache invalidation ordering** — in `consume` (`session.rs:284-286`) and `invalidate_user_sessions_except` (`:330-336`) invalidation happens *after* `result.take(0)?`; a `DELETE` that succeeds but whose row fails to deserialize returns early and leaves a positive entry live for up to TTL. Cheap fix: invalidate immediately after the `.await`.
-3. **Session cache does not re-check user status** — a user disabled or locked without a session sweep stays authenticated for up to TTL. Same semantics as the pre-cache inline check, so not a regression, but enabling the cache widens the window from "next request" to "TTL".
+3. **~~Session cache does not re-check user status~~ — ✅ CLOSED 2026-08-03: misdescribed, and subsumed by `T-39`.** *As written*, this said a disabled user "stays authenticated for up to TTL" and that enabling the cache "widens the window from *next request* to *TTL*". Tracing the path shows the premise is wrong in the SDK-favourable direction: `AuthenticatedUser::from_request` (`extractors/auth.rs:105-115`) calls only `is_session_active`, which resolves to `is_session_active_checked` (`session.rs:144-160`) — and that checks **only the session row's `expires_at`**. There is no user-status check anywhere on the session-authenticated request path, cached or uncached. So the pre-cache path never caught a disabled user either, and **the cache widens nothing**. What actually bounds the exposure is `AuthService::refresh`, which reloads the user and calls `check_user_status` before minting — so a disabled user loses access when their current access token expires. That is the already-accepted 15-minute revocation lag, threat-model **`T-39`**, not a property of the session-validation cache. Carrying it as a separate cache residual overstated the cache's risk. Closed here; `T-39` remains the correct home.
 4. **`Unlimited` gRPC family is a prefix test on the attacker-controlled path** (`rate_limit.rs:151`) — `/grpc.reflection.` and `/grpc.health.` bypass **both** limiter layers. Neither service is registered today (requests terminate `Unimplemented`), so the effect is unmetered HTTP/2 stream churn, not DB work. If a health service is ever registered this becomes a genuinely unmetered endpoint; cap the family with a generous-but-finite bucket instead of a pass-through.
 5. **Unauthenticated work factor on `/oauth2/introspect` rose 60×** (10→600/min) — the endpoint *does* authenticate the client before any lookup, so it is not a token oracle; the residual is that a pre-auth caller can now drive 600 client lookups + SHA-256 per minute per IP instead of 10.
 6. **OBS-1 carried forward** — client secrets remain unsalted single-round SHA-256. Acceptable only while every secret is 32 CSPRNG bytes with no operator-supplied path; `421e3e2a`'s doc comment now enshrines it as a design property, which is the moment it deserves a tracking ticket rather than a code comment.
@@ -451,3 +451,147 @@ For part of this pass the Swift SEC-080 fix existed only on `origin/claude/axiam
 - **All findings from this document are now closed**: SEC-071 … SEC-078 (§10.1), SEC-079 and SEC-080 (§11.1), and `T-145` (11/11 SDKs).
 - **Open residuals, all accepted and documented**: §10.4 residuals 3 and 5, OBS-1 (client-secret hashing — with its trigger condition stated), OBS-2, and OBS-3 above.
 - **Carried recommendation, unresolved**: the cross-SDK local-verification set still drifts — C honours `nbf`, C++ checks optional `iss`/`aud`, Swift models neither. `CONTRACT.md` §10 should state the minimum set every guard must enforce so this stops being decided per SDK. This is the class both SEC-071 and SEC-080 came from, and it is the one structural gap in the SDK guard surface that no individual fix closes.
+
+---
+
+## 12. CONTRACT §10.1 sweep — five new findings across the SDK guard surface (2026-08-03)
+
+> ⚠️ **Written by the remediation work, not by a reviewer.** Per the §10.7
+> precedent, every status below is a **claim pending verification**. The two
+> preceding independent passes each found something the remediation's own
+> report had missed, so this section is deliberately not self-certified.
+
+### 12.1 Why this pass happened
+
+§11.4 carried one unresolved recommendation: *"the cross-SDK local-verification
+set still drifts — C honours `nbf`, C++ checks optional `iss`/`aud`, Swift
+models neither. `CONTRACT.md` §10 should state the minimum set every guard must
+enforce so this stops being decided per SDK. This is the class both SEC-071 and
+SEC-080 came from, and it is the one structural gap in the SDK guard surface
+that no individual fix closes."*
+
+That recommendation was actioned: **`sdks/CONTRACT.md` §10.1 — Minimum
+local-verification set (normative)** now states the seven rules once, and all
+eleven SDKs were audited against it rule by rule.
+
+**The audit found substantially more than drift.** Stating the complete set and
+checking every SDK against it surfaced five findings that three prior security
+passes had not — not because those passes were careless, but because **there
+was no complete set to check against**. Each SDK's subset looked complete in
+isolation, and the reference implementation's blind spot propagated as the
+standard.
+
+### 12.2 New findings
+
+#### SEC-081 [HIGH] ❌ — `X-Tenant-ID` header selected the tenant a token was verified against (C#, PHP)
+
+- **Files**: C# `AspNetCore/AxiamAuthMiddleware.cs:103-107`; PHP `Laravel/AxiamMiddleware.php:98`, `Symfony/AxiamAuthSubscriber.php:104`.
+- **Defect**: both guards computed the expected tenant as `header ?: configured` — PHP literally `$request->headers->get('X-Tenant-ID') ?: $this->tenant` — and then verified the token against **that**. The header is attacker-controlled, so presenting a token minted for tenant B alongside `X-Tenant-ID: B` compared the token **against itself**.
+- **Impact**: the tenant assertion was not incomplete, it was **vacuous** — a cross-tenant authentication bypass on any ASP.NET Core, Laravel or Symfony app using the bridge. C# then injected the attacker's tenant into `HttpContext.User`, so downstream authorization also ran under the wrong tenant. This is strictly worse than SEC-072, which merely *skipped* the check when the header was absent.
+- **Bounded by inspection**: Python, Java, Rust, TypeScript, Kotlin and Swift use `X-Tenant-ID` only as an **outbound** client header. Go already had it right (`middleware/nethttp.go:151` — `h != "" && h != claims.TenantID`, narrowing only). Confined to C# and PHP.
+- **Fix**: the configured tenant is authoritative; an inbound header may only **narrow** (when present it must agree with the verified claim) and can never select the expectation. C# `1d2e077`, PHP `8587418`.
+
+#### SEC-082 [HIGH] ❌ — Rust SDK required `tenant_id` but never compared it
+
+- **File**: `axiam-rust-sdk` `src/token/jwks.rs` (pre-fix), `src/middleware/actix.rs:303`.
+- **Defect**: `Claims::tenant_id` is a non-`Option` field, so serde enforced its **presence** — and nothing ever compared it to a configured tenant. The middleware merely parsed it into the injected identity.
+- **Impact**: the JWKS trust anchor is organization-wide, so a validly-signed token from **any sibling tenant** was accepted by an Actix guard configured for a different one, then injected as that tenant's identity. Same class as SEC-071 and SEC-072.
+- **Why it was missed**: requiring a claim *reads* as handling it. The token could not decode without a `tenant_id`, so nothing looked absent — the gap was that presence was never followed by comparison.
+- **Fix**: `expect_tenant_id` + `assert_tenant`, failing closed on absent claim, unparseable claim, **and** unconfigured verifier. `84b7c7a`.
+
+#### SEC-083 [MEDIUM] ❌ — the SEC-080 defect was present in eight of eleven SDKs
+
+`exp` checked only when present — "the claim was missing so there was nothing to check" — making a token with no `exp` a permanent credential.
+
+| SDK | Shape | Commit |
+|---|---|---|
+| Swift | `if let exp = claims.exp` | `bc7c48d` (SEC-080) |
+| Kotlin | `if (exp != null && …)` | `0f06a53` |
+| Python | `exp_ts = float(exp) if exp is not None else None` | `b762870` |
+| Java | `if (expiration != null && expiration.before(…))` | `e4bada0` |
+| Go | `if claims.Exp != 0 && …` — absent decoded to the **zero value** | `f749b1f` |
+| C# | `TryGetProperty("exp",…) && TryGetInt64(…) && expired` | `1d2e077` |
+| PHP | inherited from `firebase/php-jwt`'s `isset($payload->exp) && …` | `8587418` |
+| TypeScript | inherited from `jose`'s `if (payload.exp !== undefined)` | `e99cb2b` |
+
+Only C, C++ and Rust rejected an absent `exp`. **The same rule failed for a different reason in each language** — a nil check, an `Option`, a zero value, a `TryGet` conjunct, and two library defaults that validate a claim only when present. No single code-review pattern catches all of those, which is the argument for a stated contract rather than eleven independent fixes.
+
+Three SDKs additionally accepted a **numeric-string** `exp` (`"1700000000"`), coerced rather than rejected as the wrong JSON type: Python (`float()`), Go, PHP (`is_numeric()`).
+
+#### SEC-084 [LOW] ❌ — unbounded, operator-settable clock skew
+
+C++ used an inline literal with no ceiling; PHP delegated to `firebase/php-jwt`'s `JWT::$leeway`, a **public mutable static** any code in the process can set to an unbounded value. Rust and TypeScript had zero leeway with no named constant. All now use a named constant; C++ enforces a 60 s ceiling and PHP pins `JWT::$leeway` for the duration of each decode. `46a9636`, `8587418`, `84b7c7a`, `e99cb2b`.
+
+#### OBS-4 — signed-integer overflow (UB) in the C++ base64url decoder
+
+`axiam-cplusplus-sdk/src/jwks.cpp` accumulated into a never-truncated `int`, overflowing on any token longer than a few characters — undefined behaviour on the **token-decode path**. Pre-existing, unrelated to §10.1, and surfaced only because the ASan+UBSan leg was run manually: **neither the C nor the C++ repository has a sanitizer or valgrind job in CI**. Fixed in `46a9636`; the missing CI gate is the more durable issue and is not addressed here.
+
+### 12.3 What the libraries actually do — recorded because two gaps came from defaults
+
+| Library | Behaviour vs §10.1 |
+|---|---|
+| `jsonwebtoken` (Rust) | `validate_nbf` defaults to **`false`**. Configuring an expected `aud` still accepts a token with **no** `aud` unless it is also added to `required_spec_claims` — an absent claim never trips the comparison. |
+| `jose` (TS) | `exp` checked **only if present**; `requiredClaims` is the fix and is not a default. But supplying `issuer`/`audience` **does** add a presence check — the opposite of `jsonwebtoken` on the same rule. |
+| PyJWT | Its own docstring states the gap. A wrong-typed `exp` raises `TypeError`, **not** a `PyJWTError`, so it escaped the handler and would have surfaced as a 500 rather than a 401. |
+| nimbus (Java) | Applies **no** claim policy at all — pure getters. The natural `exp != null &&` idiom is therefore the path of least resistance, which is exactly how the defect arose. |
+| `firebase/php-jwt` | Validates `exp`/`nbf`/`iat` **only when present**; `is_numeric()` accepts numeric strings; `JWT::$leeway` is a public mutable static. |
+| `lestrrat-go/jwx` (Go) | JWS parse/verify only — no claim validation whatsoever, so every rule was the SDK's own responsibility. |
+| C# | **No JWT library at all.** `TokenValidationParameters` is absent from the dependency graph — .NET has no Ed25519 primitive, so JOSE is hand-rolled over BouncyCastle. Every gap was hand-written, not inherited. |
+
+The lesson worth keeping: **"the library validates `exp`" is not a control.** Four of these validate `exp` in some sense and still accept a token that has none.
+
+### 12.4 Corrections to earlier sections of this document
+
+1. **§10.7's claim that residual 2 had no test seam was wrong.** It stated that reaching the invalidation-ordering bug "requires the database to commit a `DELETE … RETURN BEFORE` and then return a BEFORE image that fails to deserialize, which the real embedded SurrealDB cannot produce, and the repository takes a concrete `Surreal<C>` rather than a mockable trait." The premise about the *connection* is right; the conclusion is not. SurrealDB provides a seam **inside the database**: `DEFINE EVENT … WHEN $event = 'DELETE' THEN { THROW … }` makes the real engine fail the statement. The regression test §10.7 called impossible now exists and covers all five delete paths, proving both that the error propagates *and* that the cache is invalidated first. Recorded in `1f498ec`.
+
+2. **§11.4's carried recommendation is actioned**, not merely noted — `CONTRACT.md` §10.1 is normative and all eleven SDKs are aligned.
+
+### 12.5 Status
+
+| Item | Status | Evidence |
+|---|---|---|
+| **SEC-081** (tenant-header override) | Remediated — pending verification | C# `1d2e077`, PHP `8587418` |
+| **SEC-082** (Rust tenant never compared) | Remediated — pending verification | `84b7c7a` |
+| **SEC-083** (absent `exp`, 8 SDKs) | Remediated — pending verification | see the table in §12.2 |
+| **SEC-084** (unbounded skew) | Remediated — pending verification | `46a9636`, `8587418`, `84b7c7a`, `e99cb2b` |
+| **OBS-4** (C++ base64url UB) | Fixed — pending verification | `46a9636` |
+| **OBS-1** (client-secret hashing) | Remediated — pending verification | `2fa25c1` + startup gate `8162f00` |
+| **OBS-3** (swallowed revocation errors) | Remediated — pending verification, **now with a regression test** | `1f498ec` |
+| §4 residual 1 (mintable rate-limit key) | Advisory added | `1f498ec` |
+| §11.2 (evidence must resolve on main) | CI gate added | `1f498ec` |
+| §4 residual 2 (multi-replica cache staleness) | **Closed** — remediated, pending verification | `e5b2a26` |
+
+**§4 residual 2 — closed rather than accepted.** The ≤ `decision_cache_ttl_secs`
+stale-allow window (threat-model `T-88`) is now closable with
+`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`: invalidations fan out
+over the existing RabbitMQ transport to a per-replica exclusive queue, carrying
+the §8 signed envelope. Default off and inert when off, so a single-replica
+deployment that enables the cache acquires no AMQP dependency and the previously
+documented behaviour is unchanged.
+
+Two design points are worth recording, because both are traps the obvious
+implementation falls into:
+
+1. **Trust follows the consumer's connection liveness only.** A replica that
+   cannot hear invalidations stops serving from its cache (correct, slower)
+   rather than serving allows it can no longer invalidate. But a stale — though
+   validly signed — *message* is rejected and logged **without** revoking trust.
+   Tying trust to message freshness would turn a single captured broadcast into
+   an on-demand lever for disabling every replica's cache fleet-wide.
+2. **Nonce dedup is per-replica and in-memory, never the shared durable store.**
+   On a fanout every replica sees the same nonce; a shared store would let
+   exactly one replica record it first and make all the others reject the
+   invalidation as a replay — reinstating the very hole this closes, everywhere
+   but one node.
+
+Publish-side failure fails the *mutation* (503) rather than reporting a
+revocation that did not fully take effect; the local cache is dropped before the
+publish is attempted, so the mutating replica is never the stale one. Both are
+operator-visible behaviour changes and are documented as such.
+
+### 12.6 Recommendations that remain open
+
+1. **Add sanitizer/valgrind gates to the C and C++ CI.** OBS-4 was undefined behaviour on the token-decode path that survived because the only jobs are gcc/clang builds plus coverage. Both repos' suites pass cleanly under ASan+UBSan today — wiring them in is cheap and would have caught it.
+2. **`AXIAM__AUTH__PEPPER` is now mandatory in release builds** (OBS-1). This is an operator-visible breaking change; it needs release-note prominence, and the pepper must not be rotated without re-issuing every client secret.
+3. **Go's `govulncheck` reports 26 stdlib advisories** from the go1.25.0 toolchain, fixed in go1.25.3. A toolchain bump, not a code change, but real.
+4. **Kotlin's coverage margin is 0.19 points** above its 98% floor, because of pre-existing untested webhook lines. The next unrelated addition will trip the gate.

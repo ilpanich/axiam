@@ -2,21 +2,20 @@
 //! and refresh_token grant types. Also provides revocation (RFC 7009) and
 //! introspection (RFC 7662).
 
+use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     generate_refresh_token, hash_refresh_token, issue_access_token, issue_client_credentials_token,
     issue_id_token, validate_access_token,
 };
 use axiam_core::error::AxiamError;
-use axiam_core::models::oauth2_client::CreateRefreshToken;
+use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
 use axiam_core::repository::{
     AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
     UserRepository,
 };
-use axiam_db::hash_client_secret;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::error::OAuth2Error;
@@ -134,6 +133,75 @@ where
         }
     }
 
+    /// Verify a presented client secret against the stored hash — the single
+    /// point at which every grant authenticates a confidential client.
+    ///
+    /// The comparison is constant-time and keyed (HMAC-SHA256 under the server
+    /// pepper, `axiam_auth::client_secret`). A pre-OBS-1 row still stored as a
+    /// bare SHA-256 digest verifies against the legacy scheme and is then
+    /// **transparently upgraded**: the replacement hash is written back with a
+    /// compare-and-swap so a concurrent rotation is never clobbered.
+    ///
+    /// Two properties this function exists to guarantee:
+    ///
+    /// - the upgrade is driven by [`ClientSecretVerdict::MatchNeedsUpgrade`],
+    ///   which the hasher only ever returns on a **successful** verification —
+    ///   a wrong secret can never cause a write; and
+    /// - a failed *write* never becomes a failed *authentication*. The client
+    ///   proved possession of the secret; losing the migration is a warning,
+    ///   and the next request simply retries it.
+    ///
+    /// Cost on the hot path: one HMAC-SHA256 over the secret into a stack
+    /// buffer, plus an `OnceLock` acquire load. No heap allocation and no lock
+    /// — strictly less than the `String` the previous `hash_client_secret`
+    /// allocated per request. The DB write happens at most once per legacy
+    /// client, on its first authentication after the upgrade.
+    async fn verify_client_secret(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        presented: &str,
+    ) -> Result<(), OAuth2Error> {
+        let hasher =
+            client_secret::global().map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        match hasher.verify(presented, &client.client_secret_hash) {
+            ClientSecretVerdict::Match => Ok(()),
+            ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
+                match self
+                    .client_repo
+                    .upgrade_client_secret_hash(
+                        tenant_id,
+                        &client.client_id,
+                        &client.client_secret_hash,
+                        &upgraded_hash,
+                    )
+                    .await
+                {
+                    Ok(true) => tracing::info!(
+                        client_id = %client.client_id,
+                        "upgraded legacy client-secret hash to the peppered scheme (OBS-1)"
+                    ),
+                    Ok(false) => tracing::debug!(
+                        client_id = %client.client_id,
+                        "legacy client-secret hash upgrade skipped — a concurrent write won \
+                         the compare-and-swap"
+                    ),
+                    Err(e) => tracing::warn!(
+                        client_id = %client.client_id,
+                        error = %e,
+                        "failed to persist the legacy client-secret hash upgrade (OBS-1); \
+                         authentication succeeded, the upgrade will be retried"
+                    ),
+                }
+                Ok(())
+            }
+            ClientSecretVerdict::Mismatch => Err(OAuth2Error::InvalidClient(
+                "invalid client credentials".into(),
+            )),
+        }
+    }
+
     /// Dispatch a token request to the appropriate grant handler.
     pub async fn exchange(
         &self,
@@ -196,16 +264,8 @@ where
             .client_secret
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
-        let provided_hash = hash_client_secret(client_secret);
-        if !bool::from(
-            provided_hash
-                .as_bytes()
-                .ct_eq(client.client_secret_hash.as_bytes()),
-        ) {
-            return Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            ));
-        }
+        self.verify_client_secret(tenant_id, &client, client_secret)
+            .await?;
 
         // Look up the authorization code without consuming it so we
         // can verify PKCE *before* marking it as used.  This prevents
@@ -354,9 +414,12 @@ where
     /// There is deliberately **no "token persist" stage**: the
     /// `client_credentials` grant issues no refresh token and writes nothing —
     /// the only DB work is the two reads below. That, plus the fact that the
-    /// client secret is verified with SHA-256 rather than Argon2id (see
-    /// `axiam_db::hash_client_secret`), is why this endpoint measures 2 727
-    /// req/s where password login measures 69.
+    /// client secret is verified with a single keyed HMAC-SHA256 rather than
+    /// Argon2id (see `axiam_auth::client_secret`), is why this endpoint
+    /// measures 2 727 req/s where password login measures 69. The OBS-1
+    /// remediation deliberately kept this MAC-bound rather than KDF-bound:
+    /// client secrets are 256-bit CSPRNG values *and* the digest is now keyed,
+    /// so the offline-guessing threat a KDF defends against does not apply.
     #[tracing::instrument(
         name = "oauth2.client_credentials",
         skip(self, req),
@@ -401,22 +464,19 @@ where
             })?;
         let client_lookup_us = t_client_lookup.elapsed().as_micros() as u64;
 
-        // Stage 2 — client-secret verification. SHA-256 + constant-time compare
-        // (`axiam_db::hash_client_secret`); this does NOT touch the Argon2id
-        // `crypto_semaphore` that bounds password verification.
+        // Stage 2 — client-secret verification. Keyed HMAC-SHA256 into a stack
+        // buffer + constant-time compare (`axiam_auth::client_secret`); no heap
+        // allocation, no lock, and this does NOT touch the Argon2id
+        // `crypto_semaphore` that bounds password verification. A pre-OBS-1
+        // row additionally costs one SHA-256 and, once, one DB write to
+        // migrate; the timing recorded here therefore includes that one-off
+        // upgrade for a legacy client's first authentication.
         let t_secret_verify = std::time::Instant::now();
-        let provided_hash = hash_client_secret(client_secret);
-        let secret_ok = bool::from(
-            provided_hash
-                .as_bytes()
-                .ct_eq(client.client_secret_hash.as_bytes()),
-        );
+        let secret_result = self
+            .verify_client_secret(tenant_id, &client, client_secret)
+            .await;
         let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
-        if !secret_ok {
-            return Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            ));
-        }
+        secret_result?;
 
         // Verify grant type is allowed
         if !client.grant_types.iter().any(|s| s == "client_credentials") {
@@ -548,16 +608,8 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
-        let provided_hash = hash_client_secret(client_secret_val);
-        if !bool::from(
-            provided_hash
-                .as_bytes()
-                .ct_eq(client.client_secret_hash.as_bytes()),
-        ) {
-            return Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            ));
-        }
+        self.verify_client_secret(tenant_id, &client, client_secret_val)
+            .await?;
 
         // Verify client is authorized for refresh_token grant
         if !client.grant_types.iter().any(|s| s == "refresh_token") {
@@ -848,16 +900,8 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
-        let provided_hash = hash_client_secret(client_secret);
-        if !bool::from(
-            provided_hash
-                .as_bytes()
-                .ct_eq(client.client_secret_hash.as_bytes()),
-        ) {
-            return Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            ));
-        }
+        self.verify_client_secret(tenant_id, &client, client_secret)
+            .await?;
 
         Ok(())
     }

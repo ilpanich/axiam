@@ -690,6 +690,28 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<OAuth2Client>>> + Send;
+
+    /// Migrate a stored `client_secret_hash` from a legacy scheme to the
+    /// current one (OBS-1), after a **successful** verification of the
+    /// presented secret.
+    ///
+    /// Legacy hashes are unsalted SHA-256 digests and cannot be re-derived
+    /// offline — the secret was never stored — so migration is necessarily
+    /// lazy and happens on the authentication path.
+    ///
+    /// Implementations MUST compare-and-swap on `expected_hash`: a secret
+    /// rotation racing this upgrade would otherwise be clobbered, silently
+    /// resurrecting the previous secret. Returns `true` when a row was
+    /// actually updated, `false` when the CAS did not match (a concurrent
+    /// write won — nothing to do). Callers MUST NOT turn a failure here into
+    /// an authentication failure: authentication has already succeeded.
+    fn upgrade_client_secret_hash(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {

@@ -171,7 +171,11 @@ pub async fn update<C: Connection + Clone>(
     // D7 (REVOCATION — security critical): changing a permission's `action`
     // narrows access (a subject allowed for the old action is now denied).
     // Flush the tenant.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::Ok().json(permission))
 }
 
@@ -202,7 +206,11 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     // D7 (REVOCATION — security critical): deleting a permission removes it
     // from every role/subject that was granted it. Flush the tenant.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -245,7 +253,11 @@ pub async fn grant_to_role<C: Connection + Clone>(
     // D7: granting widens access (safe direction) for every subject holding
     // the role (set unknown here) — flush the tenant so the new grant is
     // visible immediately.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -307,6 +319,10 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     // D7 (REVOCATION — security critical): revoking a grant removes access for
     // every subject holding this role. The subject set isn't known here without
     // a query, so flush the whole tenant — this must never leave a stale allow.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

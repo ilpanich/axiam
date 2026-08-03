@@ -182,6 +182,8 @@ changes performance, never the decision an endpoint returns.
 | `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `false` | Master switch. When `false`, the authorization path is byte-for-byte identical to a build without the cache. |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | `5` | Time-to-live for a cached decision, in seconds. Also the **bound on worst-case revocation latency** if an invalidation event is ever missed (see below). Keep it short. |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | `10000` | Maximum cached decisions retained **per tenant** before FIFO eviction (memory bound). |
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | `false` | Fan invalidations out to **every replica** over RabbitMQ (§4.2). Requires the master switch above. See [below](#cross-replica-invalidation-optional-42). |
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS` | `30` | Freshness window for an inbound invalidation broadcast. Only used when the broadcast channel is on. |
 
 The cache key is `(tenant, subject, resource, action, scope)` and it stores the
 **full** decision — an allow, or a deny *with its exact reason* — so a cache
@@ -211,12 +213,14 @@ A per-tenant flush is the conservative fallback for coarse mutations; it can
 never leave a stale allow. **The security guarantee is: on the replica that
 handled the mutation, no revocation leaves a stale allow** — the cache entry is
 dropped in the same request that performs the revocation, before the response
-returns. On *other* replicas the guarantee is the ≤ TTL bound below; read the
-next section before enabling this in a scaled deployment.
+returns. Whether that guarantee extends to the *other* replicas depends on the
+broadcast switch; read the next two sections before enabling this in a scaled
+deployment.
 
-### The cache is process-local — what that means with more than one replica
+### Without the broadcast channel, the cache is process-local
 
-The cache lives in the server process and there is **no cross-replica
+With `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=false` (the default) the
+cache lives in the server process and there is **no cross-replica
 invalidation** (no AMQP fan-out, no shared store, no webhook). So:
 
 | Deployment | Revocation latency for the decision cache |
@@ -234,10 +238,47 @@ Three consequences worth stating plainly:
 - The window is **silent and unobservable**: a hit is byte-identical to a miss
   and the audit log records the decision, not its provenance. After an incident
   you cannot tell from the logs whether a given allow came from cache.
-- Therefore: enable the cache on a single replica, or only where a ≤ TTL
-  revocation window is an accepted risk. If you need immediate revocation
-  across replicas, leave `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` (the
-  default) until a cross-replica invalidation channel exists.
+- Therefore: enable the broadcast channel below, enable the cache on a single
+  replica, or accept a ≤ TTL revocation window.
+
+### Cross-replica invalidation (optional, §4.2)
+
+Setting `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` (on top of
+`DECISION_CACHE_ENABLED=true`) closes that window. Every invalidation from the
+table above is *also* published, HMAC-signed, to the **fanout** exchange
+`axiam.authz.cache.invalidate`; each replica binds its own exclusive
+auto-delete queue and applies what it receives. Revocation then reaches all
+replicas in broker-latency time. The table's granularity is unchanged — a
+broadcast carries exactly "flush this tenant" or "flush this subject in this
+tenant", nothing finer.
+
+It needs no new infrastructure: RabbitMQ is already required, and the messages
+are signed with the same mandatory `AXIAM__AMQP__SIGNING_KEY` (per-tenant
+HKDF-SHA256 subkey, `key_version >= 2`, per-message nonce, `issued_at`
+freshness) that the authz and audit consumers use. All replicas must share that
+key.
+
+**Two operational behaviours to know before enabling it:**
+
+1. **A mutation whose broadcast the broker does not confirm returns 503.** The
+   database write is durable, but the other replicas were not told, so the
+   revocation has not fully taken effect and the API says so rather than
+   reporting success. The response body contains *"could not be broadcast to
+   other replicas"*. Every such mutation is idempotent in the narrowing
+   direction — **retry it**.
+2. **A replica whose invalidation consumer is disconnected stops using its
+   cache.** It falls back to full database evaluation — correct, just slower —
+   rather than serving allows it can no longer invalidate. This also covers the
+   startup window: a replica does not serve a single cached decision until its
+   consumer has subscribed.
+
+Neither mode is silent — see *Observing what the cache is doing* below.
+
+**What this does not change:** the TTL is still the backstop; the audit log
+still records the decision, not its provenance; and a *rejected* broadcast
+(bad signature, stale, replayed) is logged and counted but can never disable a
+replica's cache — trust follows the consumer's connection state only, so a
+captured message cannot be used as a cache-disabling lever.
 
 ### Observing what the cache is doing
 
@@ -245,11 +286,21 @@ With the cache enabled the server logs a
 `AuthZ decision cache stats (D7)` line every 60 s
 (`AXIAM__AUTHZ__DECISION_CACHE_STATS_SECS=0` disables it, any other positive
 value changes the period) carrying `entries`, `tenants`, `queue_slots`, `hits`,
-`misses` and `hit_rate_pct`. Use `entries` to check whether the working set is
-actually hitting `DECISION_CACHE_MAX_ENTRIES` (i.e. whether FIFO eviction is
-running and depressing the hit rate) and `hit_rate_pct` to decide whether the
-cache is earning its staleness window at all — a low hit rate means a large key
-space and no benefit.
+`misses`, `hit_rate_pct`, `trusted` and `bypassed`. Use `entries` to check
+whether the working set is actually hitting `DECISION_CACHE_MAX_ENTRIES` (i.e.
+whether FIFO eviction is running and depressing the hit rate) and
+`hit_rate_pct` to decide whether the cache is earning its staleness window at
+all — a low hit rate means a large key space and no benefit.
+
+**With cross-replica invalidation enabled, `trusted` and `bypassed` are the
+alert conditions:**
+
+| Signal | Meaning | Action |
+| --- | --- | --- |
+| `trusted=false`, or `bypassed` rising | This replica cannot hear invalidations and is evaluating every check against the database. Correct, but at uncached latency. | Check broker connectivity from that pod. It recovers on its own once the consumer reconnects. |
+| `AuthZ decision cache UNTRUSTED …` at **ERROR** | The moment it lost the invalidation stream. | As above. |
+| `AuthZ decision cache TRUSTED again …` at INFO | Recovered; the cache restarts from empty. | None. |
+| 503 with *"could not be broadcast to other replicas"* on a mutation | The broker, not the database, refused. The write landed; the fan-out did not. | Retry the mutation. |
 
 ### Bounded-staleness backstop
 

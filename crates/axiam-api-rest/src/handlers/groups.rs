@@ -186,7 +186,11 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     // D7 (REVOCATION — security critical): deleting a group removes its
     // inherited roles from every member. Member set unknown here — flush tenant.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -226,7 +230,8 @@ pub async fn add_member<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, new_member);
+        .invalidate_subject(user.tenant_id, new_member)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -300,6 +305,7 @@ pub async fn remove_member<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.user_id);
+        .invalidate_subject(user.tenant_id, p.user_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -302,6 +302,13 @@ mTLS, or IP allow-listing). This is a property of the key modes
 themselves, not of the presets; the presets simply make it the active
 posture, which is why they are opt-in and logged.
 
+Selecting `client_id` — directly or via a preset — makes the server emit a
+startup **`WARN`** naming this caveat and pointing back here (see §6). The
+shipped `ip` default emits nothing; `ip_client_id` emits a softer `INFO`
+note, because the same single-source evasion works but the source-IP half
+of the key still stops a third party from exhausting a *known* client's
+bucket from somewhere else.
+
 **2. A rotating `client_id` also grows the bucket keyspace.** Distinct
 keys accumulate in the in-memory governor and in the shared
 `rate_limit_bucket` table. Neither is unbounded in practice (windows
@@ -357,6 +364,21 @@ whether a preset was applied, and which env vars overrode it:
 Grep for `Rate-limit posture active` in your startup logs. If
 `operator_overrides` is `none` and `preset_applied` is `false`, you are
 running the shipped internet-facing defaults.
+
+Immediately after that line, a **key-mode advisory** is emitted when — and
+only when — the active key mode is one an unauthenticated caller can
+influence (§5 caveat 1):
+
+```json
+{"level":"WARN","fields":{"key_mode":"client_id",
+ "message":"rate-limit key mode `client_id` ACTIVE — the whole bucket key is the
+ client_id read from the unauthenticated OAuth2 form body BEFORE any credential
+ check, ..."}}
+```
+
+`client_id` logs at `WARN`, `ip_client_id` at `INFO`, and the shipped `ip`
+default logs nothing at all — so the absence of this line is itself the
+confirmation that no part of your bucket key is attacker-chosen.
 
 The gRPC listener logs its own resolved family ceilings when it binds:
 

@@ -474,6 +474,122 @@ async fn oauth2_client_crud() {
     assert!(repo.get_by_id(tenant_id, client.id).await.is_err());
 }
 
+/// OBS-1 — the lazy migration of a legacy `client_secret_hash`, exercised
+/// against a real SurrealDB instance rather than a mock.
+///
+/// A pre-OBS-1 row is planted by writing the unsalted SHA-256 digest directly,
+/// because the repository can no longer produce one.
+#[tokio::test]
+async fn oauth2_client_secret_hash_is_upgraded_with_a_compare_and_swap() {
+    use axiam_db::client_secret::{self, ClientSecretVerdict, V2_PREFIX};
+
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealOAuth2ClientRepository::new(db.clone());
+    let hasher = client_secret::global().unwrap();
+
+    let (client, secret) = repo
+        .create(CreateOAuth2Client {
+            tenant_id,
+            name: "Legacy App".into(),
+            redirect_uris: vec!["https://app.example.com/cb".into()],
+            grant_types: vec!["client_credentials".into()],
+            scopes: vec!["openid".into()],
+        })
+        .await
+        .unwrap();
+
+    // A newly created client is already in the current scheme.
+    assert!(client.client_secret_hash.starts_with(V2_PREFIX));
+
+    // Plant the pre-OBS-1 representation of the same secret.
+    let legacy = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(secret.as_bytes()))
+    };
+    db.query("UPDATE oauth2_client SET client_secret_hash = $h WHERE client_id = $c")
+        .bind(("h", legacy.clone()))
+        .bind(("c", client.client_id.clone()))
+        .await
+        .unwrap();
+
+    let stored = repo
+        .get_by_client_id(tenant_id, &client.client_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.client_secret_hash, legacy);
+
+    // The legacy row still verifies, and asks to be upgraded.
+    let upgraded_hash = match hasher.verify(&secret, &stored.client_secret_hash) {
+        ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => upgraded_hash,
+        other => panic!("expected MatchNeedsUpgrade, got {other:?}"),
+    };
+
+    assert!(
+        repo.upgrade_client_secret_hash(tenant_id, &client.client_id, &legacy, &upgraded_hash,)
+            .await
+            .unwrap(),
+        "the compare-and-swap must match the row it read"
+    );
+
+    let migrated = repo
+        .get_by_client_id(tenant_id, &client.client_id)
+        .await
+        .unwrap();
+    assert_eq!(migrated.client_secret_hash, upgraded_hash);
+    assert!(migrated.client_secret_hash.starts_with(V2_PREFIX));
+    assert_eq!(
+        hasher.verify(&secret, &migrated.client_secret_hash),
+        ClientSecretVerdict::Match,
+        "the migrated row verifies with no further upgrade"
+    );
+
+    // Replaying the same upgrade (as a racing request would) is a no-op: the
+    // CAS no longer matches, so nothing is written and `false` is returned.
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(tenant_id, &client.client_id, &legacy, &upgraded_hash)
+            .await
+            .unwrap(),
+        "a stale compare-and-swap must not clobber the row"
+    );
+
+    // A rotation racing the upgrade must win: with a different current hash,
+    // the CAS fails and the rotated secret survives.
+    let rotated = hasher.hash("some-rotated-secret");
+    db.query("UPDATE oauth2_client SET client_secret_hash = $h WHERE client_id = $c")
+        .bind(("h", rotated.clone()))
+        .bind(("c", client.client_id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(tenant_id, &client.client_id, &legacy, &upgraded_hash)
+            .await
+            .unwrap()
+    );
+    let after = repo
+        .get_by_client_id(tenant_id, &client.client_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.client_secret_hash, rotated,
+        "a concurrent rotation must never be clobbered by a late migration"
+    );
+
+    // Tenant scoping: another tenant cannot drive the migration.
+    assert!(
+        !repo
+            .upgrade_client_secret_hash(
+                Uuid::new_v4(),
+                &client.client_id,
+                &rotated,
+                &hasher.hash("attacker"),
+            )
+            .await
+            .unwrap()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Email verification tokens
 // ---------------------------------------------------------------------------

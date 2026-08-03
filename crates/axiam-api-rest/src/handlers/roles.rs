@@ -184,7 +184,11 @@ pub async fn update<C: Connection + Clone>(
     // D7: a role change (e.g. is_global, name) can narrow effective access for
     // an unknown set of subjects — flush the whole tenant so no stale allow
     // can survive. No-op when the decision cache is disabled.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::Ok().json(role))
 }
 
@@ -215,7 +219,11 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     // D7: deleting a role revokes it from every subject holding it — flush the
     // tenant so no cached allow granted through this role can survive.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -262,7 +270,8 @@ pub async fn assign_to_user<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, target_user);
+        .invalidate_subject(user.tenant_id, target_user)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -303,7 +312,8 @@ pub async fn unassign_from_user<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.user_id);
+        .invalidate_subject(user.tenant_id, p.user_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -345,7 +355,11 @@ pub async fn assign_to_group<C: Connection + Clone>(
         .await?;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -382,7 +396,11 @@ pub async fn unassign_from_group<C: Connection + Clone>(
     // D7 (REVOCATION — security critical): unassigning a role from a group
     // revokes it from every member. The member set isn't known here without a
     // query, so flush the whole tenant — this must never leave a stale allow.
-    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

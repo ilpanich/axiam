@@ -5,6 +5,134 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Cross-replica authorization decision-cache invalidation over RabbitMQ (§4.2, threat-model `T-88`).**
+  The decision cache invalidated **process-locally**: on a replica that did not
+  handle the mutation, a revoked grant could stay `Allow` until its entry
+  TTL-expired (default 5 s). That residual was documented and accepted; it is
+  now closable. Setting `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`
+  (on top of `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`) publishes every
+  invalidation to the **fanout** exchange `axiam.authz.cache.invalidate`; each
+  replica binds its own exclusive auto-delete queue
+  `axiam.authz.cache.invalidate.<replica-uuid>` and applies what it receives,
+  so a revocation reaches *all* replicas in broker-latency time. Fanout, not a
+  work queue: a shared queue would deliver each invalidation to exactly one
+  consumer and leave every other replica stale.
+
+  **Default off, and inert when off.** With the switch unset, `invalidate_*` is
+  local-only and infallible, no AMQP dependency is acquired by enabling the
+  cache, and the previously documented TTL-bounded behaviour is unchanged.
+
+  **Two deliberate behaviour changes when it is on**, both loud:
+  - A mutation whose broadcast the broker does not confirm returns **503**
+    (`"could not be broadcast to other replicas"`). The database write is
+    durable but the fan-out did not happen, and reporting success would hand
+    back the TTL window the operator enabled this to remove. These mutations are
+    idempotent in the narrowing direction — retry is safe.
+  - A replica whose invalidation consumer is not connected (startup, broker
+    outage, partition) **stops serving from its cache** and evaluates every
+    check against the database — correct, just slower — instead of serving
+    allows it can no longer invalidate. Logged at ERROR
+    (`AuthZ decision cache UNTRUSTED …`) and surfaced as `trusted` / `bypassed`
+    on the periodic `AuthZ decision cache stats (D7)` line. Trust follows the
+    consumer's connection liveness **only** — no inbound message can revoke it,
+    so a captured broadcast cannot be used as a cache-disabling lever.
+
+  Messages carry the existing §8 envelope (`CacheInvalidationMessage`):
+  per-tenant HKDF-SHA256 subkey, `key_version >= 2` floor, per-message `nonce`,
+  and an `issued_at` freshness window
+  (`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS`, default 30 s, tighter
+  than the 5-minute AMQP default because an invalidation is only useful for
+  about as long as the cache TTL). Nonce dedup is **per replica, in memory** —
+  never the shared durable nonce store, which on a fanout would let one replica
+  win and make all the others reject the invalidation as a replay. The
+  publisher's own echo is a no-op, and cannot loop: a received message only ever
+  reaches `DecisionCache`, never the publishing path. Granularity is exactly the
+  cache's existing `invalidate_subject` / `invalidate_tenant`; no finer key is
+  invented.
+
+  Requires `AXIAM__AMQP__SIGNING_KEY` (already mandatory) to be shared by every
+  replica. Documented in `docs/deployment/README.md`, `docs/admin/README.md` and
+  `docs/deployment/authz-read-path.md`.
+
+- **Client secrets are now hashed with HMAC-SHA256 keyed by the server pepper (OBS-1).**
+  OAuth2 client secrets and service-account secrets were stored as an unsalted,
+  single-round SHA-256 digest — safe only while every secret is 32 CSPRNG bytes with
+  no operator-supplied path, an assumption held by nothing stronger than a code
+  comment. The digest is now keyed, so a database dump is not offline-attackable
+  without the pepper, and the guarantee no longer depends on secret entropy.
+  HMAC rather than a KDF is deliberate: the client-credentials grant stays
+  MAC-bound, not KDF-bound, and does not regress (verification is now
+  allocation-free, where it previously allocated a `String` per request).
+
+  **Operator action required.** `AXIAM__AUTH__PEPPER` is now **mandatory** — a
+  release build fails closed at startup if it is unset, the same posture as
+  `AXIAM__AUTH__SIGNING_KEY`/`AXIAM__AMQP__SIGNING_KEY` (SECHRD-08 / D-05c).
+  There is no unkeyed fallback: silently degrading when unconfigured is exactly
+  what OBS-1 objected to. A debug build resolves a documented dev-only pepper
+  with a warning. Do not change the pepper after deployment without re-issuing
+  every client secret — v2 hashes are not portable across peppers.
+
+  Existing hashes cannot be re-derived (only the digest was stored), so the
+  scheme is versioned and migrates lazily. Stored hashes are now tagged
+  `v2.hs256$<hex>`; an untagged 64-hex value is verified against the legacy
+  scheme and, **on a successful verification only**, rewritten in the new scheme
+  with a compare-and-swap so a concurrent secret rotation is never clobbered. A
+  failed verification never rehashes and never writes. No schema change and no
+  backfill: migration completes as each client next authenticates.
+
+  `axiam_db::hash_client_secret` is removed; hashing is a method on
+  `axiam_auth::client_secret::ClientSecretHasher`, so no call site can hash
+  without a key. `OAuth2ClientRepository` gains `upgrade_client_secret_hash`
+  (breaking for out-of-tree implementors).
+
+- **Session-revocation failures are no longer silently swallowed (OBS-3).**
+  `invalidate`, `invalidate_user_sessions` and `cleanup_expired` never checked
+  the DELETE result, so a statement-level database error was discarded and the
+  method returned `Ok(())` — logout, password-reset revocation and MFA reset
+  reported success when the statement may have failed. All five session-deleting
+  methods now propagate a `DbError`. Cache invalidation is deliberately ordered
+  *above* the newly-fallible step in every path, so a failing DELETE cannot
+  strand a positive cache entry.
+
+- **Startup advisory when the rate-limit bucket key is attacker-mintable (§4.1).**
+  Under `AXIAM__RATE_LIMIT__KEY=client_id` the whole bucket key is read from the
+  unauthenticated form body before the credential check, so a caller rotating
+  `client_id` values mints fresh buckets. The shipped default (`ip`) is silent;
+  `client_id` now emits a `warn!` naming the caveat and pointing at the sizing
+  guide, and `ip_client_id` a softer `info!` — its unforgeable IP half confines
+  the collateral to the attacker's own source.
+
+### Added
+
+- **CI gate: remediation evidence must resolve on `main` (§11.2).**
+  `scripts/check-remediation-evidence.py` parses the remediation tables in
+  `claude_dev/security-analysis-*.md` and verifies every cited commit is
+  reachable from `origin/main` in the repository it claims. A recorded commit
+  hash is not evidence a fix shipped — a hash exists the moment a commit is
+  authored, on any branch — and this pass caught a real instance of a fix
+  recorded as remediated while still unmerged. Rows that cannot be verified are
+  printed individually under an explicit `SKIPPED, NOT VERIFIED` banner rather
+  than passing silently.
+
+- **`sdks/CONTRACT.md` §10.1 — minimum local-verification set (normative).**
+  States once, for every SDK, what a guard must check before turning a token
+  into an identity: signature with `alg` pinned before key lookup, `exp`
+  REQUIRED, `nbf` honoured when present, `tenant_id` asserted against the
+  configured tenant, `iss`/`aud` checked when configured, and a named bounded
+  clock skew — all fail-closed. Written because `SEC-071` and `SEC-080` were the
+  same defect found independently in two SDKs: each verified a different subset,
+  and each subset looked complete in isolation.
+
+### Fixed
+
+- **gRPC admin ceiling no longer derives from the read-sized authz ceiling
+  (SEC-079).** See the entry below for the units correction that made this
+  necessary.
+
 ## [1.0.0-alpha23] - 2026-08-02
 
 ### Added
@@ -195,6 +323,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session-validation cache entry live for up to the TTL — a deleted session that kept
   validating. Only reachable with the opt-in
   `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` enabled
+- **Session revocation no longer reports success when the `DELETE` failed (OBS-3).**
+  `SessionRepository::invalidate`, `invalidate_user_sessions` and `cleanup_expired` awaited
+  their `DELETE` and returned `Ok(())` without ever calling `.check()` or `.take()`, so a
+  statement-level SurrealDB failure was discarded — logout, password-reset session
+  revocation and MFA reset all told the caller sessions were revoked when the statement may
+  never have run. All five session-deleting methods now `.check()` the response and
+  propagate a `DbError`, which surfaces as `500` at `POST /api/v1/auth/logout` and the GDPR
+  disable path rather than as a silent `204`. Cache invalidation deliberately still runs
+  **before** the new fallible step, so the ordering fix above cannot be reintroduced: an
+  erroring `DELETE` drops the cache entry (costing at most one avoidable re-read) instead of
+  stranding a positive "still valid" entry
+- Startup **warning** when `AXIAM__RATE_LIMIT__KEY=client_id` is active. In that mode the
+  rate-limit bucket key for `/oauth2/{token,introspect,revoke}` is the `client_id` read from
+  the unauthenticated form body (RFC 6749 §2.3.1) **before** any credential check, so a
+  caller rotating `client_id` values mints a fresh bucket per value; under this mode those
+  limits are a fairness control between cooperating clients, not an anti-abuse control, and
+  the mode assumes an edge (mTLS / API gateway / WAF) that already authenticates callers.
+  The warning names that and points at `docs/deployment/rate-limit-sizing.md` §5. The
+  shipped default (`ip`) is not attacker-mintable and stays **silent**; the partially
+  mintable `ip_client_id` gets a softer `info!` note, because its source-IP half still
+  prevents a third party from exhausting a known `client_id`'s bucket from elsewhere. No
+  behaviour or limit changes — advisory only, matching the I3 machine-traffic advisory and
+  the session-validation cache's startup `warn!`
+- CI now verifies that **remediation evidence actually shipped**
+  (`scripts/check-remediation-evidence.py`, wired into `docs-ci.yml`). A remediation record
+  citing a commit hash is not evidence a fix merged — a hash exists the moment a commit is
+  authored, on any branch, and the 2026-08-03 review pass caught a real instance (a Swift
+  fix recorded as remediated while still unmerged). Every `(finding id, repo, commit)`
+  triple in a remediation table of `claude_dev/security-analysis-*.md` must now resolve to a
+  commit reachable from the default branch of the repo it claims: locally via
+  `git merge-base --is-ancestor`, and for the out-of-tree SDK repos via the GitHub API when
+  the token can read them. Rows that cannot be verified are printed as **SKIPPED by name**
+  rather than passing silently, and a row that cannot be parsed into a triple **fails** the
+  check naming the row
 
 ## [1.0.0-alpha21] - 2026-07-30
 

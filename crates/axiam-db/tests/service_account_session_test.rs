@@ -9,7 +9,15 @@ use axiam_core::repository::{
     OrganizationRepository, Pagination, ServiceAccountRepository, SessionRepository,
     TenantRepository, UserRepository,
 };
-use axiam_db::hash_client_secret;
+use axiam_db::client_secret::{self, ClientSecretVerdict, V2_PREFIX};
+
+/// Hash a client secret exactly as the repository does (OBS-1: keyed
+/// HMAC-SHA256 under the process pepper).
+fn hash_client_secret(secret: &str) -> String {
+    client_secret::global()
+        .expect("debug-build test binary resolves the dev-default pepper")
+        .hash(secret)
+}
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
     SurrealTenantRepository, SurrealUserRepository,
@@ -215,6 +223,10 @@ async fn rotate_secret() {
     // Verify the new hash matches the new secret.
     let fetched = repo.get_by_id(tenant_id, sa.id).await.unwrap();
     assert_eq!(fetched.client_secret_hash, hash_client_secret(&new_secret));
+    assert!(
+        fetched.client_secret_hash.starts_with(V2_PREFIX),
+        "a rotated secret must also be stored in the keyed scheme (OBS-1)"
+    );
 
     // Old secret should no longer match.
     assert_ne!(
@@ -237,8 +249,25 @@ async fn verify_client_secret_hash() {
         .await
         .unwrap();
 
-    // The stored hash should match hashing the raw secret.
+    // The stored hash should match hashing the raw secret...
     assert_eq!(sa.client_secret_hash, hash_client_secret(&raw_secret));
+    // ...and it must be stored in the current (v2) scheme, not the legacy
+    // unsalted SHA-256 one (OBS-1).
+    assert!(
+        sa.client_secret_hash.starts_with(V2_PREFIX),
+        "new service accounts must be stored in the keyed scheme: {}",
+        sa.client_secret_hash
+    );
+    let hasher = client_secret::global().unwrap();
+    assert_eq!(
+        hasher.verify(&raw_secret, &sa.client_secret_hash),
+        ClientSecretVerdict::Match,
+        "a freshly created secret must verify with no migration"
+    );
+    assert_eq!(
+        hasher.verify("wrong", &sa.client_secret_hash),
+        ClientSecretVerdict::Mismatch
+    );
 }
 
 // ---------------------------------------------------------------------------

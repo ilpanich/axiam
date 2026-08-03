@@ -7,6 +7,10 @@ use serde::Deserialize;
 
 use crate::decision_cache::{DecisionCache, DecisionCacheConfig};
 
+/// Default freshness window for an inbound cross-replica invalidation message
+/// (§4.2). See [`AuthzConfig::decision_cache_broadcast_skew_secs`].
+pub const DEFAULT_BROADCAST_SKEW_SECS: u64 = 30;
+
 /// Strategy for evaluating a `BatchCheckAccess` call (REST + gRPC).
 ///
 /// Both strategies produce **byte-identical decisions in the same order** —
@@ -77,17 +81,62 @@ pub struct AuthzConfig {
     /// `decision_cache` module docs). A stale allow can outlive a revocation
     /// by at most `decision_cache_ttl_secs` even if an invalidation is missed.
     ///
-    /// SECURITY — **multi-replica caveat, read before enabling**: the cache and
-    /// its invalidation are **process-local**. "Revocation is immediate" is a
-    /// *single-process* property. With two or more replicas, a revocation
-    /// handled by replica A does not reach replicas B…N, which keep serving the
-    /// pre-revocation decision until their own entries expire — so the
-    /// deployment's **worst-case revocation latency is
+    /// SECURITY — **multi-replica caveat, read before enabling**: on its own
+    /// the cache and its invalidation are **process-local**. "Revocation is
+    /// immediate" is then a *single-process* property. With two or more
+    /// replicas, a revocation handled by replica A does not reach replicas
+    /// B…N, which keep serving the pre-revocation decision until their own
+    /// entries expire — so the deployment's **worst-case revocation latency is
     /// `decision_cache_ttl_secs` (default 5 s)**, on every read path including
-    /// the `RequirePermission` guard that protects the admin endpoints. Enable
-    /// this only on a single replica, or where a ≤ TTL revocation window is
-    /// acceptable.
+    /// the `RequirePermission` guard that protects the admin endpoints. Either
+    /// enable [`Self::decision_cache_broadcast_enabled`], run a single replica,
+    /// or accept a ≤ TTL revocation window.
     pub decision_cache_enabled: bool,
+
+    /// Enable **cross-replica** decision-cache invalidation over RabbitMQ
+    /// (§4.2). Requires [`Self::decision_cache_enabled`]; ignored when the
+    /// cache is off.
+    ///
+    /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED`
+    /// (default `false`).
+    ///
+    /// When `true`, every invalidation a mutation triggers is also published,
+    /// HMAC-signed, to a **fanout** exchange that every replica binds its own
+    /// exclusive auto-delete queue to — so a revocation propagates to all
+    /// replicas in broker-latency time instead of being bounded by the TTL.
+    /// Two consequences an operator must know about before flipping it:
+    ///
+    /// * **A mutation whose broadcast the broker does not confirm returns
+    ///   503.** The database write is durable, but the fan-out did not happen,
+    ///   so it is reported as a failure rather than silently falling back to
+    ///   the TTL window this switch exists to eliminate. These mutations are
+    ///   idempotent in the narrowing direction; retry is safe.
+    /// * **A replica whose invalidation consumer is not connected stops
+    ///   serving from its cache entirely** (falls back to full database
+    ///   evaluation — correct, slower) until it reconnects, rather than
+    ///   serving allows it can no longer invalidate. This is logged at ERROR
+    ///   and counted in `DecisionCacheStats::bypassed`.
+    ///
+    /// When `false` (the default) none of the above exists: no AMQP dependency
+    /// is added by the cache, `invalidate_*` cannot fail, and the documented
+    /// TTL-bounded behaviour above is unchanged.
+    pub decision_cache_broadcast_enabled: bool,
+
+    /// Freshness window, in seconds, for an inbound cross-replica invalidation
+    /// message (§4.2 / AMQP §8 `issued_at` gate). A broadcast whose `issued_at`
+    /// is outside ±this many seconds of the receiving replica's clock is
+    /// rejected and logged.
+    ///
+    /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS`
+    /// (default `30`).
+    ///
+    /// Deliberately far tighter than the 5-minute AMQP default
+    /// (`AXIAM__AMQP__REPLAY_SKEW_SECS`): an invalidation is only useful for
+    /// about as long as the cache TTL, so a short window both bounds how long a
+    /// captured message stays replay-eligible and bounds the memory of the
+    /// per-replica nonce guard. Raise it only if replica clocks are poorly
+    /// synchronised — a skew larger than the true clock spread buys nothing.
+    pub decision_cache_broadcast_skew_secs: u64,
 
     /// TTL, in seconds, for a cached decision (D7). Bounds worst-case
     /// revocation latency if an invalidation event is ever missed — and, on a
@@ -112,6 +161,8 @@ impl Default for AuthzConfig {
             batch_max_concurrency: 16,
             batch_strategy: BatchStrategy::Coalesced,
             decision_cache_enabled: false,
+            decision_cache_broadcast_enabled: false,
+            decision_cache_broadcast_skew_secs: DEFAULT_BROADCAST_SKEW_SECS,
             decision_cache_ttl_secs: 5,
             decision_cache_max_entries: 10_000,
         }
@@ -129,14 +180,36 @@ impl AuthzConfig {
     /// AMQP engines so that an invalidation triggered from a REST mutation
     /// handler is observed by every read path. (All role/permission/resource
     /// mutations are REST endpoints today.)
+    /// When cross-replica invalidation is enabled the returned cache starts
+    /// **untrusted** (`DecisionCache::set_trusted(false)`): a replica must not
+    /// serve a single cached decision before its invalidation consumer has
+    /// actually subscribed, or the startup window would be exactly the
+    /// stale-allow hole this feature closes. The consumer flips it to trusted
+    /// once it is receiving.
     pub fn build_decision_cache(&self) -> Option<Arc<DecisionCache>> {
         if !self.decision_cache_enabled {
             return None;
         }
-        Some(Arc::new(DecisionCache::new(DecisionCacheConfig {
+        let cache = DecisionCache::new(DecisionCacheConfig {
             ttl: Duration::from_secs(self.decision_cache_ttl_secs),
             max_entries_per_tenant: self.decision_cache_max_entries,
-        })))
+        });
+        if self.decision_cache_broadcast_enabled {
+            cache.set_trusted(false);
+        }
+        Some(Arc::new(cache))
+    }
+
+    /// Whether cross-replica invalidation is actually active — the broadcast
+    /// switch means nothing without the cache it invalidates.
+    pub fn cross_replica_invalidation_enabled(&self) -> bool {
+        self.decision_cache_enabled && self.decision_cache_broadcast_enabled
+    }
+
+    /// The configured inbound-broadcast freshness window as a
+    /// `chrono::Duration`, mirroring `AmqpConfig::replay_skew`.
+    pub fn decision_cache_broadcast_skew(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.decision_cache_broadcast_skew_secs as i64)
     }
 }
 
@@ -221,5 +294,79 @@ mod tests {
         assert!(cfg.decision_cache_enabled);
         assert_eq!(cfg.decision_cache_ttl_secs, 10);
         assert_eq!(cfg.decision_cache_max_entries, 500);
+    }
+
+    // -----------------------------------------------------------------------
+    // §4.2 — cross-replica invalidation defaults and inertness when off.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cross_replica_invalidation_defaults_off() {
+        let cfg = AuthzConfig::default();
+        assert!(
+            !cfg.decision_cache_broadcast_enabled,
+            "the cross-replica channel must default OFF — a single-replica \
+             deployment enabling the cache must not acquire a hard AMQP dependency"
+        );
+        assert!(!cfg.cross_replica_invalidation_enabled());
+        assert_eq!(
+            cfg.decision_cache_broadcast_skew_secs,
+            DEFAULT_BROADCAST_SKEW_SECS
+        );
+        assert_eq!(cfg.decision_cache_broadcast_skew().num_seconds(), 30);
+    }
+
+    #[test]
+    fn broadcast_switch_is_inert_without_the_cache() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: false,
+            decision_cache_broadcast_enabled: true,
+            ..AuthzConfig::default()
+        };
+        assert!(
+            !cfg.cross_replica_invalidation_enabled(),
+            "broadcasting invalidations for a cache that does not exist is meaningless"
+        );
+        assert!(cfg.build_decision_cache().is_none());
+    }
+
+    #[test]
+    fn cache_starts_trusted_when_broadcast_is_off() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: true,
+            ..AuthzConfig::default()
+        };
+        let cache = cfg.build_decision_cache().expect("cache enabled");
+        assert!(
+            cache.is_trusted(),
+            "without the broadcast channel there is nothing to wait for — \
+             behaviour is unchanged from before §4.2"
+        );
+    }
+
+    #[test]
+    fn cache_starts_untrusted_when_broadcast_is_on() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: true,
+            decision_cache_broadcast_enabled: true,
+            ..AuthzConfig::default()
+        };
+        let cache = cfg.build_decision_cache().expect("cache enabled");
+        assert!(
+            !cache.is_trusted(),
+            "a replica must not serve a cached decision before its invalidation \
+             consumer has subscribed"
+        );
+        assert!(cfg.cross_replica_invalidation_enabled());
+    }
+
+    #[test]
+    fn deserializes_broadcast_overrides() {
+        let cfg: AuthzConfig = serde_json::from_str(
+            r#"{"decision_cache_enabled": true, "decision_cache_broadcast_enabled": true, "decision_cache_broadcast_skew_secs": 15}"#,
+        )
+        .expect("broadcast overrides must deserialize");
+        assert!(cfg.decision_cache_broadcast_enabled);
+        assert_eq!(cfg.decision_cache_broadcast_skew_secs, 15);
     }
 }

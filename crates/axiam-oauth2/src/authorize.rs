@@ -262,6 +262,15 @@ mod tests {
         ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
             unimplemented!()
         }
+        async fn upgrade_client_secret_hash(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _expected_hash: &str,
+            _new_hash: &str,
+        ) -> AxiamResult<bool> {
+            unimplemented!()
+        }
     }
 
     /// QUAL-03/D-11: a client-repo that always fails with a DB-outage-shaped
@@ -301,6 +310,15 @@ mod tests {
             _tid: Uuid,
             _page: Pagination,
         ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+            unimplemented!()
+        }
+        async fn upgrade_client_secret_hash(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _expected_hash: &str,
+            _new_hash: &str,
+        ) -> AxiamResult<bool> {
             unimplemented!()
         }
     }
@@ -388,6 +406,15 @@ mod tests {
             _tid: Uuid,
             _page: Pagination,
         ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+            unimplemented!()
+        }
+        async fn upgrade_client_secret_hash(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _expected_hash: &str,
+            _new_hash: &str,
+        ) -> AxiamResult<bool> {
             unimplemented!()
         }
     }

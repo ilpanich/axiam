@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Client secrets are now hashed with HMAC-SHA256 keyed by the server pepper (OBS-1).**
+  OAuth2 client secrets and service-account secrets were stored as an unsalted,
+  single-round SHA-256 digest — safe only while every secret is 32 CSPRNG bytes with
+  no operator-supplied path, an assumption held by nothing stronger than a code
+  comment. The digest is now keyed, so a database dump is not offline-attackable
+  without the pepper, and the guarantee no longer depends on secret entropy.
+  HMAC rather than a KDF is deliberate: the client-credentials grant stays
+  MAC-bound, not KDF-bound, and does not regress (verification is now
+  allocation-free, where it previously allocated a `String` per request).
+
+  **Operator action required.** `AXIAM__AUTH__PEPPER` is now **mandatory** — a
+  release build fails closed at startup if it is unset, the same posture as
+  `AXIAM__AUTH__SIGNING_KEY`/`AXIAM__AMQP__SIGNING_KEY` (SECHRD-08 / D-05c).
+  There is no unkeyed fallback: silently degrading when unconfigured is exactly
+  what OBS-1 objected to. A debug build resolves a documented dev-only pepper
+  with a warning. Do not change the pepper after deployment without re-issuing
+  every client secret — v2 hashes are not portable across peppers.
+
+  Existing hashes cannot be re-derived (only the digest was stored), so the
+  scheme is versioned and migrates lazily. Stored hashes are now tagged
+  `v2.hs256$<hex>`; an untagged 64-hex value is verified against the legacy
+  scheme and, **on a successful verification only**, rewritten in the new scheme
+  with a compare-and-swap so a concurrent secret rotation is never clobbered. A
+  failed verification never rehashes and never writes. No schema change and no
+  backfill: migration completes as each client next authenticates.
+
+  `axiam_db::hash_client_secret` is removed; hashing is a method on
+  `axiam_auth::client_secret::ClientSecretHasher`, so no call site can hash
+  without a key. `OAuth2ClientRepository` gains `upgrade_client_secret_hash`
+  (breaking for out-of-tree implementors).
+
+- **Session-revocation failures are no longer silently swallowed (OBS-3).**
+  `invalidate`, `invalidate_user_sessions` and `cleanup_expired` never checked
+  the DELETE result, so a statement-level database error was discarded and the
+  method returned `Ok(())` — logout, password-reset revocation and MFA reset
+  reported success when the statement may have failed. All five session-deleting
+  methods now propagate a `DbError`. Cache invalidation is deliberately ordered
+  *above* the newly-fallible step in every path, so a failing DELETE cannot
+  strand a positive cache entry.
+
+- **Startup advisory when the rate-limit bucket key is attacker-mintable (§4.1).**
+  Under `AXIAM__RATE_LIMIT__KEY=client_id` the whole bucket key is read from the
+  unauthenticated form body before the credential check, so a caller rotating
+  `client_id` values mints fresh buckets. The shipped default (`ip`) is silent;
+  `client_id` now emits a `warn!` naming the caveat and pointing at the sizing
+  guide, and `ip_client_id` a softer `info!` — its unforgeable IP half confines
+  the collateral to the attacker's own source.
+
+### Added
+
+- **CI gate: remediation evidence must resolve on `main` (§11.2).**
+  `scripts/check-remediation-evidence.py` parses the remediation tables in
+  `claude_dev/security-analysis-*.md` and verifies every cited commit is
+  reachable from `origin/main` in the repository it claims. A recorded commit
+  hash is not evidence a fix shipped — a hash exists the moment a commit is
+  authored, on any branch — and this pass caught a real instance of a fix
+  recorded as remediated while still unmerged. Rows that cannot be verified are
+  printed individually under an explicit `SKIPPED, NOT VERIFIED` banner rather
+  than passing silently.
+
+- **`sdks/CONTRACT.md` §10.1 — minimum local-verification set (normative).**
+  States once, for every SDK, what a guard must check before turning a token
+  into an identity: signature with `alg` pinned before key lookup, `exp`
+  REQUIRED, `nbf` honoured when present, `tenant_id` asserted against the
+  configured tenant, `iss`/`aud` checked when configured, and a named bounded
+  clock skew — all fail-closed. Written because `SEC-071` and `SEC-080` were the
+  same defect found independently in two SDKs: each verified a different subset,
+  and each subset looked complete in isolation.
+
+### Fixed
+
+- **gRPC admin ceiling no longer derives from the read-sized authz ceiling
+  (SEC-079).** See the entry below for the units correction that made this
+  necessary.
+
 ## [1.0.0-alpha23] - 2026-08-02
 
 ### Added

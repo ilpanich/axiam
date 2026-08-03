@@ -266,9 +266,21 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Auth pepper loaded");
     } else {
         tracing::info!(
-            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper"
+            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper; \
+             client-secret hashing is mandatory-keyed and will fail closed in a release build \
+             (OBS-1)"
         );
     }
+
+    // OBS-1: install the process-wide client-secret hasher. Client secrets are
+    // stored as a keyed HMAC-SHA256 tag under the pepper — there is no unkeyed
+    // fallback — so an unset pepper must be a *startup* failure in a release
+    // build, not a first-request failure. Same posture as the mandatory AMQP
+    // master signing key (SECHRD-08 / D-05c); a debug build resolves the
+    // documented dev-only pepper with a warning.
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("client-secret pepper must resolve (OBS-1) — see AXIAM__AUTH__PEPPER");
+    tracing::info!("Client-secret hasher installed (OBS-1)");
 
     // Load allow_missing_aud_as_user override (bool, default true).
     // The serde default already sets it to true; this allows an operator to

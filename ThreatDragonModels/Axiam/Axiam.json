@@ -12277,7 +12277,7 @@
             "id": "32f40e4d-ad24-5e7a-ac23-1a63051e704d",
             "data": {
               "type": "tm.Process",
-              "name": "Webhook receiver\nhelper (absent)",
+              "name": "Webhook receiver\nhelper (\u00a713)",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -12290,12 +12290,12 @@
               "threats": [
                 {
                   "id": "18f0e937-4fd4-5de1-af0f-8c1bf2bf8d89",
-                  "title": "No SDK ships a webhook-signature verifier",
-                  "status": "Open",
+                  "title": "Receiver acts on an unverified webhook delivery",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Tampering",
-                  "description": "The server signs deliveries with the Stripe-style signed-timestamp scheme, but no SDK (Rust, TS, Go, Python, Java, C#, PHP) provides a verify_webhook helper. Every integrator therefore hand-rolls the check \u2014 or skips it \u2014 and an unverified receiver acts on any POST that reaches its URL.",
-                  "mitigation": "Open gap on the SDK side. The server-side control is complete; the fix is to add a documented verify_webhook(secret, timestamp_header, signature_header, body) helper with a freshness window to each SDK, and to state the expectation explicitly in CONTRACT.md.",
+                  "description": "The server signs deliveries with the Stripe-style signed-timestamp scheme, but a receiver that does not verify the signature acts on any POST reaching its URL. Previously no SDK shipped a verify_webhook helper, so every integrator hand-rolled the check or skipped it.",
+                  "mitigation": "T-145 closed: CONTRACT.md \u00a713 is now normative and all eleven SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C, C++) ship a webhook-signature verifier against one canonical spec \u2014 HMAC-SHA256 over <timestamp>.<raw_body>, constant-time comparison on decoded MAC bytes, a header carrying no v1 always fails, multiple v1 values accepted for secret rotation, and a two-sided freshness window (default 300 s) so future-dated timestamps are rejected like stale ones. Integrators must still call it.",
                   "modelType": "STRIDE",
                   "number": 145
                 }

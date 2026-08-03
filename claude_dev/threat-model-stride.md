@@ -9,7 +9,7 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
 | **Threats identified** | 149 |
-| **Mitigated / Open** | 127 / 22 |
+| **Mitigated / Open** | 128 / 21 |
 | **Owner** | ilpanich |
 
 ---
@@ -1290,7 +1290,7 @@ A backup written across the network without encryption exposes the entire datast
 
 The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.
 
-*15 threats — 2 critical, 8 high, 5 medium; 5 open.*
+*15 threats — 2 critical, 8 high, 5 medium; 4 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1304,7 +1304,7 @@ The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#
 | T-142 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | S | JWKS URI taken from discovery without validation | High | Mitigated |
 | T-143 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Local JWT verification misses a revoked entitlement | Medium | Open |
 | T-144 | SDK AMQP consumer (HMAC verify, nonce) <br/>*Process* | S | HMAC verification present but inoperative | Critical | Mitigated |
-| T-145 | Webhook receiver helper (absent) <br/>*Process* | T | No SDK ships a webhook-signature verifier | Medium | Open |
+| T-145 | Webhook receiver helper (§13) <br/>*Process* | T | Receiver acts on an unverified webhook delivery | Medium | Mitigated |
 | T-146 | SDK configuration (client secrets, CA bundles) <br/>*Store* | I | Long-lived client secret committed to a repository | High | Open |
 | T-147 | sdks/CONTRACT.md, openapi.json, proto/ <br/>*Store* | T | Contract weakened without review | Medium | Mitigated |
 | T-148 | Public package registries <br/>*Store* | T | Compromised release pipeline publishes a backdoored SDK | Critical | Open |
@@ -1383,12 +1383,12 @@ Finding X-1: AMQP HMAC verification was implemented but did not actually reject 
 
 > CONTRACT §8 specifies the protocol precisely — strip hmac_signature, canonicalise, HMAC-SHA256, constant-time compare, nack-without-requeue on mismatch, strict mode by default — and §8 v2 adds the mandatory nonce and issued_at replay fields. Conformance tests belong in each SDK repository.
 
-**T-145 — No SDK ships a webhook-signature verifier**  
-`Webhook receiver helper (absent)` (Process) · Tampering · Medium · Open
+**T-145 — Receiver acts on an unverified webhook delivery**  
+`Webhook receiver helper (§13)` (Process) · Tampering · Medium · Mitigated
 
-The server signs deliveries with the Stripe-style signed-timestamp scheme, but no SDK (Rust, TS, Go, Python, Java, C#, PHP) provides a verify_webhook helper. Every integrator therefore hand-rolls the check — or skips it — and an unverified receiver acts on any POST that reaches its URL.
+The server signs deliveries with the Stripe-style signed-timestamp scheme, but a receiver that does not verify the signature acts on any POST reaching its URL. Previously no SDK shipped a verify_webhook helper, so every integrator hand-rolled the check or skipped it.
 
-> Open gap on the SDK side. The server-side control is complete; the fix is to add a documented verify_webhook(secret, timestamp_header, signature_header, body) helper with a freshness window to each SDK, and to state the expectation explicitly in CONTRACT.md.
+> T-145 closed: CONTRACT.md §13 is now normative and all eleven SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C, C++) ship a webhook-signature verifier against one canonical spec — HMAC-SHA256 over `<timestamp>.<raw_body>`, constant-time comparison on decoded MAC bytes, a header carrying no `v1` always fails, multiple `v1` values accepted for secret rotation, and a two-sided freshness window (default 300 s) so future-dated timestamps are rejected like stale ones. Verified present and conformant in all eleven repositories. Integrators must still call it.
 
 **T-146 — Long-lived client secret committed to a repository**  
 `SDK configuration (client secrets, CA bundles)` (Store) · Information disclosure · High · Open
@@ -1422,7 +1422,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-22 of 149 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+21 of 149 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1446,7 +1446,6 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-129 | Medium | Erasure or expiry job silently stops running | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Deployment & platform (Kubernetes)* | Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack. |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
-| T-145 | Medium | No SDK ships a webhook-signature verifier | Webhook receiver helper (absent) <br/>*Client SDKs & admin UI integration surface* | Open gap on the SDK side. The server-side control is complete; the fix is to add a documented verify_webhook(secret, timestamp_header, signature_header, body) helper with a… |
 | T-119 | Low | Unbounded audit growth degrades the datastore | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements. |
 
 ### Grouping
@@ -1469,7 +1468,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 **Genuine gaps worth scheduling**
 
-- **No SDK ships a webhook-signature verifier** (T-145). The server signs deliveries correctly with the Stripe-style signed-timestamp scheme, but every integrator currently hand-rolls verification or skips it. Adding `verify_webhook(...)` to each SDK, with a freshness window and a clause in `CONTRACT.md`, closes a control that is otherwise only half deployed.
+- **~~No SDK ships a webhook-signature verifier~~ (T-145) — closed.** The server signs deliveries with the Stripe-style signed-timestamp scheme, and as of the 2026-08-02 remediation every one of the eleven SDKs ships a conformant `verify_webhook(...)` helper against a canonical spec, with `CONTRACT.md` §13 made normative. What remains is integrator discipline, not a missing control: the helper still has to be called. Recorded here as closed rather than deleted so the history stays legible.
 - **SDK package distribution.** Seven public registries are seven opportunities for typosquatting or a hijacked release. Reserve names, require 2FA and trusted publishing, and publish provenance attestations.
 - **Static client secrets in integrator configuration.** Outside AXIAM's control, but the most common way service-account credentials escape. Prefer mTLS or short-lived workload identity.
 
@@ -1492,7 +1491,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 |---|---|---|
 | Critical | 22 | 1 |
 | High | 60 | 9 |
-| Medium | 61 | 11 |
+| Medium | 61 | 10 |
 | Low | 6 | 1 |
 
 **By diagram**
@@ -1507,7 +1506,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | PKI, certificates & IoT device identity | 13 | 1 |
 | Audit, webhooks, email & notifications | 18 | 4 |
 | Deployment & platform (Kubernetes) | 11 | 7 |
-| Client SDKs & admin UI integration surface | 15 | 5 |
+| Client SDKs & admin UI integration surface | 15 | 4 |
 
 ## 8. Assumptions
 

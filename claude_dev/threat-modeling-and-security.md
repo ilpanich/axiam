@@ -63,7 +63,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 149 |
-| Mitigated / Open | 127 / 22 |
+| Mitigated / Open | 128 / 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -84,7 +84,7 @@ optimistic closed one.
 | PKI, certificates & IoT device identity | 13 | 1 |
 | Audit, webhooks, email & notifications | 18 | 4 |
 | Deployment & platform (Kubernetes) | 11 | 7 |
-| Client SDKs & admin-UI integration surface | 15 | 5 |
+| Client SDKs & admin-UI integration surface | 15 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -168,10 +168,14 @@ redundantly rather than at one chokepoint:
   stripped during permission resolution rather than followed.
 - **The authorization engine is RBAC, additive, allow-wins with default-deny.**
   A route with no declared permission is refused, not allowed. Roles cascade down a
-  resource hierarchy with bounded, cycle-safe traversal. An optional per-tenant
-  decision cache speeds checks without ever changing the answer — access-narrowing
-  changes invalidate affected entries immediately, so no revocation leaves a stale
-  allow.
+  resource hierarchy with bounded, cycle-safe traversal.
+- **The performance caches are off by default and never change an answer.** AXIAM
+  offers two optional caches — one for authorization decisions, one for session
+  validation. Both ship disabled, both are keyed per tenant, and both are invalidated
+  by the mutations that could change their answer: revoking a role or a session takes
+  effect immediately on the replica that handled it, and the cache lifetime bounds
+  only cross-replica staleness. Enabling one is an explicit, logged decision that
+  trades a few seconds of worst-case staleness for throughput — never correctness.
 - **Three protocols, one engine.** REST middleware, gRPC `CheckAccess` and the
   async AMQP path all evaluate the same policy. The gRPC interceptor authenticates
   the caller and derives the tenant from its verified identity, so a service account
@@ -268,10 +272,26 @@ against the classic federation attacks:
   no code path substitutes an all-zero or constant key.
 - **The eleven client SDKs conform to one cross-language contract.** Strict TLS
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
-  them); secrets are wrapped in redacting types; the browser flow keeps tokens in
-  cookies with single-flight refresh; JWKS relying-party helpers pin the key set to
-  the configured issuer. The server is the single source of truth: a CI drift gate
-  fails the build if an SDK's vendored OpenAPI/protobuf copy diverges.
+  them); a plaintext `http://` base URL is refused at construction, with a
+  loopback-only development exception matched on literal hostnames rather than
+  resolved DNS; secrets are wrapped in redacting types; the browser flow keeps tokens
+  in cookies with single-flight refresh; JWKS relying-party helpers pin the key set to
+  the configured issuer's origin. The server is the single source of truth: a CI drift
+  gate fails the build if an SDK's vendored OpenAPI/protobuf copy diverges.
+- **Local token verification in the SDK route guards is strict by default.** A guard
+  that only checked a signature would accept an expired token, and — because the JWKS
+  is organization-wide — one minted for a different tenant. Every SDK guard therefore
+  verifies signature **and** expiry **and** that the token's tenant matches the
+  client's configured tenant, failing closed when it has nothing to compare against.
+  Where a raw signature-only primitive still exists it is named to make accidental use
+  hard.
+- **Every SDK ships a webhook-signature verifier** (contract §13). Receivers no longer
+  hand-roll the check: `verify_webhook(...)` implements one canonical spec across all
+  eleven languages — HMAC-SHA256 over `<timestamp>.<raw_body>`, constant-time
+  comparison on decoded signature bytes, a signature header with no `v1` value always
+  failing rather than silently passing, multiple `v1` values accepted so secrets can be
+  rotated without downtime, and a two-sided freshness window (default 300 seconds) that
+  rejects future-dated timestamps as firmly as stale ones.
 
 ---
 
@@ -324,13 +344,19 @@ checklist — most of the threat model's open items live here.
 
 **Integration & SDKs**
 
-- **Verify webhook signatures and AMQP HMACs** on the receiving side — the contract
-  requires it, and an unverified receiver acts on any POST that reaches its URL.
+- **Call the webhook verifier.** Every SDK now ships `verify_webhook(...)`, so the
+  hard part is done — but a helper you never invoke protects nothing, and an
+  unverified receiver acts on any POST that reaches its URL. Verify before you act on
+  a delivery, and deduplicate on the delivery id. The same applies to AMQP: the
+  contract requires HMAC verification on every consumed message.
+- **Configure the tenant on any SDK route guard.** The guards bind each token to your
+  configured tenant, which means they need to know it — a guard given no tenant to
+  compare against fails closed and rejects every token, by design.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.
 - Install SDKs under their **canonical package names**, commit lockfiles, and keep
-  dependency scanning on — seven public registries are seven chances for a
+  dependency scanning on — eleven public registries are eleven chances for a
   typosquat or a hijacked release.
 
 **Accepted, documented trade-offs**
@@ -361,6 +387,12 @@ checklist — most of the threat model's open items live here.
   passes — each re-checking every prior finding against current code with
   file-and-line evidence, not trusting a checklist. Findings carry stable IDs so a
   fix can be traced back to the review that raised it.
+- **A fix is not trusted until someone else checks it.** Remediation and verification
+  are deliberately separated: after a round of fixes lands, an independent pass
+  re-derives every claim from source. That discipline earns its keep — the most recent
+  pass confirmed the fixes but also caught one that was only half complete, and found
+  that a *performance* change had quietly raised a brute-force ceiling. Both are
+  recorded as new findings rather than absorbed silently.
 - **The threat model is living.** It is revisited when a new API surface, protocol
   or integration lands, when a trust boundary moves, when a review raises something
   with no corresponding threat, or when a deferred item ships. The Threat Dragon

@@ -371,3 +371,37 @@ Both commits landed after §9 and change security-relevant behaviour.
 3. **Residual 1** — add the `member_of` tenant predicate (free, closes the last read-time gap in the authz graph).
 4. **Residuals 2 and 4** — reorder the two cache invalidations; bound the `Unlimited` gRPC family.
 5. **OBS-1** — open a ticket recording the client-secret entropy assumption.
+
+### 10.7 Remediation of §10 — status (2026-08-03)
+
+> ⚠️ **This subsection was written by the remediation work, not by a reviewer.**
+> §9 is the cautionary precedent: it asserted "all fixed", and the independent
+> pass in §10 found one of its claims partial (SEC-072 → SEC-080) plus two
+> further findings in code the remediation itself had introduced. So the
+> statuses below are **claims pending verification**, deliberately *not* marked
+> ✅ CONFIRMED. Only an independent pass may promote them. Treat §10.1's table
+> as the model: re-derive each from source.
+
+| Item | Claimed status | Where |
+|---|---|---|
+| **SEC-079** | Remediated — pending verification | `axiam` `04dc674` |
+| **SEC-080** | Remediated — pending verification | `axiam-swift-sdk` `bc7c48d` |
+| **Residual 1** (`member_of` tenant predicate) | Remediated — pending verification | `axiam` `04dc674` |
+| **Residual 2** (cache invalidation ordering) | Remediated — pending verification, **no regression test** | `axiam` `04dc674` |
+| **Residual 4** (`Unlimited` family bounded) | Remediated — pending verification | `axiam` `04dc674` |
+| **Residual 3** (cache does not re-check user status) | **Not addressed** — accepted, documented | — |
+| **Residual 5** (introspect work factor rose 60×) | **Not addressed** — accepted, documented | — |
+| **OBS-1** (client-secret hashing) | Tracked, see below | — |
+
+**What was done.**
+
+- **SEC-079.** `admin_per_sec` no longer derives from `authz_per_sec` at all: a new absolute `ADMIN_PER_SEC_DEFAULT = 10` (600/min per IP) governs the family that holds the Argon2id `ValidateCredentials`. Only `identity_per_sec` still scales with authz, so a `gateway`/`mesh` preset raising mesh capacity can no longer widen credential-guessing breadth as a side effect. `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` still overrides. The CHANGELOG entry leads with *"This is a posture change — read it even if you skipped the units fix above"*, because the hazard SEC-079 identified is precisely an operator reading "corrected gRPC units" and not realising their deployed ceiling rose 60×. The pre-existing doc-drift test `documented_per_family_rows_match_the_derivation` failed as predicted (`left: 100, right: 10`) before the docs were updated — the guard worked.
+- **Residual 1.** `AND out.tenant_id = $tenant_id` added inside the `LET $group_records` sub-select. Query-plan pins re-run: still `IndexScan idx_member_of_unique`, and the `TableScan` witness test was updated to the same shape so it still witnesses a scan rather than going vacuous.
+- **Residual 2.** Cache invalidation moved above `result.take(0)?` in `consume` and `invalidate_user_sessions_except`. The other three session-deleting methods were audited and have no fallible step between the `.await` and the invalidation, so they were already correct. **No regression test was added, deliberately**: reaching the bug requires the database to commit the `DELETE … RETURN BEFORE` and then return a BEFORE image that fails to deserialize into `SessionRow`. With the real embedded SurrealDB the returned row is by construction the row it stored, and the repository takes a concrete `Surreal<C>` rather than a mockable trait, so there is no seam. An instrumented-cache call-order assertion would test the assertion, not the behaviour. **This is the weakest item in the set and the one most worth an independent look.**
+- **Residual 4.** `Unlimited` became `Infra` with an absolute `INFRA_PER_SEC = 100`. Rationale: a k8s liveness/readiness probe runs on the order of once per few seconds per prober, so even a large sidecar fleet behind one NAT egress IP stays orders of magnitude below 100/s — the ceiling can never be what breaks a probe during an incident (the property that motivated the original pass-through), while the surface stops being unbounded. The old `reflection_and_health_are_never_throttled` test was split into two that pin *both* halves: probes survive a fully saturated server, **and** a sustained flood is eventually rejected. New shared-counter endpoint `grpc_infra`; the other three bucket names are byte-identical, so an in-flight upgrade keeps counting against the same rows.
+
+**Not addressed, and why.** Residual 3 (the cache does not re-check user status, so a disabled user stays authenticated for up to the TTL) and residual 5 (a pre-auth caller can drive 600 introspect client-lookups per minute per IP instead of 10) are both **accepted trade-offs of features that are opt-in or already reviewed**, not defects introduced here. Residual 3 has the same semantics as the pre-cache inline check — the cache widens the window from "next request" to "TTL", which is the documented bounded-staleness contract the cache is opt-in for. Changing either is a posture decision, not a fix.
+
+**OBS-1 — client-secret hashing.** Client secrets are hashed with unsalted single-round SHA-256 (`repository/service_account.rs:36-40`). This is acceptable **only** while every secret is 32 CSPRNG bytes with no operator-supplied path — verified true at both creation and rotation, with no API accepting a caller-chosen secret. §10.4 makes the right point: `421e3e2a`'s doc comment now enshrines that as a design property, which is exactly when it stops being an implementation detail and needs a tracking item rather than a comment. **The trigger condition, stated so it cannot be missed: if any code path is ever added that accepts an operator-supplied, imported, or otherwise non-CSPRNG client secret, this must move to a salted KDF in the same change.** Until then it is not a finding.
+
+**Cross-SDK observation from the SEC-080 fix (new, not previously recorded).** While fixing the absent-`exp` case, every other optional claim in the Swift authenticator was audited. `tenant_id` and `sub` already use `guard let` and fail closed. But `JwtClaims` in `JwksVerifier.swift` **has no `nbf`, `iss` or `aud` fields at all** — the Swift SDK does not model them, so it cannot check them. That is not an `if let` leak (there is nothing to leak), but it is the same family as SEC-080: the three newest SDKs now enforce three different subsets of the same token contract — C honours `nbf`, the C++ `TokenAuthenticator` checks optional `iss`/`aud`, Swift checks neither. Recorded as an observation rather than fixed: adding `nbf` enforcement changes acceptance behaviour, and `iss`/`aud` need a decision about expected values. Worth a deliberate cross-SDK decision on what the minimum local-verification set is, ideally stated in `CONTRACT.md` §10 so it stops drifting per SDK.

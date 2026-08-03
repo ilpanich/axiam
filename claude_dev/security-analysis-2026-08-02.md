@@ -725,7 +725,16 @@ session is unusable passes vacuously and does not satisfy the clause.
 
 ### 14.4 Observations from §13.4 and §12.6
 
-| Item | Claimed status | Where |
+> **No commit hashes are cited in this section, deliberately.** §11.2's rule is
+> that a remediation record citing a hash must resolve to a commit reachable from
+> the default branch, and `scripts/check-remediation-evidence.py` enforces it. A
+> hash authored on the remediation branch cannot satisfy that until the branch
+> merges, so citing one here would either fail the gate or — worse — invite
+> relaxing it. The rows below name the **repository** and what landed; the
+> merge-commit evidence belongs in the verification pass that promotes these
+> claims, which is the only point at which it can be true.
+
+| Item | Claimed status | Repo and what landed |
 |---|---|---|
 | **1** — invalidation suppression by unbinding | Remediated — pending verification | `axiam`: self-addressed liveness heartbeat; watchdog is a **one-way revoker** |
 | **2** — publisher channel has no recovery | Remediated — pending verification | `axiam`: channel opened lazily and reopened after any failure |

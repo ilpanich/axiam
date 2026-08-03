@@ -38,8 +38,12 @@ Rate limiting is **per method family**, not server-wide:
 `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
 `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService` +
 `TokenService`, `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and
-gRPC reflection/health are never limited. All three are per second per
-client IP; leaving the last two unset derives them from the authz ceiling.
+gRPC reflection/health share a fixed, deliberately generous 100/s bucket.
+All three knobs are per second per client IP. Leaving
+`GRPC_IDENTITY_PER_SEC` unset derives it as 5x the authz ceiling; leaving
+`GRPC_ADMIN_PER_SEC` unset gives a flat 10/s in **every** posture, because
+`UserService/ValidateCredentials` is an Argon2id verification and its
+ceiling is a CPU guard rather than a read ceiling (SEC-079).
 See [Sizing your rate limits § 3.1](../deployment/rate-limit-sizing.md).
 
 ## Consuming the API

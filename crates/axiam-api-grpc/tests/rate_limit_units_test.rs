@@ -11,8 +11,12 @@
 //!   loudly against the old wiring.
 //! - `identity_reads_are_not_throttled_by_the_authz_ceiling`: an identity-read
 //!   method keeps flowing after the authz bucket is exhausted (I2).
-//! - `reflection_and_health_are_never_throttled`: the neutral family is
-//!   exempt from both layers.
+//! - `reflection_and_health_survive_a_saturated_server`: the infrastructure
+//!   family has its own generous bucket, so probes keep answering while every
+//!   other family is saturated.
+//! - `reflection_and_health_are_bounded`: …and that bucket is finite, so the
+//!   family is not an unmetered surface selected by prefix-matching the
+//!   attacker-controlled `:path` (security re-verification, residual 4).
 //!
 //! Run with: cargo test -p axiam-api-grpc --test rate_limit_units_test
 
@@ -22,7 +26,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axiam_api_grpc::middleware::rate_limit::{
-    GrpcRateLimits, GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer,
+    ADMIN_PER_SEC_DEFAULT, GrpcRateLimits, GrpcSharedRateLimitLayer, INFRA_PER_SEC,
+    build_grpc_method_scoped_governor_layer,
 };
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
@@ -34,6 +39,7 @@ use tower::{Layer, Service};
 
 const AUTHZ_PATH: &str = "/axiam.v1.AuthorizationService/CheckAccess";
 const IDENTITY_PATH: &str = "/axiam.v1.UserInfoService/GetUserInfo";
+const ADMIN_PATH: &str = "/axiam.v1.UserService/ValidateCredentials";
 const HEALTH_PATH: &str = "/grpc.health.v1.Health/Check";
 const REFLECTION_PATH: &str = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
 
@@ -206,24 +212,106 @@ async fn identity_reads_are_not_throttled_by_the_authz_ceiling() {
     );
 }
 
-/// Reflection and health are the explicit neutral default: never counted,
-/// never throttled, even when every limited family is saturated.
+/// **SEC-079 acceptance, through the full stack.** The Argon2id-bound admin
+/// family stays at its absolute CPU-guard ceiling even when the authz ceiling
+/// is raised to a service-mesh number — the decoupling is what stops a mesh
+/// posture from also widening online password guessing.
 #[tokio::test]
-async fn reflection_and_health_are_never_throttled() {
+async fn admin_family_is_capped_independently_of_the_authz_ceiling() {
+    // A `mesh`-shaped authz ceiling: 5 000/s.
+    let limits = GrpcRateLimits::from_authz_per_sec(5_000);
+    assert_eq!(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
+
+    let mut svc = stack(limits).await;
+    let peer: SocketAddr = "203.0.113.14:5000".parse().unwrap();
+
+    let mut admin_admitted = 0usize;
+    while call(&mut svc, request(ADMIN_PATH, peer)).await {
+        admin_admitted += 1;
+        assert!(
+            admin_admitted <= ADMIN_PER_SEC_DEFAULT as usize * 4,
+            "the admin family admitted {admin_admitted} back-to-back credential checks \
+             against a {ADMIN_PER_SEC_DEFAULT}/s ceiling — it is tracking the authz \
+             ceiling again (SEC-079)"
+        );
+    }
+    assert!(
+        admin_admitted >= ADMIN_PER_SEC_DEFAULT as usize,
+        "the admin bucket must still allow a full {ADMIN_PER_SEC_DEFAULT}-token burst, \
+         got {admin_admitted}"
+    );
+
+    // …while the authz family, sized for the mesh, is still wide open.
+    for i in 0..500 {
+        assert!(
+            call(&mut svc, request(AUTHZ_PATH, peer)).await,
+            "authz request {i} must not be throttled by the admin ceiling"
+        );
+    }
+}
+
+/// **Residual 4, half one.** Reflection and health have their own generous
+/// bucket, so an incident that saturates every other family still leaves the
+/// probes answering — a throttled liveness probe turns an overload into an
+/// outage.
+///
+/// The probe volume asserted here (30 per path, ~60 total) is far above any
+/// real probe cadence and far below [`INFRA_PER_SEC`]'s one-second burst.
+#[tokio::test]
+async fn reflection_and_health_survive_a_saturated_server() {
     let limits = GrpcRateLimits::from_authz_per_sec(1);
     let mut svc = stack(limits).await;
     let peer: SocketAddr = "203.0.113.12:5000".parse().unwrap();
 
+    // Saturate every *other* family.
     while call(&mut svc, request(AUTHZ_PATH, peer)).await {}
     assert!(!call(&mut svc, request(AUTHZ_PATH, peer)).await);
+    while call(&mut svc, request(IDENTITY_PATH, peer)).await {}
+    while call(&mut svc, request(ADMIN_PATH, peer)).await {}
 
     for path in [HEALTH_PATH, REFLECTION_PATH] {
-        for i in 0..200 {
+        for i in 0..30 {
             assert!(
                 call(&mut svc, request(path, peer)).await,
-                "{path} request {i} must never be rate-limited — a throttled liveness \
-                 probe turns an overload into an outage"
+                "{path} request {i} must still be served while every other family is \
+                 saturated — a throttled liveness probe turns an overload into an outage"
             );
         }
     }
+}
+
+/// **Residual 4, half two.** The infrastructure family is nonetheless
+/// *bounded*: it used to bypass both limiter layers entirely on a prefix match
+/// against the attacker-controlled `:path`. Sustained flooding must eventually
+/// be rejected.
+#[tokio::test]
+async fn reflection_and_health_are_bounded() {
+    let limits = GrpcRateLimits::from_authz_per_sec(100);
+    let mut svc = stack(limits).await;
+    let peer: SocketAddr = "203.0.113.13:5000".parse().unwrap();
+
+    let mut admitted = 0usize;
+    let mut rejected = false;
+    // A generous but finite bucket: `INFRA_PER_SEC` tokens of burst plus
+    // whatever replenishes during the loop. Well under 10x the ceiling is
+    // enough to prove the bucket exists at all.
+    for _ in 0..(INFRA_PER_SEC as usize * 10) {
+        if call(&mut svc, request(HEALTH_PATH, peer)).await {
+            admitted += 1;
+        } else {
+            rejected = true;
+            break;
+        }
+    }
+
+    assert!(
+        rejected,
+        "the infrastructure family admitted {admitted} consecutive requests without \
+         ever rejecting — it is still an unbounded pass-through (residual 4)"
+    );
+    assert!(
+        admitted >= INFRA_PER_SEC as usize,
+        "the infrastructure bucket must be generous: expected at least a full \
+         {INFRA_PER_SEC}-token burst, got {admitted}"
+    );
 }

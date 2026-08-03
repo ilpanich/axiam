@@ -127,7 +127,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |
-| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 100 | 1000 | 5000 |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10 | 10 | 10 |
 <!-- rate-limit-posture-table:end -->
 
 Per-minute values are **per bucket**, and the bucket is whatever
@@ -136,10 +136,17 @@ Per-minute values are **per bucket**, and the bucket is whatever
 `/oauth2/introspect` only; everything else is always per-IP).
 
 The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
-bucket per gRPC **method family** (see §3.1). Leave
-`GRPC_IDENTITY_PER_SEC` / `GRPC_ADMIN_PER_SEC` unset and they are derived
-from `GRPC_AUTHZ_PER_SEC` (identity = 5x, admin = 1x), which is why the
-`gateway`/`mesh` columns above move together with one variable.
+bucket per gRPC **method family** (see §3.1). Leave `GRPC_IDENTITY_PER_SEC`
+unset and it is derived as 5x `GRPC_AUTHZ_PER_SEC`, which is why those two
+rows move together with one variable.
+
+`GRPC_ADMIN_PER_SEC` deliberately **does not move with the posture**: it is
+a flat 10/s (600/min per IP) in every column. `UserService` holds
+`ValidateCredentials`, an Argon2id password verification, so its ceiling is
+a CPU guard on an online-guessing surface rather than a throughput number —
+raising the authz ceiling for service-mesh capacity must not silently widen
+password spraying (SEC-079). Set the env var explicitly if you need more;
+explicit configuration still wins.
 
 ### 3.1 gRPC buckets are per method family
 
@@ -154,20 +161,33 @@ posture. The buckets are now split:
 |---|---|---|---|
 | authz-check | `axiam.v1.AuthorizationService` | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100/s |
 | identity-read | `axiam.v1.UserInfoService`, `axiam.v1.TokenService` | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500/s (5x authz) |
-| admin | `axiam.v1.UserService` | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 100/s (1x authz) |
-| unlimited | gRPC reflection (`grpc.reflection.*`), health (`grpc.health.*`) | *(none — never limited)* | — |
+| admin | `axiam.v1.UserService` | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10/s (absolute — see below) |
+| infrastructure | gRPC reflection (`grpc.reflection.*`), health (`grpc.health.*`) | *(none — fixed at 100/s)* | 100/s |
 
 Notes:
 
-- **Admin tracks authz 1:1 on purpose.** `UserService/ValidateCredentials`
-  performs an Argon2id verification, so its ceiling is a CPU guard, not a
-  read ceiling — it must not inherit the identity-read multiplier.
-- **Reflection and health are deliberately unlimited.** Their whole job is
-  to answer during an incident, exactly when the limited families are most
-  likely to be saturated; throttling a liveness probe turns an overload
-  into an outage.
+- **Admin is an absolute CPU guard, not a multiple of anything (SEC-079).**
+  `UserService/ValidateCredentials` performs an Argon2id verification
+  (~19 MiB of memory arena each), so its ceiling bounds online password
+  guessing and Argon2id CPU, not read throughput. It is therefore 10/s
+  (600/min per IP) regardless of the posture: a `gateway`/`mesh` preset
+  raising the authz ceiling for mesh capacity must not raise this one too.
+  The family contains only `GetUser` and `ValidateCredentials` — the
+  high-volume identity read is `GetUserInfo` on `UserInfoService`, which is
+  in the identity-read family and unaffected. Pin
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` if your provisioning loop needs more.
+- **Reflection and health get a deliberately generous ceiling — but a
+  finite one.** Their whole job is to answer during an incident, exactly
+  when the other families are most likely to be saturated, and 100/s per IP
+  is orders of magnitude above any real probe cadence, so this ceiling can
+  never be what breaks a liveness check. It is not, however, a
+  pass-through: the family is selected by prefix-matching the client-
+  supplied gRPC `:path`, and an unmetered surface behind a client-chosen
+  string is not something to leave open against a health service being
+  registered later.
 - **An unrecognized gRPC path is counted against the authz bucket**, not
-  the unlimited one. Adding a service without classifying it fails safe.
+  the infrastructure one. Adding a service without classifying it fails
+  safe.
 - Both layers (the in-memory governor and the cross-replica shared counter)
   use the same split and the same per-second numbers. The shared counter
   runs a 60-second window and converts internally — before run 4 it did
@@ -343,7 +363,7 @@ The gRPC listener logs its own resolved family ceilings when it binds:
 ```json
 {"level":"INFO","fields":{"message":"Starting gRPC server",
  "bind":"127.0.0.1:50051","grpc_authz_per_sec":100,
- "grpc_identity_per_sec":500,"grpc_admin_per_sec":100}}
+ "grpc_identity_per_sec":500,"grpc_admin_per_sec":10}}
 ```
 
 ### Is the `internet` posture throttling your machine traffic?

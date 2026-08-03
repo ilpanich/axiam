@@ -544,6 +544,19 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         // the plan changes. Pinned by
         // `crates/axiam-db/tests/authz_query_plan_test.rs`.
         //
+        // Defence in depth (security re-verification 2026-08-03, residual 1):
+        // the `member_of` traversal carries its own `out.tenant_id =
+        // $tenant_id` predicate. It is not reachable today — `group.rs`
+        // validates BOTH endpoints against the tenant before writing a
+        // `member_of` edge, and the outer `has_role` predicate still confines
+        // the resulting role to the tenant — but without it this was the one
+        // authorization edge with no read-time tenant check, so a migration or
+        // bulk import writing `member_of` directly would have bypassed it.
+        // `out` is a `group` record and `idx_member_of_unique` still serves the
+        // `in =` half, so the added predicate is a post-filter on an already
+        // index-selected row set: no plan change (pinned by
+        // `authz_query_plan_test::group_membership_lookup_is_index_satisfied`).
+        //
         // Statement indices below: 0 = direct SELECT, 1 = LET, 2 = inherited
         // SELECT.
         let mut result = self
@@ -563,7 +576,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                  AND out.tenant_id = $tenant_id; \
                  LET $group_records = (\
                      SELECT VALUE out FROM member_of \
-                     WHERE in = type::record('user', $user_id)\
+                     WHERE in = type::record('user', $user_id) \
+                     AND out.tenant_id = $tenant_id\
                  ); \
                  SELECT meta::id(out.id) AS record_id, \
                         out.tenant_id AS tenant_id, \

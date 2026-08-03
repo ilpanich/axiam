@@ -46,8 +46,19 @@
 //!   window again.
 //! - **I2 — scope.** Both layers used to be server-wide, so the *authz*
 //!   ceiling throttled identity reads and admin traffic too. Buckets are now
-//!   split per [`GrpcMethodFamily`] (authz-check / identity-read / admin),
-//!   with reflection and health explicitly unlimited.
+//!   split per [`GrpcMethodFamily`] (authz-check / identity-read / admin /
+//!   infrastructure).
+//!
+//! # SEC-079 — the admin ceiling is absolute, not derived
+//!
+//! The admin family contains `axiam.v1.UserService/ValidateCredentials`, an
+//! **Argon2id verification**. Its ceiling is a CPU guard, so it is an absolute
+//! constant ([`ADMIN_PER_SEC_DEFAULT`]) rather than a multiple of — or the
+//! same number as — the read-sized `authz_per_sec` base. See that constant's
+//! docs for the full reasoning; the short version is that when the I1 units
+//! bug was fixed the effective per-IP ceiling on that RPC rose 60x, and
+//! deriving it from a read-sized base would let a `gateway`/`mesh` posture
+//! raise it further still.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -194,14 +205,23 @@ pub enum GrpcMethodFamily {
     IdentityRead,
     /// Administrative / user-management traffic: `axiam.v1.UserService`
     /// (`GetUser`, `ValidateCredentials`). `ValidateCredentials` hashes a
-    /// password, so this family is deliberately NOT sized from read capacity.
+    /// password, so this family is deliberately NOT sized from read capacity —
+    /// its ceiling is the absolute [`ADMIN_PER_SEC_DEFAULT`] (SEC-079).
     Admin,
-    /// Explicitly neutral — never rate-limited. gRPC **reflection** and
-    /// **health** endpoints: infrastructure probes whose whole job is to
-    /// answer during an incident, when the limited families are most likely
-    /// to be saturated. Throttling a liveness probe turns an overload into an
-    /// outage.
-    Unlimited,
+    /// Infrastructure probes: gRPC **reflection** and **health**. Their whole
+    /// job is to answer during an incident, when the limited families are most
+    /// likely to be saturated, so this family gets a deliberately generous
+    /// ceiling ([`INFRA_PER_SEC`]) — but a **finite** one.
+    ///
+    /// This family used to be a literal pass-through (`Unlimited`) that
+    /// bypassed BOTH limiter layers, selected by a prefix test on the
+    /// attacker-controlled `:path`. Neither service is registered today, so
+    /// the practical effect was unmetered HTTP/2 stream churn rather than DB
+    /// work — but registering a health service would have turned it into a
+    /// genuinely unmetered endpoint. A generous bucket keeps probes working
+    /// during an overload without leaving an unbounded surface behind
+    /// (security re-verification 2026-08-03, residual 4).
+    Infra,
 }
 
 /// gRPC reflection service package prefix (v1 and v1alpha).
@@ -217,7 +237,7 @@ impl GrpcMethodFamily {
     /// this function fails safe (throttled) rather than open (unlimited).
     pub fn classify(path: &str) -> Self {
         if path.starts_with(REFLECTION_PREFIX) || path.starts_with(HEALTH_PREFIX) {
-            return Self::Unlimited;
+            return Self::Infra;
         }
         match path.split('/').nth(1).unwrap_or_default() {
             "axiam.v1.UserInfoService" | "axiam.v1.TokenService" => Self::IdentityRead,
@@ -227,19 +247,21 @@ impl GrpcMethodFamily {
         }
     }
 
-    /// Shared-counter bucket-name prefix for this family, or `None` when the
-    /// family is never limited.
+    /// Shared-counter bucket-name prefix for this family.
     ///
     /// These names are part of the persisted `rate_limit_bucket` key space
     /// (`"{endpoint}:{ip}"`), so `grpc_authz` is kept byte-for-byte for the
     /// authz family — an in-flight upgrade keeps counting against the same
     /// rows.
-    pub const fn shared_endpoint(self) -> Option<&'static str> {
+    ///
+    /// Every family now has one: the infrastructure family is bucketed like
+    /// the rest rather than skipping the counter entirely (residual 4).
+    pub const fn shared_endpoint(self) -> &'static str {
         match self {
-            Self::AuthzCheck => Some("grpc_authz"),
-            Self::IdentityRead => Some("grpc_identity"),
-            Self::Admin => Some("grpc_admin"),
-            Self::Unlimited => None,
+            Self::AuthzCheck => "grpc_authz",
+            Self::IdentityRead => "grpc_identity",
+            Self::Admin => "grpc_admin",
+            Self::Infra => "grpc_infra",
         }
     }
 }
@@ -258,7 +280,9 @@ pub struct GrpcRateLimits {
     pub authz_per_sec: u32,
     /// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` — userinfo / token reads.
     pub identity_per_sec: u32,
-    /// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — user management.
+    /// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — user management. Defaults to the
+    /// absolute [`ADMIN_PER_SEC_DEFAULT`], never to a multiple of
+    /// [`Self::authz_per_sec`] (SEC-079).
     pub admin_per_sec: u32,
 }
 
@@ -269,40 +293,89 @@ pub struct GrpcRateLimits {
 /// when `AXIAM__RATE_LIMIT__PROFILE` raises the authz ceiling.
 pub const IDENTITY_PER_SEC_MULTIPLE: u32 = 5;
 
+/// Default ceiling for the [`GrpcMethodFamily::Admin`] family, in requests per
+/// second per IP — **an absolute number, deliberately not derived from
+/// [`GrpcRateLimits::authz_per_sec`]** (SEC-079).
+///
+/// **Why absolute.** The admin family contains
+/// `axiam.v1.UserService/ValidateCredentials`, which performs a real Argon2id
+/// `verify_password` (~19 MiB of memory arena per verification). Its ceiling is
+/// therefore a **CPU/memory guard on an online-password-guessing surface**, not
+/// a throughput ceiling on a read. `authz_per_sec` is a read-sized base (100/s
+/// shipped, and `AXIAM__RATE_LIMIT__PROFILE=gateway`/`mesh` raise it to
+/// 1 000/s / 5 000/s); deriving the admin ceiling from it — even 1:1 — makes a
+/// service-mesh capacity decision silently also a credential-guessing-breadth
+/// decision. Decoupling the two is the entire point of this constant.
+///
+/// **Why 10/s (600/min per IP).** The family holds exactly two RPCs, `GetUser`
+/// and `ValidateCredentials`; the high-volume identity read is `GetUserInfo` on
+/// `UserInfoService`, which lives in [`GrpcMethodFamily::IdentityRead`] and is
+/// unaffected. 600 administrative calls per minute from one client IP is well
+/// above any real admin console or M2M provisioning loop, and roughly an order
+/// of magnitude below the point at which concurrent Argon2id verifications
+/// become the server's dominant cost. It also restores the protection the I1
+/// units fix accidentally removed: before that fix the shared window enforced
+/// the per-second number against a 60-second window, so the deployed ceiling
+/// was ~100/**minute**; correcting the units silently raised it to
+/// ~6 000/minute. 600/minute is the CPU-appropriate value the doc comment
+/// always claimed this family had.
+///
+/// Operators who genuinely need more can still pin
+/// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — explicit configuration always wins.
+pub const ADMIN_PER_SEC_DEFAULT: u32 = 10;
+
+/// Ceiling for the [`GrpcMethodFamily::Infra`] family (gRPC reflection and
+/// health), in requests per second per IP — generous, but finite.
+///
+/// Infrastructure probes are intrinsically low-rate: a Kubernetes liveness or
+/// readiness probe runs on the order of once every few seconds per prober, and
+/// even a large fleet of sidecars sharing one NAT egress IP stays orders of
+/// magnitude below 100/s. So this ceiling can never be the thing that breaks a
+/// health check during an incident — which is the property that made the family
+/// a pass-through in the first place — while still bounding the surface, so a
+/// health service registered later is not an unmetered endpoint reachable by
+/// prefix-matching an attacker-controlled `:path` (residual 4).
+///
+/// It is an absolute constant for the same reason as
+/// [`ADMIN_PER_SEC_DEFAULT`]: probe volume has nothing to do with authz
+/// capacity, so a posture preset must not move it.
+pub const INFRA_PER_SEC: u32 = 100;
+
 impl GrpcRateLimits {
     /// Derives the whole family from the authz ceiling alone — the shape an
     /// operator gets when only `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` (or a
     /// posture preset) is set.
     ///
-    /// Admin tracks the authz ceiling 1:1: `ValidateCredentials` is an
-    /// Argon2id verification, so its ceiling is a CPU guard and must not
-    /// inherit a read-sized multiplier.
+    /// Only [`Self::identity_per_sec`] actually scales: `ValidateCredentials`
+    /// is an Argon2id verification, so the admin ceiling is a CPU guard and
+    /// takes the absolute [`ADMIN_PER_SEC_DEFAULT`] rather than inheriting a
+    /// read-sized base (SEC-079).
     pub const fn from_authz_per_sec(authz_per_sec: u32) -> Self {
         Self {
             authz_per_sec,
             identity_per_sec: authz_per_sec.saturating_mul(IDENTITY_PER_SEC_MULTIPLE),
-            admin_per_sec: authz_per_sec,
+            admin_per_sec: ADMIN_PER_SEC_DEFAULT,
         }
     }
 
-    /// The per-second ceiling for `family`, or `None` when the family is
-    /// never limited ([`GrpcMethodFamily::Unlimited`]).
-    pub const fn per_sec(self, family: GrpcMethodFamily) -> Option<u32> {
+    /// The per-second ceiling for `family`.
+    ///
+    /// Every family is limited: [`GrpcMethodFamily::Infra`] takes the fixed
+    /// [`INFRA_PER_SEC`], which is why this is not configurable per instance
+    /// (residual 4).
+    pub const fn per_sec(self, family: GrpcMethodFamily) -> u32 {
         match family {
-            GrpcMethodFamily::AuthzCheck => Some(self.authz_per_sec),
-            GrpcMethodFamily::IdentityRead => Some(self.identity_per_sec),
-            GrpcMethodFamily::Admin => Some(self.admin_per_sec),
-            GrpcMethodFamily::Unlimited => None,
+            GrpcMethodFamily::AuthzCheck => self.authz_per_sec,
+            GrpcMethodFamily::IdentityRead => self.identity_per_sec,
+            GrpcMethodFamily::Admin => self.admin_per_sec,
+            GrpcMethodFamily::Infra => INFRA_PER_SEC,
         }
     }
 
     /// The ceiling for `family` expressed in the shared layer's 60-second
-    /// window (I1). `None` for the unlimited family.
-    pub const fn window_limit(self, family: GrpcMethodFamily) -> Option<u32> {
-        match self.per_sec(family) {
-            Some(per_sec) => Some(per_sec_to_window_limit(per_sec)),
-            None => None,
-        }
+    /// window (I1).
+    pub const fn window_limit(self, family: GrpcMethodFamily) -> u32 {
+        per_sec_to_window_limit(self.per_sec(family))
     }
 }
 
@@ -368,11 +441,13 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
 
 /// Build the per-method-family in-memory governor stack (I2).
 ///
-/// One independent [`GovernorLayer`] per limited [`GrpcMethodFamily`], each
-/// with its own token bucket keyed by client IP, plus a pass-through path for
-/// [`GrpcMethodFamily::Unlimited`] (reflection / health). Replaces the single
-/// server-wide governor, which made the authz ceiling the ceiling for every
-/// gRPC surface.
+/// One independent [`GovernorLayer`] per [`GrpcMethodFamily`], each with its
+/// own token bucket keyed by client IP. Replaces the single server-wide
+/// governor, which made the authz ceiling the ceiling for every gRPC surface.
+///
+/// Since residual 4 the infrastructure family (reflection / health) gets a
+/// governor too — a generous [`INFRA_PER_SEC`] one — instead of a pass-through
+/// that bypassed both limiter layers.
 ///
 /// # Panics
 ///
@@ -383,9 +458,10 @@ pub fn build_grpc_method_scoped_governor_layer(
     limits: GrpcRateLimits,
 ) -> GrpcMethodScopedGovernorLayer {
     GrpcMethodScopedGovernorLayer {
-        authz: build_grpc_governor_layer(limits.authz_per_sec),
-        identity: build_grpc_governor_layer(limits.identity_per_sec),
-        admin: build_grpc_governor_layer(limits.admin_per_sec),
+        authz: build_grpc_governor_layer(limits.per_sec(GrpcMethodFamily::AuthzCheck)),
+        identity: build_grpc_governor_layer(limits.per_sec(GrpcMethodFamily::IdentityRead)),
+        admin: build_grpc_governor_layer(limits.per_sec(GrpcMethodFamily::Admin)),
+        infra: build_grpc_governor_layer(limits.per_sec(GrpcMethodFamily::Infra)),
     }
 }
 
@@ -396,6 +472,7 @@ pub struct GrpcMethodScopedGovernorLayer {
     authz: GrpcGovernorLayer,
     identity: GrpcGovernorLayer,
     admin: GrpcGovernorLayer,
+    infra: GrpcGovernorLayer,
 }
 
 impl<S: Clone> Layer<S> for GrpcMethodScopedGovernorLayer {
@@ -406,23 +483,24 @@ impl<S: Clone> Layer<S> for GrpcMethodScopedGovernorLayer {
             authz: self.authz.layer(inner.clone()),
             identity: self.identity.layer(inner.clone()),
             admin: self.admin.layer(inner.clone()),
-            neutral: inner,
+            infra: self.infra.layer(inner),
         }
     }
 }
 
-/// Dispatches each request to the governor for its [`GrpcMethodFamily`],
-/// or straight through for the unlimited family.
+/// Dispatches each request to the governor for its [`GrpcMethodFamily`].
 ///
 /// All four branches wrap clones of the SAME inner service, so this is a
 /// routing decision over rate-limit state only — the request itself reaches
-/// the identical tonic router whichever branch it takes.
+/// the identical tonic router whichever branch it takes. There is no
+/// pass-through branch: the infrastructure family has its own (generous)
+/// governor rather than bypassing the layer (residual 4).
 #[derive(Clone)]
 pub struct GrpcMethodScopedGovernor<S> {
     authz: GrpcGovernor<S>,
     identity: GrpcGovernor<S>,
     admin: GrpcGovernor<S>,
-    neutral: S,
+    infra: GrpcGovernor<S>,
 }
 
 impl<S> Service<Request<tonic::body::Body>> for GrpcMethodScopedGovernor<S>
@@ -446,7 +524,7 @@ where
         std::task::ready!(Service::poll_ready(&mut self.authz, cx))?;
         std::task::ready!(Service::poll_ready(&mut self.identity, cx))?;
         std::task::ready!(Service::poll_ready(&mut self.admin, cx))?;
-        self.neutral.poll_ready(cx)
+        Service::poll_ready(&mut self.infra, cx)
     }
 
     fn call(&mut self, req: Request<tonic::body::Body>) -> Self::Future {
@@ -469,9 +547,9 @@ where
                 let mut svc = std::mem::replace(&mut self.admin, clone);
                 Box::pin(async move { svc.call(req).await })
             }
-            GrpcMethodFamily::Unlimited => {
-                let clone = self.neutral.clone();
-                let mut svc = std::mem::replace(&mut self.neutral, clone);
+            GrpcMethodFamily::Infra => {
+                let clone = self.infra.clone();
+                let mut svc = std::mem::replace(&mut self.infra, clone);
                 Box::pin(async move { svc.call(req).await })
             }
         }
@@ -606,14 +684,16 @@ enum SharedScope {
 }
 
 impl SharedScope {
-    /// `(endpoint, window limit)` for `path`, or `None` when the request must
-    /// not be counted at all (the unlimited family).
-    fn resolve(self, path: &str) -> Option<(&'static str, u32)> {
+    /// `(endpoint, window limit)` for `path`.
+    ///
+    /// Every path resolves to a bucket — since residual 4 there is no family
+    /// that skips the shared counter.
+    fn resolve(self, path: &str) -> (&'static str, u32) {
         match self {
-            Self::Uniform { endpoint, limit } => Some((endpoint, limit)),
+            Self::Uniform { endpoint, limit } => (endpoint, limit),
             Self::PerFamily(limits) => {
                 let family = GrpcMethodFamily::classify(path);
-                Some((family.shared_endpoint()?, limits.window_limit(family)?))
+                (family.shared_endpoint(), limits.window_limit(family))
             }
         }
     }
@@ -704,12 +784,11 @@ impl GrpcSharedRateLimitLayer {
         }
     }
 
-    /// The `(bucket endpoint, window limit)` this layer would apply to
-    /// `path`, or `None` when `path` is never counted.
+    /// The `(bucket endpoint, window limit)` this layer applies to `path`.
     ///
     /// Exposed so the units at the composition root can be asserted directly
     /// by a test instead of by reading the call site (I1 acceptance).
-    pub fn resolve_for_path(&self, path: &str) -> Option<(&'static str, u32)> {
+    pub fn resolve_for_path(&self, path: &str) -> (&'static str, u32) {
         self.scope.resolve(path)
     }
 }
@@ -769,9 +848,9 @@ where
         // nothing).
         let counter = self.counter.clone();
         // I2: the bucket (and its ceiling) depend on which method family the
-        // request belongs to; `None` means this surface is never counted
-        // (reflection / health).
-        let bucket = self.scope.resolve(req.uri().path());
+        // request belongs to. Every family resolves to a bucket — reflection
+        // and health are counted too, against a generous one (residual 4).
+        let (endpoint, limit) = self.scope.resolve(req.uri().path());
         let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops);
 
         // The rate-limit decision itself is now synchronous and taken BEFORE
@@ -779,8 +858,8 @@ where
         // this (server-wide!) layer. The returned future only awaits the inner
         // service.
         let ip = key_extractor.extract(&req).ok();
-        let allow = match (bucket, ip) {
-            (Some((endpoint, limit)), Some(ip)) => {
+        let allow = match ip {
+            Some(ip) => {
                 // Same bucket key shape as before — `{endpoint}:{ip}` — and
                 // the authz family keeps the `grpc_authz` endpoint name, so an
                 // in-flight upgrade keeps counting against the same
@@ -788,13 +867,11 @@ where
                 let key = format!("{endpoint}:{ip}");
                 counter.check(&key, window_start(Utc::now()), limit)
             }
-            // Unlimited family (reflection / health) — never counted.
-            (None, _) => true,
             // No client-IP key available — fail open; the in-memory governor
             // still makes the real decision. (A counter built with
             // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from inside
             // `check`.)
-            (_, None) => true,
+            None => true,
         };
 
         Box::pin(async move {
@@ -995,9 +1072,8 @@ mod tests {
             0,
         );
 
-        let (endpoint, limit) = layer
-            .resolve_for_path("/axiam.v1.AuthorizationService/CheckAccess")
-            .expect("authz is a limited family");
+        let (endpoint, limit) =
+            layer.resolve_for_path("/axiam.v1.AuthorizationService/CheckAccess");
         assert_eq!(endpoint, "grpc_authz", "bucket key must not change (I1)");
         assert_eq!(
             limit, 6_000,
@@ -1005,14 +1081,19 @@ mod tests {
              here is the ×60 units bug (I1)"
         );
 
-        // The same conversion applies to every limited family.
+        // The same conversion applies to every family.
         assert_eq!(
             layer.resolve_for_path("/axiam.v1.UserInfoService/GetUserInfo"),
-            Some(("grpc_identity", 100 * IDENTITY_PER_SEC_MULTIPLE * 60))
+            ("grpc_identity", 100 * IDENTITY_PER_SEC_MULTIPLE * 60)
         );
         assert_eq!(
             layer.resolve_for_path("/axiam.v1.UserService/GetUser"),
-            Some(("grpc_admin", 6_000))
+            ("grpc_admin", ADMIN_PER_SEC_DEFAULT * 60)
+        );
+        assert_eq!(
+            layer.resolve_for_path("/grpc.health.v1.Health/Check"),
+            ("grpc_infra", INFRA_PER_SEC * 60),
+            "the infrastructure family is bucketed, not skipped (residual 4)"
         );
     }
 
@@ -1032,7 +1113,7 @@ mod tests {
             "/grpc.health.v1.Health/Check",
             "/",
         ] {
-            assert_eq!(layer.resolve_for_path(path), Some(("grpc_authz", 42)));
+            assert_eq!(layer.resolve_for_path(path), ("grpc_authz", 42));
         }
     }
 
@@ -1054,15 +1135,15 @@ mod tests {
             ("/axiam.v1.TokenService/IntrospectToken", IdentityRead),
             ("/axiam.v1.UserService/GetUser", Admin),
             ("/axiam.v1.UserService/ValidateCredentials", Admin),
-            ("/grpc.health.v1.Health/Check", Unlimited),
-            ("/grpc.health.v1.Health/Watch", Unlimited),
+            ("/grpc.health.v1.Health/Check", Infra),
+            ("/grpc.health.v1.Health/Watch", Infra),
             (
                 "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
-                Unlimited,
+                Infra,
             ),
             (
                 "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-                Unlimited,
+                Infra,
             ),
         ] {
             assert_eq!(GrpcMethodFamily::classify(path), expected, "{path}");
@@ -1070,8 +1151,9 @@ mod tests {
     }
 
     /// Fail-safe default: an unrecognized path lands in the STRICTEST limited
-    /// family, never in the unlimited one. Adding a service without updating
-    /// `classify` must not silently create an unlimited gRPC surface.
+    /// family, never in the most generous one. Adding a service without
+    /// updating `classify` must not silently create a loosely-limited gRPC
+    /// surface.
     #[test]
     fn unknown_paths_fall_back_to_the_strictest_family() {
         for path in [
@@ -1095,7 +1177,7 @@ mod tests {
         let limits = GrpcRateLimits::from_authz_per_sec(100);
         assert_eq!(limits.authz_per_sec, 100);
         assert_eq!(limits.identity_per_sec, 500);
-        assert_eq!(limits.admin_per_sec, 100);
+        assert_eq!(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
         assert!(
             limits.identity_per_sec > limits.authz_per_sec,
             "identity reads measured ~14x an authz check; their ceiling must not \
@@ -1106,29 +1188,90 @@ mod tests {
             GrpcMethodFamily::AuthzCheck,
             GrpcMethodFamily::IdentityRead,
             GrpcMethodFamily::Admin,
+            GrpcMethodFamily::Infra,
         ]
         .iter()
-        .map(|f| f.shared_endpoint().expect("limited family"))
+        .map(|f| f.shared_endpoint())
         .collect();
-        assert_eq!(endpoints, vec!["grpc_authz", "grpc_identity", "grpc_admin"]);
-        assert_eq!(GrpcMethodFamily::Unlimited.shared_endpoint(), None);
-        assert_eq!(limits.window_limit(GrpcMethodFamily::Unlimited), None);
+        assert_eq!(
+            endpoints,
+            vec!["grpc_authz", "grpc_identity", "grpc_admin", "grpc_infra"]
+        );
     }
 
-    /// A profile preset that raises the authz ceiling raises the derived
+    /// **SEC-079.** The admin ceiling is a CPU guard on an Argon2id RPC and
+    /// must NOT scale with the read-sized authz base — otherwise a
+    /// `gateway`/`mesh` posture (or any operator raising the authz ceiling for
+    /// service-mesh throughput) silently widens online password guessing.
+    #[test]
+    fn admin_ceiling_never_derives_from_the_authz_ceiling() {
+        for authz in [1, 100, 1_000, 5_000, 60_000, u32::MAX] {
+            let limits = GrpcRateLimits::from_authz_per_sec(authz);
+            assert_eq!(
+                limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT,
+                "authz={authz}: the admin ceiling must stay at the absolute default \
+                 ({ADMIN_PER_SEC_DEFAULT}/s); deriving it from a read-sized base is SEC-079"
+            );
+            assert_eq!(
+                limits.per_sec(GrpcMethodFamily::Admin),
+                ADMIN_PER_SEC_DEFAULT
+            );
+        }
+
+        // And the absolute value is the CPU-appropriate one: 10/s = 600/min
+        // per IP through the 60-second shared window.
+        assert_eq!(ADMIN_PER_SEC_DEFAULT, 10);
+        assert_eq!(
+            GrpcRateLimits::from_authz_per_sec(100).window_limit(GrpcMethodFamily::Admin),
+            600,
+            "600 credential checks per minute per IP — not the 6 000 the units fix \
+             would have produced from the read-sized base"
+        );
+    }
+
+    /// A profile preset that raises the authz ceiling raises the **identity**
     /// family with it, so `gateway`/`mesh` cannot end up with identity reads
-    /// stricter than authz checks.
+    /// stricter than authz checks — and moves nothing else.
     #[test]
     fn derived_family_scales_with_the_authz_ceiling() {
         for authz in [100, 1_000, 5_000] {
             let limits = GrpcRateLimits::from_authz_per_sec(authz);
             assert_eq!(limits.identity_per_sec, authz * IDENTITY_PER_SEC_MULTIPLE);
-            assert_eq!(limits.admin_per_sec, authz);
+            assert_eq!(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
+            assert_eq!(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
             assert!(limits.identity_per_sec >= limits.authz_per_sec);
         }
         // Saturating, not wrapping.
         let huge = GrpcRateLimits::from_authz_per_sec(u32::MAX);
         assert_eq!(huge.identity_per_sec, u32::MAX);
+    }
+
+    /// **Residual 4.** The infrastructure family is generous but finite, and
+    /// its ceiling is fixed rather than posture-derived.
+    #[test]
+    fn infra_family_is_generous_but_finite() {
+        assert_eq!(INFRA_PER_SEC, 100);
+        for authz in [1, 100, 5_000] {
+            let limits = GrpcRateLimits::from_authz_per_sec(authz);
+            assert_eq!(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
+            assert_eq!(
+                limits.window_limit(GrpcMethodFamily::Infra),
+                INFRA_PER_SEC * 60
+            );
+        }
+        // Read through the accessor (not the constant) so these stay real
+        // assertions rather than const-folded no-ops.
+        let infra = GrpcRateLimits::from_authz_per_sec(1).per_sec(GrpcMethodFamily::Infra);
+        assert!(
+            infra >= 100,
+            "a liveness probe must never be the thing that breaks during an incident, \
+             got {infra}/s"
+        );
+        assert!(
+            infra < u32::MAX,
+            "…but the family must be bounded — an unbounded prefix match on the \
+             attacker-controlled :path is what residual 4 closed"
+        );
     }
 
     #[test]

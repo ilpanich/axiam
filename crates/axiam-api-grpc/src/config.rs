@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::middleware::rate_limit::GrpcRateLimits;
 #[cfg(doc)]
-use crate::middleware::rate_limit::IDENTITY_PER_SEC_MULTIPLE;
+use crate::middleware::rate_limit::{ADMIN_PER_SEC_DEFAULT, IDENTITY_PER_SEC_MULTIPLE};
 
 /// gRPC rate-limit bucket-key mode (D8 parity with
 /// `axiam_api_rest::config::rate_limit::RateLimitKeyMode`).
@@ -74,10 +74,13 @@ pub struct GrpcConfig {
     /// `axiam.v1.UserService` (`GetUser`, `ValidateCredentials`) (I2).
     /// Configure via `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`.
     ///
-    /// `None` (the default) tracks [`Self::grpc_authz_per_sec`] 1:1.
+    /// `None` (the default) resolves to the absolute
+    /// [`ADMIN_PER_SEC_DEFAULT`] (10/s = 600/min per IP), **independently of
+    /// [`Self::grpc_authz_per_sec`] and of any posture preset** (SEC-079).
     /// `ValidateCredentials` performs an Argon2id verification, so this
-    /// ceiling is a CPU guard and deliberately does NOT inherit the
-    /// identity-read multiplier.
+    /// ceiling is a CPU guard on an online-password-guessing surface, not a
+    /// throughput ceiling derived from read capacity. Set this env var to
+    /// override — explicit configuration always wins.
     #[serde(default)]
     pub grpc_admin_per_sec: Option<u32>,
     /// D8 parity field — see [`GrpcRateLimitKeyMode`]. Currently always
@@ -148,11 +151,12 @@ impl GrpcConfig {
     /// The per-family gRPC ceilings this config resolves to (I2), in
     /// requests **per second per IP**.
     ///
-    /// Unset knobs are derived from [`Self::grpc_authz_per_sec`] by
-    /// [`GrpcRateLimits::from_authz_per_sec`], so a deployment that only sets
-    /// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` (or only selects a posture profile)
-    /// still gets a coherent family rather than a mix of preset and shipped
-    /// numbers.
+    /// Unset knobs go through [`GrpcRateLimits::from_authz_per_sec`], so a
+    /// deployment that only sets `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` (or only
+    /// selects a posture profile) still gets a coherent family rather than a
+    /// mix of preset and shipped numbers. Only the identity-read ceiling
+    /// actually scales with the authz base; the admin ceiling is the absolute
+    /// [`ADMIN_PER_SEC_DEFAULT`] (SEC-079).
     pub fn rate_limits(&self) -> GrpcRateLimits {
         let derived = GrpcRateLimits::from_authz_per_sec(self.grpc_authz_per_sec);
         GrpcRateLimits {
@@ -191,6 +195,7 @@ fn default_grpc_authz_per_sec() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::rate_limit::ADMIN_PER_SEC_DEFAULT;
 
     #[test]
     fn default_key_mode_is_ip() {
@@ -258,22 +263,28 @@ mod tests {
         assert_eq!(pinned.grpc_authz_per_sec, 100);
     }
 
-    /// I2: unset per-family knobs derive from the authz ceiling; set ones
+    /// I2: the unset identity knob derives from the authz ceiling; set ones
     /// win. This is what keeps a `gateway`/`mesh` deployment coherent when
     /// the operator only moves `AXIAM__RATE_LIMIT__PROFILE`.
+    ///
+    /// SEC-079: the admin knob is the one that does NOT move with the preset.
     #[test]
     fn per_family_limits_derive_from_authz_unless_pinned() {
         let shipped = GrpcConfig::default().rate_limits();
         assert_eq!(shipped.authz_per_sec, 100);
         assert_eq!(shipped.identity_per_sec, 500);
-        assert_eq!(shipped.admin_per_sec, 100);
+        assert_eq!(shipped.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
 
         let mut preset = GrpcConfig::default();
         assert!(preset.apply_rate_limit_preset(1_000, |_| false));
         let preset = preset.rate_limits();
         assert_eq!(preset.authz_per_sec, 1_000);
         assert_eq!(preset.identity_per_sec, 5_000);
-        assert_eq!(preset.admin_per_sec, 1_000);
+        assert_eq!(
+            preset.admin_per_sec, ADMIN_PER_SEC_DEFAULT,
+            "a posture preset raising the authz ceiling must not drag the \
+             Argon2id-bound admin ceiling up with it (SEC-079)"
+        );
 
         let pinned = GrpcConfig {
             grpc_identity_per_sec: Some(7),
@@ -286,9 +297,42 @@ mod tests {
         assert_eq!(pinned.admin_per_sec, 9);
     }
 
+    /// SEC-079: `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` remains a working operator
+    /// override — it wins over the absolute default AND over a posture preset,
+    /// in either application order.
+    #[test]
+    fn explicit_admin_override_wins_over_the_default_and_the_preset() {
+        // Set by hand on top of the shipped posture.
+        let overridden = GrpcConfig {
+            grpc_admin_per_sec: Some(250),
+            ..GrpcConfig::default()
+        }
+        .rate_limits();
+        assert_eq!(overridden.admin_per_sec, 250);
+        assert_ne!(overridden.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
+
+        // Set by hand while a `mesh`-shaped preset also applies.
+        let mut with_preset = GrpcConfig {
+            grpc_admin_per_sec: Some(250),
+            ..GrpcConfig::default()
+        };
+        assert!(with_preset.apply_rate_limit_preset(5_000, |_| false));
+        let with_preset = with_preset.rate_limits();
+        assert_eq!(with_preset.authz_per_sec, 5_000);
+        assert_eq!(
+            with_preset.admin_per_sec, 250,
+            "an explicit AXIAM__GRPC__GRPC_ADMIN_PER_SEC must survive a preset"
+        );
+    }
+
     /// The posture doc must document the I2 knobs in every column, and the
     /// documented numbers must be exactly what the derivation produces from
     /// the documented authz ceiling in the same column.
+    ///
+    /// Since SEC-079 the admin row is therefore expected to read the same
+    /// absolute number in all three columns — if the doc ever regains a
+    /// column-varying admin row, the derivation has been re-coupled to the
+    /// read-sized authz base and this test fails.
     #[test]
     fn documented_per_family_rows_match_the_derivation() {
         let md = std::fs::read_to_string(posture_doc_path())

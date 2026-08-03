@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::config::BatchStrategy;
 use crate::decision_cache::DecisionCache;
+use crate::invalidation::{InvalidationBroadcaster, InvalidationEvent};
 use crate::types::{AccessDecision, AccessRequest};
 
 /// Permission evaluation engine.
@@ -44,6 +45,12 @@ where
     /// When `None`, `check_access` / `check_access_batch` behave exactly as a
     /// build without the cache.
     decision_cache: Option<Arc<DecisionCache>>,
+    /// Optional cross-replica invalidation transport (§4.2). `None` unless
+    /// `with_invalidation_broadcaster` was called — which `axiam-server` does
+    /// only when the decision cache *and* the broadcast channel are both
+    /// enabled. When `None`, `invalidate_*` is local-only and infallible,
+    /// exactly as before.
+    invalidation_broadcaster: Option<Arc<dyn InvalidationBroadcaster>>,
     /// How `check_access_batch` schedules its work (D10). Defaults to
     /// [`BatchStrategy::Concurrent`] when an engine is constructed directly via
     /// `new()`; `axiam-server` always overrides this from `AuthzConfig` via
@@ -143,6 +150,7 @@ where
             scope_repo,
             group_repo,
             decision_cache: None,
+            invalidation_broadcaster: None,
             batch_strategy: BatchStrategy::Concurrent,
             batch_max_concurrency: 16,
         }
@@ -174,24 +182,85 @@ where
         self
     }
 
-    /// Immediately drop every cached decision for `tenant_id`. No-op when no
-    /// cache is attached. Called by the REST mutation handlers for coarse,
-    /// access-narrowing changes whose affected-subject set isn't known without
-    /// a query (grant revoke, role/permission delete or update, group-role
-    /// unassignment, resource reparent/delete).
-    pub fn invalidate_tenant(&self, tenant_id: Uuid) {
-        if let Some(cache) = self.decision_cache.as_ref() {
-            cache.invalidate_tenant(tenant_id);
-        }
+    /// Attach a cross-replica [`InvalidationBroadcaster`] (§4.2). Consumed
+    /// builder style, like [`Self::with_decision_cache`]. `axiam-server`
+    /// calls this only when **both**
+    /// `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` and
+    /// `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`; when it is not
+    /// called, [`Self::invalidate_tenant`] / [`Self::invalidate_subject`]
+    /// behave exactly as before (local-only, infallible) and the documented
+    /// TTL-bounded multi-replica staleness applies unchanged.
+    #[must_use]
+    pub fn with_invalidation_broadcaster(
+        mut self,
+        broadcaster: Arc<dyn InvalidationBroadcaster>,
+    ) -> Self {
+        self.invalidation_broadcaster = Some(broadcaster);
+        self
+    }
+
+    /// Immediately drop every cached decision for `tenant_id`, **locally and
+    /// on every other replica**. No local effect when no cache is attached.
+    /// Called by the REST mutation handlers for coarse, access-narrowing
+    /// changes whose affected-subject set isn't known without a query (grant
+    /// revoke, role/permission delete or update, group-role unassignment,
+    /// resource reparent/delete).
+    ///
+    /// # Errors
+    ///
+    /// Only when a broadcaster is attached and the broadcast could **not** be
+    /// confirmed by the broker — see [`Self::broadcast`]. With no broadcaster
+    /// (the default) this is infallible.
+    pub async fn invalidate_tenant(&self, tenant_id: Uuid) -> AxiamResult<()> {
+        self.invalidate(InvalidationEvent::Tenant { tenant_id })
+            .await
     }
 
     /// Immediately drop every cached decision for a single `subject_id` within
-    /// `tenant_id`. No-op when no cache is attached. Called by the REST mutation
-    /// handlers when exactly one subject's effective permissions change (user
-    /// role unassign/assign, group membership add/remove).
-    pub fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
+    /// `tenant_id`, **locally and on every other replica**. No local effect
+    /// when no cache is attached. Called by the REST mutation handlers when
+    /// exactly one subject's effective permissions change (user role
+    /// unassign/assign, group membership add/remove).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::invalidate_tenant`].
+    pub async fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) -> AxiamResult<()> {
+        self.invalidate(InvalidationEvent::Subject {
+            tenant_id,
+            subject_id,
+        })
+        .await
+    }
+
+    /// Local-then-remote invalidation.
+    ///
+    /// Order is deliberate: the **local** cache is dropped first and
+    /// unconditionally, so a broadcast failure can never leave the replica
+    /// that handled the mutation serving its own stale decision. Only then is
+    /// the fan-out attempted.
+    async fn invalidate(&self, event: InvalidationEvent) -> AxiamResult<()> {
         if let Some(cache) = self.decision_cache.as_ref() {
-            cache.invalidate_subject(tenant_id, subject_id);
+            event.apply(cache);
+        }
+        self.broadcast(event).await
+    }
+
+    /// Fan the event out to the other replicas, if a broadcaster is attached.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the broadcaster's error, which the REST mutation handlers
+    /// turn into a **503**. That is the deliberate posture for §4.2: the
+    /// operator asked for a revocation, the database write is durable, but the
+    /// invalidation did **not** reach the other replicas — so it is reported as
+    /// a failure rather than silently degrading to the TTL-bounded window the
+    /// operator opted out of by enabling this channel. Retrying the mutation is
+    /// safe (all of these handlers are idempotent in the narrowing direction).
+    async fn broadcast(&self, event: InvalidationEvent) -> AxiamResult<()> {
+        match self.invalidation_broadcaster.as_ref() {
+            Some(b) => b.broadcast(event).await,
+            None => Ok(()),
         }
     }
 

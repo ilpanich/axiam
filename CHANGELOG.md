@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Cross-replica authorization decision-cache invalidation over RabbitMQ (§4.2, threat-model `T-88`).**
+  The decision cache invalidated **process-locally**: on a replica that did not
+  handle the mutation, a revoked grant could stay `Allow` until its entry
+  TTL-expired (default 5 s). That residual was documented and accepted; it is
+  now closable. Setting `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`
+  (on top of `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`) publishes every
+  invalidation to the **fanout** exchange `axiam.authz.cache.invalidate`; each
+  replica binds its own exclusive auto-delete queue
+  `axiam.authz.cache.invalidate.<replica-uuid>` and applies what it receives,
+  so a revocation reaches *all* replicas in broker-latency time. Fanout, not a
+  work queue: a shared queue would deliver each invalidation to exactly one
+  consumer and leave every other replica stale.
+
+  **Default off, and inert when off.** With the switch unset, `invalidate_*` is
+  local-only and infallible, no AMQP dependency is acquired by enabling the
+  cache, and the previously documented TTL-bounded behaviour is unchanged.
+
+  **Two deliberate behaviour changes when it is on**, both loud:
+  - A mutation whose broadcast the broker does not confirm returns **503**
+    (`"could not be broadcast to other replicas"`). The database write is
+    durable but the fan-out did not happen, and reporting success would hand
+    back the TTL window the operator enabled this to remove. These mutations are
+    idempotent in the narrowing direction — retry is safe.
+  - A replica whose invalidation consumer is not connected (startup, broker
+    outage, partition) **stops serving from its cache** and evaluates every
+    check against the database — correct, just slower — instead of serving
+    allows it can no longer invalidate. Logged at ERROR
+    (`AuthZ decision cache UNTRUSTED …`) and surfaced as `trusted` / `bypassed`
+    on the periodic `AuthZ decision cache stats (D7)` line. Trust follows the
+    consumer's connection liveness **only** — no inbound message can revoke it,
+    so a captured broadcast cannot be used as a cache-disabling lever.
+
+  Messages carry the existing §8 envelope (`CacheInvalidationMessage`):
+  per-tenant HKDF-SHA256 subkey, `key_version >= 2` floor, per-message `nonce`,
+  and an `issued_at` freshness window
+  (`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS`, default 30 s, tighter
+  than the 5-minute AMQP default because an invalidation is only useful for
+  about as long as the cache TTL). Nonce dedup is **per replica, in memory** —
+  never the shared durable nonce store, which on a fanout would let one replica
+  win and make all the others reject the invalidation as a replay. The
+  publisher's own echo is a no-op, and cannot loop: a received message only ever
+  reaches `DecisionCache`, never the publishing path. Granularity is exactly the
+  cache's existing `invalidate_subject` / `invalidate_tenant`; no finer key is
+  invented.
+
+  Requires `AXIAM__AMQP__SIGNING_KEY` (already mandatory) to be shared by every
+  replica. Documented in `docs/deployment/README.md`, `docs/admin/README.md` and
+  `docs/deployment/authz-read-path.md`.
+
 - **Client secrets are now hashed with HMAC-SHA256 keyed by the server pepper (OBS-1).**
   OAuth2 client secrets and service-account secrets were stored as an unsalted,
   single-round SHA-256 digest — safe only while every secret is 32 CSPRNG bytes with

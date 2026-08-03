@@ -51,24 +51,53 @@ pub trait AuthzChecker: Send + Sync {
         })
     }
 
-    /// Invalidate **all** cached authorization decisions for a tenant (D7).
+    /// Invalidate **all** cached authorization decisions for a tenant (D7),
+    /// locally and — when the cross-replica channel is enabled (§4.2) — on
+    /// every other replica.
     ///
     /// The default implementation is a no-op — checkers without a decision
     /// cache (the test doubles, and the engine when the cache feature flag is
     /// off) simply ignore it. The real [`AuthorizationEngine`] forwards to its
-    /// cache. Mutation handlers call this after an access-*narrowing* change
-    /// whose affected-subject set isn't cheaply known (grant revoke,
-    /// role/permission delete or update, group-role unassignment, resource
-    /// reparent/delete) so that **no revocation can leave a stale allow**.
-    fn invalidate_tenant(&self, _tenant_id: Uuid) {}
+    /// cache and its broadcaster. Mutation handlers call this after an
+    /// access-*narrowing* change whose affected-subject set isn't cheaply
+    /// known (grant revoke, role/permission delete or update, group-role
+    /// unassignment, resource reparent/delete) so that **no revocation can
+    /// leave a stale allow**.
+    ///
+    /// # Errors
+    ///
+    /// Only when the cross-replica broadcast could not be confirmed by the
+    /// broker. Handlers must `?` this: the database write is durable, but the
+    /// revocation did not reach the other replicas, so the caller is told the
+    /// mutation did not fully take effect (503) rather than being told it
+    /// succeeded. Every such mutation is idempotent in the narrowing
+    /// direction, so a retry is safe. With the channel disabled (the default)
+    /// this is infallible.
+    fn invalidate_tenant<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 
-    /// Invalidate cached decisions for a single subject within a tenant (D7).
+    /// Invalidate cached decisions for a single subject within a tenant (D7),
+    /// locally and — when enabled — on every other replica.
     ///
     /// Default no-op (see [`Self::invalidate_tenant`]). Mutation handlers call
     /// this when exactly one subject's effective permissions change (user role
     /// unassign/assign, group membership add/remove) — the targeted, cheaper
     /// alternative to a full tenant flush.
-    fn invalidate_subject(&self, _tenant_id: Uuid, _subject_id: Uuid) {}
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::invalidate_tenant`].
+    fn invalidate_subject<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _subject_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl<R, P, Res, S, G> AuthzChecker for AuthorizationEngine<R, P, Res, S, G>
@@ -93,12 +122,21 @@ where
         Box::pin(AuthorizationEngine::check_access_batch(self, requests))
     }
 
-    fn invalidate_tenant(&self, tenant_id: Uuid) {
-        AuthorizationEngine::invalidate_tenant(self, tenant_id);
+    fn invalidate_tenant<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(AuthorizationEngine::invalidate_tenant(self, tenant_id))
     }
 
-    fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
-        AuthorizationEngine::invalidate_subject(self, tenant_id, subject_id);
+    fn invalidate_subject<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(AuthorizationEngine::invalidate_subject(
+            self, tenant_id, subject_id,
+        ))
     }
 }
 

@@ -44,12 +44,15 @@
 //! evaluation. The short default TTL is the belt to the invalidation hooks'
 //! braces.
 //!
-//! # SCOPE OF "IMMEDIATE": this cache is PROCESS-LOCAL (multi-replica caveat)
+//! # SCOPE OF "IMMEDIATE": process-local by default, cross-replica when enabled
 //!
 //! `axiam-server` builds **one in-process** `Arc<DecisionCache>` and shares it
-//! across the REST, gRPC and AMQP engines of *that process*. There is no
-//! cross-replica invalidation channel: no AMQP fan-out, no webhook, no shared
-//! store. Consequently:
+//! across the REST, gRPC and AMQP engines of *that process*. Whether an
+//! invalidation reaches the *other* replicas depends on one switch:
+//!
+//! ## (a) `decision_cache_broadcast_enabled = false` — the default
+//!
+//! There is no cross-replica invalidation channel. Consequently:
 //!
 //! - **Single replica:** the invalidation hooks above make revocation
 //!   *immediate*; the TTL is only the fallback for a missed event.
@@ -67,10 +70,43 @@
 //!   its provenance. Post-incident it is not possible to tell from the logs
 //!   whether a given allow was served from cache.
 //!
-//! Operators running more than one replica must either accept a ≤ TTL
-//! revocation window or leave the cache off. This is stated next to the default
-//! in `docs/deployment/README.md`, `docs/admin/README.md`, the
-//! [`crate::config::AuthzConfig`] docstrings and
+//! Operators running more than one replica must either enable the broadcast
+//! channel below, accept a ≤ TTL revocation window, or leave the cache off.
+//!
+//! ## (b) `decision_cache_broadcast_enabled = true` — cross-replica fan-out
+//!
+//! Every [`DecisionCache::invalidate_tenant`] /
+//! [`DecisionCache::invalidate_subject`] triggered by a mutation is *also*
+//! published, HMAC-signed, to a **RabbitMQ fanout exchange**; every replica
+//! binds its own exclusive auto-delete queue to that exchange and applies what
+//! it receives. Revocation then propagates in broker-latency time on **every**
+//! replica, not just the one that handled the mutation. See
+//! [`crate::invalidation`] for the contract and
+//! `axiam-amqp::cache_invalidation` for the shipped transport.
+//!
+//! Two properties of that mode are load-bearing and live in *this* type:
+//!
+//! 1. **The trust gate** ([`DecisionCache::set_trusted`]). A replica may only
+//!    serve from this cache while it is actually receiving invalidations. If
+//!    its consumer is not subscribed — at startup, or after the broker
+//!    connection drops — the cache is marked **untrusted**: it is flushed,
+//!    every read returns a miss and every write is discarded, so the replica
+//!    silently falls back to full (correct, slower) DB evaluation instead of
+//!    serving allows it can no longer invalidate. This is a deliberate
+//!    availability/correctness trade: throughput degrades, decisions do not.
+//!    The transition is logged at ERROR and counted in
+//!    [`DecisionCacheStats::bypassed`] — the degraded mode is loud.
+//! 2. **Trust follows connection liveness only.** Nothing an inbound *message*
+//!    says can revoke trust (a stale or replayed but validly-signed capture
+//!    must not become a lever for disabling every replica's cache). Only the
+//!    consumer's own subscribe/stream state moves the flag.
+//!
+//! The publish side fails the other way: if the broadcast cannot be confirmed
+//! by the broker, the mutation handler returns 503 rather than reporting a
+//! revocation that only took effect on one replica.
+//!
+//! This split is stated next to the default in `docs/deployment/README.md`,
+//! `docs/admin/README.md`, the [`crate::config::AuthzConfig`] docstrings and
 //! `benchmarks/PUBLIC_BENCH_ANALYSIS.md`.
 //!
 //! # Internal structure (and why)
@@ -118,7 +154,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
@@ -207,6 +243,18 @@ pub struct DecisionCacheStats {
     /// Total FIFO queue slots across every tenant — the quantity that used to
     /// grow without bound. Expect ≤ ~2× `entries` (or `COMPACT_FLOOR`).
     pub queue_slots: usize,
+    /// Cumulative reads short-circuited because the cache was **untrusted**
+    /// (cross-replica invalidation enabled but this replica's consumer is not
+    /// subscribed — see [`DecisionCache::set_trusted`]). These are also counted
+    /// in `misses`, so `hits + misses` still equals total reads; `bypassed` is
+    /// the subset that was refused rather than looked up. A non-zero and
+    /// *rising* value means this replica is evaluating everything against the
+    /// database because it cannot hear invalidations — the degraded mode is
+    /// correct but slow, and this is the counter that says so.
+    pub bypassed: u64,
+    /// Whether the cache is currently trusted (i.e. actually serving). Always
+    /// `true` when cross-replica invalidation is disabled.
+    pub trusted: bool,
 }
 
 /// Per-tenant shard: the entry map, the FIFO order queue used for the size-cap
@@ -366,10 +414,21 @@ pub struct DecisionCache {
     stripes: Vec<Mutex<HashMap<Uuid, TenantShard>>>,
     hits: AtomicU64,
     misses: AtomicU64,
+    bypassed: AtomicU64,
+    /// Whether this replica may serve from the cache at all. See
+    /// [`Self::set_trusted`]; always `true` unless cross-replica invalidation
+    /// is enabled and its consumer is disconnected.
+    trusted: AtomicBool,
 }
 
 impl DecisionCache {
-    /// Build a cache with the given configuration.
+    /// Build a cache with the given configuration, **trusted** (the
+    /// single-process behaviour: nothing else has to happen for it to serve).
+    ///
+    /// When cross-replica invalidation is enabled, `axiam-server` immediately
+    /// calls `set_trusted(false)` on the fresh cache so it stays inert until
+    /// the invalidation consumer has actually subscribed — see
+    /// [`crate::config::AuthzConfig::build_decision_cache`].
     pub fn new(config: DecisionCacheConfig) -> Self {
         Self {
             config,
@@ -378,7 +437,60 @@ impl DecisionCache {
                 .collect(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            bypassed: AtomicU64::new(0),
+            trusted: AtomicBool::new(true),
         }
+    }
+
+    /// Whether the cache is currently allowed to serve.
+    pub fn is_trusted(&self) -> bool {
+        self.trusted.load(Ordering::Acquire)
+    }
+
+    /// Mark the cache trusted / untrusted, returning the **previous** value.
+    ///
+    /// This is the cross-replica degraded-mode switch (see the module docs).
+    /// Only the invalidation consumer's own connection state may call it:
+    /// `true` once it is subscribed and receiving, `false` the moment it is
+    /// not (startup, subscribe failure, stream end, task drop).
+    ///
+    /// While untrusted:
+    /// * [`Self::get`] returns `None` for every request and counts a
+    ///   [`DecisionCacheStats::bypassed`] read, so the engine falls back to a
+    ///   full database evaluation — correct, just slower. It never serves an
+    ///   allow it can no longer invalidate.
+    /// * [`Self::insert`] discards, so nothing accumulates during the outage
+    ///   that would have to be reasoned about on recovery.
+    ///
+    /// **Every transition flushes the cache**, in both directions: entering
+    /// the untrusted state drops decisions that may already be stale, and
+    /// leaving it drops anything that could have been invalidated by a
+    /// broadcast we were not there to receive. Recovery therefore starts from
+    /// an empty, provably-fresh cache rather than from whatever survived.
+    ///
+    /// Transitions are logged (ERROR on losing trust, INFO on regaining it) —
+    /// a silently-degraded cache would be exactly the failure this whole
+    /// mechanism exists to prevent.
+    pub fn set_trusted(&self, trusted: bool) -> bool {
+        let previous = self.trusted.swap(trusted, Ordering::AcqRel);
+        if previous == trusted {
+            return previous;
+        }
+        // Flush on BOTH edges — see the doc comment.
+        self.invalidate_all();
+        if trusted {
+            tracing::info!(
+                "AuthZ decision cache TRUSTED again — cross-replica invalidation stream is live; \
+                 cache flushed and re-enabled"
+            );
+        } else {
+            tracing::error!(
+                "AuthZ decision cache UNTRUSTED — cross-replica invalidation stream is NOT live; \
+                 cache flushed and every check now falls back to full database evaluation \
+                 (correct but slower) until the stream recovers"
+            );
+        }
+        previous
     }
 
     /// Which mutex owns a tenant. UUIDv4 bytes are already uniformly
@@ -398,7 +510,16 @@ impl DecisionCache {
 
     /// Look up a cached decision for `request`. Returns `None` on a miss or an
     /// expired entry (which is evicted in passing). Records a hit/miss.
+    ///
+    /// Returns `None` unconditionally while the cache is **untrusted** (see
+    /// [`Self::set_trusted`]), counting the read as both a miss and a
+    /// [`DecisionCacheStats::bypassed`].
     pub fn get(&self, request: &AccessRequest) -> Option<AccessDecision> {
+        if !self.is_trusted() {
+            self.bypassed.fetch_add(1, Ordering::Relaxed);
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         let key = SubKey::from_request(request);
         let now = Instant::now();
         let decision = {
@@ -416,7 +537,14 @@ impl DecisionCache {
     }
 
     /// Insert (or refresh) the decision for `request`, stamping it `now`.
+    ///
+    /// Discarded while the cache is **untrusted** (see [`Self::set_trusted`]),
+    /// so an outage cannot accumulate entries whose freshness nobody can
+    /// vouch for.
     pub fn insert(&self, request: &AccessRequest, decision: AccessDecision) {
+        if !self.is_trusted() {
+            return;
+        }
         let key = SubKey::from_request(request);
         let now = Instant::now();
         let mut stripe = self.stripe(request.tenant_id);
@@ -492,6 +620,8 @@ impl DecisionCache {
             entries,
             tenants,
             queue_slots,
+            bypassed: self.bypassed.load(Ordering::Relaxed),
+            trusted: self.is_trusted(),
         }
     }
 
@@ -526,6 +656,13 @@ mod tests {
             action: action.to_string(),
             resource_id: resource,
             scope: None,
+        }
+    }
+
+    fn cfg(ttl: Duration, max_entries_per_tenant: usize) -> DecisionCacheConfig {
+        DecisionCacheConfig {
+            ttl,
+            max_entries_per_tenant,
         }
     }
 
@@ -998,5 +1135,122 @@ mod tests {
             snap.queue_slots,
             snap.entries
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // §4.2 — the cross-replica trust gate (degraded mode when the invalidation
+    // stream is not live). These tests are the guarantee that a replica which
+    // can no longer *hear* invalidations stops serving allows it can no longer
+    // invalidate — the failure mode this whole mechanism exists to prevent.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_cache_is_trusted_by_default() {
+        // Single-process behaviour is unchanged: nothing has to happen for a
+        // freshly built cache to serve.
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        assert!(cache.is_trusted());
+        assert!(cache.snapshot().trusted);
+    }
+
+    #[test]
+    fn untrusted_cache_never_serves_a_previously_cached_allow() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(600), 100));
+        let t = Uuid::new_v4();
+        let s = Uuid::new_v4();
+        let r = req(t, s, Uuid::new_v4(), "read");
+        cache.insert(&r, AccessDecision::Allow);
+        assert!(
+            matches!(cache.get(&r), Some(AccessDecision::Allow)),
+            "precondition: a trusted cache serves the allow"
+        );
+
+        // Broker gone: the consumer flips the gate.
+        cache.set_trusted(false);
+
+        assert!(
+            cache.get(&r).is_none(),
+            "an untrusted replica must NOT serve a cached allow it can no longer invalidate"
+        );
+        assert!(
+            cache.is_empty(),
+            "losing trust flushes: entries that may already be stale are dropped"
+        );
+        let snap = cache.snapshot();
+        assert!(!snap.trusted);
+        assert_eq!(snap.bypassed, 1, "the degraded read is counted, not silent");
+    }
+
+    #[test]
+    fn untrusted_cache_discards_inserts_so_nothing_accumulates() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(600), 100));
+        cache.set_trusted(false);
+        let t = Uuid::new_v4();
+        for i in 0..10 {
+            cache.insert(
+                &req(t, Uuid::new_v4(), Uuid::new_v4(), &format!("a{i}")),
+                AccessDecision::Allow,
+            );
+        }
+        assert!(
+            cache.is_empty(),
+            "an untrusted cache must not accumulate entries during the outage"
+        );
+        assert_eq!(cache.snapshot().bypassed, 0, "inserts are not reads");
+    }
+
+    #[test]
+    fn regaining_trust_starts_from_an_empty_cache_and_serves_again() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(600), 100));
+        let t = Uuid::new_v4();
+        let r = req(t, Uuid::new_v4(), Uuid::new_v4(), "read");
+
+        cache.set_trusted(false);
+        // Force an entry in behind the gate's back so we can prove the
+        // trust-regained edge flushes too (belt and braces: the insert path
+        // already refuses, so this is the only way to plant one).
+        cache.set_trusted(true);
+        cache.insert(&r, AccessDecision::Allow);
+        assert!(cache.get(&r).is_some());
+        cache.set_trusted(false);
+        cache.set_trusted(true);
+        assert!(
+            cache.get(&r).is_none(),
+            "recovery must start from a provably-fresh (empty) cache"
+        );
+
+        cache.insert(&r, AccessDecision::Allow);
+        assert!(
+            matches!(cache.get(&r), Some(AccessDecision::Allow)),
+            "a re-trusted cache serves normally again"
+        );
+    }
+
+    #[test]
+    fn set_trusted_reports_the_previous_value_and_is_idempotent() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let r = req(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "read");
+        cache.insert(&r, AccessDecision::Allow);
+
+        assert!(cache.set_trusted(true), "previous value was trusted");
+        assert!(
+            cache.get(&r).is_some(),
+            "a no-op transition must not flush the cache"
+        );
+        assert!(cache.set_trusted(false), "previous value was trusted");
+        assert!(!cache.set_trusted(false), "previous value was untrusted");
+    }
+
+    #[test]
+    fn invalidation_still_applies_while_untrusted() {
+        // Applying an invalidation to an untrusted cache is always safe and
+        // must never panic or be refused — the consumer keeps draining.
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        cache.set_trusted(false);
+        let t = Uuid::new_v4();
+        cache.invalidate_tenant(t);
+        cache.invalidate_subject(t, Uuid::new_v4());
+        cache.invalidate_all();
+        assert!(cache.is_empty());
     }
 }

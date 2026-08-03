@@ -59,11 +59,31 @@ new hot query.
 | 0 (session) | `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` |
 | 1a/1b, 2, 3, 4 | `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` |
 
-Both caches are process-local and both carry the same multi-replica caveat: a
-revocation handled by one replica is not seen by the others until their entries
-expire. If you enable one, enable both at the same TTL — a deployment that has
-accepted a 5-second decision-staleness window gains nothing by keeping a
-5-second session-staleness window at zero, and vice versa.
+Both caches are process-local *by default*, and both then carry the same
+multi-replica caveat: a revocation handled by one replica is not seen by the
+others until their entries expire. If you enable one, enable both at the same
+TTL — a deployment that has accepted a 5-second decision-staleness window gains
+nothing by keeping a 5-second session-staleness window at zero, and vice versa.
+
+The **decision** cache can now escape that caveat:
+`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` fans every invalidation
+out to all replicas over RabbitMQ
+([details](README.md#cross-replica-invalidation-42)). The **session**
+validation cache has no equivalent channel, so its multi-replica window is
+still bounded only by its TTL — if you enable the broadcast channel, keep
+`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` at a value you are still
+willing to accept as a session-revocation window, because that is now the
+looser of the two.
+
+Two throughput notes for capacity planning with the broadcast channel on:
+
+* A replica whose invalidation consumer is disconnected serves **none** of the
+  round-trips in the table from cache — it drops back to the §1 uncached cost
+  for the duration. Size for that, or alert on `trusted=false` /
+  `bypassed` in the `AuthZ decision cache stats (D7)` line.
+* Every access-narrowing mutation now waits for a broker publisher-confirm
+  before responding. That is on the *administrative* mutation path, never on
+  the authorization read path measured above.
 
 Batch checks additionally benefit from `AXIAM__AUTHZ__BATCH_STRATEGY=coalesced`
 (the shipped default), which resolves the shared subject/resource lookups once

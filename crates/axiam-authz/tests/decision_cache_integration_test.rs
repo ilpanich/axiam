@@ -16,13 +16,18 @@
 //! that enforces the revocation.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axiam_authz::types::{AccessDecision, AccessRequest};
-use axiam_authz::{AuthorizationEngine, BatchStrategy, DecisionCache, DecisionCacheConfig};
-use axiam_core::error::AxiamResult;
+use axiam_authz::{
+    AuthorizationEngine, BatchStrategy, DecisionCache, DecisionCacheConfig,
+    InvalidationBroadcaster, InvalidationEvent,
+};
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::permission::{
     CreatePermission, Permission, PermissionGrant, UpdatePermission,
@@ -513,7 +518,7 @@ async fn revocation_invalidation_denies_immediately() {
     //    fires the invalidation hook (this is exactly what the REST
     //    `unassign_from_user` handler calls via `AuthzChecker::invalidate_subject`).
     repo.revoke_all_roles(subject);
-    engine.invalidate_subject(tenant, subject);
+    engine.invalidate_subject(tenant, subject).await.unwrap();
 
     // 3. The very next check must be denied — immediately, not after the TTL.
     assert_eq!(
@@ -567,7 +572,7 @@ async fn tenant_flush_enforces_revocation_immediately() {
     );
 
     repo.revoke_all_roles(subject);
-    engine.invalidate_tenant(tenant); // e.g. revoke_from_role / role delete path
+    engine.invalidate_tenant(tenant).await.unwrap(); // e.g. revoke_from_role / role delete path
 
     assert_eq!(
         engine.check_access(&request).await.unwrap(),
@@ -610,8 +615,8 @@ async fn cache_disabled_behaves_exactly_as_today() {
     );
 
     // Invalidation calls are harmless no-ops when no cache is attached.
-    engine.invalidate_subject(tenant, subject);
-    engine.invalidate_tenant(tenant);
+    engine.invalidate_subject(tenant, subject).await.unwrap();
+    engine.invalidate_tenant(tenant).await.unwrap();
 }
 
 /// The batch path is cached too: identical decisions on a second batch, DB
@@ -650,7 +655,7 @@ async fn batch_path_caches_and_invalidates() {
 
     // Revoke + invalidate → the previously-allowed items now deny immediately.
     repo.revoke_all_roles(subject);
-    engine.invalidate_subject(tenant, subject);
+    engine.invalidate_subject(tenant, subject).await.unwrap();
     let third = engine.check_access_batch(&batch).await.unwrap();
     assert_eq!(
         third,
@@ -712,5 +717,162 @@ async fn coalesced_batch_with_cache_serves_hits_and_backfills_misses() {
         Counters::get(&counters.grants),
         grants_before_second,
         "the backfilled miss is now served from cache"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §4.2 — cross-replica invalidation, engine side
+//
+// The engine is the publish side of the fan-out. These tests pin the two
+// properties the REST mutation handlers depend on:
+//
+//   1. the LOCAL cache is invalidated before, and regardless of, the broadcast
+//      — a broker outage must never leave the mutating replica itself stale;
+//   2. a broadcast that did not reach the broker FAILS the mutation, so the
+//      operator is told the revocation did not fully take effect rather than
+//      silently getting the TTL-bounded window they opted out of.
+//
+// The transport itself (fanout topology, signing, self-echo) is tested in
+// `axiam-amqp/tests/cache_invalidation_test.rs`.
+// ---------------------------------------------------------------------------
+
+/// Records every event handed to it; always succeeds.
+#[derive(Default)]
+struct RecordingBroadcaster {
+    events: Mutex<Vec<InvalidationEvent>>,
+}
+
+impl RecordingBroadcaster {
+    fn events(&self) -> Vec<InvalidationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl InvalidationBroadcaster for RecordingBroadcaster {
+    fn broadcast<'a>(
+        &'a self,
+        event: InvalidationEvent,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        })
+    }
+}
+
+/// Stands in for "the broker is unreachable / did not confirm".
+struct BrokerDownBroadcaster;
+
+impl InvalidationBroadcaster for BrokerDownBroadcaster {
+    fn broadcast<'a>(
+        &'a self,
+        _event: InvalidationEvent,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(AxiamError::ServiceUnavailable(
+                "broker unreachable".to_string(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn invalidation_broadcasts_exactly_the_event_the_mutation_asked_for() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, _repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let recorder = Arc::new(RecordingBroadcaster::default());
+    let engine = engine
+        .with_decision_cache(cache(Duration::from_secs(60)))
+        .with_invalidation_broadcaster(recorder.clone());
+
+    engine.invalidate_subject(tenant, subject).await.unwrap();
+    engine.invalidate_tenant(tenant).await.unwrap();
+
+    assert_eq!(
+        recorder.events(),
+        vec![
+            InvalidationEvent::Subject {
+                tenant_id: tenant,
+                subject_id: subject
+            },
+            InvalidationEvent::Tenant { tenant_id: tenant },
+        ],
+        "the broadcast granularity must be exactly the cache's own \
+         (invalidate_subject / invalidate_tenant) — no finer key is invented"
+    );
+}
+
+#[tokio::test]
+async fn broadcast_failure_fails_the_mutation() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, _repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let engine = engine
+        .with_decision_cache(cache(Duration::from_secs(60)))
+        .with_invalidation_broadcaster(Arc::new(BrokerDownBroadcaster));
+
+    let err = engine
+        .invalidate_subject(tenant, subject)
+        .await
+        .expect_err("an unconfirmed broadcast must fail the mutation, not be swallowed");
+    assert!(
+        matches!(err, AxiamError::ServiceUnavailable(_)),
+        "must surface as 503 to the operator, got {err:?}"
+    );
+
+    let err = engine
+        .invalidate_tenant(tenant)
+        .await
+        .expect_err("tenant flush must fail the same way");
+    assert!(matches!(err, AxiamError::ServiceUnavailable(_)));
+}
+
+#[tokio::test]
+async fn local_cache_is_invalidated_even_when_the_broadcast_fails() {
+    // The mutating replica must never be the stale one: the local drop happens
+    // before the publish is attempted, so a broker outage degrades the *other*
+    // replicas (which is reported as an error), never this one.
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let engine = engine
+        .with_decision_cache(cache(Duration::from_secs(600)))
+        .with_invalidation_broadcaster(Arc::new(BrokerDownBroadcaster));
+    let request = req(tenant, subject, resource, "read");
+
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Allow
+    );
+
+    repo.revoke_all_roles(subject);
+    assert!(engine.invalidate_subject(tenant, subject).await.is_err());
+
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into()),
+        "the local cache must be dropped regardless of the broadcast outcome"
+    );
+}
+
+#[tokio::test]
+async fn without_a_broadcaster_invalidation_is_local_only_and_infallible() {
+    // Default-off path: the cache may be enabled without acquiring any AMQP
+    // dependency, and `invalidate_*` behaves exactly as it did before §4.2.
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let engine = engine.with_decision_cache(cache(Duration::from_secs(600)));
+    let request = req(tenant, subject, resource, "read");
+
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Allow
+    );
+    repo.revoke_all_roles(subject);
+    engine
+        .invalidate_subject(tenant, subject)
+        .await
+        .expect("no broadcaster attached — invalidation cannot fail");
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into())
     );
 }

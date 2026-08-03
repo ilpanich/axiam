@@ -185,10 +185,20 @@ redundantly rather than at one chokepoint:
 - **The performance caches are off by default and never change an answer.** AXIAM
   offers two optional caches — one for authorization decisions, one for session
   validation. Both ship disabled, both are keyed per tenant, and both are invalidated
-  by the mutations that could change their answer: revoking a role or a session takes
-  effect immediately on the replica that handled it, and the cache lifetime bounds
-  only cross-replica staleness. Enabling one is an explicit, logged decision that
-  trades a few seconds of worst-case staleness for throughput — never correctness.
+  by the mutations that could change their answer, so revoking a role or a session
+  takes effect immediately on the replica that handled it. Enabling one is an
+  explicit, logged decision that trades a few seconds of worst-case staleness for
+  throughput — never correctness.
+- **Revocation propagates across replicas, and a cache that cannot hear it switches
+  itself off.** The decision cache can broadcast invalidations to every replica over
+  the message broker. Those messages are signed with the same per-tenant authenticated
+  envelope as the rest of AXIAM's messaging — nonce, timestamp and constant-time
+  verification — so a party with broker access but no signing key cannot forge one,
+  and a forged message could in any case only *drop* cache entries, never grant
+  access. The design fails safe in both directions: a replica starts out not trusting
+  its cache and only begins using it once it is successfully subscribed, and if a
+  privilege-narrowing change cannot be broadcast, the change itself fails rather than
+  leaving other replicas stale.
 - **Three protocols, one engine.** REST middleware, gRPC `CheckAccess` and the
   async AMQP path all evaluate the same policy. The gRPC interceptor authenticates
   the caller and derives the tenant from its verified identity, so a service account
@@ -279,10 +289,12 @@ against the classic federation attacks:
   optional in-process TLS listener is TLS 1.3-only and fails fast rather than
   falling back to plaintext.
 - **Secrets at rest** — MFA seeds, CA keys, federation and webhook and email
-  secrets — are AES-256-GCM encrypted; passwords and client/refresh secrets are
-  hashed. Secret-bearing types carry redacting `Debug`/`toString` implementations so
-  a credential never reaches a log line. A **missing encryption key fails startup**;
-  no code path substitutes an all-zero or constant key.
+  secrets — are AES-256-GCM encrypted; passwords are Argon2id-hashed and client
+  secrets are hashed under a **server-held key**, so a database disclosure alone does
+  not yield an offline-crackable corpus. Secret-bearing types carry redacting
+  `Debug`/`toString` implementations so a credential never reaches a log line. A
+  **missing encryption key or pepper fails startup**; no code path substitutes an
+  all-zero, constant or unkeyed fallback.
 - **The eleven client SDKs conform to one cross-language contract.** Strict TLS
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
   them); a plaintext `http://` base URL is refused at construction, with a
@@ -291,13 +303,18 @@ against the classic federation attacks:
   in cookies with single-flight refresh; JWKS relying-party helpers pin the key set to
   the configured issuer's origin. The server is the single source of truth: a CI drift
   gate fails the build if an SDK's vendored OpenAPI/protobuf copy diverges.
-- **Local token verification in the SDK route guards is strict by default.** A guard
-  that only checked a signature would accept an expired token, and — because the JWKS
-  is organization-wide — one minted for a different tenant. Every SDK guard therefore
-  verifies signature **and** expiry **and** that the token's tenant matches the
-  client's configured tenant, failing closed when it has nothing to compare against.
-  Where a raw signature-only primitive still exists it is named to make accidental use
-  hard.
+- **Local token verification in the SDK route guards is strict by default, and the
+  standard is written down.** A guard that only checked a signature would accept an
+  expired token, and — because the JWKS is organization-wide — one minted for a
+  different tenant. The SDK contract therefore defines a **normative minimum
+  verification set** that every guard must enforce: algorithm pinned before key
+  lookup, expiry required (not merely checked when present), not-before honoured,
+  tenant asserted against the configured tenant and failing closed when there is
+  nothing to compare against, issuer and audience checked when configured, and a
+  named, bounded clock skew. Stating it once rather than leaving each language to
+  infer it is deliberate — auditing eleven implementations against the written set
+  found real gaps that per-SDK review had missed. Where a raw signature-only
+  primitive still exists it is named to make accidental use hard.
 - **Every SDK ships a webhook-signature verifier** (contract §13). Receivers no longer
   hand-roll the check: `verify_webhook(...)` implements one canonical spec across all
   eleven languages — HMAC-SHA256 over `<timestamp>.<raw_body>`, constant-time

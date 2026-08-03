@@ -559,7 +559,35 @@ The lesson worth keeping: **"the library validates `exp`" is not a control.** Fo
 | **OBS-3** (swallowed revocation errors) | Remediated — pending verification, **now with a regression test** | `1f498ec` |
 | §4 residual 1 (mintable rate-limit key) | Advisory added | `1f498ec` |
 | §11.2 (evidence must resolve on main) | CI gate added | `1f498ec` |
-| §4 residual 2 (multi-replica cache staleness) | In progress | — |
+| §4 residual 2 (multi-replica cache staleness) | **Closed** — remediated, pending verification | `e5b2a26` |
+
+**§4 residual 2 — closed rather than accepted.** The ≤ `decision_cache_ttl_secs`
+stale-allow window (threat-model `T-88`) is now closable with
+`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`: invalidations fan out
+over the existing RabbitMQ transport to a per-replica exclusive queue, carrying
+the §8 signed envelope. Default off and inert when off, so a single-replica
+deployment that enables the cache acquires no AMQP dependency and the previously
+documented behaviour is unchanged.
+
+Two design points are worth recording, because both are traps the obvious
+implementation falls into:
+
+1. **Trust follows the consumer's connection liveness only.** A replica that
+   cannot hear invalidations stops serving from its cache (correct, slower)
+   rather than serving allows it can no longer invalidate. But a stale — though
+   validly signed — *message* is rejected and logged **without** revoking trust.
+   Tying trust to message freshness would turn a single captured broadcast into
+   an on-demand lever for disabling every replica's cache fleet-wide.
+2. **Nonce dedup is per-replica and in-memory, never the shared durable store.**
+   On a fanout every replica sees the same nonce; a shared store would let
+   exactly one replica record it first and make all the others reject the
+   invalidation as a replay — reinstating the very hole this closes, everywhere
+   but one node.
+
+Publish-side failure fails the *mutation* (503) rather than reporting a
+revocation that did not fully take effect; the local cache is dropped before the
+publish is attempted, so the mutating replica is never the stale one. Both are
+operator-visible behaviour changes and are documented as such.
 
 ### 12.6 Recommendations that remain open
 

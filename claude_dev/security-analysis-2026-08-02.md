@@ -850,3 +850,138 @@ Stated plainly, so the next pass spends its effort where this one is weakest:
 - **Findings: none open.** SEC-071 … SEC-085 are all closed and independently verified, as are `T-145`, OBS-1 … OBS-4 and §10.4 residuals 1–4.
 - **Observations open**: §15.3 items 1–7, plus the two partials in §15.2. None is an exploitable defect in AXIAM's own request path; the two worth scheduling are the **unclamped decision-cache TTL** (a one-line clamp that makes the Obs 1 mitigation robust rather than advisory) and the **rule-8 regression test in the ten SDKs that lack it**.
 - **Assessment**: five successive passes have now each found something the preceding remediation's self-report missed — SEC-080 after §9, SEC-079 after §10, SEC-085 after §12, and the two partials here. That the count is falling and the severity has dropped from HIGH to *partial/observation* is the meaningful signal. The practice worth keeping is the one §14.5 adopted voluntarily: **a remediation naming its own weakest points is the cheapest possible input to the next verification.**
+
+---
+
+## 16. Remediation of §15 (2026-08-03)
+
+> ⚠️ **Written by the remediation work, not by a reviewer.** Per the precedent
+> §14.5 set and §15 endorsed, this section names its own weakest points (§16.5)
+> rather than self-certifying. Statuses are **claims pending verification**, and
+> — following §16.1 — no commit hashes are cited, for the reason §14.4 records.
+
+### 16.1 Scope
+
+§15 confirmed **no open finding**. What remained were two partials (§15.2) and
+seven observations (§15.3). All are actioned below except the three recorded in
+§16.4 as deliberately not actioned.
+
+**A check for new findings was requested and performed.** Re-reading the merged
+§14 diff against the current tree surfaced **no new finding** — the one thing it
+did surface was a factual error in §15 itself (§16.3).
+
+### 16.2 The two partials
+
+**Obs 1 — the heartbeat's three remaining gaps, all closed.**
+
+| Gap | What landed |
+|---|---|
+| **1. Unclamped TTL** | `decision_cache_ttl_secs` is now clamped to `MAX_DECISION_CACHE_TTL_SECS` (300 s). Clamped in `AuthzConfig::decision_cache_ttl_secs()` — the accessor `build_decision_cache` calls — **not** in `main.rs` where `cleanup_interval_secs` is clamped, so every construction path is covered including tests and any embedder. A bound one binary happens to apply is not a bound. |
+| **2. Operator-disableable** | An interval of `0` no longer means "off". Heartbeats **cannot be disabled** while broadcast is on; out-of-range values clamp to `1..=60` with a warning. This was free to change: the `0` escape hatch was introduced in the same unreleased change, so nothing depends on it. |
+| **3. Replayable heartbeat** | Acceptance is now bound to nonces *this replica published and has not yet seen back*. `build_signed_heartbeat` returns its nonce, the publisher registers it **before** publishing (the fanout can deliver the echo before the confirm returns), and the consumer consumes it once. A replayed heartbeat carries a nonce already consumed, so it cannot refresh the liveness clock — closing the path without spending the shared `NonceGuard`'s bounded capacity, which is why heartbeats bypassed it in the first place. |
+
+Gaps 1 and 2 together are the substantive change: **neither half of the
+staleness bound is operator-removable any more.** Previously an operator could
+set the TTL to hours *and* switch off the mechanism that shortens the window.
+
+**Obs 4 — service-account hashes: the diagnosis was incomplete, and the fix
+follows the corrected one.** §15.2 said the seam has no production caller. That
+is right, and the reason is stronger than "a caller was forgotten": **nothing in
+the running server verifies a service-account secret at all.** Service accounts
+are CRUD plus certificate binding; the secret is issued at create/rotate and
+never presented back. So no lazy upgrade can ever fire here, and adding a caller
+would mean inventing a whole authentication path — a feature, not a remediation.
+
+What actually blocks progress is the *decision* the observation names: the v1
+arm cannot be retired on the strength of "no v1 `oauth2_client` rows remain",
+because this table is invisible to that reasoning. So:
+
+- `ServiceAccountRepository::count_legacy_secret_hashes(tenant)` makes the
+  backlog answerable, testing the same self-identifying prefix the verifier uses
+  rather than inventing a second definition of the format;
+- startup emits a warning naming the count **and the only migration route that
+  exists here — rotation**, which writes the current scheme under the current
+  pepper;
+- the trait doc states plainly that these rows do not drain lazily and why.
+
+The same limitation applies to the Obs 3 pepper-rotation rewrite, which drains
+`oauth2_client` rows only — now covered by the same count and the same route.
+
+### 16.3 A correction to §15
+
+**§15.3.2 is factually wrong where it says PHP "still has no equivalent"**
+slug-vs-UUID diagnostic. The PHP SDK has shipped one since the SEC-085 change
+and it is on `main`: `JwksVerifier::warnOnceIfTenantComparandLooksLikeASlug()`,
+called from the rule-4 rejection path, latched once per process, keyed on the
+operator-configured value's shape, with `looksLikeUuid()` beside it — the same
+design as the TS and Python ones §15.3.2 credits. All three named SDKs have it.
+
+The rest of §15.3.2 stands: the diagnostic **is** log-only in all three, the 401
+body is unchanged, and Python's warning is dropped under Django's default
+`LOGGING`. That is a real limitation and is left as-is deliberately — see §16.4.
+
+### 16.3a §15.3.1 — rule-8 regression tests, and a refinement to the observation
+
+§15.3.1 recorded that the rule-8 test exists only in PHP and that "the other ten
+are structurally correct today with no guardrail against regression". Auditing
+the guards to write those tests refined *why* they are correct, and that changes
+what the guardrail should be.
+
+**PHP was uniquely exposed, structurally.** `AxiamClient` bundles a stateful
+`Session`, and the guard called a helper that reached into it. In the other
+SDKs the guard's inputs are a **verifier plus configuration** — TypeScript's
+`VerifiableSession` is a config object (verifier + tenant), Python's
+`_authenticate` takes `(request, verifier, configured_tenant)`, Go's middleware
+holds a verifier. There is no second credential in scope for those guards to
+substitute, so the literal §10.1 test — "a failing caller token yields 401 while
+the client's own session is healthy and verifiable" — **cannot be written for
+them**: there is no session to make healthy, and a test that stubs one in would
+be testing the stub.
+
+The guardrail that actually protects them is therefore a different one: pin that
+the property stays true. Two tests per SDK — the verifier is invoked with the
+caller's token and nothing else, and the guard's input surface exposes no
+`session`/`client`/`refresh`/`accessToken`. Both fail the moment someone threads
+a stateful client session into the guard's inputs, which is exactly how the PHP
+bug became reachable.
+
+**Status: partially actioned.** Landed in **TypeScript** and **Python**. **Not
+done in Go, Java, C#, Rust, Swift, C, C++ and Kotlin** — the same two tests
+apply, and the argument above says what they should assert. This is the one item
+of §15 left incomplete, and it is a process gap rather than a defect: §15.1
+confirmed by hand that all eleven guards reject correctly today.
+
+### 16.4 Deliberately not actioned
+
+1. **§15.3.2's remaining substance — the diagnostic is log-only.** Making a
+   misconfigured guard *fail loudly at startup* rather than warn on first
+   rejection would mean an SDK refusing to construct against a
+   slug-shaped tenant. That is a breaking change to construction semantics for
+   a condition that is already fail-closed, and it would fire on any deployment
+   whose tenant identifier legitimately is not a UUID. A posture decision for
+   the SDK owners, not a defect to patch.
+2. **§15.3.5 — a 503 also suppresses the webhook** for a row that was written.
+   §15 already records this as consistent with the pre-existing `groups.rs`
+   pattern and not a regression. Reordering would emit an event for a change
+   that has not fully taken effect, which is worse.
+3. **§15.3.6 — `AppState::for_test` is `pub` and not `#[cfg(test)]`-gated.**
+   Pre-existing; gating it would break the integration tests that legitimately
+   construct state across crate boundaries. Worth a follow-up that introduces a
+   `test-util` feature, not a change to smuggle into a security remediation.
+4. **§10.4 residual 5** (introspect pre-auth work factor) — carried unchanged,
+   as it has been since §10.
+
+### 16.5 What a verifier should look at hardest
+
+1. **The heartbeat nonce lifecycle.** The registration happens before the
+   publish deliberately, to avoid losing a race with the echo. Confirm there is
+   no path that registers a nonce and then fails to publish in a way that lets
+   the outstanding set fill with nonces that can never be answered — the ring is
+   bounded at 8, which is the backstop, but the reasoning is worth re-deriving.
+2. **The publisher lock change.** The guard is now released before the confirm
+   await, and the failure path re-acquires and clears **only if the slot still
+   holds the same channel**. Confirm that compare-before-clear is correct under
+   a concurrent reopen, and that the fail-closed property (an unconfirmed
+   broadcast still returns `Err`) is genuinely unchanged.
+3. **The TTL clamp's placement.** It is on the accessor, not the field. Confirm
+   no caller reads `decision_cache_ttl_secs` directly and bypasses it.

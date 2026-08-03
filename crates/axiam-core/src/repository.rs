@@ -510,6 +510,29 @@ pub trait ServiceAccountRepository: Send + Sync {
         expected_hash: &str,
         new_hash: &str,
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Count service accounts whose `client_secret_hash` is still in a **legacy
+    /// (v1)** scheme (§15.2).
+    ///
+    /// ## Why this exists, stated plainly
+    ///
+    /// [`Self::upgrade_client_secret_hash`] can only fire on a *successful
+    /// verification*, and **nothing in the running server verifies a service
+    /// account's `client_secret_hash`** — service accounts are CRUD plus
+    /// certificate binding today; the secret is issued at create/rotate and
+    /// never presented back. So unlike `oauth2_client` rows, these rows do not
+    /// drain lazily: a legacy row stays legacy forever, and the same is true of
+    /// a row still keyed to a previous pepper.
+    ///
+    /// That has one concrete consequence: the v1 arm of the verifier cannot be
+    /// retired on the strength of "no v1 `oauth2_client` rows remain", because
+    /// this table is invisible to that reasoning. This count makes the question
+    /// answerable, and the migration route is **rotation** — `rotate_secret`
+    /// writes the current scheme under the current pepper.
+    fn count_legacy_secret_hashes(
+        &self,
+        tenant_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait SessionRepository: Send + Sync {

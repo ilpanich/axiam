@@ -238,6 +238,17 @@ impl ClientSecretHasher {
                     .to_string(),
             ));
         }
+        if pepper.len() < WEAK_PEPPER_LEN {
+            // §15.3.7: `from_pepper` warns on a weak pepper and this path did
+            // not. The impact is genuinely lower — a previous key can only
+            // verify hashes that already exist, never produce one — but an
+            // operator rotating *away* from a weak pepper is exactly who should
+            // be told it was weak, and silence here reads as approval.
+            tracing::warn!(
+                pepper_len = pepper.len(),
+                "AXIAM__AUTH__PEPPER_PREVIOUS is shorter than {WEAK_PEPPER_LEN} bytes. Secrets                  still hashed under it are weakly keyed until they are rewritten under the                  current pepper; complete the rotation promptly."
+            );
+        }
         self.previous_key = Some(Self::derive_key(pepper));
         Ok(self)
     }

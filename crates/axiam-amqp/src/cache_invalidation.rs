@@ -100,9 +100,20 @@
 //!   from every replica, letting them consume the bounded nonce-guard capacity
 //!   would evict real invalidation nonces and weaken replay protection.
 //!
-//! Heartbeats can be disabled with
-//! `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_HEARTBEAT_SECS=0`, which restores the
-//! pre-§13.4 behaviour and re-opens the suppression window.
+//! * **A replayed heartbeat does not count** (§15.2). Bypassing the nonce guard
+//!   left a narrow path: a party with broker rights who captured one signed
+//!   heartbeat could replay it inside the freshness window to keep this
+//!   replica's watchdog satisfied while its queue was unbound. Acceptance is
+//!   therefore bound to nonces *this* replica published and has not yet seen
+//!   back ([`InvalidationLiveness::record_sent_heartbeat`]), which closes the
+//!   replay without spending the shared guard's bounded capacity.
+//!
+//! Heartbeats **cannot be disabled** while broadcast is on. An earlier revision
+//! accepted an interval of `0` as "off", which meant this whole mitigation could
+//! be removed with one environment variable and only a warning — leaving the TTL
+//! as the sole bound, which is the state it exists to escape. The TTL is itself
+//! now clamped (`MAX_DECISION_CACHE_TTL_SECS`), so neither half of the bound is
+//! operator-removable.
 //!
 //! # 3. Authenticity
 //!
@@ -302,24 +313,28 @@ pub const HEARTBEAT_TENANT_ID: Uuid = Uuid::nil();
 /// Same envelope, same signing, same freshness and replay gates as an
 /// invalidation — a heartbeat is not a privileged message type, it simply
 /// carries no cache effect.
+/// Returns the wire bytes **and the nonce**; the caller registers the nonce as
+/// outstanding so the echo can be told apart from a replay (§15.2 gap 3).
 pub fn build_signed_heartbeat(
     master_key: &[u8],
     origin_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<Vec<u8>, AmqpError> {
-    sign_message(
+) -> Result<(Vec<u8>, Uuid), AmqpError> {
+    let nonce = Uuid::new_v4();
+    let payload = sign_message(
         master_key,
         CacheInvalidationMessage {
             origin_id,
             tenant_id: HEARTBEAT_TENANT_ID,
             subject_id: None,
             key_version: CURRENT_KEY_VERSION,
-            nonce: Uuid::new_v4(),
+            nonce,
             issued_at: now,
             heartbeat: true,
             hmac_signature: None,
         },
-    )
+    )?;
+    Ok((payload, nonce))
 }
 
 /// Canonicalize, sign, and serialize one message. Shared by the invalidation and
@@ -450,8 +465,9 @@ pub enum InvalidationOutcome {
     /// A liveness heartbeat (§13.4 observation 1). Never touches the cache.
     /// `own` distinguishes this replica's own heartbeat — the only one that
     /// carries information, since observing it proves *our* binding is intact —
-    /// from another replica's, which is simply ignored.
-    Heartbeat { own: bool },
+    /// from another replica's, which is simply ignored. `nonce` lets the caller
+    /// tell a genuine echo from a replay (§15.2 gap 3).
+    Heartbeat { own: bool, nonce: Uuid },
     /// Refused; see [`InvalidationReject`].
     Rejected(InvalidationReject),
 }
@@ -538,7 +554,10 @@ pub fn process_invalidation(
     if message.heartbeat {
         let own = message.origin_id == local_origin;
         debug!(own, "Cache-invalidation liveness heartbeat");
-        return InvalidationOutcome::Heartbeat { own };
+        return InvalidationOutcome::Heartbeat {
+            own,
+            nonce: message.nonce,
+        };
     }
 
     if message.origin_id == local_origin {
@@ -623,7 +642,33 @@ pub const HEARTBEAT_MISS_THRESHOLD: u32 = 3;
 pub struct InvalidationLiveness {
     /// When we last saw our own broadcast come back. `None` = not subscribed.
     last_own_echo: Mutex<Option<DateTime<Utc>>>,
+    /// Nonces of heartbeats this replica has published and not yet seen return
+    /// (§15.2 gap 3).
+    ///
+    /// Heartbeats deliberately bypass the [`NonceGuard`] — they arrive on a
+    /// fixed interval from every replica and would evict real invalidation
+    /// nonces from its bounded capacity. But that left a narrow suppression
+    /// path: a party with broker rights who captured one signed heartbeat could
+    /// replay it inside the freshness window to keep this replica's watchdog
+    /// satisfied while its queue was unbound — the exact adversary Obs 1 is
+    /// about.
+    ///
+    /// Binding acceptance to nonces *we* generated closes that without touching
+    /// the shared guard: a replayed heartbeat carries a nonce that was already
+    /// consumed (or never issued here), so it is ignored. This is strictly
+    /// cheaper than a general replay guard because the set only ever holds the
+    /// handful of heartbeats currently in flight.
+    outstanding: Mutex<VecDeque<Uuid>>,
 }
+
+/// Cap on [`InvalidationLiveness::outstanding`].
+///
+/// Only heartbeats still in flight matter, and a heartbeat that has not come
+/// back within a few intervals is already a miss. A small ring keeps this
+/// bounded regardless of broker behaviour — an unbound queue means every
+/// published nonce goes unanswered, and the set must not grow for as long as
+/// that lasts.
+const MAX_OUTSTANDING_HEARTBEATS: usize = 8;
 
 impl Default for InvalidationLiveness {
     fn default() -> Self {
@@ -635,6 +680,37 @@ impl InvalidationLiveness {
     pub fn new() -> Self {
         Self {
             last_own_echo: Mutex::new(None),
+            outstanding: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Record a heartbeat nonce this replica is about to publish (§15.2 gap 3).
+    pub fn record_sent_heartbeat(&self, nonce: Uuid) {
+        let mut q = self
+            .outstanding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if q.len() >= MAX_OUTSTANDING_HEARTBEATS {
+            q.pop_front();
+        }
+        q.push_back(nonce);
+    }
+
+    /// Consume `nonce` if this replica published it and has not seen it back.
+    ///
+    /// Returns `false` for a nonce we never issued or already consumed — i.e.
+    /// for a replayed heartbeat, which must not refresh the liveness clock.
+    fn consume_outstanding(&self, nonce: Uuid) -> bool {
+        let mut q = self
+            .outstanding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match q.iter().position(|n| *n == nonce) {
+            Some(i) => {
+                q.remove(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -646,14 +722,28 @@ impl InvalidationLiveness {
     }
 
     /// Called by the consumer when it observes its **own** heartbeat.
-    pub fn record_own_heartbeat(&self, now: DateTime<Utc>) {
+    ///
+    /// Refreshes the liveness clock **only** for a nonce this replica actually
+    /// published and has not already seen back (§15.2 gap 3), so a replayed
+    /// heartbeat cannot hold the watchdog open. Returns whether it counted.
+    pub fn record_own_heartbeat(&self, nonce: Uuid, now: DateTime<Utc>) -> bool {
+        if !self.consume_outstanding(nonce) {
+            return false;
+        }
         *self.lock() = Some(now);
+        true
     }
 
     /// Called when the consumer stops, so a reconnecting consumer cannot inherit
     /// a stale "recently alive" timestamp from its predecessor.
     pub fn mark_unsubscribed(&self) {
         *self.lock() = None;
+        // A reconnecting consumer must not be able to satisfy its watchdog with
+        // a heartbeat its predecessor published.
+        self.outstanding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     /// The last observation, if any.
@@ -761,28 +851,50 @@ impl CacheInvalidationPublisher {
     /// must traverse the exact same path it is meant to be evidence about. A
     /// heartbeat sent over a different channel, exchange or routing key would
     /// prove something other than what the invalidations depend on.
-    pub async fn publish_heartbeat(&self) -> Result<(), AmqpError> {
-        let payload = build_signed_heartbeat(&self.master_key, self.origin_id, Utc::now())?;
+    pub async fn publish_heartbeat(
+        &self,
+        liveness: &InvalidationLiveness,
+    ) -> Result<(), AmqpError> {
+        let (payload, nonce) =
+            build_signed_heartbeat(&self.master_key, self.origin_id, Utc::now())?;
+        // Registered BEFORE the publish: the fanout can deliver the echo before
+        // the confirm returns, and a nonce registered afterwards could lose that
+        // race and be discarded as a replay.
+        liveness.record_sent_heartbeat(nonce);
         self.publish_payload(&payload).await
     }
 
     /// Acquire a healthy channel, publish, and await the confirm — reopening the
     /// channel if the one we hold has been closed.
+    /// The lock covers only channel *acquisition*, never the broker round-trip
+    /// (§15.3.4).
+    ///
+    /// Holding it across the confirm serialised every access-narrowing mutation
+    /// in the process behind one network round-trip, with the heartbeat task
+    /// contending on the same lock — a throughput cliff under a slow broker,
+    /// and a regression against the pre-§13.4 code, which shared the channel
+    /// with no lock at all. `lapin::Channel` is a cheap handle over shared
+    /// state, so cloning it out of the slot and releasing the guard keeps the
+    /// reopen logic single-threaded while letting publishes proceed
+    /// concurrently — which is what the AMQP channel already supports.
     async fn publish_payload(&self, payload: &[u8]) -> Result<(), AmqpError> {
-        let mut slot = self.channel.lock().await;
+        let channel = {
+            let mut slot = self.channel.lock().await;
 
-        // Drop a channel the broker has already closed, so the next block opens
-        // a fresh one instead of publishing into a dead handle.
-        if slot.as_ref().is_some_and(|c| !c.status().connected()) {
-            warn!("Cache-invalidation publisher channel is closed — reopening");
-            *slot = None;
-        }
-        if slot.is_none() {
-            *slot = Some(self.channels.open().await?);
-        }
-        let channel = slot.as_ref().expect("channel opened above");
+            // Drop a channel the broker has already closed, so the next block
+            // opens a fresh one instead of publishing into a dead handle.
+            if slot.as_ref().is_some_and(|c| !c.status().connected()) {
+                warn!("Cache-invalidation publisher channel is closed — reopening");
+                *slot = None;
+            }
+            if slot.is_none() {
+                *slot = Some(self.channels.open().await?);
+            }
+            slot.as_ref().expect("channel opened above").clone()
+            // Guard dropped here — the confirm below is awaited unlocked.
+        };
 
-        match Self::publish_on(channel, payload).await {
+        match Self::publish_on(&channel, payload).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Any failure may have been the channel dying under us. Discard
@@ -791,7 +903,16 @@ impl CacheInvalidationPublisher {
                 // still returned: this mutation genuinely did not fan out, and
                 // silently retrying here would hide a broker refusing the
                 // message for a reason that will recur.
-                *slot = None;
+                //
+                // Compare-before-clear: between releasing the guard and
+                // re-acquiring it, a concurrent publisher may already have
+                // replaced the slot with a healthy channel. Clearing
+                // unconditionally would discard that one too, and a burst of
+                // failures could then thrash the slot indefinitely.
+                let mut slot = self.channel.lock().await;
+                if slot.as_ref().is_some_and(|c| c.id() == channel.id()) {
+                    *slot = None;
+                }
                 Err(e)
             }
         }
@@ -958,15 +1079,25 @@ pub async fn run_cache_invalidation_consumer(
             InvalidationOutcome::SelfEcho => {
                 let _ = delivery.acker.ack(BasicAckOptions::default()).await;
             }
-            InvalidationOutcome::Heartbeat { own } => {
+            InvalidationOutcome::Heartbeat { own, nonce } => {
                 // Only our OWN heartbeat is evidence: it is the one that proves
                 // *this* replica's queue is still bound to the exchange. Another
                 // replica's heartbeat proves only that the other replica can
                 // publish, which says nothing about our binding.
                 if let Some(liveness) = &liveness
                     && own
+                    && !liveness.record_own_heartbeat(nonce, Utc::now())
                 {
-                    liveness.record_own_heartbeat(Utc::now());
+                    // A correctly-signed, fresh heartbeat carrying our origin id
+                    // but a nonce we did not issue (or already saw) is a replay.
+                    // It must not refresh the liveness clock — that is the
+                    // suppression path §15.2 gap 3 names — and it is worth a log
+                    // line, because in normal operation it cannot happen.
+                    warn!(
+                        %nonce,
+                        "Replayed or unrecognised own-heartbeat nonce — ignoring; \
+                         this does not refresh cache-invalidation liveness"
+                    );
                 }
                 let _ = delivery.acker.ack(BasicAckOptions::default()).await;
             }

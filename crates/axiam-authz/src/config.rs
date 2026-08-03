@@ -15,6 +15,26 @@ pub const DEFAULT_BROADCAST_SKEW_SECS: u64 = 30;
 /// observation 1). See [`AuthzConfig::decision_cache_broadcast_heartbeat_secs`].
 pub const DEFAULT_BROADCAST_HEARTBEAT_SECS: u64 = 10;
 
+/// Hard ceiling on [`AuthzConfig::decision_cache_ttl_secs`] (§15.2).
+///
+/// The TTL is the only bound on how long a revoked grant can still be served by
+/// a replica that missed its invalidation — the heartbeat shortens the window in
+/// which invalidations go undelivered, but it cannot bound a window the operator
+/// set to hours. Five minutes is already far beyond anything the cache needs to
+/// be useful (the default is 5 **seconds**), so the ceiling costs nothing real
+/// and removes the foot-gun.
+pub const MAX_DECISION_CACHE_TTL_SECS: u64 = 300;
+
+/// Bounds on the heartbeat interval (§15.2).
+///
+/// A lower bound stops a misconfiguration turning the liveness probe into a
+/// broadcast flood; the upper bound keeps detection latency
+/// (`interval × HEARTBEAT_MISS_THRESHOLD`) inside the same order as the TTL
+/// ceiling it backstops.
+pub const MIN_BROADCAST_HEARTBEAT_SECS: u64 = 1;
+/// See [`MIN_BROADCAST_HEARTBEAT_SECS`].
+pub const MAX_BROADCAST_HEARTBEAT_SECS: u64 = 60;
+
 /// Strategy for evaluating a `BatchCheckAccess` call (REST + gRPC).
 ///
 /// Both strategies produce **byte-identical decisions in the same order** —
@@ -160,9 +180,12 @@ pub struct AuthzConfig {
     /// detected within
     /// `decision_cache_broadcast_heartbeat_secs × HEARTBEAT_MISS_THRESHOLD`.
     ///
-    /// Set to `0` to disable heartbeats. That restores the pre-§13.4 behaviour
-    /// and is **not** recommended: it re-opens the suppression window this
-    /// closes, leaving `decision_cache_ttl_secs` as the only bound.
+    /// **Cannot be disabled** while broadcast is on, and clamped to
+    /// `MIN_BROADCAST_HEARTBEAT_SECS..=MAX_BROADCAST_HEARTBEAT_SECS` (§15.2).
+    /// An earlier revision accepted `0` as "disabled"; that made the mitigation
+    /// removable with one environment variable and only a warning, leaving
+    /// `decision_cache_ttl_secs` as the sole bound — the exact state this
+    /// exists to escape.
     ///
     /// Raising it weakens detection linearly and saves almost nothing — one
     /// transient 200-byte message per replica per interval.
@@ -175,6 +198,14 @@ pub struct AuthzConfig {
     /// process-local; see `decision_cache_enabled`). Short by design.
     ///
     /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default `5`).
+    ///
+    /// **Clamped to [`MAX_DECISION_CACHE_TTL_SECS`] at construction** (§15.2).
+    /// This value is the *only* bound on how long a revoked grant can still be
+    /// served on a replica that missed its invalidation, so an unbounded `u64`
+    /// let an operator configure a multi-hour stale-allow window — and the
+    /// cross-replica heartbeat, which exists to shorten that window, cannot
+    /// help once the window itself is arbitrary. `cleanup_interval_secs` has
+    /// been clamped for this reason since T-04-35; this one had not been.
     pub decision_cache_ttl_secs: u64,
 
     /// Maximum cached decisions retained **per tenant** before FIFO eviction
@@ -222,7 +253,7 @@ impl AuthzConfig {
             return None;
         }
         let cache = DecisionCache::new(DecisionCacheConfig {
-            ttl: Duration::from_secs(self.decision_cache_ttl_secs),
+            ttl: Duration::from_secs(self.decision_cache_ttl_secs()),
             max_entries_per_tenant: self.decision_cache_max_entries,
         });
         if self.decision_cache_broadcast_enabled {
@@ -243,21 +274,56 @@ impl AuthzConfig {
         chrono::Duration::seconds(self.decision_cache_broadcast_skew_secs as i64)
     }
 
-    /// The configured heartbeat interval, or `None` when heartbeats are disabled
-    /// (`0`) or cross-replica invalidation is not active at all.
+    /// The effective decision-cache TTL, clamped to
+    /// [`MAX_DECISION_CACHE_TTL_SECS`] (§15.2).
     ///
-    /// Returning `None` rather than a zero `Duration` keeps "disabled" a state
-    /// the caller must destructure, so a heartbeat loop cannot be started with a
-    /// zero-length interval and spin.
+    /// Clamped here rather than in `main.rs` — where `cleanup_interval_secs` is
+    /// clamped — so that *every* construction path is covered, including tests
+    /// and any future embedder that builds an `AuthzConfig` directly. A bound
+    /// that only applies when one particular binary happens to apply it is not
+    /// really a bound.
+    pub fn decision_cache_ttl_secs(&self) -> u64 {
+        let configured = self.decision_cache_ttl_secs;
+        if configured > MAX_DECISION_CACHE_TTL_SECS {
+            tracing::warn!(
+                configured,
+                clamped_to = MAX_DECISION_CACHE_TTL_SECS,
+                "AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS exceeds the maximum and has been clamped. \
+                 This value bounds how long a REVOKED grant can still be served on a replica that \
+                 missed its invalidation, so it is a security bound, not a tuning knob."
+            );
+        }
+        configured.min(MAX_DECISION_CACHE_TTL_SECS)
+    }
+
+    /// The heartbeat interval, or `None` when cross-replica invalidation is not
+    /// active at all.
+    ///
+    /// **There is deliberately no way to disable heartbeats while broadcast is
+    /// on** (§15.2). An earlier revision treated `0` as "disabled", which meant
+    /// the mitigation for the queue-unbind suppression hole could be switched
+    /// off with a single environment variable and only a warning — leaving the
+    /// TTL as the sole bound, which is precisely the state the heartbeat exists
+    /// to escape. A heartbeat costs one transient ~200-byte message per replica
+    /// per interval, so there is no deployment for which disabling it is the
+    /// right trade. Out-of-range values are clamped, not honoured.
     pub fn decision_cache_broadcast_heartbeat(&self) -> Option<chrono::Duration> {
-        if !self.cross_replica_invalidation_enabled()
-            || self.decision_cache_broadcast_heartbeat_secs == 0
-        {
+        if !self.cross_replica_invalidation_enabled() {
             return None;
         }
-        Some(chrono::Duration::seconds(
-            self.decision_cache_broadcast_heartbeat_secs as i64,
-        ))
+        let configured = self.decision_cache_broadcast_heartbeat_secs;
+        let effective =
+            configured.clamp(MIN_BROADCAST_HEARTBEAT_SECS, MAX_BROADCAST_HEARTBEAT_SECS);
+        if effective != configured {
+            tracing::warn!(
+                configured,
+                clamped_to = effective,
+                "AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_HEARTBEAT_SECS is out of range and has \
+                 been clamped. Heartbeats cannot be disabled while cross-replica invalidation is \
+                 enabled: they are what detects a replica whose queue has been unbound."
+            );
+        }
+        Some(chrono::Duration::seconds(effective as i64))
     }
 }
 
@@ -416,5 +482,108 @@ mod tests {
         .expect("broadcast overrides must deserialize");
         assert!(cfg.decision_cache_broadcast_enabled);
         assert_eq!(cfg.decision_cache_broadcast_skew_secs, 15);
+    }
+
+    // --- §15.2: neither half of the staleness bound is operator-removable ---
+
+    /// The TTL is the only bound on how long a revoked grant can still be served
+    /// by a replica that missed its invalidation. It was an unbounded `u64`,
+    /// while `cleanup_interval_secs` had been clamped since T-04-35.
+    #[test]
+    fn decision_cache_ttl_is_clamped_to_the_ceiling() {
+        let cfg = AuthzConfig {
+            decision_cache_ttl_secs: 86_400,
+            ..AuthzConfig::default()
+        };
+        assert_eq!(cfg.decision_cache_ttl_secs(), MAX_DECISION_CACHE_TTL_SECS);
+    }
+
+    /// Clamping must not disturb a sane value — including the default.
+    #[test]
+    fn a_within_range_ttl_is_untouched() {
+        for secs in [0, 1, 5, 60, MAX_DECISION_CACHE_TTL_SECS] {
+            let cfg = AuthzConfig {
+                decision_cache_ttl_secs: secs,
+                ..AuthzConfig::default()
+            };
+            assert_eq!(cfg.decision_cache_ttl_secs(), secs);
+        }
+    }
+
+    /// The clamp must apply at the point the TTL becomes real, not only in
+    /// `main.rs` — a bound that one binary happens to apply is not a bound.
+    ///
+    /// Asserted through the accessor `build_decision_cache` actually calls,
+    /// rather than by reading the field back off the built cache, so the test
+    /// fails if a future edit reverts that call site to the raw field.
+    #[test]
+    fn the_built_cache_uses_the_clamped_ttl() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: true,
+            decision_cache_ttl_secs: 86_400,
+            ..AuthzConfig::default()
+        };
+        assert!(cfg.build_decision_cache().is_some(), "cache enabled");
+        assert_eq!(
+            Duration::from_secs(cfg.decision_cache_ttl_secs()),
+            Duration::from_secs(MAX_DECISION_CACHE_TTL_SECS),
+            "build_decision_cache must not hand an unclamped TTL to the cache"
+        );
+        assert_ne!(
+            cfg.decision_cache_ttl_secs(),
+            cfg.decision_cache_ttl_secs,
+            "precondition: the raw field really is out of range here"
+        );
+    }
+
+    /// Heartbeats cannot be switched off while broadcast is on. An earlier
+    /// revision treated `0` as "disabled", which let one environment variable
+    /// remove the mitigation for the queue-unbind hole.
+    #[test]
+    fn heartbeats_cannot_be_disabled_while_broadcast_is_on() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: true,
+            decision_cache_broadcast_enabled: true,
+            decision_cache_broadcast_heartbeat_secs: 0,
+            ..AuthzConfig::default()
+        };
+        let interval = cfg
+            .decision_cache_broadcast_heartbeat()
+            .expect("heartbeats must stay on");
+        assert_eq!(
+            interval.num_seconds() as u64,
+            MIN_BROADCAST_HEARTBEAT_SECS,
+            "0 must clamp to the minimum, not disable the watchdog"
+        );
+    }
+
+    /// An absurdly long interval is clamped too: detection latency is
+    /// `interval * HEARTBEAT_MISS_THRESHOLD`, so an unbounded interval is an
+    /// unbounded suppression window by another route.
+    #[test]
+    fn an_over_long_heartbeat_interval_is_clamped() {
+        let cfg = AuthzConfig {
+            decision_cache_enabled: true,
+            decision_cache_broadcast_enabled: true,
+            decision_cache_broadcast_heartbeat_secs: 86_400,
+            ..AuthzConfig::default()
+        };
+        assert_eq!(
+            cfg.decision_cache_broadcast_heartbeat()
+                .unwrap()
+                .num_seconds() as u64,
+            MAX_BROADCAST_HEARTBEAT_SECS
+        );
+    }
+
+    /// With broadcast off there is no heartbeat to run — the whole feature is
+    /// inert, which is the documented default.
+    #[test]
+    fn no_heartbeat_when_broadcast_is_off() {
+        assert!(
+            AuthzConfig::default()
+                .decision_cache_broadcast_heartbeat()
+                .is_none()
+        );
     }
 }

@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Neither half of the decision-cache staleness bound is operator-removable any
+  more (§15.2).** Two gaps compounded: `decision_cache_ttl_secs` was an
+  unbounded `u64` (unlike `cleanup_interval_secs`, clamped since T-04-35), and
+  the cross-replica heartbeat that shortens the undelivered-invalidation window
+  could be switched off with `..._HEARTBEAT_SECS=0` and only a warning. An
+  operator could therefore set a multi-hour stale-allow window *and* disable the
+  mechanism that detects a replica whose queue has been unbound.
+
+  The TTL is now clamped to 300 s — in the accessor `build_decision_cache`
+  calls, not in `main.rs`, so every construction path is covered. Heartbeats
+  cannot be disabled while broadcast is on; out-of-range intervals clamp to
+  `1..=60`. The `0` escape hatch was introduced in this same unreleased change,
+  so removing it breaks nothing.
+
+- **A replayed heartbeat can no longer satisfy the liveness watchdog (§15.2).**
+  Heartbeats bypass the replay `NonceGuard` deliberately — they arrive on a
+  fixed interval from every replica and would evict real invalidation nonces
+  from its bounded capacity. That left a narrow path: a party with broker rights
+  who captured one signed heartbeat could replay it inside the freshness window
+  to keep a replica's watchdog satisfied while its queue was unbound, which is
+  the exact adversary the heartbeat exists to detect. Acceptance is now bound to
+  nonces the replica itself published and has not yet seen back.
+
+### Added
+
+- **Legacy client-secret hashes in `service_account` are now countable, and the
+  situation is stated honestly (§15.2).** These rows cannot migrate lazily:
+  `upgrade_client_secret_hash` only fires on a successful verification, and
+  **nothing in the running server verifies a service-account secret** — they are
+  CRUD plus certificate binding, and the secret is issued at create/rotate but
+  never presented back. So unlike `oauth2_client` rows they never drain, which
+  is what blocked retiring the legacy hash arm: "no v1 `oauth2_client` rows
+  remain" does not answer the question, because this table is invisible to it.
+
+  `count_legacy_secret_hashes(tenant)` makes the backlog answerable, and startup
+  warns with the count and the only migration route that exists here —
+  **rotation**, which rewrites under the current scheme and current pepper. The
+  same applies to rows still keyed to a superseded pepper.
+
+### Fixed
+
+- **The cache-invalidation publisher no longer serialises mutations behind a
+  network round-trip (§15.3.4).** The channel-slot mutex was held across the
+  broker confirm, so every access-narrowing mutation in the process queued on
+  one lock while the heartbeat task contended for it — a throughput cliff under
+  a slow broker, and a regression against the pre-§13.4 code, which shared the
+  channel with no lock at all. The lock now covers only channel acquisition. The
+  failure path clears the slot **only if it still holds the same channel**, so a
+  concurrent reopen is not discarded.
+
+- **`with_previous_pepper` now carries the weak-pepper warning (§15.3.7)** that
+  `from_pepper` has always emitted. Lower impact — a previous key can only
+  verify existing hashes, never produce one — but an operator rotating *away*
+  from a weak pepper is precisely who should be told it was weak.
+
 - **Cache-invalidation liveness heartbeats (§13.4 observation 1).** Decision-cache
   trust followed **consumer** liveness alone. A party with broker `configure`
   rights could `queue.unbind` a replica's queue from the fanout exchange and the
@@ -29,8 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in exactly one place, by the consumer on a successful subscribe, so it can
   never resurrect trust on a replica whose consumer has died. Heartbeats never
   touch the cache and never enter the replay-nonce guard. Only applies when
-  cross-replica broadcast is enabled; set the interval to `0` to disable
-  (not recommended — it re-opens the suppression window).
+  cross-replica broadcast is enabled. (Superseded below: heartbeats can no
+  longer be disabled, and the interval is clamped to `1..=60`.)
 
 - **Cached authorization decisions are now invalidated on user delete/update
   (§13.4 observation 9).** `users::update` and `users::delete` did not invalidate,
@@ -38,8 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the TTL expired. Nothing on the session-authenticated request path
   re-reads user status, so the cache was the only place the stale grant could be
   cleared. Both handlers now flush the affected subject.
-
-### Fixed
 
 - **Pepper rotation is no longer an unversioned hard break (§13.4 observation 3).**
   `AXIAM__AUTH__PEPPER` keys client-secret hashing, and the `v2.hs256$` tag
@@ -66,6 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not be retired on the strength of "no v1 `oauth2_client` rows remain". The
   repository now exposes the same tenant-scoped compare-and-swap upgrade the
   OAuth2 client repository has, which also carries pepper-rotation rewrites.
+  (Superseded above: the seam has no production caller because nothing verifies
+  a service-account secret, so these rows migrate by **rotation**, not lazily.)
 
 - **The cache-invalidation publisher recovers its channel (§13.4 observation 2).**
   It held one channel created at startup and never replaced, while the consumer

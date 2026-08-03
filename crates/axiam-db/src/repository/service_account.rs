@@ -463,4 +463,39 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
         Ok(!rows.is_empty())
     }
+
+    async fn count_legacy_secret_hashes(&self, tenant_id: Option<Uuid>) -> AxiamResult<u64> {
+        // A v2 hash is identified by its own prefix, so "legacy" is simply
+        // "does not start with it" — the same self-identifying test the verifier
+        // uses, rather than a second, drift-prone definition of the format.
+        let sql = match tenant_id {
+            Some(_) => {
+                "SELECT count() AS total FROM service_account \
+                        WHERE tenant_id = $tenant_id \
+                        AND !string::starts_with(client_secret_hash, $prefix) \
+                        GROUP ALL"
+            }
+            None => {
+                "SELECT count() AS total FROM service_account \
+                     WHERE !string::starts_with(client_secret_hash, $prefix) \
+                     GROUP ALL"
+            }
+        };
+        let db = self.db.current();
+        let mut q = db
+            .query(sql)
+            .bind(("prefix", client_secret::V2_PREFIX.to_string()));
+        if let Some(tid) = tenant_id {
+            q = q.bind(("tenant_id", tid.to_string()));
+        }
+
+        let mut result = q
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.total).unwrap_or(0))
+    }
 }

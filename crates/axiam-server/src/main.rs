@@ -46,7 +46,9 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::{
     AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
 };
-use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
+use axiam_core::repository::{
+    OrganizationRepository, Pagination, ServiceAccountRepository, TenantRepository,
+};
 use axiam_db::{
     DbConfig, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
@@ -477,6 +479,36 @@ async fn main() -> std::io::Result<()> {
     let resource_repo = SurrealResourceRepository::new(pool.handle_for_repo());
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
+
+    // §15.2 — service-account secret hashes cannot migrate lazily.
+    //
+    // `upgrade_client_secret_hash` only fires on a successful verification, and
+    // nothing in the running server verifies a service account's secret: they
+    // are CRUD plus certificate binding, and the secret is issued at
+    // create/rotate but never presented back. So unlike `oauth2_client` rows,
+    // these do not drain — a legacy row stays legacy forever, and so does one
+    // still keyed to a superseded pepper.
+    //
+    // That matters for exactly one decision: whether the v1 verifier arm can be
+    // retired. "No v1 `oauth2_client` rows remain" does not answer it, because
+    // this table is invisible to that reasoning. Surfacing the count at startup
+    // makes it answerable, and names the only migration route that exists here.
+    match service_account_repo.count_legacy_secret_hashes(None).await {
+        Ok(0) => {
+            tracing::debug!("All service-account client secrets use the current hash scheme");
+        }
+        Ok(n) => {
+            tracing::warn!(
+                legacy_rows = n,
+                "{n} service account(s) still store a legacy client-secret hash. These CANNOT                  migrate on their own: nothing verifies a service-account secret, so the lazy                  upgrade that drains `oauth2_client` rows never runs here. Rotate them                  (POST /api/v1/service-accounts/{{id}}/rotate-secret) to move them to the                  current scheme and the current pepper. Until this reaches 0, the legacy hash                  arm cannot be retired."
+            );
+        }
+        Err(e) => {
+            // Diagnostic only — never a reason to refuse to start.
+            tracing::debug!(error = %e, "Could not count legacy service-account secret hashes");
+        }
+    }
+
     let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
     // I6: optional short-TTL session-validation cache. Opt-in via
     // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
@@ -1006,7 +1038,7 @@ async fn main() -> std::io::Result<()> {
                         // the staleness check below is the single decision point,
                         // and a failed publish simply means no heartbeat was sent,
                         // which that check will notice on its own if it persists.
-                        if let Err(e) = hb_publisher.publish_heartbeat().await {
+                        if let Err(e) = hb_publisher.publish_heartbeat(&hb_liveness).await {
                             tracing::warn!(
                                 error = %e,
                                 "AuthZ cache-invalidation heartbeat could not be published"
@@ -1031,13 +1063,12 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 });
-            } else {
-                tracing::warn!(
-                    "AuthZ cache-invalidation liveness heartbeats are DISABLED — an unbound \
-                     replica queue would suppress invalidations undetected, bounded only by \
-                     decision_cache_ttl_secs (§13.4 observation 1)"
-                );
             }
+            // No `else`: `decision_cache_broadcast_heartbeat()` returns `Some`
+            // whenever broadcast is on (§15.2). Heartbeats are not disableable —
+            // they are the only thing that detects a replica whose queue has been
+            // unbound, and an earlier revision let one environment variable turn
+            // that off with nothing but a warning.
 
             tracing::info!(
                 replica_id = %replica_id,

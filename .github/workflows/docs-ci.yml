@@ -6,6 +6,9 @@ name: Docs CI (spec-validate + link-check)
 #   1. Internal doc link-check  — scripts/check-doc-links.sh (stdlib bash, no npm/network)
 #   2. OpenAPI spec parse-check  — asserts docs/api/openapi.json is valid JSON (python3 stdlib)
 #
+# A third job, `remediation-evidence`, guards the security-analysis remediation
+# tables — see its own comment block below (security-analysis-2026-08-02 §11.2).
+#
 # The AsyncAPI meta-schema validation step (`npx @asyncapi/cli validate
 # docs/api/asyncapi.yml`) is INTENTIONALLY OMITTED here pending human
 # confirmation of the @asyncapi/cli package. The automated Package Legitimacy
@@ -25,6 +28,8 @@ on:
     paths:
       - 'docs/**'
       - 'claude_dev/security-audit.md'
+      - 'claude_dev/security-analysis-*.md'
+      - 'scripts/check-remediation-evidence.py'
       - 'crates/axiam-amqp/**'
       - 'crates/axiam-api-rest/src/openapi.rs'
   push:
@@ -32,6 +37,8 @@ on:
     paths:
       - 'docs/**'
       - 'claude_dev/security-audit.md'
+      - 'claude_dev/security-analysis-*.md'
+      - 'scripts/check-remediation-evidence.py'
       - 'crates/axiam-amqp/**'
       - 'crates/axiam-api-rest/src/openapi.rs'
 
@@ -54,3 +61,34 @@ jobs:
         run: python3 -c "import json; json.load(open('docs/api/openapi.json'))"
       # AsyncAPI validation intentionally omitted — see file header comment.
       # Run locally instead: npx @asyncapi/cli validate docs/api/asyncapi.yml
+
+  remediation-evidence:
+    name: Remediation evidence resolves on main
+    runs-on: ubuntu-latest
+    # security-analysis-2026-08-02 §11.2: a remediation record citing a commit
+    # hash is not evidence the fix shipped — a hash exists the moment a commit
+    # is authored, on any branch. That pass caught a real instance (the Swift
+    # SEC-080 fix recorded as remediated while still unmerged). This job asserts
+    # every (finding id, repo, commit) triple in a remediation table resolves to
+    # a commit reachable from the default branch of the repo it claims.
+    #
+    # Server-repo claims are verified locally with `git merge-base
+    # --is-ancestor`. SDK-repo claims are verified over the GitHub API when the
+    # token can read them; when it cannot (the default GITHUB_TOKEN is scoped to
+    # this repository), each such row is printed as SKIPPED **by name** so the
+    # run can never be misread as a clean pass. Grant a token with read access
+    # to the ilpanich/axiam-*-sdk repos to turn those into real checks.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # `git merge-base --is-ancestor <sha> origin/main` needs real history,
+          # not the default depth-1 cone.
+          fetch-depth: 0
+      - name: Ensure origin/main is present
+        run: git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+      - name: Remediation evidence check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+          REMEDIATION_BASE_REF: origin/main
+        run: python3 scripts/check-remediation-evidence.py

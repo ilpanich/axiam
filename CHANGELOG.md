@@ -195,6 +195,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session-validation cache entry live for up to the TTL — a deleted session that kept
   validating. Only reachable with the opt-in
   `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` enabled
+- **Session revocation no longer reports success when the `DELETE` failed (OBS-3).**
+  `SessionRepository::invalidate`, `invalidate_user_sessions` and `cleanup_expired` awaited
+  their `DELETE` and returned `Ok(())` without ever calling `.check()` or `.take()`, so a
+  statement-level SurrealDB failure was discarded — logout, password-reset session
+  revocation and MFA reset all told the caller sessions were revoked when the statement may
+  never have run. All five session-deleting methods now `.check()` the response and
+  propagate a `DbError`, which surfaces as `500` at `POST /api/v1/auth/logout` and the GDPR
+  disable path rather than as a silent `204`. Cache invalidation deliberately still runs
+  **before** the new fallible step, so the ordering fix above cannot be reintroduced: an
+  erroring `DELETE` drops the cache entry (costing at most one avoidable re-read) instead of
+  stranding a positive "still valid" entry
+- Startup **warning** when `AXIAM__RATE_LIMIT__KEY=client_id` is active. In that mode the
+  rate-limit bucket key for `/oauth2/{token,introspect,revoke}` is the `client_id` read from
+  the unauthenticated form body (RFC 6749 §2.3.1) **before** any credential check, so a
+  caller rotating `client_id` values mints a fresh bucket per value; under this mode those
+  limits are a fairness control between cooperating clients, not an anti-abuse control, and
+  the mode assumes an edge (mTLS / API gateway / WAF) that already authenticates callers.
+  The warning names that and points at `docs/deployment/rate-limit-sizing.md` §5. The
+  shipped default (`ip`) is not attacker-mintable and stays **silent**; the partially
+  mintable `ip_client_id` gets a softer `info!` note, because its source-IP half still
+  prevents a third party from exhausting a known `client_id`'s bucket from elsewhere. No
+  behaviour or limit changes — advisory only, matching the I3 machine-traffic advisory and
+  the session-validation cache's startup `warn!`
+- CI now verifies that **remediation evidence actually shipped**
+  (`scripts/check-remediation-evidence.py`, wired into `docs-ci.yml`). A remediation record
+  citing a commit hash is not evidence a fix merged — a hash exists the moment a commit is
+  authored, on any branch, and the 2026-08-03 review pass caught a real instance (a Swift
+  fix recorded as remediated while still unmerged). Every `(finding id, repo, commit)`
+  triple in a remediation table of `claude_dev/security-analysis-*.md` must now resolve to a
+  commit reachable from the default branch of the repo it claims: locally via
+  `git merge-base --is-ancestor`, and for the out-of-tree SDK repos via the GitHub API when
+  the token can read them. Rows that cannot be verified are printed as **SKIPPED by name**
+  rather than passing silently, and a row that cannot be parsed into a triple **fails** the
+  check naming the row
 
 ## [1.0.0-alpha21] - 2026-07-30
 

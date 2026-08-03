@@ -61,6 +61,38 @@ impl RateLimitKeyMode {
             Self::IpClientId => "ip_client_id",
         }
     }
+
+    /// How much of this mode's bucket key an **unauthenticated** caller
+    /// chooses (security-analysis-2026-08-02 §4 item 1).
+    pub const fn mintability(self) -> KeyMintability {
+        match self {
+            // Source IP, after `trusted_hops` normalisation. Not caller-chosen.
+            Self::Ip => KeyMintability::None,
+            // The whole key is the `client_id` read from the raw form body
+            // before any credential is verified.
+            Self::ClientId => KeyMintability::Full,
+            // Half the key (`client_id`) is caller-chosen; the IP half is not.
+            Self::IpClientId => KeyMintability::Partial,
+        }
+    }
+}
+
+/// How much of a rate-limit bucket key an unauthenticated caller controls.
+///
+/// The bucket key for `/oauth2/{token,introspect,revoke}` is derived
+/// **before** the credential check (`middleware/rate_limit_shared.rs`,
+/// `extractors/rate_limit.rs`) — RFC 6749 §2.3.1 puts `client_id` in the
+/// request body, so it cannot be authenticated before it is read. Whatever
+/// part of the key comes from that body is therefore attacker-chosen, and a
+/// caller rotating it mints a fresh bucket per value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMintability {
+    /// No part of the key is caller-chosen (the shipped default, `ip`).
+    None,
+    /// Part of the key is caller-chosen, part is not (`ip_client_id`).
+    Partial,
+    /// The entire key is caller-chosen (`client_id`).
+    Full,
 }
 
 /// Deployment rate-limit **posture preset** (G7).
@@ -418,6 +450,60 @@ impl RateLimitConfig {
             preset_applied: true,
             operator_overrides: overrides,
             grpc_authz_per_sec_preset: Some(preset.grpc_authz_per_sec),
+        }
+    }
+
+    /// Startup advisory for an **attacker-mintable** bucket-key mode
+    /// (security-analysis-2026-08-02 §4 item 1).
+    ///
+    /// Call once, at composition time, right after the "Rate-limit posture
+    /// active" line. Mirrors the two existing startup advisories: the I3
+    /// machine-traffic advisory (armed only when the shipped defaults are what
+    /// this process actually enforces) and the session-validation cache's
+    /// `warn!` (fires only for the opt-in, bounded-staleness mode). Like both,
+    /// this stays silent for the shipped default and speaks only when an
+    /// operator has selected the mode with the caveat.
+    ///
+    /// - **`client_id` → `warn!`.** The entire bucket key is read from the
+    ///   unauthenticated form body before the credential check, so rotating
+    ///   `client_id` values mints fresh buckets on
+    ///   `/oauth2/{token,introspect,revoke}`. The mode is intended only behind
+    ///   an edge (mTLS / API gateway / WAF) that already authenticates
+    ///   callers.
+    /// - **`ip_client_id` → `info!`, deliberately softer.** It is *partially*
+    ///   mintable: the same single-source evasion works, so this is not a
+    ///   "safe" mode. But the key still carries a component the caller cannot
+    ///   forge, which removes the one thing `client_id` mode uniquely allows —
+    ///   `client_id`s are not secret, so under `client_id` an attacker can
+    ///   exhaust a *known legitimate client's* bucket from anywhere and deny
+    ///   it service, while under `ip_client_id` that collateral is confined to
+    ///   the attacker's own source IP. Warning at the same level as
+    ///   `client_id` would flatten a real difference and train operators to
+    ///   ignore both; staying silent would hide a genuine caveat. `info!` is
+    ///   the honest middle.
+    /// - **`ip` (default) → silent.** Nothing about the key is caller-chosen.
+    pub fn warn_on_mintable_key(&self) {
+        match self.key.mintability() {
+            KeyMintability::None => {}
+            KeyMintability::Full => tracing::warn!(
+                key_mode = self.key.as_str(),
+                "rate-limit key mode `client_id` ACTIVE — the whole bucket key is the \
+                 client_id read from the unauthenticated OAuth2 form body BEFORE any \
+                 credential check, so a caller rotating client_id values mints fresh \
+                 buckets on /oauth2/{{token,introspect,revoke}}. Under this mode those \
+                 limits are a fairness control between cooperating clients, NOT an \
+                 anti-abuse control; the mode assumes an edge (mTLS / API gateway / WAF) \
+                 that already authenticates callers. See \
+                 docs/deployment/rate-limit-sizing.md section 5"
+            ),
+            KeyMintability::Partial => tracing::info!(
+                key_mode = self.key.as_str(),
+                "rate-limit key mode `ip_client_id` active — the client_id half of the \
+                 bucket key is caller-chosen before authentication, so a single source \
+                 can still mint fresh buckets; the source-IP half only bounds the blast \
+                 radius (a third party cannot exhaust a known client_id's bucket from \
+                 elsewhere). See docs/deployment/rate-limit-sizing.md section 5"
+            ),
         }
     }
 
@@ -990,6 +1076,125 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<RateLimitKeyMode>("\"ip_client_id\"").unwrap(),
             RateLimitKeyMode::IpClientId
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // §4 item 1 — startup advisory for the attacker-mintable key mode
+    // ------------------------------------------------------------------
+
+    /// In-memory `MakeWriter` so the tests below assert on what a real
+    /// subscriber would print, not on a return value. Mirrors the capture
+    /// helper in `tests/gdpr_audit_dlq_test.rs`.
+    #[derive(Clone)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `warn_on_mintable_key` under a capturing subscriber at TRACE and
+    /// returns everything it emitted.
+    fn captured_advisory(key: RateLimitKeyMode) -> String {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+
+        let cfg = RateLimitConfig {
+            key,
+            ..Default::default()
+        };
+        tracing::subscriber::with_default(subscriber, || cfg.warn_on_mintable_key());
+
+        let out = buf.lock().unwrap().clone();
+        String::from_utf8(out).expect("tracing output is utf-8")
+    }
+
+    /// The advisory must fire at WARN for `client_id`, must name the
+    /// pre-authentication mintability and the authenticating-edge assumption,
+    /// and must point at the configuration-guide caveat.
+    #[test]
+    fn mintable_key_advisory_warns_for_client_id() {
+        let out = captured_advisory(RateLimitKeyMode::ClientId);
+        assert!(out.contains("WARN"), "must be emitted at WARN, got: {out}");
+        assert!(
+            out.contains("client_id"),
+            "must name the key mode, got: {out}"
+        );
+        assert!(
+            out.contains("BEFORE any credential check"),
+            "must state that the key is read pre-authentication, got: {out}"
+        );
+        assert!(
+            out.contains("mTLS / API gateway / WAF"),
+            "must state the authenticating-edge assumption, got: {out}"
+        );
+        assert!(
+            out.contains("docs/deployment/rate-limit-sizing.md"),
+            "must point at the configuration-guide caveat, got: {out}"
+        );
+    }
+
+    /// The shipped default is not attacker-mintable, so it must stay silent —
+    /// an advisory that fires for everyone teaches operators to ignore it.
+    #[test]
+    fn mintable_key_advisory_is_silent_for_the_default_ip_mode() {
+        assert_eq!(RateLimitConfig::default().key, RateLimitKeyMode::Ip);
+        let out = captured_advisory(RateLimitKeyMode::Ip);
+        assert!(
+            out.trim().is_empty(),
+            "default `ip` mode must emit nothing, got: {out}"
+        );
+    }
+
+    /// `ip_client_id` is partially mintable: it gets a note, deliberately at
+    /// INFO rather than WARN (see `warn_on_mintable_key`'s rationale).
+    #[test]
+    fn mintable_key_advisory_notes_ip_client_id_at_info() {
+        let out = captured_advisory(RateLimitKeyMode::IpClientId);
+        assert!(
+            out.contains("INFO"),
+            "ip_client_id note must be INFO, got: {out}"
+        );
+        assert!(
+            !out.contains("WARN"),
+            "ip_client_id must not be raised to WARN — it would flatten a real \
+             difference against `client_id` mode, got: {out}"
+        );
+        assert!(
+            out.contains("ip_client_id") && out.contains("docs/deployment/rate-limit-sizing.md"),
+            "must name the mode and point at the caveat, got: {out}"
+        );
+    }
+
+    /// The classifier the advisory branches on, pinned independently of the
+    /// emitter so a future key mode cannot be added without a decision.
+    #[test]
+    fn key_mode_mintability_is_pinned() {
+        assert_eq!(RateLimitKeyMode::Ip.mintability(), KeyMintability::None);
+        assert_eq!(
+            RateLimitKeyMode::ClientId.mintability(),
+            KeyMintability::Full
+        );
+        assert_eq!(
+            RateLimitKeyMode::IpClientId.mintability(),
+            KeyMintability::Partial
         );
     }
 }

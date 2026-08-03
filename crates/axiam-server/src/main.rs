@@ -741,6 +741,16 @@ async fn main() -> std::io::Result<()> {
         "Rate-limit posture active"
     );
 
+    // §4 item 1 (security-analysis-2026-08-02): the bucket key for
+    // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
+    // BEFORE the credential check, so under `AXIAM__RATE_LIMIT__KEY=client_id`
+    // it is attacker-mintable. Silent for the shipped default (`ip`); `warn!`
+    // for `client_id`; a softer `info!` note for the partially-mintable
+    // `ip_client_id`. Same shape as the I3 advisory below and the
+    // session-validation cache's startup `warn!` — announce the opt-in mode
+    // that carries the caveat, say nothing when the safe default is active.
+    config.rate_limit.warn_on_mintable_key();
+
     // I3: should the machine-traffic throttling advisory be armed on the
     // shared rate-limit counter built further down? Only when the shipped
     // `internet` defaults are what this process is actually enforcing —

@@ -315,6 +315,14 @@ against the classic federation attacks:
   infer it is deliberate — auditing eleven implementations against the written set
   found real gaps that per-SDK review had missed. Where a raw signature-only
   primitive still exists it is named to make accidental use hard.
+- **A guard decides on the caller's credential and no other.** The rules above ask
+  *"is this token good?"*; one more asks *"is this the token the decision is
+  about?"* — because a guard can satisfy every claim rule and still be a bypass if a
+  failed verification quietly routes into a second, successful one. So a guard must
+  reject when the presented credential fails: never retry, never refresh, and never
+  fall back to the application's own session, which would admit the caller under a
+  service account's identity. Where an SDK offers a refresh-on-failure helper for its
+  own outbound calls, that helper is a separate method that guards do not use.
 - **Every SDK ships a webhook-signature verifier** (contract §13). Receivers no longer
   hand-roll the check: `verify_webhook(...)` implements one canonical spec across all
   eleven languages — HMAC-SHA256 over `<timestamp>.<raw_body>`, constant-time

@@ -4,6 +4,10 @@ use std::net::SocketAddr;
 
 use serde::Deserialize;
 
+use crate::middleware::rate_limit::GrpcRateLimits;
+#[cfg(doc)]
+use crate::middleware::rate_limit::IDENTITY_PER_SEC_MULTIPLE;
+
 /// gRPC rate-limit bucket-key mode (D8 parity with
 /// `axiam_api_rest::config::rate_limit::RateLimitKeyMode`).
 ///
@@ -47,11 +51,35 @@ pub struct GrpcConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Max gRPC authz requests per second per IP (default: 100).
-    /// Generous for service-mesh patterns where authz is called per-request.
-    /// Configure via AXIAM__GRPC__GRPC_AUTHZ_PER_SEC env var.
+    /// Max `axiam.v1.AuthorizationService` requests per second per IP
+    /// (default: 100). Generous for service-mesh patterns where authz is
+    /// called per-request. Configure via `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`.
+    ///
+    /// Since I2 this sizes the **authz-check family only** — it is no longer
+    /// a server-wide gRPC ceiling. See [`GrpcConfig::rate_limits`].
     #[serde(default = "default_grpc_authz_per_sec")]
     pub grpc_authz_per_sec: u32,
+    /// Max identity-read requests per second per IP —
+    /// `axiam.v1.UserInfoService` and `axiam.v1.TokenService` (I2).
+    /// Configure via `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC`.
+    ///
+    /// `None` (the default) derives it as
+    /// [`IDENTITY_PER_SEC_MULTIPLE`]x [`Self::grpc_authz_per_sec`], so the
+    /// family stays coherent when `AXIAM__RATE_LIMIT__PROFILE` raises the
+    /// authz ceiling — 500/s shipped, 5 000/s under `gateway`, 25 000/s
+    /// under `mesh`.
+    #[serde(default)]
+    pub grpc_identity_per_sec: Option<u32>,
+    /// Max administrative requests per second per IP —
+    /// `axiam.v1.UserService` (`GetUser`, `ValidateCredentials`) (I2).
+    /// Configure via `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`.
+    ///
+    /// `None` (the default) tracks [`Self::grpc_authz_per_sec`] 1:1.
+    /// `ValidateCredentials` performs an Argon2id verification, so this
+    /// ceiling is a CPU guard and deliberately does NOT inherit the
+    /// identity-read multiplier.
+    #[serde(default)]
+    pub grpc_admin_per_sec: Option<u32>,
     /// D8 parity field — see [`GrpcRateLimitKeyMode`]. Currently always
     /// behaves as `Ip` regardless of value; reserved for a future per-RPC
     /// client-identity-aware rate limiter. Configure via `AXIAM__GRPC__KEY`.
@@ -65,6 +93,8 @@ impl Default for GrpcConfig {
             host: default_host(),
             port: default_port(),
             grpc_authz_per_sec: default_grpc_authz_per_sec(),
+            grpc_identity_per_sec: None,
+            grpc_admin_per_sec: None,
             key: GrpcRateLimitKeyMode::Ip,
         }
     }
@@ -73,6 +103,10 @@ impl Default for GrpcConfig {
 /// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` — presence pins
 /// [`GrpcConfig::grpc_authz_per_sec`] against a posture preset.
 pub const ENV_GRPC_AUTHZ_PER_SEC: &str = "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC";
+/// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` — I2 identity-read ceiling.
+pub const ENV_GRPC_IDENTITY_PER_SEC: &str = "AXIAM__GRPC__GRPC_IDENTITY_PER_SEC";
+/// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — I2 administrative ceiling.
+pub const ENV_GRPC_ADMIN_PER_SEC: &str = "AXIAM__GRPC__GRPC_ADMIN_PER_SEC";
 
 impl GrpcConfig {
     /// G7: applies the deployment rate-limit posture preset's gRPC authz
@@ -108,6 +142,25 @@ impl GrpcConfig {
         } else {
             self.grpc_authz_per_sec = per_sec;
             true
+        }
+    }
+
+    /// The per-family gRPC ceilings this config resolves to (I2), in
+    /// requests **per second per IP**.
+    ///
+    /// Unset knobs are derived from [`Self::grpc_authz_per_sec`] by
+    /// [`GrpcRateLimits::from_authz_per_sec`], so a deployment that only sets
+    /// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` (or only selects a posture profile)
+    /// still gets a coherent family rather than a mix of preset and shipped
+    /// numbers.
+    pub fn rate_limits(&self) -> GrpcRateLimits {
+        let derived = GrpcRateLimits::from_authz_per_sec(self.grpc_authz_per_sec);
+        GrpcRateLimits {
+            authz_per_sec: derived.authz_per_sec,
+            identity_per_sec: self
+                .grpc_identity_per_sec
+                .unwrap_or(derived.identity_per_sec),
+            admin_per_sec: self.grpc_admin_per_sec.unwrap_or(derived.admin_per_sec),
         }
     }
 
@@ -153,30 +206,42 @@ mod tests {
     /// `axiam_api_rest::config::rate_limit::tests::documented_presets_match_applied_profiles`.)
     #[test]
     fn documented_grpc_default_matches_shipped_config() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("docs/deployment/rate-limit-sizing.md");
-        let md = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
-        let row = md
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with(&format!("| `{ENV_GRPC_AUTHZ_PER_SEC}`")))
-            .unwrap_or_else(|| panic!("{} must document {ENV_GRPC_AUTHZ_PER_SEC}", path.display()));
-        let documented: u32 = row
-            .trim_matches('|')
-            .split('|')
-            .nth(1)
-            .expect("posture row has an `internet` column")
-            .trim()
-            .parse()
-            .expect("`internet` column is a plain integer");
+        let md = std::fs::read_to_string(posture_doc_path())
+            .expect("docs/deployment/rate-limit-sizing.md must be readable");
         assert_eq!(
-            documented,
+            documented_row(&md, ENV_GRPC_AUTHZ_PER_SEC)[0],
             GrpcConfig::default().grpc_authz_per_sec,
             "docs/deployment/rate-limit-sizing.md disagrees with GrpcConfig::default()"
         );
+    }
+
+    /// `crates/axiam-api-grpc` → the operator-facing posture page.
+    fn posture_doc_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs/deployment/rate-limit-sizing.md")
+    }
+
+    /// The `[internet, gateway, mesh]` numbers documented for `env` in the
+    /// marker-delimited posture table.
+    fn documented_row(md: &str, env: &str) -> [u32; 3] {
+        let row = md
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(&format!("| `{env}`")))
+            .unwrap_or_else(|| panic!("rate-limit-sizing.md must document {env}"));
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        assert_eq!(
+            cells.len(),
+            4,
+            "posture row for {env} must have env + 3 profile columns: {row}"
+        );
+        std::array::from_fn(|i| {
+            cells[i + 1]
+                .parse()
+                .unwrap_or_else(|e| panic!("{env} column {i} ({:?}): {e}", cells[i + 1]))
+        })
     }
 
     /// G7: the preset only lands when the operator has NOT pinned
@@ -191,6 +256,60 @@ mod tests {
         let mut pinned = GrpcConfig::default();
         assert!(!pinned.apply_rate_limit_preset(1_000, |n| n == ENV_GRPC_AUTHZ_PER_SEC));
         assert_eq!(pinned.grpc_authz_per_sec, 100);
+    }
+
+    /// I2: unset per-family knobs derive from the authz ceiling; set ones
+    /// win. This is what keeps a `gateway`/`mesh` deployment coherent when
+    /// the operator only moves `AXIAM__RATE_LIMIT__PROFILE`.
+    #[test]
+    fn per_family_limits_derive_from_authz_unless_pinned() {
+        let shipped = GrpcConfig::default().rate_limits();
+        assert_eq!(shipped.authz_per_sec, 100);
+        assert_eq!(shipped.identity_per_sec, 500);
+        assert_eq!(shipped.admin_per_sec, 100);
+
+        let mut preset = GrpcConfig::default();
+        assert!(preset.apply_rate_limit_preset(1_000, |_| false));
+        let preset = preset.rate_limits();
+        assert_eq!(preset.authz_per_sec, 1_000);
+        assert_eq!(preset.identity_per_sec, 5_000);
+        assert_eq!(preset.admin_per_sec, 1_000);
+
+        let pinned = GrpcConfig {
+            grpc_identity_per_sec: Some(7),
+            grpc_admin_per_sec: Some(9),
+            ..GrpcConfig::default()
+        }
+        .rate_limits();
+        assert_eq!(pinned.authz_per_sec, 100);
+        assert_eq!(pinned.identity_per_sec, 7);
+        assert_eq!(pinned.admin_per_sec, 9);
+    }
+
+    /// The posture doc must document the I2 knobs in every column, and the
+    /// documented numbers must be exactly what the derivation produces from
+    /// the documented authz ceiling in the same column.
+    #[test]
+    fn documented_per_family_rows_match_the_derivation() {
+        let md = std::fs::read_to_string(posture_doc_path())
+            .expect("docs/deployment/rate-limit-sizing.md must be readable");
+        let authz = documented_row(&md, ENV_GRPC_AUTHZ_PER_SEC);
+        let identity = documented_row(&md, ENV_GRPC_IDENTITY_PER_SEC);
+        let admin = documented_row(&md, ENV_GRPC_ADMIN_PER_SEC);
+
+        for column in 0..3 {
+            let derived = GrpcRateLimits::from_authz_per_sec(authz[column]);
+            assert_eq!(
+                identity[column], derived.identity_per_sec,
+                "column {column}: documented {ENV_GRPC_IDENTITY_PER_SEC} disagrees \
+                 with the derivation from {ENV_GRPC_AUTHZ_PER_SEC}"
+            );
+            assert_eq!(
+                admin[column], derived.admin_per_sec,
+                "column {column}: documented {ENV_GRPC_ADMIN_PER_SEC} disagrees \
+                 with the derivation from {ENV_GRPC_AUTHZ_PER_SEC}"
+            );
+        }
     }
 
     #[test]

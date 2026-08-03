@@ -131,7 +131,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -184,6 +184,131 @@ const WAKE_CHANNEL_CAPACITY: usize = 1_024;
 /// The stated overshoot bound scales with the ACTUAL flush period, so this is
 /// worth exactly one `warn` to an operator.
 const OVERDUE_SYNC_MULTIPLE: i32 = 5;
+
+// ---------------------------------------------------------------------------
+// Machine-traffic throttling advisory (I3)
+// ---------------------------------------------------------------------------
+
+/// Evaluation interval for the machine-traffic throttling advisory, in
+/// seconds. "Sustained" has to mean more than a burst, and 5 minutes is long
+/// enough that a deploy-time thundering herd or a single retry storm cannot
+/// trip it.
+pub const ADVISORY_WINDOW_SECS: i64 = 300;
+
+/// Deny ratio, over one [`ADVISORY_WINDOW_SECS`] interval, above which the
+/// shipped `internet` limits are more likely mis-sized than under attack.
+pub const ADVISORY_DENIED_RATIO: f64 = 0.5;
+
+/// Minimum machine-endpoint requests in an interval before the ratio is
+/// meaningful at all — 3 denials out of 4 requests is noise, not a signal.
+pub const ADVISORY_MIN_SAMPLES: u64 = 100;
+
+/// Bucket-name prefixes counted as **machine** traffic by the advisory.
+///
+/// Human endpoints (`login`, `register`, `password_reset`, `mfa`) are
+/// deliberately absent: a `429` storm there is a credential-stuffing signal,
+/// not a sizing signal, and must never be answered by raising a limit.
+/// These are the `endpoint` halves of the `"{endpoint}:{key_part}"` bucket
+/// keys wired in `axiam-api-rest::server`.
+pub const MACHINE_ENDPOINTS: &[&str] = &[
+    "oauth2_token",
+    "oauth2_introspect",
+    "oauth2_revoke",
+    "authz_check",
+    "authz_check_batch",
+];
+
+/// `true` when `key` (`"{endpoint}:{key_part}"`) belongs to a machine
+/// endpoint.
+fn is_machine_key(key: &str) -> bool {
+    let endpoint = key.split(':').next().unwrap_or(key);
+    MACHINE_ENDPOINTS.contains(&endpoint)
+}
+
+/// Rolling allow/deny tally over the machine endpoints, evaluated once per
+/// [`ADVISORY_WINDOW_SECS`] interval (I3).
+///
+/// **Why it lives here.** The write-behind counter already sees every
+/// rate-limit decision and already runs exactly one background task. Putting
+/// the tally on the same atomics `check` touches, and the evaluation on the
+/// flusher's existing pass, adds no task, no timer and no lock — a separate
+/// watcher for this would cost more than the advice is worth.
+///
+/// Inert until [`SharedRateLimitCounter::arm_machine_traffic_advisory`] is
+/// called, which the composition root does only when the shipped `internet`
+/// defaults are the active posture: an operator who deliberately picked
+/// `gateway`/`mesh`, or who pinned the limits by hand, has already made this
+/// decision and does not need to be told about it.
+#[derive(Debug, Default)]
+struct MachineTrafficAdvisory {
+    armed: AtomicBool,
+    allowed: AtomicU64,
+    denied: AtomicU64,
+    /// Start of the current evaluation interval, epoch seconds. `0` = not
+    /// started yet (set on the first flush after arming).
+    window_start_epoch: AtomicI64,
+}
+
+impl MachineTrafficAdvisory {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Records one decision. Cheap enough for the request path: an armed
+    /// check is one relaxed load, and only machine keys pay the increment.
+    fn record(&self, key: &str, allowed: bool) {
+        if !self.armed.load(Ordering::Relaxed) || !is_machine_key(key) {
+            return;
+        }
+        let counter = if allowed { &self.allowed } else { &self.denied };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Closes the interval if it is due, emitting the advisory when the
+    /// sustained deny ratio says the shipped limits are throttling what looks
+    /// like legitimate machine traffic. Called from the flusher's existing
+    /// pass — never from the request path.
+    fn maybe_report(&self, now: DateTime<Utc>) {
+        if !self.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let now_epoch = now.timestamp();
+        let started = self.window_start_epoch.load(Ordering::Relaxed);
+        if started == 0 {
+            self.window_start_epoch.store(now_epoch, Ordering::Relaxed);
+            return;
+        }
+        if now_epoch - started < ADVISORY_WINDOW_SECS {
+            return;
+        }
+
+        // Interval closed: take the tallies and start the next one. The two
+        // `swap`es are not atomic together, so a decision landing between
+        // them is counted in the next interval — irrelevant at this
+        // resolution, and cheaper than a lock on the request path.
+        let allowed = self.allowed.swap(0, Ordering::Relaxed);
+        let denied = self.denied.swap(0, Ordering::Relaxed);
+        self.window_start_epoch.store(now_epoch, Ordering::Relaxed);
+
+        let total = allowed + denied;
+        if total < ADVISORY_MIN_SAMPLES {
+            return;
+        }
+        let ratio = denied as f64 / total as f64;
+        if ratio <= ADVISORY_DENIED_RATIO {
+            return;
+        }
+        // No key, no IP, no client_id — only aggregate counts (T-24-43).
+        tracing::warn!(
+            machine_denied_ratio = format!("{ratio:.2}"),
+            machine_denied = denied,
+            machine_allowed = allowed,
+            window_secs = ADVISORY_WINDOW_SECS,
+            "your limits are throttling what looks like legitimate machine traffic; \
+             see rate-limit-sizing"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Store abstraction
@@ -376,6 +501,9 @@ struct Inner {
     /// Latch for the "flusher is starved" alarm (see
     /// [`OVERDUE_SYNC_MULTIPLE`]), for the same reason.
     starvation_warned: AtomicBool,
+    /// I3 machine-traffic throttling advisory. Inert unless armed by
+    /// [`SharedRateLimitCounter::arm_machine_traffic_advisory`].
+    advisory: MachineTrafficAdvisory,
 }
 
 impl SharedRateLimitCounter {
@@ -522,8 +650,30 @@ impl SharedRateLimitCounter {
             bucket.shared_count.saturating_add(bucket.pending) <= u64::from(limit)
         };
 
+        // I3: aggregate tally only (no key, no IP), inert unless armed.
+        self.inner.advisory.record(key, allow);
         self.notify_flusher();
         allow
+    }
+
+    /// Arms the I3 machine-traffic throttling advisory (see
+    /// [`MachineTrafficAdvisory`]).
+    ///
+    /// Call from the composition root **only when the shipped `internet`
+    /// defaults are the active posture**. Once armed, every
+    /// [`ADVISORY_WINDOW_SECS`] the existing write-behind flusher evaluates
+    /// the machine endpoints' deny ratio and, above
+    /// [`ADVISORY_DENIED_RATIO`], logs one `warn` pointing at
+    /// `docs/deployment/rate-limit-sizing.md`. Idempotent; no task is
+    /// spawned.
+    ///
+    /// On a counter built without a background flusher (`without_flusher`,
+    /// or `AXIAM__RATE_LIMIT__SHARED=off`) nothing closes the interval on its
+    /// own — the tally still accumulates, but the caller must drive
+    /// [`Self::flush_once`] for it to ever be evaluated. That is the shape
+    /// the unit tests use.
+    pub fn arm_machine_traffic_advisory(&self) {
+        self.inner.advisory.arm();
     }
 
     /// Non-blocking wake hint for the flusher.
@@ -600,6 +750,7 @@ impl Inner {
             shards,
             wake_warned: AtomicBool::new(false),
             starvation_warned: AtomicBool::new(false),
+            advisory: MachineTrafficAdvisory::default(),
         }
     }
 
@@ -621,11 +772,16 @@ impl Inner {
     ///    flushed delta from `pending` (increments that arrived during the
     ///    await stay pending for the next pass).
     async fn flush_once(&self) {
+        let now = Utc::now();
+        // I3: piggy-backs on the flusher's existing cadence — no extra task,
+        // no extra timer. Runs before the store check so the advisory does
+        // not depend on store reachability.
+        self.advisory.maybe_report(now);
+
         let Some(store) = self.store.as_ref() else {
             return;
         };
 
-        let now = Utc::now();
         let work = self.collect_pending(now);
 
         for (shard_idx, key, window, delta) in work {
@@ -1342,5 +1498,153 @@ mod tests {
             7,
             "one shared row holds the combined count"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // I3 — machine-traffic throttling advisory
+    // -----------------------------------------------------------------
+
+    /// Backdates the advisory's interval so the next `flush_once` closes it,
+    /// instead of the test waiting `ADVISORY_WINDOW_SECS`.
+    fn close_advisory_window(counter: &SharedRateLimitCounter) {
+        counter.inner.advisory.window_start_epoch.store(
+            Utc::now().timestamp() - ADVISORY_WINDOW_SECS - 1,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn advisory_tally(counter: &SharedRateLimitCounter) -> (u64, u64) {
+        (
+            counter.inner.advisory.allowed.load(Ordering::Relaxed),
+            counter.inner.advisory.denied.load(Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn advisory_is_inert_until_armed() {
+        let counter = counter_with(Arc::new(RecordingStore::default()));
+        let window = Utc::now();
+        for _ in 0..50 {
+            counter.check("oauth2_token:203.0.113.1", window, 0);
+        }
+        assert_eq!(
+            advisory_tally(&counter),
+            (0, 0),
+            "an unarmed advisory must not tally anything — the shipped-internet \
+             posture is the only thing that arms it"
+        );
+    }
+
+    /// Human endpoints are excluded by construction: a `429` storm on
+    /// `/auth/login` is a credential-stuffing signal, not a sizing signal.
+    #[test]
+    fn advisory_counts_only_machine_endpoints() {
+        let counter = counter_with(Arc::new(RecordingStore::default()));
+        counter.arm_machine_traffic_advisory();
+        let window = Utc::now();
+
+        // 4 machine denials (limit 0 denies everything).
+        for _ in 0..4 {
+            assert!(!counter.check("oauth2_token:203.0.113.1", window, 0));
+        }
+        // 2 machine admissions.
+        for _ in 0..2 {
+            assert!(counter.check("authz_check:203.0.113.1", window, 100));
+        }
+        // Human endpoints: ignored entirely, allowed or denied.
+        for endpoint in ["login", "register", "password_reset", "mfa"] {
+            counter.check(&format!("{endpoint}:203.0.113.1"), window, 0);
+            counter.check(&format!("{endpoint}:203.0.113.2"), window, 100);
+        }
+
+        assert_eq!(advisory_tally(&counter), (2, 4));
+    }
+
+    /// The interval is closed and reset by the flusher's existing pass — no
+    /// separate task, no timer. (The `warn` itself is a `tracing` side
+    /// effect; what is asserted here is the state machine that decides
+    /// whether to emit it.)
+    #[tokio::test]
+    async fn advisory_interval_closes_on_the_existing_flush_pass() {
+        let counter = counter_with(Arc::new(RecordingStore::default()));
+        counter.arm_machine_traffic_advisory();
+        let window = Utc::now();
+
+        // First pass just starts the interval — nothing to report yet.
+        counter.flush_once().await;
+        let started = counter
+            .inner
+            .advisory
+            .window_start_epoch
+            .load(Ordering::Relaxed);
+        assert!(started > 0, "the first flush starts the interval");
+
+        // A sustained, mostly-denied machine load.
+        for _ in 0..(ADVISORY_MIN_SAMPLES * 2) {
+            counter.check("oauth2_introspect:203.0.113.1", window, 0);
+        }
+        let (_, denied) = advisory_tally(&counter);
+        assert_eq!(denied, ADVISORY_MIN_SAMPLES * 2);
+
+        // Not due yet: the tally survives a flush untouched.
+        counter.flush_once().await;
+        assert_eq!(advisory_tally(&counter), (0, ADVISORY_MIN_SAMPLES * 2));
+
+        // Due: the interval closes, the tally resets, the next interval opens.
+        close_advisory_window(&counter);
+        counter.flush_once().await;
+        assert_eq!(
+            advisory_tally(&counter),
+            (0, 0),
+            "closing the interval must reset the tally"
+        );
+        assert!(
+            counter
+                .inner
+                .advisory
+                .window_start_epoch
+                .load(Ordering::Relaxed)
+                >= started,
+            "a new interval must start immediately"
+        );
+    }
+
+    /// Below [`ADVISORY_MIN_SAMPLES`] the ratio is noise; the interval still
+    /// rolls, it just says nothing.
+    #[tokio::test]
+    async fn advisory_ignores_intervals_with_too_few_samples() {
+        let counter = counter_with(Arc::new(RecordingStore::default()));
+        counter.arm_machine_traffic_advisory();
+        let window = Utc::now();
+
+        counter.flush_once().await;
+        for _ in 0..(ADVISORY_MIN_SAMPLES - 1) {
+            counter.check("oauth2_revoke:203.0.113.1", window, 0);
+        }
+        close_advisory_window(&counter);
+        counter.flush_once().await;
+        assert_eq!(advisory_tally(&counter), (0, 0));
+    }
+
+    #[test]
+    fn machine_key_classification_matches_the_wired_endpoints() {
+        for key in [
+            "oauth2_token:203.0.113.1",
+            "oauth2_introspect:client-a",
+            "oauth2_revoke:203.0.113.1",
+            "authz_check:203.0.113.1",
+            "authz_check_batch:203.0.113.1",
+        ] {
+            assert!(is_machine_key(key), "{key} is machine traffic");
+        }
+        for key in [
+            "login:203.0.113.1",
+            "register:203.0.113.1",
+            "password_reset:203.0.113.1",
+            "mfa:203.0.113.1",
+            "grpc_authz:203.0.113.1",
+        ] {
+            assert!(!is_machine_key(key), "{key} must not be counted");
+        }
     }
 }

@@ -159,15 +159,52 @@ pub async fn token<C: Connection + Clone>(
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
-    match state
-        .token_service
-        .exchange(tenant_id, form.into_inner())
-        .await
-    {
-        Ok(resp) => HttpResponse::Ok()
-            .append_header(("Cache-Control", "no-store"))
-            .append_header(("Pragma", "no-cache"))
-            .json(resp),
+    let form = form.into_inner();
+    // I5: keep the grant type for the stage-timing event below. The token
+    // service moves `form`, so copy the (short) discriminator first.
+    let grant_type = form.grant_type.clone();
+    let started = std::time::Instant::now();
+
+    match state.token_service.exchange(tenant_id, form).await {
+        Ok(resp) => {
+            let exchange_us = started.elapsed().as_micros() as u64;
+
+            // I5: serialize explicitly rather than via `.json()` so the
+            // serialization cost and the exact response body size are
+            // observable. Body size is the load-bearing number for the
+            // Nagle/delayed-ACK hypothesis behind the TLS client-credentials
+            // plateau: the pathology only fires when a response reaches the
+            // socket as a full segment plus a small trailing fragment, so run 5
+            // needs to know where this body sits relative to the path MSS
+            // (1448 bytes on a standard 1500-byte-MTU docker veth) once TLS
+            // record and HTTP/2 frame overhead are added.
+            let t_serialize = std::time::Instant::now();
+            let body = match serde_json::to_vec(&resp) {
+                Ok(body) => body,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to serialize token response");
+                    return HttpResponse::InternalServerError().finish();
+                }
+            };
+            let serialize_us = t_serialize.elapsed().as_micros() as u64;
+
+            tracing::debug!(
+                target: "axiam::perf",
+                stage = "oauth2.token_endpoint",
+                %grant_type,
+                exchange_us,
+                serialize_us,
+                response_body_bytes = body.len(),
+                handler_total_us = started.elapsed().as_micros() as u64,
+                "token endpoint stage timings (I5)"
+            );
+
+            HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .content_type("application/json")
+                .body(body)
+        }
         Err(e) => build_oauth2_error_response(&e),
     }
 }

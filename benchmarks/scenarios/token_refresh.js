@@ -69,6 +69,47 @@ export default function () {
       // refresh, so tag + count it as a fallback (comparability:
       // fallback-op). For AXIAM/Keycloak this branch should no longer be
       // reached (G4).
+      //
+      // I17(a) (improvement-after-run4-benchmark.md §D) follow-up research —
+      // what it would actually take to close this gap, and why it is not
+      // done here:
+      //   - Exchanging the v2 session token this harness already mints
+      //     (zitadel.login() in lib/targets.js) directly for an OIDC token
+      //     set via RFC 8693 Token Exchange is NOT implemented by Zitadel —
+      //     confirmed against zitadel/zitadel#7900 ("Allow Token Exchange
+      //     with Session Token"), open and still in the "investigating"
+      //     stage with no grant_type/subject_token_type defined yet, and the
+      //     Token Exchange guide (zitadel.com/docs/guides/integrate/
+      //     token-exchange) documents exchanging EXISTING OAuth tokens only,
+      //     never a v2 session token as the subject.
+      //   - Zitadel does not support the Resource Owner Password Credentials
+      //     grant at all (grant_type=password) — explicitly refused per
+      //     zitadel.com/docs/apis/openidoauth/grant-types ("due to growing
+      //     security concerns... with OAuth 2.1 it looks like this grant
+      //     will be removed"), so there is no simple non-interactive
+      //     grant-type swap either.
+      //   - The one HTTP-only (no real browser) path that DOES appear to be
+      //     designed for this — Zitadel's "Custom Login UI" API
+      //     (zitadel.com/docs/guides/integrate/login-ui/oidc-standard):
+      //     start an authorization request (GET /oauth/v2/authorize with
+      //     PKCE + scope including offline_access) to obtain an authRequestId,
+      //     then POST /v2/oidc/auth_requests/{authRequestId}/callback with
+      //     the ALREADY-MINTED v2 session token to link the two and receive
+      //     a callback URL carrying the authorization `code`, then the usual
+      //     POST /oauth/v2/token (grant_type=authorization_code) to redeem
+      //     it for an access_token + refresh_token. This is plausibly
+      //     tractable as a ONE-TIME step in runner/seed.sh (not per-VU in
+      //     this hot k6 loop) — but its exact request/response shapes
+      //     (authRequestId extraction, callback body/response format) are
+      //     unconfirmed against a live instance: no Zitadel is reachable
+      //     from this sandbox (the same limitation the D5/session-API commit
+      //     in lib/targets.js already flagged for the 201-vs-200 CreateSession
+      //     status code). Shipping an unverified implementation of a
+      //     multi-step token flow risks a silent, hard-to-diagnose failure
+      //     that reads as a target-availability problem, not a harness bug —
+      //     worse than the current honest `fallback-op` label. Left
+      //     un-implemented; a run against a live Zitadel instance should
+      //     confirm the exact shapes above before writing the code.
       m.fallback.add(1);
       doOp(a.clientCredentials());
       return;

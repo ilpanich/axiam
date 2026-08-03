@@ -299,6 +299,60 @@ fn zero_ops() -> serde_json::Value {
     serde_json::Value::Object(ops)
 }
 
+/// I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+/// `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+/// never wired. Reads `/proc/self/status` (`VmHWM`, already a lifetime
+/// high-water mark, not a snapshot) for peak RSS and `/proc/self/stat`
+/// (fields 14/15: utime/stime in clock ticks) for cumulative CPU time —
+/// stdlib-only (`std::fs`), no new crate dependency. Linux-only (matches
+/// this harness' Docker/K8s deployment target per CLAUDE.md); returns
+/// `(0.0, 0.0)` if `/proc` is unavailable rather than failing the bench.
+/// The kernel clock-tick rate is assumed to be the near-universal Linux
+/// default of 100 Hz (`sysconf(_SC_CLK_TCK)`) rather than queried, since
+/// querying it portably needs an FFI call this file otherwise has no reason
+/// to make; this makes `client_cpu_ms_total` an approximation on the rare
+/// kernel built with a different `USER_HZ`.
+fn client_resource_usage() -> (f64, f64) {
+    const CLK_TCK_HZ: f64 = 100.0;
+
+    let rss_mib_peak = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:").map(|rest| {
+                    rest.trim()
+                        .split_whitespace()
+                        .next()
+                        .and_then(|kb| kb.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 1024.0 // kB -> MiB
+                })
+            })
+        })
+        .unwrap_or(0.0);
+
+    let parse_field = |fields: &[&str], idx: usize| -> Option<f64> {
+        fields.get(idx).and_then(|s| s.parse::<f64>().ok())
+    };
+    let cpu_ms_total = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| {
+            // Field 2 (comm) may itself contain spaces/parens, so split on
+            // the LAST ')' before splitting the remaining fields by
+            // whitespace (the same trick ps/top use).
+            let after_comm = stat.rsplit_once(')')?.1;
+            let fields: Vec<&str> = after_comm.split_whitespace().collect();
+            // Fields after `comm` are 1-indexed from `state` (field 3 overall):
+            // utime is overall field 14 -> fields[11]; stime is field 15 -> fields[12].
+            let utime = parse_field(&fields, 11)?;
+            let stime = parse_field(&fields, 12)?;
+            Some((utime + stime) / CLK_TCK_HZ * 1000.0)
+        })
+        .unwrap_or(0.0);
+
+    (cpu_ms_total, rss_mib_peak)
+}
+
 /// Print exactly one `axiam.sdk-bench/v1` JSON object to stdout.
 fn emit(
     status: &str,
@@ -309,6 +363,7 @@ fn emit(
     profile: &str,
     notes: &str,
 ) {
+    let (cpu_ms_total, rss_mib_peak) = client_resource_usage();
     let record = serde_json::json!({
         "schema": "axiam.sdk-bench/v1",
         "sdk": "rust",
@@ -320,14 +375,48 @@ fn emit(
         "iterations": iterations,
         "concurrency": concurrency,
         "ops": ops,
-        "client_cpu_ms_total": 0,
-        "client_rss_mib_peak": 0,
+        "client_cpu_ms_total": cpu_ms_total,
+        "client_rss_mib_peak": rss_mib_peak,
         "notes": notes,
     });
     println!(
         "{}",
         serde_json::to_string_pretty(&record).expect("record serializes")
     );
+}
+
+/// I9 (improvement-after-run4-benchmark.md §C): a floor below which a
+/// measured `refresh` latency is not plausibly a real HTTP round trip. The
+/// C# bench recorded p50 1.2 microseconds ("752 k rps") because its SDK's
+/// RefreshGuard cached a completed token result on a shared client for up
+/// to ~15 minutes (wall-clock freshness, no observed-token check), so only
+/// the FIRST refresh in a ~2200-call run ever touched the wire. This SDK's
+/// `token::refresh_guard::TokenManager::refresh_if_needed` keys on the
+/// caller's currently observed access token instead, which this bench's
+/// `shared.refresh()` call updates after every real refresh — so a
+/// same-client loop keeps hitting the wire — but this floor is kept as a
+/// language-agnostic regression guard against that class of bug reappearing
+/// here too (a cache hit completes in low single-digit microseconds; every
+/// genuine wire call recorded across this harness' 11 languages averages
+/// ~17 ms, so 0.2 ms leaves a wide margin).
+const MIN_PLAUSIBLE_REFRESH_MS: f64 = 0.2;
+
+/// I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+/// instead of silently publishing a fake number if `refresh` looks like it
+/// never left the process.
+fn assert_refresh_hit_the_wire(refresh: &serde_json::Value, iterations: usize) {
+    let errors = refresh["errors"].as_u64().unwrap_or(0) as usize;
+    let p50 = refresh["p50_ms"].as_f64().unwrap_or(0.0);
+    let had_samples = errors < iterations;
+    if had_samples && p50 < MIN_PLAUSIBLE_REFRESH_MS {
+        eprintln!(
+            "[rust] I9 guard: refresh p50={p50:.4}ms is below the {MIN_PLAUSIBLE_REFRESH_MS}ms \
+             plausible-wire-call floor despite successful samples — this looks like a cached \
+             no-op (CONTRACT.md §9 guard reuse), not a real HTTP round trip. Failing the bench \
+             run instead of publishing a fake number (see improvement-after-run4-benchmark.md I9)."
+        );
+        std::process::exit(1);
+    }
 }
 
 #[tokio::main]
@@ -398,5 +487,6 @@ async fn main() {
         "batch_check": batch_check,
     });
 
-    emit("ok", ops, iterations, conc, &target, &profile, "");
+    emit("ok", ops.clone(), iterations, conc, &target, &profile, "");
+    assert_refresh_hit_the_wire(&ops["refresh"], iterations);
 }

@@ -84,8 +84,30 @@ Dictionary<string, object?> ZeroOps()
     return ops;
 }
 
+// I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+// `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+// never wired. .NET's Process API gives both directly and precisely, no
+// polling needed: TotalProcessorTime is cumulative CPU time since process
+// start (user+kernel), and PeakWorkingSet64 is already a lifetime
+// high-water mark (not a snapshot) on every platform .NET runs on —
+// unlike the procfs-based samplers this file's siblings use, this one is
+// not Linux-specific.
+(double CpuMsTotal, double RssMiBPeak) ClientResourceUsage()
+{
+    try
+    {
+        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+        return (proc.TotalProcessorTime.TotalMilliseconds, proc.PeakWorkingSet64 / 1024.0 / 1024.0);
+    }
+    catch
+    {
+        return (0.0, 0.0); // best-effort telemetry only — never fail the bench over it
+    }
+}
+
 void Emit(string status, Dictionary<string, object?> ops, int iterations, int concurrency, string notes)
 {
+    var (cpuMsTotal, rssMiBPeak) = ClientResourceUsage();
     var record = new Dictionary<string, object?>
     {
         ["schema"] = "axiam.sdk-bench/v1",
@@ -98,12 +120,46 @@ void Emit(string status, Dictionary<string, object?> ops, int iterations, int co
         ["iterations"] = iterations,
         ["concurrency"] = concurrency,
         ["ops"] = ops,
-        ["client_cpu_ms_total"] = 0,
-        ["client_rss_mib_peak"] = 0,
+        ["client_cpu_ms_total"] = cpuMsTotal,
+        ["client_rss_mib_peak"] = rssMiBPeak,
         ["notes"] = notes,
     };
     Console.WriteLine(JsonSerializer.Serialize(record, new JsonSerializerOptions { WriteIndented = true }));
 }
+
+// ---------------------------------------------------------------------------
+// I9 fix (improvement-after-run4-benchmark.md §C): `refresh` measured a
+// cached no-op (p50 1.2 microseconds / "752 k rps"). Axiam.Sdk's RefreshGuard
+// (Axiam.Sdk/Auth/RefreshGuard.cs in the sibling axiam-csharp-sdk checkout)
+// reuses a completed TokenPair whenever it is still more than FreshnessMargin
+// (5s) short of expiry — and, unlike the Go/Python/Rust/Java/Kotlin/PHP/C
+// SDKs' guards (which key on the CALLER's currently observed access token,
+// so a same-client loop always sees "fresh" again right after a real refresh
+// updates that token and therefore keeps hitting the wire), the C# guard's
+// RefreshIfNeededAsync() takes no observed-token parameter at all — it is a
+// pure wall-clock cache. Against a ~15-minute access-token TTL, the FIRST
+// call on a shared client performs the real POST /api/v1/auth/refresh; every
+// one of the following ~2199 calls in the same run returns the cached result
+// with no HTTP call whatsoever.
+//
+// Axiam.Sdk exposes no ForceRefreshAsync/expiry-override escape hatch (this
+// is a harness-only fix, not an SDK change — that repo is out of scope
+// here), so the fix is structural: give `refresh` a FRESH client + login
+// (both untimed) on every iteration. A brand-new AxiamClient owns a brand-new
+// RefreshGuard with no cached result, so its RefreshAsync() always performs
+// the real wire call — only that call is timed, not the login that seeds it.
+// See TimeForcedRefreshOp() below; `refresh` no longer goes through the
+// generic TimeOp()+shared-client path other three ops still use.
+// ---------------------------------------------------------------------------
+
+// I9: a floor below which a measured refresh latency is not plausibly a real
+// HTTP round trip (a cache hit typically completes in low single-digit
+// microseconds; every genuine wire call recorded across this harness' 11
+// languages averages ~17 ms). 0.2 ms leaves a large margin against fast
+// networks while still catching a reintroduced cached-no-op bug of this
+// class outright (this file's original bug measured 0.0012 ms). Mirrors the
+// identical constant/check added to every other sdk/<lang> bench runner.
+const double MinPlausibleRefreshMs = 0.2;
 
 // ---------------------------------------------------------------------------
 // Timed op loop: serial warm-up (uncounted) then measured, bounded concurrency.
@@ -149,6 +205,86 @@ async Task<Dictionary<string, object?>> TimeOp(Func<Task> fn, int concurrency)
     double secs = sw.Elapsed.TotalSeconds;
     double rps = secs > 0 ? lat.Count / secs : 0.0;
     return OpRecord(Pct(lat, 50), Pct(lat, 95), Pct(lat, 99), rps, errors);
+}
+
+// I9 fix: forces one genuine `POST /api/v1/auth/refresh` wire call per
+// iteration by giving `refresh` a fresh client (fresh RefreshGuard, so
+// nothing to cache) + login on every pass, serially (concurrency 1, per
+// HARNESS-SPEC.md). Only the RefreshAsync() call itself is timed; the login
+// that seeds each fresh client is untimed setup, mirroring how `login`'s own
+// op already builds and discards a fresh client per call.
+async Task<Dictionary<string, object?>> TimeForcedRefreshOp()
+{
+    var lat = new List<double>();
+    int errors = 0;
+
+    async Task<double?> OneForcedRefresh()
+    {
+        AxiamClient fresh;
+        try
+        {
+            fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, NewOptions());
+            await fresh.LoginAsync(username, password);
+        }
+        catch
+        {
+            return null; // setup failure: an error, nothing to time
+        }
+        try
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            await fresh.RefreshAsync();
+            return (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            fresh.Dispose();
+        }
+    }
+
+    for (int i = 0; i < WARMUP; i++)
+    {
+        if (await OneForcedRefresh() is null) errors++;
+    }
+
+    var sw = Stopwatch.StartNew();
+    foreach (var _ in Enumerable.Range(0, ITER))
+    {
+        var ms = await OneForcedRefresh();
+        if (ms is null) errors++;
+        else lat.Add(ms.Value);
+    }
+    sw.Stop();
+
+    double secs = sw.Elapsed.TotalSeconds;
+    double rps = secs > 0 ? lat.Count / secs : 0.0;
+    return OpRecord(Pct(lat, 50), Pct(lat, 95), Pct(lat, 99), rps, errors);
+}
+
+// I9: shared-driver-style regression guard — if `refresh` ever again reports
+// a p50 implausibly below a real HTTP round trip while it had successful
+// samples, this is very likely the cached-no-op bug (or an equivalent)
+// reappearing, not a genuinely fast server. Fails loudly (non-zero exit,
+// after the record is already on stdout for inspection) rather than letting
+// a silently-wrong number reach the report.
+void AssertRefreshHitTheWire(Dictionary<string, object?> refreshOp)
+{
+    var errors = (int)refreshOp["errors"]!;
+    var p50 = (double)refreshOp["p50_ms"]!;
+    bool hadSamples = errors < ITER; // at least one real measured sample exists
+    if (hadSamples && p50 < MinPlausibleRefreshMs)
+    {
+        Console.Error.WriteLine(
+            $"[csharp] I9 guard: refresh p50={p50:F4}ms is below the {MinPlausibleRefreshMs}ms " +
+            "plausible-wire-call floor despite successful samples — this looks like a cached " +
+            "no-op (CONTRACT.md §9 guard reuse), not a real HTTP round trip. Failing the bench " +
+            "run instead of publishing a fake number (see improvement-after-run4-benchmark.md I9).");
+        Environment.Exit(1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +347,10 @@ catch (Exception ex)
 // ---------------------------------------------------------------------------
 // Measure the four ops.
 // ---------------------------------------------------------------------------
+// I9: `refresh` is NOT in this table — it goes through TimeForcedRefreshOp()
+// below, which forces a fresh client + login per iteration so RefreshAsync()
+// always performs a genuine wire call instead of hitting the shared client's
+// RefreshGuard cache. See the I9 comment above TimeOp() for why.
 var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
 {
     ["login"] = (async () =>
@@ -219,7 +359,6 @@ var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
         try { await fresh.LoginAsync(username, password); }
         finally { fresh.Dispose(); }
     }, CONC),
-    ["refresh"] = (() => client.RefreshAsync(), 1), // serial: single-flight-guarded
     ["check_access"] = (() => client.Authz.CheckAccessAsync(action, resourceId), CONC),
     ["batch_check"] = (() => client.Authz.BatchCheckAsync(checks), CONC),
 };
@@ -227,9 +366,11 @@ var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
 var ops = new Dictionary<string, object?>();
 foreach (var key in OP_KEYS)
 {
-    var (fn, concurrency) = opsFns[key];
-    ops[key] = await TimeOp(fn, concurrency);
+    ops[key] = key == "refresh"
+        ? await TimeForcedRefreshOp()
+        : await TimeOp(opsFns[key].Fn, opsFns[key].Concurrency);
 }
 
 client.Dispose();
+AssertRefreshHitTheWire((Dictionary<string, object?>)ops["refresh"]!);
 Emit("ok", ops, ITER, CONC, "");

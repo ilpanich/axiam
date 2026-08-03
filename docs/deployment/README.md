@@ -250,6 +250,61 @@ the per-mutation invalidation table are in the
 > `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` unless a ≤ TTL revocation window
 > is an accepted risk.
 
+## Session-validation cache (optional, I6)
+
+Access tokens are stateless JWTs, so every authenticated request re-reads the
+`session` row behind the token's `jti` to confirm the session has not been
+revoked (D-15 / REQ-7). That is **one SurrealDB read per authenticated
+request** — including on `POST /api/v1/authz/check`, and it is *not* covered by
+the authorization decision cache above. It is the reason enabling the decision
+cache lifted gRPC authorization checks 13× but REST checks only 5% in benchmark
+run 4: the two caches cover different round-trips, and the gRPC surface never
+had this one (its interceptor validates the JWT signature and stops).
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default `0` = **disabled** (every request reads). Suggested starting value when enabling: `5`, matching the decision cache. |
+
+What the cache stores and does not store:
+
+* Only **positive** answers. A missing or revoked session is never cached, so a
+  freshly-created session works immediately and a revoked one can never be
+  resurrected by a stale negative.
+* Entries carry the session row's own `expires_at` and are rejected exactly on
+  time — **session expiry is never extended by this cache**, whatever the TTL.
+* Every session-deleting method on the repository (`invalidate`, `consume`,
+  `invalidate_user_sessions`, `invalidate_user_sessions_except`,
+  `cleanup_expired`) drops the affected entries in the same call. There is no
+  second code path that can delete a session row, so the invalidation cannot be
+  forgotten by a future change.
+
+> **⚠ Multi-replica caveat — identical to the decision cache.** The cache and
+> its invalidation are **process-local**. On a single replica a logout or
+> password change takes effect immediately. With two or more replicas, a
+> session revoked on replica A stays acceptable on replicas B…N for up to
+> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`. Keep it at `0` in the
+> multi-replica `k8s/` manifests unless that window is an accepted risk — and
+> if you have already accepted the decision cache's window, accept this one at
+> the same value, not a longer one.
+
+## TCP_NODELAY on the REST listener (I5)
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__SERVER__TCP_NODELAY` | Set `TCP_NODELAY` (disable Nagle's algorithm) on accepted REST connections. Default `true`. |
+
+actix-web does not set this socket option unless asked, so before AXIAM set it
+explicitly the REST listener ran with Nagle **enabled** while the gRPC listener
+(tonic, which defaults it on) did not. Nagle only costs anything when a
+response reaches the socket as more than one write and the last write is a
+partial segment — the kernel then holds that fragment until the peer
+acknowledges the previous one, and Linux's delayed-ACK timer is 40 ms. That is
+the leading explanation for the flat ~43 ms per-request floor benchmark run 4
+measured on the TLS client-credentials endpoint with nothing saturated.
+
+`false` restores the previous behaviour and exists so the effect can be
+A/B-measured. There is no security implication either way.
+
 ## Rate limiting
 
 Every authentication/OAuth2 endpoint is rate-limited (see
@@ -266,17 +321,27 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 |---|---|
 | `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `20`). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `10`). |
-| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `10`). |
-| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `300`). |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `600`). |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `60`). |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `1800`). |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
 | `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` | Write-behind flush interval for the shared counter, in milliseconds (default `1000`, clamped `50`–`60000`). Directly scales the cross-replica overshoot bound — see [Shared-store consistency model](#shared-store-consistency-model-write-behind) below. |
+
+The gRPC listener has its own per-second ceilings, one bucket per gRPC
+**method family** (reflection and health are never limited):
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | Max `axiam.v1.AuthorizationService` requests per second per IP (default `100`). |
+| `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | Max `axiam.v1.UserInfoService` + `axiam.v1.TokenService` requests per second per IP. Unset = 5x the authz ceiling (default `500`). |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` requests per second per IP. Unset = the authz ceiling (default `100`). `ValidateCredentials` is Argon2id-bound, so this is a CPU guard. |
+| `AXIAM__GRPC__KEY` | Reserved for D8 parity; currently a no-op (the gRPC limiters are always per-IP — see [Sizing your rate limits § 5](rate-limit-sizing.md)). |
 
 > **Which numbers should you actually run?** See
 > **[Sizing your rate limits](rate-limit-sizing.md)** — the measured hardware

@@ -528,6 +528,24 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         // Query has_role edges (direct + via groups) and join with role data.
         // Each result row contains role fields + the resource_id from the edge.
+        //
+        // I7(a) — the group-inherited half MUST hoist the membership sub-select
+        // into a `LET` binding.
+        //
+        // Written inline as `WHERE in IN (SELECT VALUE out FROM member_of …)`
+        // the planner cannot see a constant on the right-hand side; it reports
+        // `TableScan { predicate: "in INSIDE (ProjectValue) …",
+        // pre_decode_filter: "no (unsupported predicate)" }` and walks **every**
+        // `has_role` edge in the database — every role assignment of every user
+        // of every tenant — on every authorization check. Evaluating the
+        // membership set first and binding it to `$group_records` turns the same
+        // predicate into an `IndexScan` over the `(in, out)` composite index
+        // `idx_has_role_unique` (schema v19). Rows returned are identical; only
+        // the plan changes. Pinned by
+        // `crates/axiam-db/tests/authz_query_plan_test.rs`.
+        //
+        // Statement indices below: 0 = direct SELECT, 1 = LET, 2 = inherited
+        // SELECT.
         let mut result = self
             .db
             .current()
@@ -543,6 +561,10 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                  FROM has_role \
                  WHERE in = type::record('user', $user_id) \
                  AND out.tenant_id = $tenant_id; \
+                 LET $group_records = (\
+                     SELECT VALUE out FROM member_of \
+                     WHERE in = type::record('user', $user_id)\
+                 ); \
                  SELECT meta::id(out.id) AS record_id, \
                         out.tenant_id AS tenant_id, \
                         out.name AS name, \
@@ -552,10 +574,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.updated_at AS updated_at, \
                         resource_id \
                  FROM has_role \
-                 WHERE in IN (\
-                     SELECT VALUE out FROM member_of \
-                     WHERE in = type::record('user', $user_id)\
-                 ) \
+                 WHERE in IN $group_records \
                  AND out.tenant_id = $tenant_id;",
             )
             .bind(("tenant_id", tenant_id_str))
@@ -564,7 +583,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             .map_err(DbError::from)?;
 
         let direct: Vec<RoleAssignmentRow> = result.take(0).map_err(DbError::from)?;
-        let inherited: Vec<RoleAssignmentRow> = result.take(1).map_err(DbError::from)?;
+        let inherited: Vec<RoleAssignmentRow> = result.take(2).map_err(DbError::from)?;
 
         let mut assignments = Vec::new();
         for row in direct.into_iter().chain(inherited) {

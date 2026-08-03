@@ -55,6 +55,31 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bench-admin-sa
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Bench Admin SA
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "9999-12-31T23:59:59Z"
+      # I17(b) (improvement-after-run4-benchmark.md §D): oauth2_password_login
+      # is bcrypt-dominated on this target — Zitadel's default bcrypt cost 14
+      # (2^14 rounds) makes `login` p50 ~22s, far outside any latency-
+      # comparable window against AXIAM's Argon2id/Keycloak's PBKDF2 at their
+      # own tuned costs. `HASHER_COST` is Zitadel's documented, runtime-
+      # configurable password-hasher setting (self-hosting/manage/configure)
+      # — this line WIRES it through as an opt-in override, defaulting to
+      # Zitadel's OWN built-in default (14) so an unset BENCH_ZITADEL_HASHER_COST
+      # changes nothing about the default matrix (byte-identical to this
+      # line being absent). Only takes effect for users created AFTER the
+      # value changes (bcrypt cost is baked into the hash at creation time,
+      # not a login-time setting) — so a labelled sensitivity cell needs a
+      # FRESH instance + fresh seed at the lower cost, not just a live
+      # container restart with the var flipped:
+      #   BENCH_ZITADEL_HASHER_COST=4 just target=zitadel bench-down
+      #   BENCH_ZITADEL_HASHER_COST=4 just target=zitadel bench-up
+      #   BENCH_ZITADEL_HASHER_COST=4 just target=zitadel bench-seed
+      #   just target=zitadel scenario=oauth2_password_login.js bench-run
+      # Label the resulting cell "zitadel-lowcost-bcrypt(cost=4), NON-DEFAULT"
+      # in any report that includes it — never compare it head-to-head
+      # against the default-cost matrix cell. Prepared but NOT exercised
+      # against a live instance from this sandbox (no Zitadel reachable
+      # here) — verify the cost actually lands in newly-created users'
+      # stored hashes before trusting the resulting latency number.
+      ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_COST: "${BENCH_ZITADEL_HASHER_COST:-14}"
     volumes:
       - machinekey:/machinekey
       # Throwaway TLS certs (shared with the other targets). Read-only; ignored

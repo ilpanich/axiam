@@ -29,6 +29,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
+import java.lang.management.ManagementFactory
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -102,6 +103,38 @@ private data class Stats(
     val errors: Int = 0,
 )
 
+// I9 (improvement-after-run4-benchmark.md §C): a floor below which a
+// measured `refresh` latency is not plausibly a real HTTP round trip. The
+// C# bench recorded p50 1.2 microseconds ("752 k rps") because its SDK's
+// RefreshGuard cached a completed token result on a shared client for up to
+// ~15 minutes (wall-clock freshness, no observed-token check), so only the
+// FIRST refresh in a ~2200-call run ever touched the wire. This SDK's
+// io.axiam.sdk.internal.RefreshGuard keys on the caller's currently observed
+// access token instead, which this bench's client.refresh() call updates
+// after every real refresh — so a same-client loop keeps hitting the wire —
+// but this floor is kept as a language-agnostic regression guard against
+// that class of bug reappearing here too (a cache hit completes in low
+// single-digit microseconds; every genuine wire call recorded across this
+// harness' 11 languages averages ~17 ms, so 0.2 ms leaves a wide margin).
+private const val MIN_PLAUSIBLE_REFRESH_MS = 0.2
+
+/** I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+ * instead of silently publishing a fake number if `refresh` looks like it
+ * never left the process. */
+private fun assertRefreshHitTheWire(refresh: Stats, iterations: Int) {
+    val hadSamples = refresh.errors < iterations
+    if (hadSamples && refresh.p50 < MIN_PLAUSIBLE_REFRESH_MS) {
+        System.err.println(
+            "[kotlin] I9 guard: refresh p50=${"%.4f".format(refresh.p50)}ms is below the " +
+                "${MIN_PLAUSIBLE_REFRESH_MS}ms plausible-wire-call floor despite successful " +
+                "samples — this looks like a cached no-op (CONTRACT.md §9 guard reuse), not a " +
+                "real HTTP round trip. Failing the bench run instead of publishing a fake " +
+                "number (see improvement-after-run4-benchmark.md I9).",
+        )
+        kotlin.system.exitProcess(1)
+    }
+}
+
 fun main() = runBlocking {
     // A logged-in client shared by refresh/check_access/batch_check; login builds its
     // own fresh client per iteration below.
@@ -149,6 +182,7 @@ fun main() = runBlocking {
     }
 
     println(render("ok", results, ITER, CONC, ""))
+    assertRefreshHitTheWire(results.getValue("refresh"), ITER)
 }
 
 private suspend fun timeOp(concurrency: Int, op: suspend () -> Unit): Stats {
@@ -210,7 +244,42 @@ private fun pct(arr: List<Double>, p: Double): Double {
 
 private fun zeroOps(): Map<String, Stats> = OP_KEYS.associateWith { Stats() }
 
+// I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+// `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+// never wired. `com.sun.management.OperatingSystemMXBean` (a de-facto-
+// standard OpenJDK/HotSpot JMX extension) gives the JVM's cumulative CPU
+// time (getProcessCpuTime(), ns) directly — no polling thread needed. The
+// JVM exposes no standard peak-RSS API, so peak resident set size is read
+// from /proc/self/status's VmHWM (Linux-only, matching this harness'
+// Docker/K8s deployment target per CLAUDE.md); returns 0 for either metric
+// if the corresponding source is unavailable rather than throwing.
+private fun clientResourceUsage(): Pair<Double, Double> {
+    var cpuMsTotal = 0.0
+    try {
+        val osBean = ManagementFactory.getOperatingSystemMXBean()
+        if (osBean is com.sun.management.OperatingSystemMXBean) {
+            val cpuNs = osBean.processCpuTime // -1 if unsupported
+            if (cpuNs >= 0) cpuMsTotal = cpuNs / 1_000_000.0
+        }
+    } catch (_: Throwable) {
+        // Best-effort telemetry only — never fail the bench over it.
+    }
+    var rssMiBPeak = 0.0
+    try {
+        File("/proc/self/status").forEachLine { line ->
+            if (line.startsWith("VmHWM:")) {
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size >= 2) rssMiBPeak = parts[1].toDouble() / 1024.0 // kB -> MiB
+            }
+        }
+    } catch (_: Exception) {
+        // /proc unavailable (non-Linux) — leave at 0.
+    }
+    return Pair(cpuMsTotal, rssMiBPeak)
+}
+
 private fun render(status: String, ops: Map<String, Stats>, iterations: Int, concurrency: Int, notes: String): String {
+    val (cpuMsTotal, rssMiBPeak) = clientResourceUsage()
     val sb = StringBuilder()
     sb.append("{\n")
     sb.append("  \"schema\": \"axiam.sdk-bench/v1\",\n")
@@ -230,8 +299,8 @@ private fun render(status: String, ops: Map<String, Stats>, iterations: Int, con
         sb.append(if (i < OP_KEYS.size - 1) ",\n" else "\n")
     }
     sb.append("  },\n")
-    sb.append("  \"client_cpu_ms_total\": 0,\n")
-    sb.append("  \"client_rss_mib_peak\": 0,\n")
+    sb.append("  \"client_cpu_ms_total\": ").append(num(cpuMsTotal)).append(",\n")
+    sb.append("  \"client_rss_mib_peak\": ").append(num(rssMiBPeak)).append(",\n")
     sb.append("  \"notes\": ").append(jsonString(notes)).append("\n")
     sb.append("}")
     return sb.toString()

@@ -224,6 +224,19 @@ filter_scenarios() {
       echo "[run] skipping $s (OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2)"
       record_dry "${s%.js}" "SKIP" "OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2"; continue
     fi
+    # I16 (improvement-after-run4-benchmark.md §D): an explicit, operator-set
+    # exclusion list — space-separated scenario filenames in
+    # BENCH_SCENARIO_EXCLUDE — so a cell that needs a DIFFERENT container
+    # envelope than the rest of the matrix (e.g. Keycloak's login cells
+    # needing BENCH_MEM=4096m per the H7 diagnosis, while everything else
+    # stays at the shared 2048 cap) can be split into its own `bench-up`/
+    # `bench-run` pass without also re-running the whole matrix twice.
+    # Unset by default (empty), so this is a no-op unless the operator
+    # deliberately sets it.
+    if [ -n "${BENCH_SCENARIO_EXCLUDE:-}" ] && [[ " ${BENCH_SCENARIO_EXCLUDE} " == *" $s "* ]]; then
+      echo "[run] skipping $s (BENCH_SCENARIO_EXCLUDE)"
+      record_dry "${s%.js}" "SKIP" "excluded via BENCH_SCENARIO_EXCLUDE (run separately, e.g. a different BENCH_MEM cap)"; continue
+    fi
     out+=("$s")
   done
   SCENARIOS=("${out[@]}")
@@ -310,6 +323,34 @@ echo "[run] rate-limit posture: $RL_POSTURE"
 # for that binary. $BENCH is this repo's benchmarks/ dir, so its parent is
 # the repo root.
 BUILD_REF="$(git -C "$BENCH/.." rev-parse HEAD 2>/dev/null || echo unknown)"
+
+# I18 (improvement-after-run4-benchmark.md §D): preflight provenance check.
+# Run 4's build_ref (6875e4b) was NOT an ancestor of origin/main — the image
+# had been built from a fix branch before it was merged, so a run whose
+# report implicitly claims "this measures main" was silently wrong; nothing
+# caught it until manual review well after the matrix finished. Fail fast
+# instead — before this cell's (or the whole matrix's) hours of k6 time are
+# spent — unless build_ref resolves as an ancestor of origin/main.
+# BENCH_ALLOW_UNMERGED_BUILD_REF=1 opts out for a DELIBERATE pre-merge
+# validation run (e.g. exercising a fix branch before it lands); never the
+# default, and any such run's output must be labeled non-canonical
+# downstream. Skipped (not run) for target != axiam — build_ref is
+# meaningful only for AXIAM's own working tree, never a competitor's.
+if [ "$TARGET" = "axiam" ] && [ "$BUILD_REF" != "unknown" ] \
+   && [ "${BENCH_ALLOW_UNMERGED_BUILD_REF:-0}" != "1" ]; then
+  if git -C "$BENCH/.." rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    if ! git -C "$BENCH/.." merge-base --is-ancestor "$BUILD_REF" origin/main 2>/dev/null; then
+      echo "[run] FATAL (A9/I18): build_ref $BUILD_REF is not an ancestor of origin/main — this run's image was built from unmerged work, not what a reader of the report would understand \"main\" to mean." >&2
+      echo "[run]   Fix: merge/rebase the branch this was built from onto main and rebuild, OR re-run with BENCH_ALLOW_UNMERGED_BUILD_REF=1 for a deliberate pre-merge validation pass (label the result non-canonical in any report)." >&2
+      exit 1
+    fi
+  else
+    # C3 precedent: warn, never silently skip, when a check can't run —
+    # a sandboxed/offline environment with no `origin` fetched is the
+    # expected reason, not a hard failure (git fetch origin main fixes it).
+    echo "[run] WARN (A9/I18): origin/main is not resolvable locally (run 'git fetch origin main' first) — cannot verify build_ref's provenance against main; proceeding unchecked." >&2
+  fi
+fi
 
 # Host facts that don't change across scenarios in this run — gathered once.
 HOST_KERNEL="$(host_fact "$(uname -r 2>/dev/null)")"

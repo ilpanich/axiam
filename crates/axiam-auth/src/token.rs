@@ -460,6 +460,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             hibp_breaker_cooldown_secs: 30,
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
+            session_validation_cache_ttl_secs: 0,
         }
     }
 

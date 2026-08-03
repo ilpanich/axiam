@@ -23,6 +23,43 @@ pub struct ServerConfig {
     /// D-06). When enabled, the server binds with rustls restricted to TLS 1.3
     /// (see `axiam-server`).
     pub tls: TlsConfig,
+    /// Set `TCP_NODELAY` (disable Nagle's algorithm) on accepted connections.
+    ///
+    /// **Default: `true`.** Override with
+    /// `AXIAM__SERVER__TCP_NODELAY=false`.
+    ///
+    /// # Why this exists and why the default is `true` (I5)
+    ///
+    /// actix-web 4.14 exposes `HttpServer::tcp_nodelay` but leaves it *unset*
+    /// by default, and an unset value means "never call `set_nodelay`"
+    /// (`actix-http-3.13.1 src/service.rs:28-35`, `src/h2/service.rs:29-35`:
+    /// `fn desired_nodelay(tcp_nodelay: Option<bool>) -> Option<bool> {
+    /// tcp_nodelay }`). The kernel default therefore applied and Nagle stayed
+    /// **on** for every REST connection — while the gRPC listener has had it
+    /// off all along, because tonic's `Server` defaults `tcp_nodelay` to `true`
+    /// (`tonic .../transport/server/mod.rs:132`).
+    ///
+    /// Nagle only costs anything when a response reaches the socket as more
+    /// than one write and the last write is a partial segment: the kernel holds
+    /// that final fragment until the peer acknowledges the previous one, and
+    /// Linux's delayed-ACK timer is **40 ms** (`TCP_DELACK_MIN`). A response
+    /// emitted as a single `sendmsg` is immune (`tcp_push` sets
+    /// `TCP_NAGLE_PUSH` on the tail), which is why an HTTP/1.1 plaintext bind
+    /// can look clean while the h2-over-TLS bind — where the `h2` crate emits
+    /// HEADERS and DATA frames through separate `poll_write`s into
+    /// `tokio-rustls`, each becoming its own TLS record — is exposed.
+    ///
+    /// That is the leading hypothesis for the run-4 TLS client-credentials
+    /// plateau: 1 180 req/s at a flat p50/p95/p99 of 42.6/43.9/44.8 ms with
+    /// nothing saturated, i.e. ~40 ms of pure timer plus ~2.6 ms of work, on
+    /// the one endpoint whose response happened to straddle a segment boundary.
+    /// It is a *hypothesis*, not a measured result: run 5 must A/B this knob
+    /// (see the run-5 runbook). Keeping it configurable is what makes that A/B
+    /// possible; `false` reproduces the pre-I5 behaviour exactly.
+    ///
+    /// Setting `TCP_NODELAY` is standard for request/response HTTP servers and
+    /// has no security implication.
+    pub tcp_nodelay: bool,
 }
 
 impl Default for ServerConfig {
@@ -32,6 +69,7 @@ impl Default for ServerConfig {
             port: 8090,
             cors_allowed_origins: Vec::new(),
             tls: TlsConfig::default(),
+            tcp_nodelay: true,
         }
     }
 }
@@ -119,6 +157,29 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// I5: the whole point of the knob is that the socket option is now set
+    /// *explicitly*. If this default ever flips to `false`, the REST listener
+    /// silently goes back to running with Nagle enabled while gRPC does not.
+    #[test]
+    fn tcp_nodelay_defaults_to_enabled() {
+        assert!(
+            ServerConfig::default().tcp_nodelay,
+            "TCP_NODELAY must default to enabled — actix-web leaves the socket \
+             option untouched when unset, which means Nagle stays on"
+        );
+    }
+
+    /// The knob must be reachable from configuration, since the run-5
+    /// measurement plan depends on being able to turn it off.
+    #[test]
+    fn tcp_nodelay_can_be_disabled_from_config() {
+        let parsed: ServerConfig = serde_json::from_str(r#"{"tcp_nodelay": false}"#)
+            .expect("a partial server config must deserialize");
+        assert!(!parsed.tcp_nodelay);
+        // Everything else still falls back to the defaults.
+        assert_eq!(parsed.port, ServerConfig::default().port);
+    }
 
     #[test]
     fn client_auth_defaults_to_off() {

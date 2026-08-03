@@ -50,6 +50,7 @@ fn test_config() -> AuthConfig {
         hibp_breaker_cooldown_secs: 30,
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
+        session_validation_cache_ttl_secs: 0,
         mfa_encryption_key: Some(TEST_MFA_KEY),
         federation_encryption_key: None,
         allow_missing_aud_as_user: true,

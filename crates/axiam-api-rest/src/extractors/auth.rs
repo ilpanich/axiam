@@ -16,7 +16,6 @@ use axiam_auth::token::{
     AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
 };
 use axiam_core::error::AxiamError;
-use axiam_core::repository::SessionRepository;
 use axiam_db::SurrealSessionRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -50,12 +49,12 @@ impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            match self.get_by_id(tenant_id, session_id).await {
-                Ok(session) => session.expires_at > chrono::Utc::now(),
-                Err(_) => false,
-            }
-        })
+        // I6: delegate to the repository, which answers from its optional
+        // short-TTL validity cache when one is attached and otherwise performs
+        // exactly the read this used to inline. Keeping the logic there is what
+        // guarantees the cache is invalidated by the same methods that delete
+        // the rows — see `axiam_db::session_validation_cache`.
+        Box::pin(self.is_session_active_checked(tenant_id, session_id))
     }
 }
 
@@ -389,6 +388,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             hibp_breaker_cooldown_secs: 30,
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
+            session_validation_cache_ttl_secs: 0,
         }
     }
 
@@ -527,5 +527,79 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             result.is_err(),
             "expected rejection of user token on m2m route"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Audience-narrowing regression guard
+    // (security-analysis-2026-08-02 §4 item 3 / backend residual §4.3)
+    // -----------------------------------------------------------------------
+
+    /// `axiam_auth::token::decode_access_token` deliberately accepts BOTH
+    /// `axiam:user` and `axiam:m2m` (`token.rs`: `validation.set_audience(&[
+    /// AUD_USER, AUD_M2M])`), deferring per-route audience separation to
+    /// these extractors. That is only safe while the extractors really do
+    /// narrow, so this test asserts the whole contract end to end in one
+    /// place: **permissive at the token layer, strict at the route layer, in
+    /// both directions.**
+    ///
+    /// If someone ever "simplifies" `check_user_aud_and_parse_jti` or
+    /// `AuthenticatedServiceAccount`'s audience check away, the token layer's
+    /// permissiveness silently becomes a cross-audience token-confusion bug
+    /// (an M2M client-credentials token would be accepted as a user session,
+    /// and vice-versa). This test is what stops that.
+    #[test]
+    fn token_layer_accepts_both_audiences_but_routes_narrow_in_both_directions() {
+        let config = test_auth_config();
+        let user_token = make_user_token(&config, None);
+        let m2m_token = make_m2m_token(&config);
+
+        // 1. The token layer is deliberately permissive: both audiences
+        //    decode successfully, with the audience preserved in the claims.
+        let decoded_user = axiam_auth::token::decode_access_token(&user_token, &config)
+            .expect("a user token must decode at the token layer");
+        let decoded_m2m = axiam_auth::token::decode_access_token(&m2m_token, &config)
+            .expect("an m2m token must ALSO decode at the token layer (D-20/SEC-006)");
+        assert_eq!(decoded_user.aud.as_deref(), Some(AUD_USER));
+        assert_eq!(decoded_m2m.aud.as_deref(), Some(AUD_M2M));
+
+        // 2. A user route accepts ONLY axiam:user.
+        assert!(
+            extract_user(&req_with_config_and_bearer(config.clone(), &user_token)).is_ok(),
+            "axiam:user must be accepted on a user route"
+        );
+        assert!(
+            extract_user(&req_with_config_and_bearer(config.clone(), &m2m_token)).is_err(),
+            "axiam:m2m must be REJECTED on a user route — the token layer accepts it, so \
+             this extractor is the only thing enforcing the separation"
+        );
+
+        // 3. An m2m route accepts ONLY axiam:m2m.
+        assert!(
+            extract_service_account(&req_with_config_and_bearer(config.clone(), &m2m_token))
+                .is_ok(),
+            "axiam:m2m must be accepted on an m2m route"
+        );
+        assert!(
+            extract_service_account(&req_with_config_and_bearer(config, &user_token)).is_err(),
+            "axiam:user must be REJECTED on an m2m route"
+        );
+    }
+
+    /// The `allow_missing_aud_as_user` back-compat window must NOT leak into
+    /// the m2m route: an `aud`-less legacy token is a *user* token by
+    /// definition, never a service account, whatever the flag says.
+    #[test]
+    fn missing_aud_is_never_accepted_on_an_m2m_route() {
+        for allow_missing in [true, false] {
+            let mut config = test_auth_config();
+            config.allow_missing_aud_as_user = allow_missing;
+            let token = make_no_aud_token(&config);
+            let req = req_with_config_and_bearer(config, &token);
+            assert!(
+                extract_service_account(&req).is_err(),
+                "a token with no aud must be rejected on an m2m route \
+                 (allow_missing_aud_as_user={allow_missing})"
+            );
+        }
     }
 }

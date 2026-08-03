@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 
 #if defined(__clang__)
@@ -379,6 +380,23 @@ static void json_escape(const char *in, char *out, size_t out_sz) {
     out[o] = '\0';
 }
 
+/* I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+ * `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+ * never wired. POSIX `getrusage(RUSAGE_SELF, ...)` (sys/resource.h) gives an
+ * exact, cheap high-water-mark read with no polling needed: `ru_maxrss` is
+ * already a lifetime peak (not a snapshot), and `ru_utime`/`ru_stime` are
+ * cumulative CPU time since process start. `ru_maxrss` is in KiB on Linux
+ * (matches this harness' Docker/K8s deployment target per CLAUDE.md). */
+static void client_resource_usage(double *cpu_ms_total, double *rss_mib_peak) {
+    *cpu_ms_total = 0.0;
+    *rss_mib_peak = 0.0;
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return;
+    *cpu_ms_total = (double)ru.ru_utime.tv_sec * 1000.0 + (double)ru.ru_utime.tv_usec / 1000.0 +
+                    (double)ru.ru_stime.tv_sec * 1000.0 + (double)ru.ru_stime.tv_usec / 1000.0;
+    *rss_mib_peak = (double)ru.ru_maxrss / 1024.0; /* KiB -> MiB (Linux) */
+}
+
 static void print_op(const char *key, op_result_t r, int is_last) {
     printf("    \"%s\": {\"p50_ms\": %.3f, \"p95_ms\": %.3f, \"p99_ms\": %.3f, "
            "\"throughput_rps\": %.3f, \"errors\": %d}%s\n",
@@ -391,6 +409,8 @@ static void emit_record(const cfg_t *cfg, const char *status, int iterations, in
                          const char *notes) {
     char notes_esc[1024];
     json_escape(notes, notes_esc, sizeof(notes_esc));
+    double cpu_ms_total, rss_mib_peak;
+    client_resource_usage(&cpu_ms_total, &rss_mib_peak);
 
     printf("{\n");
     printf("  \"schema\": \"axiam.sdk-bench/v1\",\n");
@@ -408,8 +428,8 @@ static void emit_record(const cfg_t *cfg, const char *status, int iterations, in
     print_op("check_access", op_check_access_r, 0);
     print_op("batch_check", op_batch_check_r, 1);
     printf("  },\n");
-    printf("  \"client_cpu_ms_total\": 0,\n");
-    printf("  \"client_rss_mib_peak\": 0,\n");
+    printf("  \"client_cpu_ms_total\": %.3f,\n", cpu_ms_total);
+    printf("  \"client_rss_mib_peak\": %.3f,\n", rss_mib_peak);
     printf("  \"notes\": \"%s\"\n", notes_esc);
     printf("}\n");
 }
@@ -417,6 +437,39 @@ static void emit_record(const cfg_t *cfg, const char *status, int iterations, in
 static void emit_error(const cfg_t *cfg, const char *notes) {
     op_result_t z = zero_op_result();
     emit_record(cfg, "error", 0, 0, z, z, z, z, notes);
+}
+
+/* ------------------------------------------------------------------ */
+/* I9 (improvement-after-run4-benchmark.md §C) regression guard        */
+/* ------------------------------------------------------------------ */
+
+/* Unlike the other ten benches (which can only infer "did this hit the wire"
+ * from latency), the C SDK exposes a literal, exact observability counter —
+ * axiam_client_refresh_count() — incremented once per real
+ * POST /api/v1/auth/refresh transport round trip (see single_flight_refresh()
+ * in the sibling axiam-c-sdk's src/client.c). This bench's refresh loop is
+ * serial (concurrency 1, like every op in this harness — see the file
+ * header), so after `warmup + iters` calls to axiam_refresh() the counter
+ * must read exactly `warmup + iters`: this is the literal "refresh op
+ * recorded >=1 HTTP call per iteration" check the other benches can only
+ * approximate with a latency floor. The C# bench's bug (a shared client's
+ * refresh silently reusing a cached token, p50 1.2 microseconds) could never
+ * happen here even without this check — the C SDK's single_flight_refresh()
+ * performs a real transport call unconditionally whenever it isn't already
+ * mid-flight — but this assertion still fails the run loudly if that
+ * invariant is ever broken, rather than letting a stale/cached number
+ * through silently. */
+static void assert_refresh_hit_the_wire(unsigned long refresh_count, int warmup, int iters) {
+    unsigned long expected = (unsigned long)warmup + (unsigned long)iters;
+    if (refresh_count < expected) {
+        fprintf(stderr,
+                "[c] I9 guard: axiam_client_refresh_count()=%lu is below the expected %lu "
+                "(warmup=%d + iterations=%d) real POST /api/v1/auth/refresh transport calls — "
+                "refresh is not hitting the wire on every call. Failing the bench run instead "
+                "of publishing a fake number (see improvement-after-run4-benchmark.md I9).\n",
+                refresh_count, expected, warmup, iters);
+        exit(1);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -526,6 +579,10 @@ int main(void) {
     op_result_t r_check_access = time_op(op_check_access, &shared, warmup, iterations);
     op_result_t r_batch_check = time_op(op_batch_check, &shared, warmup, iterations);
 
+    /* I9: capture the exact refresh-call count while `client` is still alive,
+     * before axiam_client_free() below. */
+    unsigned long refresh_count = axiam_client_refresh_count(client);
+
     axiam_logout(client, &err);
     axiam_client_free(client);
 
@@ -534,6 +591,10 @@ int main(void) {
                 "serial loop (concurrency=1) for all four ops, not just refresh — "
                 "see HARNESS-SPEC.md's allowance for a simple C harness; "
                 "SDK_BENCH_CONCURRENCY was read but not applied");
+    /* I9: fails the run (non-zero exit) if refresh did not hit the wire on
+     * every call — the JSON record above has already been printed for
+     * inspection by the time this can fire. */
+    assert_refresh_hit_the_wire(refresh_count, warmup, iterations);
     cfg_dispose(&cfg);
     return 0;
 }

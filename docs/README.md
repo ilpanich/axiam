@@ -27,6 +27,9 @@ gRPC (Protocol Buffers), and AMQP (AsyncAPI).
   sizing your rate limits: the measured hardware envelope, the
   `internet`/`gateway`/`mesh` posture presets, and the security caveats of
   per-client keying
+- [`deployment/authz-read-path.md`](./deployment/authz-read-path.md) — what an
+  authorization check costs against SurrealDB, which cache removes which
+  round-trip, and the read-replica design note
 
 ## Admin & PKI guides
 

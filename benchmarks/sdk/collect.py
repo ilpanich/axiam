@@ -111,20 +111,54 @@ def build(results, recs):
             by_profile[r.get("profile", "?")].append(r)
         for profile in sorted(by_profile):
             lines += [f"### profile: {profile}", ""]
-            rows = []
+            # I10 (improvement-after-run4-benchmark.md §D): C's and PHP's
+            # benches honestly record `concurrency: 1` (their `notes` field
+            # says so — the C harness is a plain serial loop, PHP's SDK has
+            # no async client — see HARNESS-SPEC.md), but this table used to
+            # render their rows beside every other SDK's concurrency-16
+            # rows, unlabeled — a reader comparing `thr(rps)` across rows
+            # would mistake single-threaded throughput for a genuine SDK
+            # deficit. Split on the RECORD's overall `concurrency` (not any
+            # one op's — `refresh` is contractually concurrency-1 for every
+            # SDK per HARNESS-SPEC.md and is not what this is about): a
+            # record with concurrency==1 ran its ENTIRE bench serially, and
+            # its rows move to a separate, explicitly-labeled table.
+            concurrent_rows = []
+            serial_rows = []
             for r in by_profile[profile]:
+                conc = r.get("concurrency", 0)
+                target_rows = serial_rows if conc == 1 else concurrent_rows
                 for op, stats in r.get("ops", {}).items():
                     sp95 = server_p95(results, r["target"], profile,
                                       OP_TO_SCENARIO.get(op, ""))
                     wire = ("%.2f" % sp95) if sp95 else "—"
                     overhead = ("%+.2f" % (stats["p95_ms"] - sp95)) if sp95 else "—"
-                    rows.append([r["sdk"], op, f"{stats['p50_ms']:.2f}",
-                                 f"{stats['p95_ms']:.2f}", wire,
-                                 f"{stats['throughput_rps']:.0f}",
-                                 str(stats.get("errors", 0)), overhead])
-            lines += [md_table(["sdk", "op", "sdk p50(ms)", "sdk p95(ms)",
-                                "wire p95(ms)", "thr(rps)", "errors",
-                                "p95 overhead vs wire(ms)"], rows), ""]
+                    target_rows.append([r["sdk"], op, str(conc), f"{stats['p50_ms']:.2f}",
+                                        f"{stats['p95_ms']:.2f}", wire,
+                                        f"{stats['throughput_rps']:.0f}",
+                                        str(stats.get("errors", 0)), overhead])
+            headers = ["sdk", "op", "conc", "sdk p50(ms)", "sdk p95(ms)",
+                       "wire p95(ms)", "thr(rps)", "errors", "p95 overhead vs wire(ms)"]
+            if concurrent_rows:
+                lines += [md_table(headers, concurrent_rows), ""]
+            if serial_rows:
+                lines += [
+                    "#### conc=1 — serial benches "
+                    "(excluded from cross-SDK throughput comparison above)",
+                    "",
+                    "I10: these SDKs' benches run every op in a single serial "
+                    "process/thread (see each record's own `notes` field for why — "
+                    "e.g. the PHP SDK has no async client, the C harness is a plain "
+                    "serial loop by HARNESS-SPEC.md's explicit allowance). "
+                    "`thr(rps)` here is one worker's throughput, not "
+                    "`SDK_BENCH_CONCURRENCY`'s, and is **not comparable** to the "
+                    "concurrency-N table above — do not read these rows into a "
+                    "cross-SDK throughput ranking. Implementing a multi-process/"
+                    "multi-thread driver (PHP: `pcntl_fork`; C: pthreads) would let "
+                    "an SDK graduate out of this table; not done here — see "
+                    "HARNESS-SPEC.md.", "",
+                ]
+                lines += [md_table(headers, serial_rows), ""]
 
     if errored:
         lines += ["## Error (server unreachable / setup failed)", "", ]

@@ -5,6 +5,7 @@
 - **Baseline**: [`final-review-2026-07-08.md`](final-review-2026-07-08.md) + [`remediation-2026-07-08.md`](remediation-2026-07-08.md) (last full code-level review, at `a8e40b3`), the [`security-audit.md`](security-audit.md) compliance index (`c79b66e`), and the [`threat-model-stride.md`](threat-model-stride.md) STRIDE model. Companion public write-up: [`threat-modeling-and-security.md`](threat-modeling-and-security.md).
 - **Scope**: (1) re-verification at current HEAD of the security controls that landed *after* the 2026-07-08 review — none of which had a prior code-level review — namely write-behind rate limiting, in-process TLS termination, the authz decision cache, AMQP v2 replay protection, the signed-timestamp webhook scheme, and the org-scope/refresh escalation fixes; (2) the **first-ever security review of the four newest SDKs** — Kotlin, Swift, C and C++ (REST-only, contract §1–§7/§9–§11); (3) confirmation that the 2026-07-08 SDK remediations still hold in the original seven SDKs, plus the two open SDK items (webhook helper, per-SDK dependency hygiene).
 - **Method**: multi-agent fan-out with per-item file:line evidence, followed by hand re-verification of both new HIGH-class findings and the two headline backend controls (org_id derivation, atomic refresh). Statuses: ✅ verified sound · 🔶 residual/partial · ❌ finding. New findings continue the review sequence at **SEC-071**.
+- **Remediation status**: every finding in this document has since been fixed. See **[§9 Remediation status](#9-remediation-status-2026-08-02)** for the per-finding record, the commits, the two deliberate fail-closed breaking changes, and a correction to the SEC-078 premise below.
 
 ---
 
@@ -26,6 +27,8 @@
 | Low | 0 | 4 (SEC-075, SEC-076, SEC-077, SEC-078) | 4 |
 
 Plus three **backend residual concerns** (§4) — all documented and accepted, none a new finding — and one **still-open** SDK gap (`T-145`, webhook verifier).
+
+> **Status as of 2026-08-02: all eight findings fixed and `T-145` closed across all eleven SDKs.** The §4.3 residual is now traced and pinned by regression tests. Two of the fixes are deliberately **fail-closed in a way that rejects previously-accepted tokens** — see [§9.3](#93--two-deliberate-fail-closed-breaking-changes). The SEC-078 premise as originally written was **incorrect** and is corrected in place in §3.
 
 ### Top remediation priorities
 
@@ -104,11 +107,21 @@ The four newest SDKs are REST-only relying-party clients. The findings below are
 
 - **File**: `axiam-swift-sdk/Sources/AxiamSDK/Sensitive.swift:28-32` — `Equatable` via plain `lhs.value == rhs.value` over secret material. The Kotlin SDK deliberately does *not* override equality for exactly this reason. Low severity (few call sites compare secrets), but worth a constant-time compare.
 
-### SEC-078 [LOW] ❌ — TypeScript SDK `amqplib` pinned to a nonexistent major (SDK-Q06 regression)
+### SEC-078 [LOW] ❌ — TypeScript SDK `amqplib` mis-pinned across a major line (SDK-Q06 regression)
 
-- **File**: `axiam-typescript-sdk/package.json:118` — `"amqplib": "^2.0.1"`, while `@types/amqplib` is `^0.10.8` (`:150`). amqplib has no 2.x line (real releases top out at 0.10.x), so the runtime dependency is **unsatisfiable** as pinned. The 2026-07-08 remediation claimed this was corrected to `^0.10.x`; it is not, at HEAD.
-- **Impact**: the AMQP transport can't install cleanly; a resolver that ignores the bad range could pull an unexpected artifact. Reliability/supply-chain hygiene rather than an exploit.
-- **Fix**: repin to a real `^0.10.x` matching `@types/amqplib`; add a `postinstall`/CI lockfile-resolve gate so an unsatisfiable pin fails the build.
+> **⚠ Premise corrected during remediation (2026-08-02).** As originally written this
+> finding stated that "amqplib has no 2.x line (real releases top out at 0.10.x), so the
+> runtime dependency is **unsatisfiable** as pinned." **That is false.** The registry was
+> checked directly during remediation (`npm view amqplib versions`): amqplib published
+> 1.x and 2.x releases between 2026-03 and 2026-05, and `^2.0.1` resolves cleanly — a
+> clean `npm ci` on the unmodified tree installed and typechecked without error. The
+> finding is still real, but the defect is a different one; the corrected statement is
+> below. The original text is preserved above the fold for audit continuity.
+
+- **File**: `axiam-typescript-sdk/package.json:118` — `"amqplib": "^2.0.1"`, while `@types/amqplib` is `^0.10.8` (`:150`).
+- **Actual defect**: `amqplib@2.x` is a rewrite that ships its own bundled `index.d.ts` (zero dependencies), whereas `@types/amqplib` was never updated past `0.10.8`. Pinning the runtime package to 2.x therefore **silently orphans the vendored types package**: the two describe different APIs, and nothing fails loudly. This is a type/runtime divergence, not an install failure.
+- **Impact**: type checking validates against an API the installed runtime may not implement. Reliability/supply-chain hygiene rather than an exploit — but the *silent* nature makes it worse than the unsatisfiable pin originally described, which would at least have failed the install.
+- **Fix**: repin to a real `^0.10.x` matching `@types/amqplib`; add a CI lockfile-resolve gate so a future divergence fails the build.
 
 ---
 
@@ -136,7 +149,7 @@ Re-verified at `alpha23`; the fixes from [`remediation-2026-07-08.md`](remediati
 - **Plaintext base URL rejection (X-2)** ✅ — Rust (`ensure_secure_scheme`, + redirect scheme-downgrade guard) and TS gRPC (`allowInsecure` opt-in). *(Not carried to the four new SDKs → SEC-073.)*
 - **Header redaction allowlist (X-3)** ✅ — TS/Python/Go/Java/C# all use a safe-header allowlist, not the old 3-entry denylist.
 
-**Still open — `T-145` (webhook-signature verifier).** No SDK — original seven or new four — ships a `verify_webhook(secret, timestamp_header, signature_header, body)` helper for the server's signed-timestamp scheme. Every integrator hand-rolls or skips verification. The server-side control is complete; the gap is purely on the client side. **Fix**: add the helper (HMAC-SHA256 over `<timestamp>.<body>`, constant-time compare, freshness window on `t`, dedup on `X-Axiam-Delivery`) to each SDK and state the expectation in `CONTRACT.md`.
+**~~Still open~~ → ✅ CLOSED 2026-08-02 — `T-145` (webhook-signature verifier).** *As reviewed:* no SDK — original seven or new four — shipped a `verify_webhook(secret, timestamp_header, signature_header, body)` helper for the server's signed-timestamp scheme, so every integrator hand-rolled or skipped verification. The server-side control was complete; the gap was purely client-side. **Now fixed in all eleven SDKs**, with `CONTRACT.md` §13 made normative — see [§9.2](#92-t-145--webhook-verifier-all-eleven-sdks) for commits and the cross-SDK vector check.
 
 ---
 
@@ -154,6 +167,10 @@ The model's 22 open items are otherwise unchanged and correctly characterised: a
 ---
 
 ## 7. Prioritized remediation order
+
+> **✅ All tiers below were completed on 2026-08-02** on branch
+> `claude/axiam-fixes-optimization-4qymzu`. This section is retained as the plan of record;
+> [§9](#9-remediation-status-2026-08-02) is the outcome of record.
 
 **Tier 1 — SDK auth-verification correctness (do first):**
 1. **SEC-071** — C SDK guards: enforce `exp` + tenant binding in local verification. (HIGH.)
@@ -178,4 +195,97 @@ The model's 22 open items are otherwise unchanged and correctly characterised: a
 
 - **Backend**: the eight post-2026-07-08 controls were each verified with current-HEAD file:line evidence; the two headline items (org_id derivation, atomic refresh) were re-derived by hand end-to-end. Not re-run locally: the full `axiam-server` binary build and `cargo audit` (swagger-ui offline placeholder + tool availability in this sandbox — rely on CI, which gates both). The earlier reviews' sound controls (PKCE S256-only, OAuth2 atomic single-use, JWT audience blocks, parameterised SurrealQL, PKI/mTLS, GDPR erasure durability) were not re-audited this round and are assumed to hold, no source having regressed them per the changelog.
 - **SDKs**: the four new SDKs were reviewed across strict-TLS/no-bypass, plaintext-URL rejection, secret redaction, JWKS/token verification, weak-crypto/RNG, mTLS handling and (C/C++) memory safety. SEC-071 was confirmed by directly reading `guard.c` and `jwks.c` (no `exp`/tenant logic present). The original seven were spot-verified against the 2026-07-08 remediation list; the `amqplib` mis-pin (SEC-078) was confirmed firsthand.
-- **Lower-confidence residual**: the backend §4.3 audience-narrowing path was not traced into the extractor this round; the multi-replica cache-staleness bound rests on the documented single-process invalidation model. Both are flagged for a future targeted pass rather than asserted closed.
+- **Lower-confidence residual**: the backend §4.3 audience-narrowing path was not traced into the extractor this round; the multi-replica cache-staleness bound rests on the documented single-process invalidation model. Both are flagged for a future targeted pass rather than asserted closed. *(§4.3 has since been traced and pinned — see §9.)*
+
+---
+
+## 9. Remediation status (2026-08-02)
+
+All eight findings (SEC-071 … SEC-078) and the standing `T-145` gap were remediated on
+branch `claude/axiam-fixes-optimization-4qymzu` across the server repo and all eleven SDK
+repos. Every fix landed with the negative tests the §7 executor note required.
+
+### 9.1 Per-finding record
+
+| ID | Severity | Repo | Status | Commit | What landed |
+|---|---|---|---|---|---|
+| **SEC-071** | HIGH | `axiam-c-sdk` | ✅ Fixed | `6698c48` | `axiam_jwt_verify` became `axiam_jwt_verify_ex(..., AXIAM_JWT_VERIFY_STRICT, ...)` — **safe by default**, with opt-out flags (`SIGNATURE_ONLY`/`EXPIRY`/`TENANT`) and `AXIAM_JWT_CLOCK_SKEW_SECS 60`. `exp` is mandatory and numeric, `nbf` honoured when present, `tenant_id` must equal the configured tenant. Every failure returns `AXIAM_ERR_AUTH` → 401 and the authz server is **never consulted**. 15 new claim tests. |
+| **SEC-072** | MEDIUM | `axiam-swift-sdk` | ✅ Fixed | `41b05f2` | `AxiamRequestAuthenticator` now asserts the configured tenant on **every** verified session (matching against `tenantID` or `tenantSlug`), not only when an `X-Tenant-ID` header is present. Cross-tenant negative test added; `exp` enforcement unchanged. |
+| **SEC-073** | MEDIUM | Kotlin, Swift, C, C++ | ✅ Fixed | `8018b93`, `41b05f2`, `6698c48`, `e28874e` | Non-`https` base URL rejected at construction in all four, with a loopback dev exception (`localhost`/`127.0.0.1`/`::1`). Matched on **string literals, never DNS-resolved**, so a hostile name resolving to loopback cannot slip through. The C implementation also parses URL userinfo, so `http://localhost@evil.example` is refused. Negative + positive tests in each. |
+| **SEC-074** | MEDIUM | `axiam-cplusplus-sdk` | ✅ Fixed | `e28874e` | New safe-by-default authenticator verifying signature **and** `exp` (named skew, `nbf` honoured) **and** configured tenant; it is now the documented guard entry point. The raw primitive was renamed `verify_signature_only_unchecked()` so it cannot be reached by accident. |
+| **SEC-075** | LOW/MED | `axiam-kotlin-sdk` | ✅ Fixed | `8018b93` | Discovered `jwks_uri` must be absolute `https` and same host+port as the configured base URL; anything else (cross-origin, relative, plaintext) falls back to `{baseUrl}/oauth2/jwks` — the PHP `SDK-19` fix. The test points the cross-origin URI at an **unreachable** host, so it fails if the pin ever stops working rather than passing by coincidence. |
+| **SEC-076** | LOW | C, C++ | ✅ Fixed | `6698c48`, `e28874e` | MFA `challenge_token`/`setup_token` wrapped in the SDK `Sensitive` type. C additionally scrubs the plaintext out of parsed JSON and request bodies before free, and replaces an elidable `memset` with a volatile-write `axiam_secure_zero()`. |
+| **SEC-077** | LOW | `axiam-swift-sdk` | ✅ Fixed | `41b05f2` | `Sensitive` equality is now constant-time. Went further than the finding asked: `Equatable` is constrained to a new `ConstantTimeComparable` protocol (`String`, `Data`, `[UInt8]`) so no wrapped type can silently fall back to a short-circuiting compare. `Hashable` was deliberately **not** added — hashing secret material invites `Set`/dictionary use, whose lookup is hash-bucketed and not constant time. |
+| **SEC-078** | LOW | `axiam-typescript-sdk` | ✅ Fixed | `cd2402f` | `amqplib` repinned `^2.0.1` → `^0.10.9` (verified against the live registry), lockfile regenerated, and an `npm ls amqplib` gate added to `sdk-ci-typescript.yml` after `npm ci`. **See the corrected premise in §3** — the original "unsatisfiable pin" diagnosis was wrong. |
+| **T-145** | Gap | all 11 SDKs | ✅ Closed | see §9.2 | `verify_webhook(...)` shipped in every SDK against one canonical spec, plus **CONTRACT.md §13** normative in all twelve repos. |
+| **§4.3 residual** | Residual | `axiam` | ✅ Pinned | `a15b78d` | The audience-narrowing regression tests already existed (`rejects_axiam_m2m_audience_on_user_route`, `service_account_extractor_rejects_user_token`). Rather than duplicate them, two tests were added that pin the whole §4.3 contract in one place: `token_layer_accepts_both_audiences_but_routes_narrow_in_both_directions` and `missing_aud_is_never_accepted_on_an_m2m_route` (the latter proves the `allow_missing_aud_as_user` back-compat window cannot leak onto an m2m route, for both flag values). The residual noted in §8 is now traced and closed. |
+
+### 9.2 T-145 — webhook verifier, all eleven SDKs
+
+To keep every implementation byte-compatible with the server signer
+(`crates/axiam-api-rest/src/webhook.rs`, `compute_signature_v2`), one canonical spec was
+derived from that code and handed to every implementation, and **CONTRACT.md §13** was
+made normative: HMAC-SHA256 over `<timestamp>.<raw_body>`; `t=` taken verbatim from the
+header (not reformatted from a parsed integer); constant-time comparison on **decoded**
+MAC bytes; a header carrying no `v1` is always a failure, never a silent pass; multiple
+`v1` values accepted for secret rotation; a **two-sided** freshness window defaulting to
+300 s so future-dated timestamps are rejected like stale ones; fail-closed on malformed
+hex; and an error surface that never carries the secret or the expected MAC.
+
+| SDK | Commit | | SDK | Commit |
+|---|---|---|---|---|
+| Rust | `415961e` | | Kotlin | `8018b93` |
+| TypeScript | `cd2402f` | | Swift | `41b05f2` |
+| Python | `b00d78c` | | C | `6698c48` |
+| Java | `47c9879` | | C++ | `e28874e` |
+| C# | `3ae1205` | | PHP | `bbe09ec` |
+| Go | `2ee34ba` | | | |
+
+**Cross-SDK pin verified, not assumed.** The §13.4 shared vector (`whsec_test_0123456789abcdef`,
+`t=1785700000`) produces `a642d9201b6f99c4e4e86f03cdedf1592a277f97c14ba936d78f37cb14c5d720`,
+confirmed identical between independent PHP and Python computations. Each SDK computes the
+vector in test setup rather than hardcoding the hex, so the pin cannot drift into a
+tautology.
+
+### 9.3 ⚠ Two deliberate fail-closed breaking changes
+
+Both fall directly out of the tenant-binding fixes and **will reject tokens that previously
+succeeded**. This is the vulnerability being closed, not a regression — but it warrants
+release-note prominence rather than a CHANGELOG line, because it can break working
+deployments on upgrade.
+
+1. **A guard-side C or Swift client must now be configured with the tenant UUID.** Access
+   tokens carry the tenant **UUID** in `tenant_id`; a client configured only with a tenant
+   **slug** has nothing to compare against, so it now refuses *every* token. C falls back to
+   the UUID resolved at login (D-14) when available and fails closed otherwise; Swift accepts
+   a match against either configured identifier. Deployments relying on a guard that admitted
+   tokens without tenant configuration were relying on SEC-071/SEC-072.
+2. **Source-breaking type changes.** C: `challenge_token`/`setup_token` are now
+   `axiam_sensitive_t *` (new `axiam_verify_mfa_sensitive()`). C++: `LoginResult::challenge_token`
+   is `Sensitive<std::string>` and `JwksVerifier::verify()` is renamed
+   `verify_signature_only_unchecked()`. Swift: `Sensitive`'s `Equatable` conformance narrowed
+   to `ConstantTimeComparable`.
+
+### 9.4 New observations from the remediation pass
+
+Neither is a finding against this review's scope; both were discovered while fixing the above
+and are recorded so they are not lost.
+
+- **OBS-1 — client-secret hashing is unsalted single-round SHA-256** (`crates/axiam-db/src/repository/service_account.rs:36-40`, consumed at `crates/axiam-oauth2/src/token.rs:199,408,551,851`). Found while establishing that the client-credentials path is *not* Argon2-bound. **Severity: informational, not a finding.** Every client secret is 32 CSPRNG bytes (256-bit) from `generate_client_secret()` at both creation and rotation, and there is no operator-supplied-secret path — so brute-force and rainbow-table attacks are infeasible and the missing salt has no practical consequence, the same posture GitHub and Stripe use for API tokens. The comparison is already constant-time (`ct_eq`). **It would become a real finding the moment an operator-supplied or low-entropy client secret is accepted anywhere**; if that is ever added, this must move to a salted KDF at the same time. Worth an explicit code comment recording the entropy assumption.
+- **OBS-2 — C++ SDK `CURLOPT_CUSTOMREQUEST` was sticky across reused handles** (fixed in `e28874e`). After any POST, every subsequent GET on the same easy handle inherited the previous verb, silently turning the JWKS fetch into `POST /oauth2/jwks` — which a conformant server answers `405`. This is a reliability bug rather than a vulnerability, but it is recorded here because the **SEC-074 authenticator depends on that fetch**: the security fix would have failed in production against a real server had this not been caught. Now reset per request, with a regression test.
+
+### 9.5 Verification depth
+
+Fixes were verified with each repo's own CI gates, run locally where the toolchain permitted:
+
+- **C** — 23/23 tests under gcc *and* clang, clean under ASan+UBSan, **valgrind across all 22 binaries: 0 errors, 0 definite leaks**, coverage 98.7% line / 82.7% branch (gates: 96/80).
+- **C++** — 103 test cases / 359 checks under g++ and clang++, clean under ASan+UBSan with leak detection, 98.81% line coverage. Transport fixes were **falsification-tested**: each fix was reverted to confirm its test fails, then restored.
+- **Swift** — a real Swift 5.10.1 toolchain matching CI was downloaded; `swift build` clean, 92 tests / 0 failures (up from 63), 96.32% line coverage vs a 92% floor.
+- **Kotlin** — `./gradlew build` green at 247/247, `koverVerify` clearing the 98% line floor.
+- **Java** — `mvn verify` BUILD SUCCESS at 373 tests, JaCoCo floor met, D-22 doclint gate passing.
+- **Go** — `build`/`vet`/`test` green, webhook package 98.3% coverage, `golangci-lint` clean. *`govulncheck` could not be installed (module-proxy timeout) and did not run.*
+- **TypeScript** — typecheck clean, 495 tests passing, build + publish dry-run OK, `npm audit` 0 high.
+- **Python** — `mypy --strict` clean, 480 tests, 98.94% coverage (webhook module 100%).
+- **Rust SDK** — `fmt`, `clippy --all-targets --all-features -D warnings`, `cargo doc -D warnings` all pass; 33/34 suites, 0 failures (the exception, `tests/trybuild.rs`, fails byte-identically on unmodified `HEAD` — a trybuild/rustc toolchain interaction, not a regression).
+- **C#** — repo CI gates run locally.
+- **PHP** — ⚠ **PHPUnit and PHPStan could not be run**: `composer install` cannot authenticate to github.com through this environment's proxy. Compensating verification: `php -l` clean on all files, and the real classes were driven directly through every §13.4 required case (**20/20**, including tampered body, wrong secret, stale/future timestamps, tolerance boundary, all malformed-header shapes, secret rotation, and an assertion that error messages leak neither secret nor MAC), plus the cross-SDK vector cross-checked against Python. Repository CI is the first execution of PHPUnit and PHPStan level 6 for this change.

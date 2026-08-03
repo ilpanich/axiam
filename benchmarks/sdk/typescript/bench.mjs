@@ -86,13 +86,43 @@ function zeroOps() {
   return ops;
 }
 
+// I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+// `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+// never wired. Node's stdlib `process.cpuUsage()` gives cumulative
+// user+system CPU time (microseconds) since process start directly — no
+// polling needed and no clock-tick-rate assumption (unlike a procfs-based
+// sampler). Node has no cross-platform peak-RSS API, so peak resident set
+// size is read from `/proc/self/status`'s `VmHWM` (Linux-only, matching
+// this harness' Docker/K8s deployment target per CLAUDE.md); returns 0 for
+// either metric if the corresponding source is unavailable rather than
+// throwing.
+function clientResourceUsage() {
+  let cpuMsTotal = 0;
+  try {
+    const usage = process.cpuUsage(); // { user, system } in microseconds
+    cpuMsTotal = (usage.user + usage.system) / 1000.0;
+  } catch {
+    // Best-effort telemetry only — never fail the bench over it.
+  }
+  let rssMiBPeak = 0;
+  try {
+    const status = readFileSync("/proc/self/status", "utf8");
+    const match = status.match(/^VmHWM:\s+(\d+)\s*kB/m);
+    if (match) rssMiBPeak = Number(match[1]) / 1024.0; // kB -> MiB
+  } catch {
+    // /proc unavailable (non-Linux) — leave at 0.
+  }
+  return { cpuMsTotal, rssMiBPeak };
+}
+
 function emit(status, ops, iterations, concurrency, notes) {
+  const { cpuMsTotal, rssMiBPeak } = clientResourceUsage();
   console.log(JSON.stringify({
     schema: "axiam.sdk-bench/v1", sdk: "typescript",
     sdk_version: "1.0.0-alpha2", language_runtime: `node ${process.version}`,
     target: env("BENCH_TARGET", "axiam"), profile: env("BENCH_PROFILE", "p0-plaintext"),
     status, iterations, concurrency,
-    ops, client_cpu_ms_total: 0, client_rss_mib_peak: 0, notes,
+    ops, client_cpu_ms_total: cpuMsTotal, client_rss_mib_peak: rssMiBPeak, notes,
   }, null, 2));
 }
 
@@ -186,6 +216,37 @@ async function timeOp(fn, conc = CONC) {
   };
 }
 
+// I9 (improvement-after-run4-benchmark.md §C): a floor below which a measured
+// `refresh` latency is not plausibly a real HTTP round trip. The C# bench
+// recorded p50 1.2 microseconds ("752 k rps") because its SDK's RefreshGuard
+// cached a completed token result on a shared client for up to ~15 minutes
+// (wall-clock freshness, no observed-token check), so only the FIRST refresh
+// in a ~2200-call run ever touched the wire. axiam-sdk's tokenManager keys on
+// the caller's currently observed access token instead, which this bench's
+// `client.refresh()` call updates after every real refresh — so a same-client
+// loop keeps hitting the wire — but this floor is kept as a language-agnostic
+// regression guard against that class of bug reappearing here too (a cache
+// hit completes in low single-digit microseconds; every genuine wire call
+// recorded across this harness' 11 languages averages ~17 ms, so 0.2 ms
+// leaves a wide margin).
+const MIN_PLAUSIBLE_REFRESH_MS = 0.2;
+
+// I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+// instead of silently publishing a fake number if `refresh` looks like it
+// never left the process.
+function assertRefreshHitTheWire(refreshOp, iterations) {
+  const hadSamples = refreshOp.errors < iterations;
+  if (hadSamples && refreshOp.p50_ms < MIN_PLAUSIBLE_REFRESH_MS) {
+    console.error(
+      `[typescript] I9 guard: refresh p50=${refreshOp.p50_ms.toFixed(4)}ms is below the `
+      + `${MIN_PLAUSIBLE_REFRESH_MS}ms plausible-wire-call floor despite successful samples `
+      + `— this looks like a cached no-op (CONTRACT.md §9 guard reuse), not a real HTTP round `
+      + `trip. Failing the bench run instead of publishing a fake number `
+      + `(see improvement-after-run4-benchmark.md I9).`);
+    process.exit(1);
+  }
+}
+
 async function main() {
   let opsFns;
   try {
@@ -205,6 +266,7 @@ async function main() {
   const ops = {};
   for (const k of OP_KEYS) ops[k] = await timeOp(opsFns[k], k === "refresh" ? 1 : CONC);
   emit("ok", ops, ITER, CONC, "");
+  assertRefreshHitTheWire(ops.refresh, ITER);
 }
 
 main();

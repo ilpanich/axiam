@@ -40,13 +40,37 @@ From benchmark run 3 (2026-07-25/26, `1.0.0-alpha19`,
 [`benchmarks/PUBLIC_BENCH_ANALYSIS.md`](../../benchmarks/PUBLIC_BENCH_ANALYSIS.md)
 §4/§6):
 
-- With the **shipped defaults**, a 50-VU load generator on a **single
+- With the **then-shipped defaults** (token 20/min, introspect 10/min,
+  revoke 10/min, authz 300/min), a 50-VU load generator on a **single
   source IP** was flattened to ~0–14 req/s on every limited endpoint at
   ~100% `429` (client-credentials 0.9/s, introspection 0.4/s). Unlimited
   paths in the same pass were untouched — JWKS served 27 700/s. The limits
   work exactly as designed.
 - The **same 2-core server** sustains ~1 800 token issuances/s and
   ~740–2 300 authz checks/s when unthrottled.
+
+### The run-4 revision of the machine-endpoint defaults
+
+Run 4 re-measured the same envelope on a clean build and put the shipped
+machine defaults next to the capacity actually behind them: token 20/min
+against ~163 000/min, introspect 10/min against ~263 000/min, authz
+300/min against ~45 000/min. Those numbers did not protect anything the
+raised ones fail to protect — they broke the first healthy integration
+behind a NAT while sitting four to five orders of magnitude below the
+machine's ceiling. The `internet` machine defaults were therefore revised:
+
+| Knob | Was | Now | Margin to measured capacity |
+|---|---:|---:|---|
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 20 | **120** | ~1 358x below |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 10 | **600** | ~438x below |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 300 | **1 800** | ~25x below (4% of a 2-core envelope) |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 10 | **60** | ~2 716x below |
+| login / register / password-reset / MFA | 10 / 5 / 3 / 5 | **unchanged** | not sized from capacity — see §4 rule 6 |
+
+The posture did not change: still strict, still per-IP, still opt-in to
+anything else. Only the numbers moved, and only on the four machine
+endpoints. If you had pinned any of these with an env var, nothing about
+your deployment changes.
 
 Both facts are true at once. A single IP producing 10 token requests per
 second is an attacker on a small public deployment and a perfectly normal
@@ -97,17 +121,58 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | 5 | 5 | 5 |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | 3 | 3 | 3 |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | 5 | 5 | 5 |
-| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 20 | 600 | 6000 |
-| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 10 | 6000 | 60000 |
-| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 10 | 600 | 6000 |
-| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 300 | 6000 | 60000 |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 120 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 600 | 6000 | 60000 |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 60 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
+| `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 100 | 1000 | 5000 |
 <!-- rate-limit-posture-table:end -->
 
 Per-minute values are **per bucket**, and the bucket is whatever
 `AXIAM__RATE_LIMIT__KEY` selects — per IP under `internet`, per OAuth2
 `client_id` under both presets (on `/oauth2/token`, `/oauth2/revoke`,
 `/oauth2/introspect` only; everything else is always per-IP).
+
+The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
+bucket per gRPC **method family** (see §3.1). Leave
+`GRPC_IDENTITY_PER_SEC` / `GRPC_ADMIN_PER_SEC` unset and they are derived
+from `GRPC_AUTHZ_PER_SEC` (identity = 5x, admin = 1x), which is why the
+`gateway`/`mesh` columns above move together with one variable.
+
+### 3.1 gRPC buckets are per method family
+
+Until run 4 both gRPC rate-limit layers were **server-wide**: one bucket,
+sized from `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, shared by every method on
+every service. That made an authorization-sizing decision silently also a
+userinfo-sizing decision — run 4 measured `GetUserInfo` (an identity read
+that sustains ~12 700/s) collapsing to the authz ceiling under production
+posture. The buckets are now split:
+
+| Family | Services | Knob | Shipped |
+|---|---|---|---|
+| authz-check | `axiam.v1.AuthorizationService` | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100/s |
+| identity-read | `axiam.v1.UserInfoService`, `axiam.v1.TokenService` | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500/s (5x authz) |
+| admin | `axiam.v1.UserService` | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 100/s (1x authz) |
+| unlimited | gRPC reflection (`grpc.reflection.*`), health (`grpc.health.*`) | *(none — never limited)* | — |
+
+Notes:
+
+- **Admin tracks authz 1:1 on purpose.** `UserService/ValidateCredentials`
+  performs an Argon2id verification, so its ceiling is a CPU guard, not a
+  read ceiling — it must not inherit the identity-read multiplier.
+- **Reflection and health are deliberately unlimited.** Their whole job is
+  to answer during an incident, exactly when the limited families are most
+  likely to be saturated; throttling a liveness probe turns an overload
+  into an outage.
+- **An unrecognized gRPC path is counted against the authz bucket**, not
+  the unlimited one. Adding a service without classifying it fails safe.
+- Both layers (the in-memory governor and the cross-replica shared counter)
+  use the same split and the same per-second numbers. The shared counter
+  runs a 60-second window and converts internally — before run 4 it did
+  not, which made the effective gRPC ceiling 1/60th of the configured one
+  (fixed; `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100` now really means 100/s).
 
 ### Where the preset numbers come from
 
@@ -123,7 +188,9 @@ whole machine:
 | `gateway` authz 6 000/min | 100/s per client, the **low** end of the 6 000–60 000 band in public §6; the server measured ~740/s cache-off in total. |
 | `mesh` token 6 000/min | 100/s per client ≈ 5.6% of the measured ceiling. |
 | `mesh` authz 60 000/min | 1 000/s per client — **above** the measured 740/s cache-off whole-server ceiling. On this hardware it stops a runaway retry loop, not an attacker. Sized honestly, not aspirationally. |
-| gRPC 1 000 / 5 000 per sec | The gRPC authz path measured ~603/s per 2 cores. These are coarse ceilings; see the keying caveat in §5. |
+| gRPC authz 1 000 / 5 000 per sec | The gRPC authz path measured ~603/s per 2 cores (run 3) / ~887/s (run 4). These are coarse ceilings; see the keying caveat in §5. |
+| gRPC identity 5 000 / 25 000 per sec | Derived as 5x the authz ceiling. `GetUserInfo` measured 12 665/s — an identity read is ~14x an authz check, so it must not inherit the authz number (§3.1). |
+| gRPC admin 1 000 / 5 000 per sec | Derived as 1x the authz ceiling. `ValidateCredentials` is Argon2id-bound, so this is a CPU guard rather than a read ceiling. |
 
 ### Turning it on
 
@@ -223,11 +290,13 @@ resource-consumption vector, and each rejected request still costs one
 client lookup. Front an internet-exposed `client_id`-mode deployment with
 something that rate-limits by IP before AXIAM sees the request.
 
-**3. The gRPC authz limiter is per-IP only.** There is no client identity
-at the layer that keys it (the `tower` layer runs before tonic resolves
+**3. The gRPC limiters are per-IP only.** There is no client identity at
+the layer that keys them (the `tower` layer runs before tonic resolves
 per-RPC claims), so `AXIAM__GRPC__KEY` is reserved and currently a no-op.
-Behind a shared ingress IP, `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` is a
-**fleet-wide** ceiling, not a per-client one.
+Behind a shared ingress IP, the three `AXIAM__GRPC__*_PER_SEC` values are
+**fleet-wide** ceilings, not per-client ones. The per-method-family split
+(§3.1) separates *workloads*, not *callers* — it does not make the gRPC
+limiter client-aware.
 
 **4. Requests with no parseable `client_id` fall back to the IP key.**
 That fallback is fail-safe (it never disables limiting), but note the
@@ -268,6 +337,35 @@ whether a preset was applied, and which env vars overrode it:
 Grep for `Rate-limit posture active` in your startup logs. If
 `operator_overrides` is `none` and `preset_applied` is `false`, you are
 running the shipped internet-facing defaults.
+
+The gRPC listener logs its own resolved family ceilings when it binds:
+
+```json
+{"level":"INFO","fields":{"message":"Starting gRPC server",
+ "bind":"127.0.0.1:50051","grpc_authz_per_sec":100,
+ "grpc_identity_per_sec":500,"grpc_admin_per_sec":100}}
+```
+
+### Is the `internet` posture throttling your machine traffic?
+
+When the shipped `internet` defaults are active, the server watches the
+sustained `429` ratio on the four **machine** endpoints
+(`/oauth2/token`, `/oauth2/introspect`, `/oauth2/revoke`, authz check) over
+rolling 5-minute intervals. If more than half of that traffic is being
+rejected for long enough that it cannot be a burst, it logs once per
+interval:
+
+```
+WARN  your limits are throttling what looks like legitimate machine
+      traffic; see rate-limit-sizing
+      (machine_denied_ratio=0.83 window_secs=300 …)
+```
+
+That line is advice, not an error: it means your fleet's real per-bucket
+peak is above the shipped `internet` numbers, and you should either pick a
+posture from §1 or size by hand from §4. Human endpoints are excluded from
+the ratio — a `429` storm on `/auth/login` is a credential-stuffing signal,
+not a sizing signal, and must never be answered by raising a limit.
 
 ---
 

@@ -333,11 +333,47 @@ where
     /// Client credentials grant (RFC 6749 section 4.4).
     ///
     /// Machine-to-machine flow — no user context, no refresh token.
+    ///
+    /// # Per-stage timing (I5)
+    ///
+    /// This handler is the subject of the run-4 TLS plateau investigation, so it
+    /// carries a stage breakdown on its span: `client_lookup_us`,
+    /// `secret_verify_us`, `tenant_lookup_us`, `token_mint_us` and
+    /// `handler_total_us`, recorded on the `oauth2.client_credentials` span and
+    /// re-emitted as one DEBUG event on `target: "axiam::perf"`.
+    ///
+    /// **Cost, and why it is left permanently on:** five `Instant::now()` calls
+    /// (~20 ns each on a `clock_gettime` vDSO read) and five
+    /// `Span::record` calls that are no-ops when no subscriber is interested —
+    /// together well under 0.1 % of the ~370 µs this handler takes even in the
+    /// *fast* (plaintext, 2 727 req/s) configuration. No flag gates the
+    /// measurement; only the *reporting* is gated, by the ordinary tracing
+    /// level (`RUST_LOG=axiam_oauth2=debug`, or any subscriber that samples the
+    /// span's fields).
+    ///
+    /// There is deliberately **no "token persist" stage**: the
+    /// `client_credentials` grant issues no refresh token and writes nothing —
+    /// the only DB work is the two reads below. That, plus the fact that the
+    /// client secret is verified with SHA-256 rather than Argon2id (see
+    /// `axiam_db::hash_client_secret`), is why this endpoint measures 2 727
+    /// req/s where password login measures 69.
+    #[tracing::instrument(
+        name = "oauth2.client_credentials",
+        skip(self, req),
+        fields(
+            client_lookup_us = tracing::field::Empty,
+            secret_verify_us = tracing::field::Empty,
+            tenant_lookup_us = tracing::field::Empty,
+            token_mint_us = tracing::field::Empty,
+            handler_total_us = tracing::field::Empty,
+        )
+    )]
     async fn handle_client_credentials(
         &self,
         tenant_id: Uuid,
         req: TokenRequest,
     ) -> Result<TokenResponse, OAuth2Error> {
+        let started = std::time::Instant::now();
         let client_id = req
             .client_id
             .as_deref()
@@ -347,7 +383,8 @@ where
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
 
-        // Authenticate client
+        // Stage 1 — client lookup (DB round-trip #1).
+        let t_client_lookup = std::time::Instant::now();
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
@@ -362,13 +399,20 @@ where
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+        let client_lookup_us = t_client_lookup.elapsed().as_micros() as u64;
 
+        // Stage 2 — client-secret verification. SHA-256 + constant-time compare
+        // (`axiam_db::hash_client_secret`); this does NOT touch the Argon2id
+        // `crypto_semaphore` that bounds password verification.
+        let t_secret_verify = std::time::Instant::now();
         let provided_hash = hash_client_secret(client_secret);
-        if !bool::from(
+        let secret_ok = bool::from(
             provided_hash
                 .as_bytes()
                 .ct_eq(client.client_secret_hash.as_bytes()),
-        ) {
+        );
+        let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
+        if !secret_ok {
             return Err(OAuth2Error::InvalidClient(
                 "invalid client credentials".into(),
             ));
@@ -403,7 +447,8 @@ where
             None => client.scopes.clone(),
         };
 
-        // Resolve org_id from tenant
+        // Stage 3 — tenant lookup (DB round-trip #2), for the `org_id` claim.
+        let t_tenant_lookup = std::time::Instant::now();
         let tenant = self
             .tenant_repo
             .get_by_id(tenant_id)
@@ -412,8 +457,11 @@ where
                 AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+        let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
-        // Issue M2M access token (no refresh token for client_credentials)
+        // Stage 4 — token mint + EdDSA (Ed25519) signature. No refresh token is
+        // issued for client_credentials, so there is no persist stage.
+        let t_token_mint = std::time::Instant::now();
         let access_token = issue_client_credentials_token(
             client_id,
             tenant_id,
@@ -422,12 +470,32 @@ where
             &self.auth_config,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
 
         let scope = if scopes.is_empty() {
             None
         } else {
             Some(scopes.join(" "))
         };
+
+        let handler_total_us = started.elapsed().as_micros() as u64;
+        let span = tracing::Span::current();
+        span.record("client_lookup_us", client_lookup_us);
+        span.record("secret_verify_us", secret_verify_us);
+        span.record("tenant_lookup_us", tenant_lookup_us);
+        span.record("token_mint_us", token_mint_us);
+        span.record("handler_total_us", handler_total_us);
+        tracing::debug!(
+            target: "axiam::perf",
+            stage = "oauth2.client_credentials",
+            client_lookup_us,
+            secret_verify_us,
+            tenant_lookup_us,
+            token_mint_us,
+            handler_total_us,
+            access_token_len = access_token.len(),
+            "client_credentials stage timings (I5)"
+        );
 
         Ok(TokenResponse {
             access_token,

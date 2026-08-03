@@ -34,6 +34,20 @@
 //! HARD CONSTRAINT (D-01c coordination note): the `Quota::per_second(...)
 //! .burst_size(...)` throughput/quota math in [`build_grpc_governor_layer`]
 //! is untouched by this module — CORR-01/Phase 26 owns it.
+//!
+//! # Units and scope (run-4 fixes I1 and I2)
+//!
+//! - **I1 — units.** The gRPC ceilings are configured **per second**; the
+//!   shared cross-replica bucket runs a fixed **60-second** window shared with
+//!   the REST limiter. The conversion lives in exactly one place,
+//!   [`per_sec_to_window_limit`], and the production constructor
+//!   ([`GrpcSharedRateLimitLayer::new_method_scoped`]) takes per-second
+//!   ceilings so no caller can hand a per-second number to a per-minute
+//!   window again.
+//! - **I2 — scope.** Both layers used to be server-wide, so the *authz*
+//!   ceiling throttled identity reads and admin traffic too. Buckets are now
+//!   split per [`GrpcMethodFamily`] (authz-check / identity-read / admin),
+//!   with reflection and health explicitly unlimited.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -53,7 +67,9 @@ use surrealdb::Connection;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tower::{Layer, Service};
 use tower_governor::{
-    GovernorLayer, errors::GovernorError, governor::GovernorConfigBuilder,
+    GovernorLayer,
+    errors::GovernorError,
+    governor::{Governor, GovernorConfigBuilder},
     key_extractor::KeyExtractor,
 };
 
@@ -146,6 +162,150 @@ fn grpc_peer_addr<T>(req: &Request<T>) -> Option<SocketAddr> {
         })
 }
 
+// ---------------------------------------------------------------------------
+// Per-method scoping (I2)
+// ---------------------------------------------------------------------------
+
+/// The rate-limit bucket family a gRPC method belongs to (I2).
+///
+/// **Why this exists.** Both gRPC rate-limit layers used to be *server-wide*:
+/// one bucket, sized from `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, shared by every
+/// method on every service. Run 4 measured `UserInfoService/GetUserInfo` — an
+/// identity read that sustains ~12 700/s — collapsing to the *authz* ceiling
+/// under production posture, because a `check_access` sizing decision was
+/// silently also a userinfo sizing decision
+/// (`claude_dev/improvement-after-run4-benchmark.md` I2). Splitting the
+/// buckets lets an operator size the authz path (called once per protected
+/// request) independently of identity reads and of administrative traffic.
+///
+/// **Classification is by gRPC path**, i.e. `/<package>.<Service>/<Method>`,
+/// which is the only identity available to a `tower::Layer` running before
+/// tonic resolves per-RPC claims (the same structural reason the buckets key
+/// on IP — see `crate::config::GrpcRateLimitKeyMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrpcMethodFamily {
+    /// `axiam.v1.AuthorizationService` — `CheckAccess` / `BatchCheckAccess`.
+    /// Also the family for any **unrecognized** path: an unknown method must
+    /// land in the strictest bucket rather than in the unlimited one.
+    AuthzCheck,
+    /// Identity reads: `axiam.v1.UserInfoService` (OIDC-style self lookup)
+    /// and `axiam.v1.TokenService` (validate/introspect). High-frequency,
+    /// cheap, and measured an order of magnitude faster than an authz check.
+    IdentityRead,
+    /// Administrative / user-management traffic: `axiam.v1.UserService`
+    /// (`GetUser`, `ValidateCredentials`). `ValidateCredentials` hashes a
+    /// password, so this family is deliberately NOT sized from read capacity.
+    Admin,
+    /// Explicitly neutral — never rate-limited. gRPC **reflection** and
+    /// **health** endpoints: infrastructure probes whose whole job is to
+    /// answer during an incident, when the limited families are most likely
+    /// to be saturated. Throttling a liveness probe turns an overload into an
+    /// outage.
+    Unlimited,
+}
+
+/// gRPC reflection service package prefix (v1 and v1alpha).
+const REFLECTION_PREFIX: &str = "/grpc.reflection.";
+/// gRPC health-checking service package prefix.
+const HEALTH_PREFIX: &str = "/grpc.health.";
+
+impl GrpcMethodFamily {
+    /// Classifies a gRPC request path (`/<package>.<Service>/<Method>`).
+    ///
+    /// Unknown paths deliberately fall into [`Self::AuthzCheck`] — the
+    /// strictest limited family — so that adding a service without updating
+    /// this function fails safe (throttled) rather than open (unlimited).
+    pub fn classify(path: &str) -> Self {
+        if path.starts_with(REFLECTION_PREFIX) || path.starts_with(HEALTH_PREFIX) {
+            return Self::Unlimited;
+        }
+        match path.split('/').nth(1).unwrap_or_default() {
+            "axiam.v1.UserInfoService" | "axiam.v1.TokenService" => Self::IdentityRead,
+            "axiam.v1.UserService" => Self::Admin,
+            // "axiam.v1.AuthorizationService" and everything else.
+            _ => Self::AuthzCheck,
+        }
+    }
+
+    /// Shared-counter bucket-name prefix for this family, or `None` when the
+    /// family is never limited.
+    ///
+    /// These names are part of the persisted `rate_limit_bucket` key space
+    /// (`"{endpoint}:{ip}"`), so `grpc_authz` is kept byte-for-byte for the
+    /// authz family — an in-flight upgrade keeps counting against the same
+    /// rows.
+    pub const fn shared_endpoint(self) -> Option<&'static str> {
+        match self {
+            Self::AuthzCheck => Some("grpc_authz"),
+            Self::IdentityRead => Some("grpc_identity"),
+            Self::Admin => Some("grpc_admin"),
+            Self::Unlimited => None,
+        }
+    }
+}
+
+/// Per-family gRPC ceilings, in requests **per second per IP** (I2).
+///
+/// The unit is per-second at every boundary of this type. The shared
+/// cross-replica layer runs a 60-second window and therefore converts with
+/// [`per_sec_to_window_limit`] internally — callers never do that arithmetic
+/// themselves, which is precisely the bug I1 fixed (the per-second number was
+/// handed to a per-minute window verbatim, making the effective ceiling
+/// 1/60th of the configured one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcRateLimits {
+    /// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` — authorization decisions.
+    pub authz_per_sec: u32,
+    /// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` — userinfo / token reads.
+    pub identity_per_sec: u32,
+    /// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — user management.
+    pub admin_per_sec: u32,
+}
+
+/// Identity reads default to this multiple of the authz ceiling — they were
+/// measured ~14x faster than an authz check (12 665/s vs 887/s, run 4) and a
+/// resource server does one per protected request just like a check. The
+/// multiplier (rather than a fixed number) is what keeps the family coherent
+/// when `AXIAM__RATE_LIMIT__PROFILE` raises the authz ceiling.
+pub const IDENTITY_PER_SEC_MULTIPLE: u32 = 5;
+
+impl GrpcRateLimits {
+    /// Derives the whole family from the authz ceiling alone — the shape an
+    /// operator gets when only `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` (or a
+    /// posture preset) is set.
+    ///
+    /// Admin tracks the authz ceiling 1:1: `ValidateCredentials` is an
+    /// Argon2id verification, so its ceiling is a CPU guard and must not
+    /// inherit a read-sized multiplier.
+    pub const fn from_authz_per_sec(authz_per_sec: u32) -> Self {
+        Self {
+            authz_per_sec,
+            identity_per_sec: authz_per_sec.saturating_mul(IDENTITY_PER_SEC_MULTIPLE),
+            admin_per_sec: authz_per_sec,
+        }
+    }
+
+    /// The per-second ceiling for `family`, or `None` when the family is
+    /// never limited ([`GrpcMethodFamily::Unlimited`]).
+    pub const fn per_sec(self, family: GrpcMethodFamily) -> Option<u32> {
+        match family {
+            GrpcMethodFamily::AuthzCheck => Some(self.authz_per_sec),
+            GrpcMethodFamily::IdentityRead => Some(self.identity_per_sec),
+            GrpcMethodFamily::Admin => Some(self.admin_per_sec),
+            GrpcMethodFamily::Unlimited => None,
+        }
+    }
+
+    /// The ceiling for `family` expressed in the shared layer's 60-second
+    /// window (I1). `None` for the unlimited family.
+    pub const fn window_limit(self, family: GrpcMethodFamily) -> Option<u32> {
+        match self.per_sec(family) {
+            Some(per_sec) => Some(per_sec_to_window_limit(per_sec)),
+            None => None,
+        }
+    }
+}
+
 /// Concrete type alias for the gRPC GovernorLayer.
 ///
 /// - `K` = [`GrpcTrustedHopsKeyExtractor`] — trusted_hops-aware, keys off the
@@ -154,6 +314,10 @@ fn grpc_peer_addr<T>(req: &Request<T>) -> Option<SocketAddr> {
 /// - `RespBody` = tonic::body::Body — tonic's native streaming body type
 pub type GrpcGovernorLayer =
     GovernorLayer<GrpcTrustedHopsKeyExtractor, NoOpMiddleware<QuantaInstant>, tonic::body::Body>;
+
+/// Concrete type alias for one per-family in-memory governor service.
+type GrpcGovernor<S> =
+    Governor<GrpcTrustedHopsKeyExtractor, NoOpMiddleware<QuantaInstant>, S, tonic::body::Body>;
 
 /// Build a [`GovernorLayer`] for gRPC server-wide rate limiting.
 ///
@@ -202,6 +366,118 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
     GovernorLayer::new(config)
 }
 
+/// Build the per-method-family in-memory governor stack (I2).
+///
+/// One independent [`GovernorLayer`] per limited [`GrpcMethodFamily`], each
+/// with its own token bucket keyed by client IP, plus a pass-through path for
+/// [`GrpcMethodFamily::Unlimited`] (reflection / health). Replaces the single
+/// server-wide governor, which made the authz ceiling the ceiling for every
+/// gRPC surface.
+///
+/// # Panics
+///
+/// Panics at startup if any family's ceiling is 0 — the governor crate
+/// requires a non-zero burst size (same contract as
+/// [`build_grpc_governor_layer`]).
+pub fn build_grpc_method_scoped_governor_layer(
+    limits: GrpcRateLimits,
+) -> GrpcMethodScopedGovernorLayer {
+    GrpcMethodScopedGovernorLayer {
+        authz: build_grpc_governor_layer(limits.authz_per_sec),
+        identity: build_grpc_governor_layer(limits.identity_per_sec),
+        admin: build_grpc_governor_layer(limits.admin_per_sec),
+    }
+}
+
+/// `tower::Layer` producing [`GrpcMethodScopedGovernor`] — see
+/// [`build_grpc_method_scoped_governor_layer`].
+#[derive(Clone)]
+pub struct GrpcMethodScopedGovernorLayer {
+    authz: GrpcGovernorLayer,
+    identity: GrpcGovernorLayer,
+    admin: GrpcGovernorLayer,
+}
+
+impl<S: Clone> Layer<S> for GrpcMethodScopedGovernorLayer {
+    type Service = GrpcMethodScopedGovernor<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        GrpcMethodScopedGovernor {
+            authz: self.authz.layer(inner.clone()),
+            identity: self.identity.layer(inner.clone()),
+            admin: self.admin.layer(inner.clone()),
+            neutral: inner,
+        }
+    }
+}
+
+/// Dispatches each request to the governor for its [`GrpcMethodFamily`],
+/// or straight through for the unlimited family.
+///
+/// All four branches wrap clones of the SAME inner service, so this is a
+/// routing decision over rate-limit state only — the request itself reaches
+/// the identical tonic router whichever branch it takes.
+#[derive(Clone)]
+pub struct GrpcMethodScopedGovernor<S> {
+    authz: GrpcGovernor<S>,
+    identity: GrpcGovernor<S>,
+    admin: GrpcGovernor<S>,
+    neutral: S,
+}
+
+impl<S> Service<Request<tonic::body::Body>> for GrpcMethodScopedGovernor<S>
+where
+    S: Service<Request<tonic::body::Body>, Response = Response<tonic::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = Response<tonic::body::Body>;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Every branch must be ready before we can promise `call` will
+        // succeed, since the family is only known once the request arrives.
+        // In practice all four wrap clones of the same always-ready tonic
+        // router, so this is a formality that keeps the tower contract exact.
+        std::task::ready!(Service::poll_ready(&mut self.authz, cx))?;
+        std::task::ready!(Service::poll_ready(&mut self.identity, cx))?;
+        std::task::ready!(Service::poll_ready(&mut self.admin, cx))?;
+        self.neutral.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<tonic::body::Body>) -> Self::Future {
+        // Standard clone-and-swap per branch so the returned future owns an
+        // independent, ready-to-call copy (same convention as
+        // `GrpcSharedRateLimitService::call`).
+        match GrpcMethodFamily::classify(req.uri().path()) {
+            GrpcMethodFamily::AuthzCheck => {
+                let clone = self.authz.clone();
+                let mut svc = std::mem::replace(&mut self.authz, clone);
+                Box::pin(async move { svc.call(req).await })
+            }
+            GrpcMethodFamily::IdentityRead => {
+                let clone = self.identity.clone();
+                let mut svc = std::mem::replace(&mut self.identity, clone);
+                Box::pin(async move { svc.call(req).await })
+            }
+            GrpcMethodFamily::Admin => {
+                let clone = self.admin.clone();
+                let mut svc = std::mem::replace(&mut self.admin, clone);
+                Box::pin(async move { svc.call(req).await })
+            }
+            GrpcMethodFamily::Unlimited => {
+                let clone = self.neutral.clone();
+                let mut svc = std::mem::replace(&mut self.neutral, clone);
+                Box::pin(async move { svc.call(req).await })
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared SurrealDB-backed pre-check layer (Task 2 — D-01a/b/c parity)
 // ---------------------------------------------------------------------------
@@ -211,7 +487,33 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
 /// (`axiam-api-rest::middleware::rate_limit_shared::WINDOW_SECS`): a simple
 /// fixed-window counter is acceptable here since this layer only needs to be
 /// *approximately* right (it fails open by design).
-const WINDOW_SECS: i64 = 60;
+pub const WINDOW_SECS: i64 = 60;
+
+/// Converts a per-**second** ceiling into the budget for one
+/// [`WINDOW_SECS`]-second shared window (I1).
+///
+/// **This is the units bug this constant exists to prevent.** The gRPC
+/// ceiling (`AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`) is per second; the shared
+/// cross-replica bucket is a fixed 60-second window shared with the REST
+/// limiter, whose knobs are per minute. Before I1 the per-second number was
+/// handed to [`GrpcSharedRateLimitLayer::new`] verbatim, so the shared layer
+/// enforced "N per 60 s" while the operator had configured "N per second" —
+/// and since the stricter of the two cooperating layers wins, the effective
+/// ceiling was **1/60th** of the configured one. Run 4 measured exactly that:
+/// with `GRPC_AUTHZ_PER_SEC=100`, all three gRPC scenarios admitted ~100 ops
+/// per minute (`claude_dev/improvement-after-run4-benchmark.md` I1).
+///
+/// The multiply saturates: an operator who configures a per-second ceiling
+/// above `u32::MAX / 60` gets `u32::MAX` for the window (effectively
+/// unlimited, which is what they asked for) instead of a wrapped — and
+/// therefore *tiny* — budget.
+///
+/// The alternative fix, a per-second shared window, was rejected: it would
+/// fork the `rate_limit_bucket` schema away from the REST limiter's and
+/// change the write-behind flusher cadence, for no enforcement benefit.
+pub const fn per_sec_to_window_limit(per_sec: u32) -> u32 {
+    per_sec.saturating_mul(WINDOW_SECS as u32)
+}
 
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
@@ -287,9 +589,34 @@ fn too_many_requests_response() -> Response<tonic::body::Body> {
 #[derive(Clone)]
 pub struct GrpcSharedRateLimitLayer {
     counter: SharedRateLimitCounter,
-    endpoint: &'static str,
-    limit: u32,
+    scope: SharedScope,
     trusted_hops: usize,
+}
+
+/// How a [`GrpcSharedRateLimitLayer`] derives `(bucket endpoint, window
+/// limit)` for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharedScope {
+    /// One bucket for every request, whatever the method — the pre-I2 shape.
+    /// `limit` is already expressed in the 60-second window.
+    Uniform { endpoint: &'static str, limit: u32 },
+    /// One bucket per [`GrpcMethodFamily`] (I2), sized from per-second
+    /// ceilings and converted with [`per_sec_to_window_limit`].
+    PerFamily(GrpcRateLimits),
+}
+
+impl SharedScope {
+    /// `(endpoint, window limit)` for `path`, or `None` when the request must
+    /// not be counted at all (the unlimited family).
+    fn resolve(self, path: &str) -> Option<(&'static str, u32)> {
+        match self {
+            Self::Uniform { endpoint, limit } => Some((endpoint, limit)),
+            Self::PerFamily(limits) => {
+                let family = GrpcMethodFamily::classify(path);
+                Some((family.shared_endpoint()?, limits.window_limit(family)?))
+            }
+        }
+    }
 }
 
 impl GrpcSharedRateLimitLayer {
@@ -306,6 +633,12 @@ impl GrpcSharedRateLimitLayer {
     /// `endpoint` MUST be unique per rate-limited gRPC surface so the shared
     /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
     /// never collapse distinct surfaces into one global bucket.
+    ///
+    /// **Units:** `limit` is the budget for one [`WINDOW_SECS`]-second window,
+    /// NOT a per-second rate. Prefer [`Self::new_method_scoped`], whose
+    /// parameter type ([`GrpcRateLimits`]) is per-second at the boundary and
+    /// does the conversion itself — that is the shape that makes the I1 units
+    /// bug unrepresentable.
     pub fn new<C: Connection>(
         db: impl Into<axiam_db::DbHandle<C>>,
         endpoint: &'static str,
@@ -323,6 +656,8 @@ impl GrpcSharedRateLimitLayer {
     /// Builds the layer over an EXISTING counter — for tests, and for any
     /// deployment that wants the gRPC listener and something else to share one
     /// counter instance.
+    ///
+    /// `limit` is per [`WINDOW_SECS`]-second window — see [`Self::new`].
     pub fn with_counter(
         counter: SharedRateLimitCounter,
         endpoint: &'static str,
@@ -331,10 +666,51 @@ impl GrpcSharedRateLimitLayer {
     ) -> Self {
         Self {
             counter,
-            endpoint,
-            limit,
+            scope: SharedScope::Uniform { endpoint, limit },
             trusted_hops,
         }
+    }
+
+    /// **The production constructor (I1 + I2).** Builds the layer and its
+    /// process-wide write-behind counter with one shared bucket per
+    /// [`GrpcMethodFamily`], sized from **per-second** ceilings.
+    ///
+    /// The per-second → per-window conversion happens here, once, via
+    /// [`per_sec_to_window_limit`] — a caller cannot get the units wrong
+    /// because it never sees the window.
+    pub fn new_method_scoped<C: Connection>(
+        db: impl Into<axiam_db::DbHandle<C>>,
+        limits: GrpcRateLimits,
+        trusted_hops: usize,
+    ) -> Self {
+        Self::with_counter_method_scoped(
+            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
+            limits,
+            trusted_hops,
+        )
+    }
+
+    /// [`Self::new_method_scoped`] over an EXISTING counter — for tests and
+    /// for sharing one counter instance across listeners.
+    pub fn with_counter_method_scoped(
+        counter: SharedRateLimitCounter,
+        limits: GrpcRateLimits,
+        trusted_hops: usize,
+    ) -> Self {
+        Self {
+            counter,
+            scope: SharedScope::PerFamily(limits),
+            trusted_hops,
+        }
+    }
+
+    /// The `(bucket endpoint, window limit)` this layer would apply to
+    /// `path`, or `None` when `path` is never counted.
+    ///
+    /// Exposed so the units at the composition root can be asserted directly
+    /// by a test instead of by reading the call site (I1 acceptance).
+    pub fn resolve_for_path(&self, path: &str) -> Option<(&'static str, u32)> {
+        self.scope.resolve(path)
     }
 }
 
@@ -345,8 +721,7 @@ impl<S> Layer<S> for GrpcSharedRateLimitLayer {
         GrpcSharedRateLimitService {
             inner,
             counter: self.counter.clone(),
-            endpoint: self.endpoint,
-            limit: self.limit,
+            scope: self.scope,
             trusted_hops: self.trusted_hops,
         }
     }
@@ -361,8 +736,7 @@ impl<S> Layer<S> for GrpcSharedRateLimitLayer {
 pub struct GrpcSharedRateLimitService<S> {
     inner: S,
     counter: SharedRateLimitCounter,
-    endpoint: &'static str,
-    limit: u32,
+    scope: SharedScope,
     trusted_hops: usize,
 }
 
@@ -394,8 +768,10 @@ where
         // counter, never a fresh one (a per-request counter would count
         // nothing).
         let counter = self.counter.clone();
-        let endpoint = self.endpoint;
-        let limit = self.limit;
+        // I2: the bucket (and its ceiling) depend on which method family the
+        // request belongs to; `None` means this surface is never counted
+        // (reflection / health).
+        let bucket = self.scope.resolve(req.uri().path());
         let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops);
 
         // The rate-limit decision itself is now synchronous and taken BEFORE
@@ -403,19 +779,22 @@ where
         // this (server-wide!) layer. The returned future only awaits the inner
         // service.
         let ip = key_extractor.extract(&req).ok();
-        let allow = match ip {
-            Some(ip) => {
-                // Same bucket key as before — `{endpoint}:{ip}` — so an
+        let allow = match (bucket, ip) {
+            (Some((endpoint, limit)), Some(ip)) => {
+                // Same bucket key shape as before — `{endpoint}:{ip}` — and
+                // the authz family keeps the `grpc_authz` endpoint name, so an
                 // in-flight upgrade keeps counting against the same
                 // `rate_limit_bucket` records.
                 let key = format!("{endpoint}:{ip}");
                 counter.check(&key, window_start(Utc::now()), limit)
             }
+            // Unlimited family (reflection / health) — never counted.
+            (None, _) => true,
             // No client-IP key available — fail open; the in-memory governor
             // still makes the real decision. (A counter built with
             // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from inside
             // `check`.)
-            None => true,
+            (_, None) => true,
         };
 
         Box::pin(async move {
@@ -576,6 +955,180 @@ mod tests {
              1s window, got low={low} high={high} — the quota construction \
              may be inverted (CORR-01)"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // I1 — the shared-window units, pinned at the boundary
+    // -----------------------------------------------------------------
+
+    /// The shared bucket's window is 60 s and the gRPC ceilings are per
+    /// second. If this ever stops being true, `per_sec_to_window_limit` is
+    /// wrong and the ×60 units bug is back.
+    #[test]
+    fn shared_window_is_sixty_seconds() {
+        assert_eq!(WINDOW_SECS, 60);
+    }
+
+    #[test]
+    fn per_sec_converts_to_a_sixty_second_window_budget() {
+        assert_eq!(per_sec_to_window_limit(1), 60);
+        assert_eq!(per_sec_to_window_limit(100), 6_000);
+        assert_eq!(per_sec_to_window_limit(1_000), 60_000);
+        // Saturating, never wrapping: a wrapped multiply would produce a
+        // TINY budget from a huge configured rate — the opposite of what the
+        // operator asked for, and silently.
+        assert_eq!(per_sec_to_window_limit(u32::MAX), u32::MAX);
+        assert_eq!(per_sec_to_window_limit(u32::MAX / 2), u32::MAX);
+    }
+
+    /// **The I1 call-site pin.** The layer the composition root builds
+    /// (`server.rs::start_grpc_server` → `new_method_scoped`) must enforce
+    /// `configured_per_sec × 60` against its 60-second window — NOT the
+    /// per-second number verbatim, which is what made the effective ceiling
+    /// 1/60th of the configured one.
+    #[test]
+    fn method_scoped_shared_layer_enforces_per_sec_times_sixty() {
+        let limits = GrpcRateLimits::from_authz_per_sec(100);
+        let layer = GrpcSharedRateLimitLayer::with_counter_method_scoped(
+            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
+            limits,
+            0,
+        );
+
+        let (endpoint, limit) = layer
+            .resolve_for_path("/axiam.v1.AuthorizationService/CheckAccess")
+            .expect("authz is a limited family");
+        assert_eq!(endpoint, "grpc_authz", "bucket key must not change (I1)");
+        assert_eq!(
+            limit, 6_000,
+            "the 60-second shared window must budget 100/s × 60 = 6 000; a bare 100 \
+             here is the ×60 units bug (I1)"
+        );
+
+        // The same conversion applies to every limited family.
+        assert_eq!(
+            layer.resolve_for_path("/axiam.v1.UserInfoService/GetUserInfo"),
+            Some(("grpc_identity", 100 * IDENTITY_PER_SEC_MULTIPLE * 60))
+        );
+        assert_eq!(
+            layer.resolve_for_path("/axiam.v1.UserService/GetUser"),
+            Some(("grpc_admin", 6_000))
+        );
+    }
+
+    /// The legacy uniform constructor is unchanged: its `limit` is already a
+    /// window budget and is applied to every path, whatever the method.
+    #[test]
+    fn uniform_scope_applies_one_bucket_to_every_path() {
+        let layer = GrpcSharedRateLimitLayer::with_counter(
+            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
+            "grpc_authz",
+            42,
+            0,
+        );
+        for path in [
+            "/axiam.v1.AuthorizationService/CheckAccess",
+            "/axiam.v1.UserInfoService/GetUserInfo",
+            "/grpc.health.v1.Health/Check",
+            "/",
+        ] {
+            assert_eq!(layer.resolve_for_path(path), Some(("grpc_authz", 42)));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // I2 — per-method-family scoping
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn classifies_each_service_into_its_family() {
+        use GrpcMethodFamily::*;
+        for (path, expected) in [
+            ("/axiam.v1.AuthorizationService/CheckAccess", AuthzCheck),
+            (
+                "/axiam.v1.AuthorizationService/BatchCheckAccess",
+                AuthzCheck,
+            ),
+            ("/axiam.v1.UserInfoService/GetUserInfo", IdentityRead),
+            ("/axiam.v1.TokenService/ValidateToken", IdentityRead),
+            ("/axiam.v1.TokenService/IntrospectToken", IdentityRead),
+            ("/axiam.v1.UserService/GetUser", Admin),
+            ("/axiam.v1.UserService/ValidateCredentials", Admin),
+            ("/grpc.health.v1.Health/Check", Unlimited),
+            ("/grpc.health.v1.Health/Watch", Unlimited),
+            (
+                "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+                Unlimited,
+            ),
+            (
+                "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+                Unlimited,
+            ),
+        ] {
+            assert_eq!(GrpcMethodFamily::classify(path), expected, "{path}");
+        }
+    }
+
+    /// Fail-safe default: an unrecognized path lands in the STRICTEST limited
+    /// family, never in the unlimited one. Adding a service without updating
+    /// `classify` must not silently create an unlimited gRPC surface.
+    #[test]
+    fn unknown_paths_fall_back_to_the_strictest_family() {
+        for path in [
+            "/",
+            "/nonsense",
+            "/some.other.Service/Method",
+            "/axiam.v1.FutureService/Whatever",
+        ] {
+            assert_eq!(
+                GrpcMethodFamily::classify(path),
+                GrpcMethodFamily::AuthzCheck,
+                "{path} must fail safe into the authz bucket"
+            );
+        }
+    }
+
+    /// I2's core claim: an identity read is no longer throttled by the authz
+    /// ceiling, and the three limited families use three distinct buckets.
+    #[test]
+    fn families_get_distinct_buckets_and_distinct_ceilings() {
+        let limits = GrpcRateLimits::from_authz_per_sec(100);
+        assert_eq!(limits.authz_per_sec, 100);
+        assert_eq!(limits.identity_per_sec, 500);
+        assert_eq!(limits.admin_per_sec, 100);
+        assert!(
+            limits.identity_per_sec > limits.authz_per_sec,
+            "identity reads measured ~14x an authz check; their ceiling must not \
+             be the authz ceiling (I2)"
+        );
+
+        let endpoints: Vec<_> = [
+            GrpcMethodFamily::AuthzCheck,
+            GrpcMethodFamily::IdentityRead,
+            GrpcMethodFamily::Admin,
+        ]
+        .iter()
+        .map(|f| f.shared_endpoint().expect("limited family"))
+        .collect();
+        assert_eq!(endpoints, vec!["grpc_authz", "grpc_identity", "grpc_admin"]);
+        assert_eq!(GrpcMethodFamily::Unlimited.shared_endpoint(), None);
+        assert_eq!(limits.window_limit(GrpcMethodFamily::Unlimited), None);
+    }
+
+    /// A profile preset that raises the authz ceiling raises the derived
+    /// family with it, so `gateway`/`mesh` cannot end up with identity reads
+    /// stricter than authz checks.
+    #[test]
+    fn derived_family_scales_with_the_authz_ceiling() {
+        for authz in [100, 1_000, 5_000] {
+            let limits = GrpcRateLimits::from_authz_per_sec(authz);
+            assert_eq!(limits.identity_per_sec, authz * IDENTITY_PER_SEC_MULTIPLE);
+            assert_eq!(limits.admin_per_sec, authz);
+            assert!(limits.identity_per_sec >= limits.authz_per_sec);
+        }
+        // Saturating, not wrapping.
+        let huge = GrpcRateLimits::from_authz_per_sec(u32::MAX);
+        assert_eq!(huge.identity_per_sec, u32::MAX);
     }
 
     #[test]

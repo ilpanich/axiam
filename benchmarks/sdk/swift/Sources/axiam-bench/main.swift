@@ -136,7 +136,54 @@ func swiftRuntimeVersion() -> String {
     return "swift unknown"
 }
 
+// I13 (improvement-after-run4-benchmark.md §C): `client_cpu_ms_total`/
+// `client_rss_mib_peak` recorded 0.0 for every SDK bench — the sampler was
+// never wired. Reads `/proc/self/status` (`VmHWM`, already a lifetime
+// high-water mark, not a snapshot) for peak RSS and `/proc/self/stat`
+// (fields 14/15: utime/stime in clock ticks) for cumulative CPU time —
+// Foundation-only, no new package dependency. Linux-only (matches this
+// harness' Docker/K8s deployment target per CLAUDE.md; also this bench's
+// only tested deployment target — no `swift` toolchain is present in this
+// sandbox to exercise this path live, see swift/TODO.md); returns
+// `(0, 0)` if `/proc` is unavailable rather than failing the bench. The
+// kernel clock-tick rate is assumed to be the near-universal Linux default
+// of 100 Hz rather than queried via `sysconf`, for the same "no extra API
+// surface" reason as the Rust sibling's identical sampler.
+func clientResourceUsage() -> (cpuMsTotal: Int, rssMiBPeak: Int) {
+    let clkTckHz = 100.0
+
+    var rssMiBPeak = 0
+    if let status = try? String(contentsOfFile: "/proc/self/status", encoding: .utf8) {
+        for line in status.split(separator: "\n") where line.hasPrefix("VmHWM:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2 {
+                let kb = parts[1].trimmingCharacters(in: .whitespaces)
+                    .split(separator: " ").first.map(String.init) ?? ""
+                if let kbValue = Double(kb) {
+                    rssMiBPeak = Int(kbValue / 1024.0)
+                }
+            }
+            break
+        }
+    }
+
+    var cpuMsTotal = 0
+    if let stat = try? String(contentsOfFile: "/proc/self/stat", encoding: .utf8),
+       let closeParen = stat.range(of: ")", options: .backwards) {
+        let afterComm = stat[closeParen.upperBound...]
+        let fields = afterComm.split(separator: " ").map(String.init)
+        // Fields after `comm` are 1-indexed from `state` (overall field 3):
+        // utime is overall field 14 -> fields[11]; stime field 15 -> fields[12].
+        if fields.count > 12, let utime = Double(fields[11]), let stime = Double(fields[12]) {
+            cpuMsTotal = Int((utime + stime) / clkTckHz * 1000.0)
+        }
+    }
+
+    return (cpuMsTotal, rssMiBPeak)
+}
+
 func emit(status: String, ops: [String: OpResult], iterations: Int, concurrency: Int, notes: String) {
+    let (cpuMsTotal, rssMiBPeak) = clientResourceUsage()
     let output = BenchOutput(
         schema: "axiam.sdk-bench/v1",
         sdk: "swift",
@@ -149,8 +196,8 @@ func emit(status: String, ops: [String: OpResult], iterations: Int, concurrency:
         iterations: iterations,
         concurrency: concurrency,
         ops: ops,
-        client_cpu_ms_total: 0,
-        client_rss_mib_peak: 0,
+        client_cpu_ms_total: cpuMsTotal,
+        client_rss_mib_peak: rssMiBPeak,
         notes: notes
     )
     let encoder = JSONEncoder()
@@ -366,6 +413,41 @@ func timeOp(_ fn: @escaping OpFn, concurrency: Int) async -> OpResult {
     )
 }
 
+// MARK: - I9 regression guard (improvement-after-run4-benchmark.md §C)
+//
+// A floor below which a measured `refresh` latency is not plausibly a real
+// HTTP round trip. The C# bench recorded p50 1.2 microseconds ("752 k rps")
+// because its SDK's RefreshGuard cached a completed token result on a
+// shared client for up to ~15 minutes (wall-clock freshness, no
+// observed-token check), so only the FIRST refresh in a ~2200-call run ever
+// touched the wire. AxiamSDK's single-flight `actor` guard keys on the
+// caller's currently observed access token instead, which this bench's
+// `client.refresh()` call updates after every real refresh — so a
+// same-client loop keeps hitting the wire — but this floor is kept as a
+// language-agnostic regression guard against that class of bug reappearing
+// here too (a cache hit completes in low single-digit microseconds; every
+// genuine wire call recorded across this harness' 11 languages averages
+// ~17 ms, so 0.2 ms leaves a wide margin).
+let MIN_PLAUSIBLE_REFRESH_MS = 0.2
+
+/// I9 shared-driver-style regression guard: fail loudly (non-zero exit)
+/// instead of silently publishing a fake number if `refresh` looks like it
+/// never left the process.
+func assertRefreshHitTheWire(_ refresh: OpResult, iterations: Int) {
+    let hadSamples = refresh.errors < iterations
+    if hadSamples && refresh.p50_ms < MIN_PLAUSIBLE_REFRESH_MS {
+        let message = "[swift] I9 guard: refresh p50=\(String(format: "%.4f", refresh.p50_ms))ms "
+            + "is below the \(MIN_PLAUSIBLE_REFRESH_MS)ms plausible-wire-call floor despite "
+            + "successful samples — this looks like a cached no-op (CONTRACT.md §9 guard "
+            + "reuse), not a real HTTP round trip. Failing the bench run instead of publishing "
+            + "a fake number (see improvement-after-run4-benchmark.md I9).\n"
+        if let data = message.data(using: .utf8) {
+            FileHandle.standardError.write(data)
+        }
+        exit(1)
+    }
+}
+
 // MARK: - Main
 
 do {
@@ -382,6 +464,9 @@ do {
     }
 
     emit(status: "ok", ops: results, iterations: ITER, concurrency: CONC, notes: "")
+    if let refresh = results["refresh"] {
+        assertRefreshHitTheWire(refresh, iterations: ITER)
+    }
 } catch {
     // Covers target unreachable, login failing at runtime, seed/grant missing, and bad
     // PEM material — nothing to time, so report gracefully instead of crashing (no `swift`

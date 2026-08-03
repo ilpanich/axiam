@@ -44,13 +44,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- gRPC rate limits are now scoped **per method family** instead of server-wide (I2). One
+  bucket each for authz-check (`axiam.v1.AuthorizationService`), identity-read
+  (`axiam.v1.UserInfoService`, `axiam.v1.TokenService`) and admin
+  (`axiam.v1.UserService`), with gRPC reflection and health explicitly never limited and
+  an unrecognized path failing safe into the strictest bucket. Two new knobs,
+  `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` (default 5x the authz ceiling = 500/s) and
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (default 1x = 100/s); leaving them unset derives both
+  from `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, so a posture preset still moves the whole family
+  with one variable. Previously a `GetUserInfo` read — measured at 12 665/s — was throttled
+  by the *authz* ceiling, because a single server-wide bucket made an authorization sizing
+  decision into a userinfo sizing decision
+- Startup advisory for mis-sized machine limits: when the shipped `internet` defaults are
+  what a process is actually enforcing (no posture preset, no machine limit pinned by
+  hand) and the sustained 429 ratio on the machine endpoints exceeds ~50% over a 5-minute
+  interval, the server logs "your limits are throttling what looks like legitimate machine
+  traffic; see rate-limit-sizing". Built on the write-behind rate-limit counter's existing
+  flusher pass — no new background task, no new timer, and human endpoints are excluded
+  from the ratio by construction (a 429 storm on `/auth/login` is a credential-stuffing
+  signal, not a sizing signal)
 - Benchmark dry-run mode (`just bench-dry-run`, `just dry=1 bench-run`) — rehearses the
   whole target × profile matrix over the same bring-up/seed/run/tear-down path in minutes,
   grading each cell on the k6 client contract (connect, request, expected response) instead
   of on performance, so a break surfaces before an hours-long matrix commits to it
+- Optional **session-validation cache** (I6), `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`
+  (default `0` = off). Every authenticated REST request re-reads the `session` row behind
+  the access token's `jti` to enforce D-15 revocation; that read is not covered by the
+  authorization decision cache, which is why turning the decision cache on lifted gRPC
+  authorization checks 13.1x but REST checks only 5% in benchmark run 4 — the gRPC
+  interceptor has no equivalent read. The cache stores **positive answers only**, carries
+  each session's own `expires_at` (so expiry is never extended), and is invalidated by every
+  session-deleting method on the repository, so on a single replica a logout still takes
+  effect immediately. Multi-replica deployments inherit the same bounded-staleness caveat as
+  the decision cache and should leave it off or match its TTL
+- `AXIAM__SERVER__TCP_NODELAY` (default `true`, I5) — actix-web leaves `TCP_NODELAY` unset
+  unless asked, so the REST listener ran with Nagle's algorithm enabled while the gRPC
+  listener (tonic, which defaults it on) did not. Set `false` to restore the previous
+  behaviour for A/B measurement
+- Per-stage timing instrumentation on the OAuth2 client-credentials path (I5) —
+  `client_lookup_us`, `secret_verify_us`, `tenant_lookup_us`, `token_mint_us`,
+  `handler_total_us` on the `oauth2.client_credentials` span, plus `exchange_us`,
+  `serialize_us` and `response_body_bytes` from the token endpoint, re-emitted as DEBUG
+  events on `target: "axiam::perf"`. Measurement is unconditional (five `Instant::now()`
+  reads, well under 0.1% of the handler) and only reporting is gated by the tracing level
+- `crates/axiam-db/tests/authz_query_plan_test.rs` — `EXPLAIN`-based query-plan pins for
+  the authorization hot path, so a rewrite that reintroduces a table scan fails in CI rather
+  than in production. Includes witness tests proving the removed forms really did scan
+- [`docs/deployment/authz-read-path.md`](docs/deployment/authz-read-path.md) — what one
+  authorization check costs against SurrealDB, which cache removes which round-trip, and a
+  design note on read-replica topology for authorization reads (analysis only; not
+  implemented)
+
+### Changed
+
+- Revised the shipped `internet` machine-endpoint rate-limit defaults (I3), sized from the
+  run-4 measured capacity of each endpoint: `TOKEN_PER_MIN` 20 → **120**,
+  `INTROSPECT_PER_MIN` 10 → **600**, `AUTHZ_CHECK_PER_MIN` 300 → **1800**,
+  `REVOKE_PER_MIN` 10 → **60**. The old numbers sat four to five orders of magnitude below
+  the machine's ceiling (token 20/min against ~163 000/min of capacity) and broke the first
+  healthy integration behind a NAT without protecting anything the new ones fail to
+  protect; every revised value still stays 25–2 700x below measured capacity. **Human
+  endpoints (login, register, password-reset, MFA) are unchanged** — they are sized against
+  credential guessing, never against capacity. The `gateway`/`mesh` presets are unchanged.
+  If you pinned any of these with an env var, nothing changes for you: explicit env still
+  beats both the preset and the shipped default
 
 ### Fixed
 
+- Two **full table scans on the authorization hot path** (I7). Every uncached authorization
+  check — REST, gRPC and AMQP alike — walked the whole `grants` table (every role-to-permission
+  grant of every tenant) and the whole `has_role` table (every role assignment of every user
+  of every tenant), because both predicates were written in forms the SurrealDB planner
+  cannot serve from an index: `WHERE meta::id(in) IN $role_ids` wraps the indexed field in a
+  function call, and `WHERE in IN (SELECT VALUE out FROM member_of WHERE ...)` leaves a
+  correlated sub-select on the right-hand side. `EXPLAIN` reported
+  `TableScan { pre_decode_filter: "no (unsupported predicate)" }` for both. They now compare
+  against bound record ids and a pre-resolved `LET` binding respectively and plan as
+  `IndexScan` over the existing `idx_grants_unique` / `idx_has_role_unique` composite indexes
+  — no schema change, identical rows returned. The cost was invisible on a small seed and
+  grew with total database size, which is consistent with SurrealDB showing up as the
+  product's throughput ceiling in benchmark run 4
+- gRPC rate limits were enforced at **1/60th of the configured rate** (I1). The gRPC
+  ceiling is per second, but the cross-replica shared pre-check runs the same fixed
+  60-second window as the REST limiter and was handed the per-second number verbatim; since
+  the stricter of the two cooperating layers wins, `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100`
+  admitted ~100 requests per *minute*. The per-second → per-window conversion now happens
+  once, at the layer boundary, with a saturating multiply, and the production constructor
+  takes per-second ceilings so a caller cannot get the units wrong again. Found by benchmark
+  run 4's production-posture pass
 - Stale DB handles after a reconnect: every repository was built at boot from a one-time
   `pool.handle_for_repo()` **clone** of the pooled SurrealDB connection, so when the pool's
   reconnect loop evicted a poisoned connection (observed ~7 minutes into a sustained load

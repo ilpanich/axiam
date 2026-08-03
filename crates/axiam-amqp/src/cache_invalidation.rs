@@ -63,11 +63,46 @@
 //!   logged at ERROR and counted in `DecisionCacheStats::bypassed`, so the
 //!   degraded mode is loud rather than silent.
 //!
-//! **Trust follows connection liveness and nothing else.** No inbound
-//! *message* can revoke trust — not a stale one, not a replayed one. Otherwise
-//! an attacker holding a single captured, validly-signed broadcast could
-//! disable every replica's cache at will. A rejected message is logged and
-//! counted; only the consumer's own subscribe/stream state moves the flag.
+//! **No inbound message can revoke trust** — not a stale one, not a replayed
+//! one. Otherwise an attacker holding a single captured, validly-signed
+//! broadcast could disable every replica's cache at will. A rejected message is
+//! logged and counted; it never moves the flag.
+//!
+//! ## 2a. Binding liveness — the heartbeat (§13.4 observation 1)
+//!
+//! Consumer liveness alone is not sufficient evidence, and this was a real gap.
+//! A party with broker **configure** rights can `queue.unbind` a replica's queue
+//! from the fanout exchange. Nothing visibly breaks: the consumer stays
+//! subscribed to a queue nothing routes to any more, so trust stays `true` and
+//! the replica keeps serving cached allows it will never be told to invalidate.
+//! The publisher cannot see it either — `mandatory` is off, so the broker acks
+//! an unroutable message. Invalidations are silently suppressed, bounded only by
+//! `decision_cache_ttl_secs`.
+//!
+//! Each replica therefore publishes a **self-addressed heartbeat** on an
+//! interval ([`build_signed_heartbeat`]) and watches for its own to come back.
+//! That round trip is the smallest thing that actually exercises the property in
+//! question — publish → exchange → binding → queue → consumer — so an unbound
+//! queue breaks it immediately. After
+//! [`HEARTBEAT_MISS_THRESHOLD`] consecutive missed intervals, the watchdog calls
+//! `set_trusted(false)` ([`InvalidationLiveness`]).
+//!
+//! Three properties make this safe rather than a new lever:
+//!
+//! * **The watchdog can only revoke, never grant.** Trust is granted in exactly
+//!   one place — the consumer, on a successful `basic_consume`. A watchdog able
+//!   to grant it could resurrect trust on a replica whose consumer had died.
+//! * **Only our OWN heartbeat counts.** Another replica's heartbeat proves that
+//!   replica can publish, which says nothing about *our* binding.
+//! * **Heartbeats never touch the cache and never enter the nonce guard.** They
+//!   are separated out before any [`InvalidationEvent`] is constructed, so a
+//!   heartbeat has no path to `apply`; and since they arrive on a fixed interval
+//!   from every replica, letting them consume the bounded nonce-guard capacity
+//!   would evict real invalidation nonces and weaken replay protection.
+//!
+//! Heartbeats can be disabled with
+//! `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_HEARTBEAT_SECS=0`, which restores the
+//! pre-§13.4 behaviour and re-opens the suppression window.
 //!
 //! # 3. Authenticity
 //!
@@ -114,6 +149,7 @@ use lapin::options::{
 };
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel, Confirmation, ExchangeKind};
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -235,16 +271,63 @@ pub fn build_signed_invalidation(
     event: InvalidationEvent,
     now: DateTime<Utc>,
 ) -> Result<Vec<u8>, AmqpError> {
-    let mut message = CacheInvalidationMessage {
-        origin_id,
-        tenant_id: event.tenant_id(),
-        subject_id: event.subject_id(),
-        key_version: CURRENT_KEY_VERSION,
-        nonce: Uuid::new_v4(),
-        issued_at: now,
-        hmac_signature: None,
-    };
+    sign_message(
+        master_key,
+        CacheInvalidationMessage {
+            origin_id,
+            tenant_id: event.tenant_id(),
+            subject_id: event.subject_id(),
+            key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::new_v4(),
+            issued_at: now,
+            heartbeat: false,
+            hmac_signature: None,
+        },
+    )
+}
 
+/// Tenant id stamped on a liveness heartbeat.
+///
+/// Heartbeats are not tenant-scoped — they carry no cache effect at all — but
+/// the envelope derives its HMAC subkey from `tenant_id`, so the field must
+/// hold *something*. The nil UUID is used deliberately: it is not a real
+/// tenant, so even if a heartbeat were somehow mistaken for an invalidation it
+/// could only ever flush a tenant that does not exist. The consumer's heartbeat
+/// branch runs before any event is constructed, so that path is unreachable —
+/// this is the second line of defence, not the first.
+pub const HEARTBEAT_TENANT_ID: Uuid = Uuid::nil();
+
+/// Build the signed wire bytes for one liveness heartbeat (§13.4 observation 1).
+///
+/// Same envelope, same signing, same freshness and replay gates as an
+/// invalidation — a heartbeat is not a privileged message type, it simply
+/// carries no cache effect.
+pub fn build_signed_heartbeat(
+    master_key: &[u8],
+    origin_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Vec<u8>, AmqpError> {
+    sign_message(
+        master_key,
+        CacheInvalidationMessage {
+            origin_id,
+            tenant_id: HEARTBEAT_TENANT_ID,
+            subject_id: None,
+            key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::new_v4(),
+            issued_at: now,
+            heartbeat: true,
+            hmac_signature: None,
+        },
+    )
+}
+
+/// Canonicalize, sign, and serialize one message. Shared by the invalidation and
+/// heartbeat builders so the two can never drift into signing different shapes.
+fn sign_message(
+    master_key: &[u8],
+    mut message: CacheInvalidationMessage,
+) -> Result<Vec<u8>, AmqpError> {
     // Canonical body = the message with `hmac_signature` absent.
     let canonical = serde_json::to_vec(&message)
         .map_err(|e| AmqpError::Publish(format!("canonicalize invalidation: {e}")))?;
@@ -364,6 +447,11 @@ pub enum InvalidationOutcome {
     /// would be redundant work on the exact code path the cache exists to make
     /// fast.
     SelfEcho,
+    /// A liveness heartbeat (§13.4 observation 1). Never touches the cache.
+    /// `own` distinguishes this replica's own heartbeat — the only one that
+    /// carries information, since observing it proves *our* binding is intact —
+    /// from another replica's, which is simply ignored.
+    Heartbeat { own: bool },
     /// Refused; see [`InvalidationReject`].
     Rejected(InvalidationReject),
 }
@@ -441,6 +529,18 @@ pub fn process_invalidation(
         return InvalidationOutcome::Rejected(InvalidationReject::Stale);
     }
 
+    // Heartbeats are separated out BEFORE the nonce guard and before any event
+    // is constructed. Two reasons, both deliberate: a heartbeat must never be
+    // able to reach `InvalidationEvent::apply` (so it cannot flush anything),
+    // and heartbeats arrive on a fixed interval from every replica, so letting
+    // them consume the bounded nonce-guard capacity would evict real
+    // invalidation nonces and weaken replay protection on a busy cluster.
+    if message.heartbeat {
+        let own = message.origin_id == local_origin;
+        debug!(own, "Cache-invalidation liveness heartbeat");
+        return InvalidationOutcome::Heartbeat { own };
+    }
+
     if message.origin_id == local_origin {
         debug!(tenant_id = %tenant_id, "Cache-invalidation self-echo — no-op");
         return InvalidationOutcome::SelfEcho;
@@ -487,6 +587,100 @@ pub fn handle_invalidation(
 }
 
 // ---------------------------------------------------------------------------
+// Liveness (§13.4 observation 1)
+// ---------------------------------------------------------------------------
+
+/// How many heartbeat intervals may pass with no self-echo before this replica
+/// stops trusting its cache.
+///
+/// Three, not one: a single missed heartbeat is far more likely to be a broker
+/// hiccup or a scheduling delay than a broken binding, and revoking trust on it
+/// would make every transient blip a latency cliff. Three consecutive misses is
+/// long enough to be a real signal and still bounded well below any interval an
+/// operator would find acceptable for a stale allow.
+pub const HEARTBEAT_MISS_THRESHOLD: u32 = 3;
+
+/// Tracks whether this replica is still *receiving* its own broadcasts.
+///
+/// The gap this closes (§13.4 observation 1): the cache's trust flag follows
+/// **consumer liveness** — it is set when `basic_consume` succeeds and cleared
+/// when the consumer exits. But a party with broker *configure* rights can
+/// `queue.unbind` a replica's queue from the fanout exchange. The consumer stays
+/// happily subscribed to a queue nothing is routed to any more, trust stays
+/// `true`, and the replica keeps serving cached allows it will never be told to
+/// invalidate. The publisher sees nothing either: with `mandatory` off, the
+/// broker acks an unroutable message.
+///
+/// A self-addressed heartbeat is the smallest thing that actually tests the
+/// property in question, because it exercises the *entire* loop — publish →
+/// exchange → binding → queue → consumer. An unbound queue breaks it
+/// immediately.
+///
+/// **This type can only ever revoke trust, never grant it.** Trust is granted in
+/// exactly one place, by the consumer, on a successful `basic_consume`. A
+/// watchdog that could also grant it would be able to resurrect trust on a
+/// replica whose consumer had died — turning a fail-safe into a fail-open.
+pub struct InvalidationLiveness {
+    /// When we last saw our own broadcast come back. `None` = not subscribed.
+    last_own_echo: Mutex<Option<DateTime<Utc>>>,
+}
+
+impl Default for InvalidationLiveness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InvalidationLiveness {
+    pub fn new() -> Self {
+        Self {
+            last_own_echo: Mutex::new(None),
+        }
+    }
+
+    /// Called by the consumer immediately after it subscribes. Starts the clock:
+    /// without this, a freshly-subscribed replica would look infinitely stale
+    /// and the watchdog would revoke trust before the first heartbeat round.
+    pub fn mark_subscribed(&self, now: DateTime<Utc>) {
+        *self.lock() = Some(now);
+    }
+
+    /// Called by the consumer when it observes its **own** heartbeat.
+    pub fn record_own_heartbeat(&self, now: DateTime<Utc>) {
+        *self.lock() = Some(now);
+    }
+
+    /// Called when the consumer stops, so a reconnecting consumer cannot inherit
+    /// a stale "recently alive" timestamp from its predecessor.
+    pub fn mark_unsubscribed(&self) {
+        *self.lock() = None;
+    }
+
+    /// The last observation, if any.
+    pub fn last_own_echo(&self) -> Option<DateTime<Utc>> {
+        *self.lock()
+    }
+
+    /// Has the loop been silent for longer than `interval * HEARTBEAT_MISS_THRESHOLD`?
+    ///
+    /// `None` (not subscribed) is **not** stale: the consumer's own exit path
+    /// already marked the cache untrusted, and reporting staleness here would
+    /// only produce a duplicate revocation and a misleading log line.
+    pub fn is_stale(&self, now: DateTime<Utc>, interval: chrono::Duration) -> bool {
+        match *self.lock() {
+            Some(last) => now - last > interval * (HEARTBEAT_MISS_THRESHOLD as i32),
+            None => false,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DateTime<Utc>>> {
+        self.last_own_echo
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Publisher
 // ---------------------------------------------------------------------------
 
@@ -495,20 +689,46 @@ pub fn handle_invalidation(
 /// Attached to every `AuthorizationEngine` as an
 /// [`InvalidationBroadcaster`] when the channel is enabled.
 pub struct CacheInvalidationPublisher {
-    /// Must be a **publisher-confirm** channel
-    /// (`AmqpManager::create_publisher_channel`) — without confirms the broker
-    /// returns `Confirmation::NotRequested` and this publisher would report
-    /// success for a message the broker never accepted, which is precisely the
-    /// silent failure §4.2 exists to remove.
-    channel: Channel,
+    /// Opens publisher-confirm channels on demand.
+    ///
+    /// Publisher confirms are mandatory: without them the broker returns
+    /// `Confirmation::NotRequested` and this publisher would report success for
+    /// a message the broker never accepted, which is precisely the silent
+    /// failure §4.2 exists to remove.
+    channels: Arc<dyn PublisherChannelFactory>,
+    /// The channel currently in use, if one is open and healthy.
+    ///
+    /// §13.4 observation 2: this used to be a single `Channel` created once at
+    /// startup and never replaced. A channel is closed by the broker on any
+    /// channel-level exception, and the consumer side is fully supervised with
+    /// backoff while this side was not — so one exception made **every**
+    /// access-narrowing mutation return 503 for the rest of the process
+    /// lifetime. Fail-closed, so not a security hole, but a permanent
+    /// availability defect that only a restart cleared.
+    ///
+    /// `tokio::sync::Mutex`, not `std::sync::Mutex`: the guard is held across
+    /// the `.await` on the broker's confirm.
+    channel: TokioMutex<Option<Channel>>,
     master_key: Vec<u8>,
     origin_id: Uuid,
 }
 
+/// Opens a publisher-confirm channel. Implemented by `AmqpManager`; a trait so
+/// this module stays testable without a broker and does not depend on the
+/// connection layer's concrete type.
+pub trait PublisherChannelFactory: Send + Sync {
+    fn open<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<Channel, AmqpError>> + Send + 'a>>;
+}
+
 impl CacheInvalidationPublisher {
-    pub fn new(channel: Channel, master_key: Vec<u8>, origin_id: Uuid) -> Self {
+    pub fn new(
+        channels: Arc<dyn PublisherChannelFactory>,
+        master_key: Vec<u8>,
+        origin_id: Uuid,
+    ) -> Self {
         Self {
-            channel,
+            channels,
+            channel: TokioMutex::new(None),
             master_key,
             origin_id,
         }
@@ -532,15 +752,59 @@ impl CacheInvalidationPublisher {
     pub async fn publish_event(&self, event: InvalidationEvent) -> Result<(), AmqpError> {
         let payload =
             build_signed_invalidation(&self.master_key, self.origin_id, event, Utc::now())?;
+        self.publish_payload(&payload).await
+    }
 
-        let confirm = self
-            .channel
+    /// Publish one liveness heartbeat (§13.4 observation 1).
+    ///
+    /// Deliberately shares `publish_payload` with invalidations: the heartbeat
+    /// must traverse the exact same path it is meant to be evidence about. A
+    /// heartbeat sent over a different channel, exchange or routing key would
+    /// prove something other than what the invalidations depend on.
+    pub async fn publish_heartbeat(&self) -> Result<(), AmqpError> {
+        let payload = build_signed_heartbeat(&self.master_key, self.origin_id, Utc::now())?;
+        self.publish_payload(&payload).await
+    }
+
+    /// Acquire a healthy channel, publish, and await the confirm — reopening the
+    /// channel if the one we hold has been closed.
+    async fn publish_payload(&self, payload: &[u8]) -> Result<(), AmqpError> {
+        let mut slot = self.channel.lock().await;
+
+        // Drop a channel the broker has already closed, so the next block opens
+        // a fresh one instead of publishing into a dead handle.
+        if slot.as_ref().is_some_and(|c| !c.status().connected()) {
+            warn!("Cache-invalidation publisher channel is closed — reopening");
+            *slot = None;
+        }
+        if slot.is_none() {
+            *slot = Some(self.channels.open().await?);
+        }
+        let channel = slot.as_ref().expect("channel opened above");
+
+        match Self::publish_on(channel, payload).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Any failure may have been the channel dying under us. Discard
+                // it so the *next* mutation reopens rather than inheriting a
+                // broken handle — the whole point of observation 2. The error is
+                // still returned: this mutation genuinely did not fan out, and
+                // silently retrying here would hide a broker refusing the
+                // message for a reason that will recur.
+                *slot = None;
+                Err(e)
+            }
+        }
+    }
+
+    async fn publish_on(channel: &Channel, payload: &[u8]) -> Result<(), AmqpError> {
+        let confirm = channel
             .basic_publish(
                 exchanges::AUTHZ_CACHE_INVALIDATE.into(),
                 // Fanout ignores the routing key.
                 "".into(),
                 BasicPublishOptions::default(),
-                &payload,
+                payload,
                 BasicProperties::default()
                     .with_content_type("application/json".into())
                     // Transient (1), not persistent: an invalidation is only
@@ -595,11 +859,17 @@ impl InvalidationBroadcaster for CacheInvalidationPublisher {
 /// mid-await. Making this a `Drop` guard rather than a line at the end of the
 /// function is what stops a future edit from introducing an early `return`
 /// that leaves the cache trusted with no consumer behind it.
-struct TrustGuard(Arc<DecisionCache>);
+struct TrustGuard(Arc<DecisionCache>, Option<Arc<InvalidationLiveness>>);
 
 impl Drop for TrustGuard {
     fn drop(&mut self) {
         self.0.set_trusted(false);
+        // Clear the liveness clock too, so a reconnecting consumer cannot
+        // inherit its predecessor's "recently alive" timestamp and look healthy
+        // before it has actually observed anything.
+        if let Some(liveness) = &self.1 {
+            liveness.mark_unsubscribed();
+        }
     }
 }
 
@@ -619,10 +889,11 @@ pub async fn run_cache_invalidation_consumer(
     master_key: Vec<u8>,
     replica_id: Uuid,
     skew: chrono::Duration,
+    liveness: Option<Arc<InvalidationLiveness>>,
 ) -> Result<(), AmqpError> {
     // Armed before anything can fail: from here on, every exit path leaves the
     // cache untrusted.
-    let _trust = TrustGuard(Arc::clone(&cache));
+    let _trust = TrustGuard(Arc::clone(&cache), liveness.clone());
 
     let queue = declare_cache_invalidation_topology(&channel, replica_id).await?;
 
@@ -639,7 +910,15 @@ pub async fn run_cache_invalidation_consumer(
         .map_err(AmqpError::Channel)?;
 
     // Only now — subscribed and receiving — may this replica serve from cache.
+    // This is the ONLY place trust is granted; the liveness watchdog can revoke
+    // it but never restore it, so a dead consumer can never be papered over.
     cache.set_trusted(true);
+    if let Some(liveness) = &liveness {
+        // Start the clock here rather than at the first heartbeat: otherwise a
+        // freshly-subscribed replica looks infinitely stale and the watchdog
+        // would revoke trust before the first heartbeat round completes.
+        liveness.mark_subscribed(Utc::now());
+    }
     info!(
         queue = %queue,
         replica_id = %replica_id,
@@ -677,6 +956,18 @@ pub async fn run_cache_invalidation_consumer(
                 let _ = delivery.acker.ack(BasicAckOptions::default()).await;
             }
             InvalidationOutcome::SelfEcho => {
+                let _ = delivery.acker.ack(BasicAckOptions::default()).await;
+            }
+            InvalidationOutcome::Heartbeat { own } => {
+                // Only our OWN heartbeat is evidence: it is the one that proves
+                // *this* replica's queue is still bound to the exchange. Another
+                // replica's heartbeat proves only that the other replica can
+                // publish, which says nothing about our binding.
+                if let Some(liveness) = &liveness
+                    && own
+                {
+                    liveness.record_own_heartbeat(Utc::now());
+                }
                 let _ = delivery.acker.ack(BasicAckOptions::default()).await;
             }
             InvalidationOutcome::Rejected(reason) => {

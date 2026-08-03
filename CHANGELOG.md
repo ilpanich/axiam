@@ -9,6 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Cache-invalidation liveness heartbeats (§13.4 observation 1).** Decision-cache
+  trust followed **consumer** liveness alone. A party with broker `configure`
+  rights could `queue.unbind` a replica's queue from the fanout exchange and the
+  replica would notice nothing: its consumer stays subscribed to a queue nothing
+  routes to, so trust stays on and it keeps serving cached allows it will never
+  be told to invalidate. The publisher sees nothing either — `mandatory` is off,
+  so the broker acks an unroutable message. Invalidations were silently
+  suppressed, bounded only by `decision_cache_ttl_secs`.
+
+  Each replica now publishes a **self-addressed heartbeat** every
+  `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_HEARTBEAT_SECS` (default `10`) and
+  watches for its own to come back — a round trip that exercises the whole loop
+  (publish → exchange → binding → queue → consumer), so an unbound queue breaks
+  it immediately. After three consecutive missed intervals the cache is marked
+  UNTRUSTED and the replica falls back to uncached evaluation.
+
+  The watchdog can only **revoke** trust, never grant it: trust is still granted
+  in exactly one place, by the consumer on a successful subscribe, so it can
+  never resurrect trust on a replica whose consumer has died. Heartbeats never
+  touch the cache and never enter the replay-nonce guard. Only applies when
+  cross-replica broadcast is enabled; set the interval to `0` to disable
+  (not recommended — it re-opens the suppression window).
+
+- **Cached authorization decisions are now invalidated on user delete/update
+  (§13.4 observation 9).** `users::update` and `users::delete` did not invalidate,
+  so a deleted or deactivated user's cached `Allow` survived on every replica
+  until the TTL expired. Nothing on the session-authenticated request path
+  re-reads user status, so the cache was the only place the stale grant could be
+  cleared. Both handlers now flush the affected subject.
+
+### Fixed
+
+- **Pepper rotation is no longer an unversioned hard break (§13.4 observation 3).**
+  `AXIAM__AUTH__PEPPER` keys client-secret hashing, and the `v2.hs256$` tag
+  versions the *algorithm*, not the *key* — so rotating the pepper invalidated
+  **every** client secret at once, and every OAuth2 client and service account
+  had to be re-issued in lockstep with the restart.
+
+  Set the new `AXIAM__AUTH__PEPPER_PREVIOUS` to the outgoing value for the
+  duration of a rotation: pre-rotation hashes still verify, and each secret is
+  transparently rewritten under the new pepper the first time its owner
+  authenticates, so the rotation drains itself with no downtime and no
+  re-issuance. Nothing is ever *written* under the previous key. **See the
+  rotation procedure in `docs/deployment/README.md` before rotating.**
+
+  A stored key id was deliberately not used instead: it would hand anyone with a
+  table dump an offline oracle for testing pepper guesses, which does not exist
+  today. Both keys are tried unconditionally while a rotation is configured, so
+  response time does not reveal which pepper era a row is in.
+
+- **Service-account client secrets can now migrate hash schemes (§13.4
+  observation 4).** `service_account` wrote the current scheme on create/rotate
+  but had no `upgrade_client_secret_hash`, so an existing row never migrated no
+  matter how often it authenticated — meaning the legacy v1 verifier arm could
+  not be retired on the strength of "no v1 `oauth2_client` rows remain". The
+  repository now exposes the same tenant-scoped compare-and-swap upgrade the
+  OAuth2 client repository has, which also carries pepper-rotation rewrites.
+
+- **The cache-invalidation publisher recovers its channel (§13.4 observation 2).**
+  It held one channel created at startup and never replaced, while the consumer
+  side was fully supervised with backoff — so a single channel-level exception
+  made every access-narrowing mutation return `503` for the rest of the process
+  lifetime, clearing only on restart. The channel is now opened lazily and
+  reopened after any failure.
+
 - **Cross-replica authorization decision-cache invalidation over RabbitMQ (§4.2, threat-model `T-88`).**
   The decision cache invalidated **process-locally**: on a replica that did not
   handle the mutation, a revoked grant could stay `Allow` until its entry

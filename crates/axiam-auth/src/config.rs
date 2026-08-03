@@ -34,6 +34,24 @@ pub struct AuthConfig {
     /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
     /// `&str` boundary where a pepper value is consumed.
     pub pepper: Option<SecretString>,
+    /// Previous pepper, kept **verify-only** while a pepper rotation drains
+    /// (`AXIAM__AUTH__PEPPER_PREVIOUS`, §13.4 observation 3).
+    ///
+    /// Client-secret hashes are keyed by the pepper, and the `v2.hs256$` tag
+    /// versions the *algorithm*, not the *key* — so without this, rotating
+    /// `AXIAM__AUTH__PEPPER` permanently invalidates **every** client secret and
+    /// every service account and OAuth2 client has to be re-issued in lockstep
+    /// with the restart.
+    ///
+    /// Set this to the outgoing value for the duration of a rotation. Secrets
+    /// hashed under it still verify, and each one is transparently rewritten
+    /// under the new pepper the first time its owner authenticates, so the
+    /// rotation drains itself. Unset it once the fleet has drained; nothing is
+    /// ever *written* under this key.
+    ///
+    /// It does **not** apply to Argon2id password peppering, which has its own
+    /// migration story — only to client-secret hashing.
+    pub pepper_previous: Option<SecretString>,
     /// Minimum password length for policy enforcement.
     pub min_password_length: usize,
     /// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
@@ -212,6 +230,7 @@ impl Default for AuthConfig {
             jwt_issuer: "axiam".into(),
             oauth2_issuer_url: String::new(),
             pepper: None,
+            pepper_previous: None,
             min_password_length: 12,
             mfa_encryption_key: None,
             federation_encryption_key: None,

@@ -902,19 +902,28 @@ async fn main() -> std::io::Result<()> {
             let replica_id = uuid::Uuid::new_v4();
             let broadcast_skew = config.authz.decision_cache_broadcast_skew();
 
-            // Publisher confirms are mandatory here: without them the broker
+            // §13.4 observation 2: the publisher takes the *manager*, not a
+            // channel. It opens a publisher-confirm channel lazily and reopens
+            // it after any channel-level exception. Previously this was one
+            // channel created here and held for the process lifetime, so a
+            // single exception made every access-narrowing mutation 503 until
+            // the process restarted — the consumer side was supervised with
+            // backoff, this side was not.
+            //
+            // Publisher confirms remain mandatory: without them the broker
             // answers `NotRequested` and a broadcast the broker never accepted
             // would be reported as success — the exact silent failure §4.2
             // exists to remove.
-            let publish_channel = amqp
-                .create_publisher_channel()
-                .await
-                .expect("Failed to create AMQP cache-invalidation publisher channel");
             let publisher = Arc::new(axiam_amqp::CacheInvalidationPublisher::new(
-                publish_channel,
+                Arc::clone(&amqp) as Arc<dyn axiam_amqp::PublisherChannelFactory>,
                 amqp_signing_key.clone(),
                 replica_id,
             ));
+
+            // §13.4 observation 1: trust otherwise follows consumer liveness
+            // alone, which a `queue.unbind` defeats silently. This tracks
+            // whether our own broadcasts still come back to us.
+            let liveness = Arc::new(axiam_amqp::InvalidationLiveness::new());
 
             // Consumer supervisor. The consumer marks the cache TRUSTED once it
             // is subscribed and UNTRUSTED on every exit path, so a replica that
@@ -926,6 +935,7 @@ async fn main() -> std::io::Result<()> {
             let consumer_amqp = Arc::clone(&amqp);
             let consumer_cache = Arc::clone(cache);
             let consumer_key = amqp_signing_key.clone();
+            let consumer_liveness = Arc::clone(&liveness);
             tokio::spawn(async move {
                 let mut backoff = Duration::from_secs(1);
                 let max_backoff = Duration::from_secs(30);
@@ -939,6 +949,7 @@ async fn main() -> std::io::Result<()> {
                                 consumer_key.clone(),
                                 replica_id,
                                 broadcast_skew,
+                                Some(Arc::clone(&consumer_liveness)),
                             )
                             .await
                             {
@@ -970,10 +981,69 @@ async fn main() -> std::io::Result<()> {
                 }
             });
 
+            // §13.4 observation 1 — liveness watchdog. Publishes a
+            // self-addressed heartbeat on an interval and revokes cache trust if
+            // our own heartbeats stop coming back, which is what a `queue.unbind`
+            // looks like from in here.
+            //
+            // It is a ONE-WAY revoker by construction: it calls
+            // `set_trusted(false)` and never `set_trusted(true)`. Trust is
+            // granted in exactly one place — the consumer, on a successful
+            // subscribe — so this watchdog can never resurrect trust on a
+            // replica whose consumer has died.
+            if let Some(interval) = config.authz.decision_cache_broadcast_heartbeat() {
+                let hb_publisher = Arc::clone(&publisher);
+                let hb_liveness = Arc::clone(&liveness);
+                let hb_cache = Arc::clone(cache);
+                let period = interval
+                    .to_std()
+                    .expect("heartbeat interval is a small positive duration");
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(period).await;
+
+                        // A publish failure is NOT itself a reason to distrust:
+                        // the staleness check below is the single decision point,
+                        // and a failed publish simply means no heartbeat was sent,
+                        // which that check will notice on its own if it persists.
+                        if let Err(e) = hb_publisher.publish_heartbeat().await {
+                            tracing::warn!(
+                                error = %e,
+                                "AuthZ cache-invalidation heartbeat could not be published"
+                            );
+                        }
+
+                        if hb_liveness.is_stale(chrono::Utc::now(), interval)
+                            && hb_cache.set_trusted(false)
+                        {
+                            // `set_trusted` returns the PREVIOUS value, so this
+                            // logs once on the transition rather than every tick.
+                            tracing::error!(
+                                replica_id = %replica_id,
+                                interval_secs = interval.num_seconds(),
+                                misses = axiam_amqp::HEARTBEAT_MISS_THRESHOLD,
+                                "AuthZ cache-invalidation heartbeats stopped returning — this \
+                                 replica's queue is subscribed but appears no longer bound to the \
+                                 fanout exchange, so invalidations would be silently dropped. The \
+                                 decision cache is now UNTRUSTED here (uncached evaluation: \
+                                 correct, slower). Check the broker bindings for the exchange."
+                            );
+                        }
+                    }
+                });
+            } else {
+                tracing::warn!(
+                    "AuthZ cache-invalidation liveness heartbeats are DISABLED — an unbound \
+                     replica queue would suppress invalidations undetected, bounded only by \
+                     decision_cache_ttl_secs (§13.4 observation 1)"
+                );
+            }
+
             tracing::info!(
                 replica_id = %replica_id,
                 exchange = axiam_amqp::exchanges::AUTHZ_CACHE_INVALIDATE,
                 skew_secs = config.authz.decision_cache_broadcast_skew_secs,
+                heartbeat_secs = config.authz.decision_cache_broadcast_heartbeat_secs,
                 "Cross-replica AuthZ decision-cache invalidation ENABLED (§4.2, fanout) — a \
                  mutation whose broadcast the broker does not confirm now returns 503, and this \
                  replica will not serve from cache while its invalidation consumer is down"

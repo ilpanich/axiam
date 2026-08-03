@@ -484,6 +484,32 @@ pub trait ServiceAccountRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<String>> + Send;
+
+    /// Migrate a stored `client_secret_hash` to the current scheme (§13.4
+    /// observation 4), after a **successful** verification.
+    ///
+    /// This mirrors [`OAuth2ClientRepository::upgrade_client_secret_hash`],
+    /// which service accounts were missing: `create`/`rotate_secret` write the
+    /// current scheme, but nothing migrated an existing row, so a legacy v1
+    /// service-account hash stayed v1 forever no matter how often it
+    /// authenticated. The consequence was structural rather than immediate —
+    /// the v1 arm of the verifier could never be retired on the strength of "no
+    /// v1 `oauth2_client` rows remain", because the service-account table was
+    /// silently accumulating rows the migration never reached. The same seam now
+    /// also carries pepper-rotation rewrites (§13.4 observation 3).
+    ///
+    /// Implementations MUST compare-and-swap on `expected_hash`, so a secret
+    /// rotation racing this upgrade is not clobbered into resurrecting the
+    /// previous secret. Returns `true` when a row was updated, `false` when the
+    /// CAS did not match. Callers MUST NOT turn a failure here into an
+    /// authentication failure: authentication has already succeeded.
+    fn upgrade_client_secret_hash(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 }
 
 pub trait SessionRepository: Send + Sync {

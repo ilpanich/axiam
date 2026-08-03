@@ -334,3 +334,15 @@ impl AmqpManager {
         &self.connection
     }
 }
+
+/// Lets [`crate::cache_invalidation::CacheInvalidationPublisher`] reopen its
+/// channel after a channel-level exception (§13.4 observation 2) instead of
+/// holding one channel for the process lifetime.
+impl crate::cache_invalidation::PublisherChannelFactory for AmqpManager {
+    fn open<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Channel, AmqpError>> + Send + 'a>>
+    {
+        Box::pin(self.create_publisher_channel())
+    }
+}

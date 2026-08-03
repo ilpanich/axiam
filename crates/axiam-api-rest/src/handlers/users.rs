@@ -318,6 +318,21 @@ pub async fn update<C: Connection + Clone>(
         .update(user.tenant_id, target_id, input)
         .await?;
 
+    // D7 (REVOCATION — security critical): an update can NARROW access, most
+    // directly by setting `status` to a non-Active value. Nothing on the
+    // session-authenticated request path re-reads user status (`is_session_active`
+    // checks only the session row's `expires_at`), so a cached `Allow` for this
+    // subject would otherwise outlive the change by up to the cache TTL on every
+    // replica. Invalidate unconditionally rather than only on a status change:
+    // the flush is a single targeted per-subject removal, and gating it on which
+    // field moved is exactly the kind of reasoning that goes stale as the update
+    // surface grows.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, target_id)
+        .await?;
+
     // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
     state
         .emit_webhook(
@@ -353,6 +368,16 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     let target_id = path.into_inner();
     state.user_repo.delete(user.tenant_id, target_id).await?;
+
+    // D7 (REVOCATION — security critical): the subject no longer exists, so every
+    // cached `Allow` naming it is now a decision about a deleted principal. Flush
+    // this subject before returning; without it the deleted user's cached allows
+    // survive until the TTL expires.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, target_id)
+        .await?;
 
     // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
     state

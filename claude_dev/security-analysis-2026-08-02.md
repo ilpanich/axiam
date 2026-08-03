@@ -665,3 +665,126 @@ Recorded plainly, because both were cases where I endorsed a claim rather than t
 - **Open**: **SEC-085** (HIGH, PHP guard fallback) — the only open finding in this document.
 - **Open observations**: §13.4 items 1–10, plus §10.4 residual 5 (introspect pre-auth work factor) and the carried recommendations from §12.6 (C/C++ sanitizer CI, pepper release-note prominence, Go toolchain advisories, Kotlin coverage margin).
 - **Structural note**: the §10.1 contract did what it was introduced to do. Stating the rules once and auditing eleven implementations against them surfaced two HIGH cross-tenant bypasses, an eight-SDK expiry gap and a UB defect that three prior passes had missed — *"there was no complete set to check against"* is the correct diagnosis. SEC-085 is the argument for extending that discipline one level up: §10.1 constrains what a guard must *check*, and should also state that a guard must fail closed on the **caller's** credential and never substitute another.
+
+---
+
+## 14. Remediation of §13 (2026-08-03)
+
+> ⚠️ **Written by the remediation work, not by a reviewer.** Per the §10.7 and
+> §12 precedent, every status below is a **claim pending verification**. Three
+> prior independent passes each found something the remediation's own report had
+> missed, so this section is deliberately not self-certified. §13.1's table is
+> the model: re-derive each from source, at `origin/main`, not at a working-tree
+> HEAD or a feature branch (§11.2).
+
+### 14.1 Scope
+
+§13.6 left exactly one open finding and a list of open observations. All of them
+were actioned — the required item (SEC-085) and every optional one — with the
+single deliberate exception recorded in §14.4.
+
+### 14.2 The open finding
+
+| Item | Severity | Repo | Claimed status | What landed |
+|---|---|---|---|---|
+| **SEC-085** | HIGH | `axiam-php-sdk` | Remediated — pending verification | New `AxiamClient::verifyLocally()` applies the full §10.1 set to the caller's token with **no fallback**, and is what both framework bridges now call. `verifyLocallyOrFallback()` is retained for the SDK's own outbound calls — the context where refreshing the client's own token is the intended recovery — and now carries an explicit warning against guard use. |
+
+**On the regression tests.** The finding's own fix note asked for "a negative
+test asserting that an expired caller token yields 401 even while the client
+session is healthy". Writing that test naively produces a **vacuous pass**, and
+this is worth recording because the trap is not obvious: the natural fixture
+token carries no `org_id`, so `Session::buildRefreshCall()` rejects locally and
+the fallback never reaches the transport. The test then passes against the
+*vulnerable* code, for a reason that has nothing to do with the fix.
+
+The harness therefore primes a session whose refresh genuinely succeeds and
+whose token genuinely verifies, and **asserts that precondition explicitly**
+before each case. Verified by falsification: reverting either guard to
+`verifyLocallyOrFallback()` fails 8 of the 9 new cases, each admitting the
+rejected caller as `app-service-account`. Four caller shapes are covered
+(expired, garbage, `alg:none`, foreign tenant) across both Laravel and Symfony.
+Full suite: 507 tests / 1302 assertions green.
+
+### 14.3 CONTRACT.md §10.1 rule 8 — the structural note actioned
+
+§13.6 closed with: *"§10.1 constrains what a guard must check, and should also
+state that a guard must fail closed on the caller's credential and never
+substitute another."* That is now **rule 8 — subject of the decision**, normative
+in `sdks/CONTRACT.md` and re-synced to all eleven vendored copies.
+
+Rule 8 is deliberately framed as being about **control flow, not claims**, because
+that is what made SEC-085 invisible to three prior passes and to the §10.1 audit
+itself: rules 1–7 ask *"is this token good?"* and the PHP guard satisfied all
+seven. Rule 8 asks *"is this the token the decision is about?"*. The rule also
+states the legitimate shape — a reactive-refresh helper is correct for an SDK's
+**outbound** calls — and requires the two to be separate methods with the
+no-fallback one as the documented guard entry point.
+
+The testing clause carries the §14.2 lesson forward: a rule-8 test whose client
+session is unusable passes vacuously and does not satisfy the clause.
+
+### 14.4 Observations from §13.4 and §12.6
+
+| Item | Claimed status | Where |
+|---|---|---|
+| **1** — invalidation suppression by unbinding | Remediated — pending verification | `axiam`: self-addressed liveness heartbeat; watchdog is a **one-way revoker** |
+| **2** — publisher channel has no recovery | Remediated — pending verification | `axiam`: channel opened lazily and reopened after any failure |
+| **3** — pepper rotation is an unversioned hard break | Remediated — pending verification | `axiam`: `AXIAM__AUTH__PEPPER_PREVIOUS` dual-read + lazy rewrite |
+| **4** — service-account secrets have no upgrade path | Remediated — pending verification | `axiam`: tenant-scoped CAS `upgrade_client_secret_hash` |
+| **5** — Python/Java permit a 300 s operator-set skew | Remediated — pending verification | `axiam-python-sdk`, `axiam-java-sdk`: ceiling lowered to 60 s |
+| **6** — tenant comparand is a slug in three SDKs | Remediated — pending verification | TS/PHP/Python: one-time diagnostic naming the cause |
+| **7** — Swift accepts a token with no `kid` | Remediated — pending verification | `axiam-swift-sdk` |
+| **8** — C SDK's §10.1 negative-test set incomplete | Remediated — pending verification | `axiam-c-sdk` |
+| **9** — `users.rs` does not invalidate cached decisions | Remediated — pending verification | `axiam` |
+| **10 / §12.6.1** — no sanitizer job in C/C++ CI | Remediated — pending verification | `axiam-c-sdk`, `axiam-cplusplus-sdk`: ASan+UBSan+valgrind |
+| **§12.6.2** — pepper release-note prominence | Remediated — pending verification | `axiam`: CHANGELOG + a rotation procedure in `docs/deployment/` |
+| **§12.6.3** — Go stdlib advisories | Remediated — pending verification | `axiam-go-sdk`: toolchain bump |
+| **§12.6.4** — Kotlin coverage margin 0.19 pts | Remediated — pending verification | `axiam-kotlin-sdk`: webhook lines covered |
+| **§10.4 residual 5** — introspect pre-auth work factor | **Not addressed** — accepted, unchanged | — |
+| **OBS-1** — client-secret entropy assumption | Superseded by the keyed hash (§13.1) | — |
+
+**Two design points worth recording**, because both are traps the obvious
+implementation falls into:
+
+1. **The heartbeat watchdog can only revoke trust, never grant it.** Trust is
+   still granted in exactly one place — the consumer, on a successful
+   `basic_consume`. A watchdog able to grant it could resurrect trust on a
+   replica whose consumer had died, converting a fail-safe into a fail-open.
+   Only the replica's *own* heartbeat counts: another replica's proves that
+   replica can publish, which says nothing about our binding. And heartbeats are
+   separated out before any `InvalidationEvent` exists, so they have no path to
+   `apply` and cannot consume the bounded nonce-guard capacity that real
+   invalidations depend on.
+
+2. **Pepper rotation uses a dual read, not a stored key id.** The obvious design
+   — derive a kid from the pepper and store it beside the hash — would hand
+   anyone holding a table dump an **offline oracle for testing pepper guesses**,
+   which does not exist today: testing a guess currently requires a known
+   (secret, hash) pair, and no secret is ever stored. Trying both keys costs one
+   extra HMAC on rotation-era rows and adds no new verifier for an attacker.
+   Both candidates are computed unconditionally while a rotation is configured,
+   so response time does not reveal which pepper era a row is in.
+
+**Not addressed, and why.** §10.4 residual 5 (a pre-auth caller can drive 600
+introspect client-lookups per minute per IP instead of 10) remains accepted: the
+endpoint authenticates the client before any lookup, so it is not a token oracle,
+and changing the ceiling is a posture decision rather than a fix. It stays
+recorded in §10.4.
+
+### 14.5 What a verifier should look at hardest
+
+Stated plainly, so the next pass spends its effort where this one is weakest:
+
+1. **The rule-8 regression harness.** Its value rests entirely on the fallback
+   being genuinely reachable. The precondition is asserted in-test, but a future
+   edit to the mock transport could make it vacuous again without failing
+   anything. Re-run the falsification rather than trusting the assertion.
+2. **The heartbeat's one-way-revoker property.** It is a claim about the *whole*
+   wiring, not one function: confirm by source that no path other than the
+   consumer's post-subscribe call reaches `set_trusted(true)`.
+3. **The pepper dual-read's timing behaviour.** Both candidates are computed
+   unconditionally, but only when a previous pepper is configured. Confirm that
+   the no-rotation path is unchanged and that neither path branches on the
+   presented secret.
+4. **§14.4 items 5–8 across SDKs.** Per-SDK changes are where every previous pass
+   found drift, and each language closed its own rule for its own reason.

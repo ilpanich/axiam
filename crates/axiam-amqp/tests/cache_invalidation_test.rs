@@ -730,12 +730,13 @@ fn publisher_is_an_invalidation_broadcaster() {
 #[test]
 fn own_heartbeat_is_recognised_as_own() {
     let origin = Uuid::new_v4();
-    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let (raw, nonce) =
+        build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
     let guard = NonceGuard::new();
 
     assert_eq!(
         process_invalidation(&raw, MASTER_KEY, origin, &guard, skew(), Utc::now()),
-        InvalidationOutcome::Heartbeat { own: true }
+        InvalidationOutcome::Heartbeat { own: true, nonce }
     );
 }
 
@@ -745,12 +746,13 @@ fn own_heartbeat_is_recognised_as_own() {
 fn foreign_heartbeat_is_not_evidence_of_our_own_binding() {
     let other = Uuid::new_v4();
     let us = Uuid::new_v4();
-    let raw = build_signed_heartbeat(MASTER_KEY, other, Utc::now()).expect("sign heartbeat");
+    let (raw, nonce) =
+        build_signed_heartbeat(MASTER_KEY, other, Utc::now()).expect("sign heartbeat");
     let guard = NonceGuard::new();
 
     assert_eq!(
         process_invalidation(&raw, MASTER_KEY, us, &guard, skew(), Utc::now()),
-        InvalidationOutcome::Heartbeat { own: false }
+        InvalidationOutcome::Heartbeat { own: false, nonce }
     );
 
     let liveness = InvalidationLiveness::new();
@@ -773,7 +775,8 @@ fn heartbeats_never_touch_the_cache() {
     assert!(cache.get(&request(tenant, subject)).is_some());
 
     let origin = Uuid::new_v4();
-    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let (raw, nonce) =
+        build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
     let guard = NonceGuard::new();
 
     // Processed as a FOREIGN heartbeat — the case that would be applied if
@@ -787,7 +790,10 @@ fn heartbeats_never_touch_the_cache() {
         skew(),
         Utc::now(),
     );
-    assert_eq!(outcome, InvalidationOutcome::Heartbeat { own: false });
+    assert_eq!(
+        outcome,
+        InvalidationOutcome::Heartbeat { own: false, nonce }
+    );
     assert!(
         cache.get(&request(tenant, subject)).is_some(),
         "a heartbeat must never flush a cached decision"
@@ -803,7 +809,8 @@ fn heartbeats_do_not_consume_replay_guard_capacity() {
     let us = Uuid::new_v4();
 
     for _ in 0..50 {
-        let raw = build_signed_heartbeat(MASTER_KEY, Uuid::new_v4(), Utc::now()).expect("sign");
+        let (raw, _) =
+            build_signed_heartbeat(MASTER_KEY, Uuid::new_v4(), Utc::now()).expect("sign");
         let _ = process_invalidation(&raw, MASTER_KEY, us, &guard, skew(), Utc::now());
     }
 
@@ -821,9 +828,15 @@ fn heartbeats_do_not_consume_replay_guard_capacity() {
 #[test]
 fn an_unsigned_heartbeat_is_rejected_like_any_other_message() {
     let origin = Uuid::new_v4();
-    let raw = build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
+    let (raw, nonce) =
+        build_signed_heartbeat(MASTER_KEY, origin, Utc::now()).expect("sign heartbeat");
     let mut message: CacheInvalidationMessage = serde_json::from_slice(&raw).expect("decode");
     assert!(message.heartbeat, "builder must set the heartbeat marker");
+    assert_eq!(
+        message.nonce, nonce,
+        "the builder must stamp the nonce it hands back — the liveness check \
+         registers that value, so a mismatch would make every echo look replayed"
+    );
 
     message.hmac_signature = None;
     let unsigned = serde_json::to_vec(&message).expect("serialize");
@@ -877,7 +890,8 @@ fn liveness_goes_stale_only_after_the_miss_threshold() {
     assert!(liveness.is_stale(past, interval));
 
     // A fresh own-heartbeat re-arms it.
-    liveness.record_own_heartbeat(past);
+    liveness.record_sent_heartbeat(Uuid::nil());
+    assert!(liveness.record_own_heartbeat(Uuid::nil(), past));
     assert!(!liveness.is_stale(past, interval));
 }
 
@@ -976,10 +990,98 @@ async fn publisher_reopens_its_channel_on_every_attempt_until_one_succeeds() {
     }
 
     // Heartbeats travel the same path, so they recover the same way.
-    let _ = publisher.publish_heartbeat().await;
+    let liveness = InvalidationLiveness::new();
+    let _ = publisher.publish_heartbeat(&liveness).await;
     assert_eq!(
         factory.calls.load(std::sync::atomic::Ordering::SeqCst),
         4,
         "the heartbeat must share the publish path it is meant to be evidence about"
+    );
+}
+
+/// §15.2 gap 3 — a replayed heartbeat must not satisfy the watchdog.
+///
+/// Heartbeats deliberately bypass the `NonceGuard` so they cannot evict real
+/// invalidation nonces from its bounded capacity. That left a narrow path: a
+/// party with broker rights who captured one signed heartbeat could replay it
+/// inside the freshness window to keep a replica's watchdog satisfied while its
+/// queue was unbound — the precise adversary Obs 1 is about. Acceptance is now
+/// bound to nonces this replica actually published.
+#[test]
+fn a_replayed_own_heartbeat_does_not_refresh_liveness() {
+    let liveness = InvalidationLiveness::new();
+    let t0 = Utc::now();
+    liveness.mark_subscribed(t0);
+
+    let nonce = Uuid::new_v4();
+    liveness.record_sent_heartbeat(nonce);
+
+    // The genuine echo counts, once.
+    let later = t0 + chrono::Duration::seconds(10);
+    assert!(
+        liveness.record_own_heartbeat(nonce, later),
+        "the echo of a heartbeat we published must count"
+    );
+    assert_eq!(liveness.last_own_echo(), Some(later));
+
+    // Replaying that same signed heartbeat must not count again, and must not
+    // move the clock — otherwise one captured message holds the watchdog open
+    // indefinitely.
+    let replay_at = later + chrono::Duration::seconds(60);
+    assert!(
+        !liveness.record_own_heartbeat(nonce, replay_at),
+        "a replayed heartbeat must be refused"
+    );
+    assert_eq!(
+        liveness.last_own_echo(),
+        Some(later),
+        "a replay must leave the liveness clock exactly where it was"
+    );
+}
+
+/// A heartbeat nonce this replica never issued is equally refused — covers a
+/// forged-but-signed message from a compromised sibling replaying our origin id.
+#[test]
+fn an_unissued_heartbeat_nonce_is_refused() {
+    let liveness = InvalidationLiveness::new();
+    liveness.mark_subscribed(Utc::now());
+    assert!(!liveness.record_own_heartbeat(Uuid::new_v4(), Utc::now()));
+}
+
+/// The outstanding set must stay bounded when nothing ever comes back — which
+/// is exactly the unbound-queue case the watchdog is for.
+#[test]
+fn outstanding_heartbeats_stay_bounded_when_none_return() {
+    let liveness = InvalidationLiveness::new();
+    let mut first = Vec::new();
+    for i in 0..200 {
+        let n = Uuid::new_v4();
+        if i < 8 {
+            first.push(n);
+        }
+        liveness.record_sent_heartbeat(n);
+    }
+    // The earliest nonces have been evicted, so a very late echo of one of them
+    // no longer counts — correct, since it is far past the miss threshold.
+    for n in first {
+        assert!(!liveness.record_own_heartbeat(n, Utc::now()));
+    }
+}
+
+/// A reconnecting consumer must not satisfy its watchdog with a heartbeat its
+/// predecessor published.
+#[test]
+fn unsubscribing_clears_outstanding_heartbeats() {
+    let liveness = InvalidationLiveness::new();
+    liveness.mark_subscribed(Utc::now());
+    let nonce = Uuid::new_v4();
+    liveness.record_sent_heartbeat(nonce);
+
+    liveness.mark_unsubscribed();
+    liveness.mark_subscribed(Utc::now());
+
+    assert!(
+        !liveness.record_own_heartbeat(nonce, Utc::now()),
+        "a nonce published before the reconnect must not count after it"
     );
 }

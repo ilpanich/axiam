@@ -774,3 +774,78 @@ async fn service_account_client_secret_hash_migrates_with_a_compare_and_swap() {
             .unwrap()
     );
 }
+
+/// §15.2 — service-account legacy hashes must be *countable*.
+///
+/// They cannot migrate on their own: `upgrade_client_secret_hash` only fires on
+/// a successful verification, and nothing in the running server verifies a
+/// service-account secret. So the only honest answers are (a) make the backlog
+/// visible, and (b) name rotation as the migration route. This pins both.
+#[tokio::test]
+async fn legacy_service_account_hashes_are_countable_and_clear_on_rotation() {
+    use axiam_db::client_secret::V2_PREFIX;
+
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealServiceAccountRepository::new(db.clone());
+
+    let (a, _) = repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "legacy-a".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let (b, secret_b) = repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "current-b".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+
+    // Freshly created rows are already current.
+    assert_eq!(repo.count_legacy_secret_hashes(None).await.unwrap(), 0);
+    assert!(b.client_secret_hash.starts_with(V2_PREFIX));
+
+    // Plant a pre-OBS-1 row, as a deployment upgraded from an older release has.
+    let legacy = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(b"whatever"))
+    };
+    db.query("UPDATE service_account SET client_secret_hash = $h WHERE client_id = $c")
+        .bind(("h", legacy))
+        .bind(("c", a.client_id.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.count_legacy_secret_hashes(None).await.unwrap(),
+        1,
+        "the backlog must be visible — otherwise 'can the v1 arm be retired?' is unanswerable"
+    );
+    assert_eq!(
+        repo.count_legacy_secret_hashes(Some(tenant_id))
+            .await
+            .unwrap(),
+        1,
+        "tenant scoping must narrow, not miss"
+    );
+    assert_eq!(
+        repo.count_legacy_secret_hashes(Some(Uuid::new_v4()))
+            .await
+            .unwrap(),
+        0,
+        "another tenant's backlog must not be reported as this tenant's"
+    );
+
+    // Rotation is the migration route, since lazy upgrade can never fire here.
+    let rotated = repo.rotate_secret(tenant_id, a.id).await.unwrap();
+    assert_ne!(rotated, secret_b);
+    assert_eq!(
+        repo.count_legacy_secret_hashes(None).await.unwrap(),
+        0,
+        "rotating a legacy service account must clear it from the backlog"
+    );
+}

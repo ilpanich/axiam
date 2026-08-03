@@ -135,6 +135,15 @@ have to be re-established — nothing is assumed across a boundary.
   dummy hash when the user does not exist so timing does not distinguish the two,
   and failed attempts drive an atomic, exponential-backoff lockout that is shared
   by every credential-checking path (REST and gRPC alike).
+- **Rate limits are sized by what an operation costs, not by one global number.**
+  A password verification is thousands of times more expensive than a permission
+  check, so it gets its own much tighter ceiling — and that ceiling is deliberately
+  *not* derived from the throughput knobs, so tuning a cluster for authorization
+  volume cannot widen credential guessing as a side effect. The internet-facing
+  human endpoints (login, registration, password reset, MFA) keep strict per-IP
+  limits under every deployment profile, enforced structurally: the tuning presets
+  are prevented from touching them at all. Every request path is bounded, including
+  infrastructure endpoints like health and reflection — there is no unmetered route.
 - **MFA** is built in — TOTP today, WebAuthn/passkeys for phishing-resistant,
   origin-bound second factors. TOTP codes are single-use within their window
   (replay is rejected with an atomic compare-and-set), and the MFA challenge is a
@@ -165,7 +174,11 @@ redundantly rather than at one chokepoint:
 - **Repository queries are tenant-scoped and parameterised.** Every SurrealQL
   statement uses bind parameters — no query is assembled by string concatenation of
   user input — and carries a `tenant_id` predicate. Cross-tenant graph edges are
-  stripped during permission resolution rather than followed.
+  stripped during permission resolution rather than followed. The isolation is
+  enforced twice over: an edge that would cross tenants cannot be *written* in the
+  first place, and every traversal that reads one — including group membership,
+  the indirect path by which roles are inherited — re-checks the tenant at read
+  time rather than trusting the write-time guard.
 - **The authorization engine is RBAC, additive, allow-wins with default-deny.**
   A route with no declared permission is refused, not allowed. Roles cascade down a
   resource hierarchy with bounded, cycle-safe traversal.

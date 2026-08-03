@@ -126,15 +126,30 @@ bench-up:
       export AXIAM_BENCH_RL_POSTURE="{{rl}}"
       if [ "{{rl}}" = "prod" ]; then
         echo "[bench-up] rate limits: PRODUCTION posture — per-IP limiter ACTIVE (head-to-head numbers will be throttled and flagged by report.py)"
+        # Human endpoints — unchanged by I3, and never sized from capacity.
         export AXIAM__RATE_LIMIT__LOGIN_PER_MIN=10
         export AXIAM__RATE_LIMIT__REGISTER_PER_MIN=5
-        export AXIAM__RATE_LIMIT__TOKEN_PER_MIN=20
         export AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN=3
         export AXIAM__RATE_LIMIT__MFA_PER_MIN=5
-        export AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN=10
-        export AXIAM__RATE_LIMIT__REVOKE_PER_MIN=10
-        export AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN=300
+        # Machine endpoints — I3 revision. Previous values, for the record:
+        # token 20, introspect 10, revoke 10, authz_check 300. If these drift
+        # from RateLimitConfig::default() again, `just rl-prod-check` FAILS the
+        # run: it extracts the real numbers from the source and compares them
+        # against what was admitted, so a stale value here shows up as every
+        # endpoint being "throttled" against a limit the server never had.
+        export AXIAM__RATE_LIMIT__TOKEN_PER_MIN=120
+        export AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN=600
+        export AXIAM__RATE_LIMIT__REVOKE_PER_MIN=60
+        export AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN=1800
+        # gRPC is per-method-family since I2. Leaving identity/admin unset
+        # would let them derive from authz (5x / 1x) inside the server, which
+        # is the shipped behaviour — but pinning them makes the posture the
+        # harness applied explicit in `docker inspect`, so rl-prod-check can
+        # assert all three families separately (a server-wide assertion would
+        # not have caught I2).
         export AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100
+        export AXIAM__GRPC__GRPC_IDENTITY_PER_SEC=500
+        export AXIAM__GRPC__GRPC_ADMIN_PER_SEC=100
       elif [ "{{rl}}" != "neutralized" ]; then
         echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
       else

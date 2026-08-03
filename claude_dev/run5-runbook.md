@@ -20,6 +20,11 @@ Read §0 and §1 before touching anything. Several cells need a non-default
 envelope, and two of the new knobs default to *off* — if run 5 is executed with
 last run's command lines, §5's data will silently not exist.
 
+> **Just want the commands?** [**§12 is a complete copy-paste script**](#12-exact-commands--the-copy-paste-reference)
+> for the whole run, in order, with every environment variable and parameter
+> spelled out. §0–§11 explain *why*; §12 is what you actually type. If you
+> follow §12 top to bottom you cannot collect the wrong data.
+
 ---
 
 ## 0. What changed since run 4 (and what that means for the numbers)
@@ -260,6 +265,14 @@ AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5
 a `WARN` naming the active TTL; its absence means the cache is off. Check the log
 line before trusting a cell.
 
+> **Set it before `bench-up`, not before `bench-run`.** The compose file
+> forwards an explicit allow-list of variable names into the container, and the
+> server reads its config at start — so exporting this against an
+> already-running stack changes nothing. `bench-down` then `bench-up` to change
+> it. (This knob and `AXIAM__SERVER__TCP_NODELAY` were added to that allow-list
+> alongside this runbook; they were not forwarded before.) §12.5 has the exact
+> loop, including the `docker exec … env` check that proves the value landed.
+
 Cache semantics, for interpreting results: **positive answers only** are cached
 (a revoked session is never cached, so it cannot be resurrected; a new session is
 usable instantly), entries carry the row's own `expires_at` so expiry is exact,
@@ -332,12 +345,22 @@ is measured in isolation rather than masked by caching.
 | **Success metric** | Capped-envelope `authz_check` REST **≥ 1 000/s without cache** (run-4 baseline: 753). |
 | **Strong confirmation** | The DB-uncapped delta **shrinks** (was checks +89/90%). Removing a table scan cuts per-query cost, so the capped↔uncapped gap should narrow. If it stays near +90%, the ceiling is *concurrency*, not per-query cost — and read replicas (§6.4) move up the priority list. |
 
-### 6.3 Seed-size sensitivity — the cleanest single demonstration
+### 6.3 Seed-size sensitivity — desirable, but NOT runnable as the harness stands
 
-Add **one labelled cell at 10× the seed volume**. Pre-fix, scan cost scaled with
-total row count; post-fix it should be flat. If you run only one extra cell for
-I7, run this one — it is the most direct evidence the fix is real rather than
-noise.
+The idea: one labelled cell at ~10× the seed volume. Pre-fix, scan cost scaled
+with total row count; post-fix it should be flat — the most direct evidence the
+fix is real rather than noise.
+
+**The harness cannot do this today.** `runner/seed.sh` provisions a single
+fixture (one org/tenant/user/client) and exposes no volume knob; there is no
+`BENCH_SEED_SCALE` or equivalent anywhere in `benchmarks/`. Building it means a
+bulk loader that inserts ~10× the `grants` and `has_role` edge rows **across
+many tenants** — both tables grow with the whole database, which is exactly why
+the scans mattered — run between `bench-seed` and `bench-run`.
+
+Treat this as follow-up tooling, not a run-5 step. See §12.6 for the same note
+at the point of use. Without it, I7's evidence rests on the §6.2 decision rule
+plus the `EXPLAIN` plan pins already enforced in CI.
 
 ### 6.4 Not in scope for run 5
 
@@ -513,9 +536,420 @@ When writing up:
 - [ ] I6 2×2 cache matrix run on REST and gRPC (§5.2)
 - [ ] `h5-revocation-check.sh` re-run with the session cache on (§5.4)
 - [ ] I7 cells run with **both caches off**, capped and uncapped (§6.1)
-- [ ] 10× seed-size sensitivity cell run (§6.3)
+- [ ] ~~10× seed-size sensitivity cell~~ — **not runnable**, harness has no bulk-seed tooling (§6.3)
 - [ ] `rl-prod-check` passes, `rl-prod-summary.md` archived (§7)
 - [ ] SDK pass with `repeat=3` and the wire baseline enabled (§8)
 - [ ] C# refresh reads ~1.2 ms, not 1.2 µs (§8)
 - [ ] `client_cpu_ms_total` / `client_rss_mib_peak` are non-zero (§8)
 - [ ] Thermals and `mhz_avg` recorded per cell (§1.2)
+
+> Every command in §12 was checked against the harness as it exists on this
+> branch: `just` recipes and variables, the scenario filenames, the runner
+> scripts, and — critically — that each `AXIAM__…` variable is actually
+> forwarded into the container by `targets/axiam/docker-compose.yml`. Compose
+> uses an explicit allow-list, so a variable that is merely exported in your
+> shell but absent from that list reaches nothing. The I5 and I6 knobs were
+> **added to that list** in the same commit as this section; before it, the
+> §5.1 instruction would have been silently ignored.
+
+---
+
+## 12. Exact commands — the copy-paste reference
+
+Everything below is literal. Run it from `benchmarks/` unless a block says
+otherwise. Blocks are in execution order; do not reorder them.
+
+### 12.0 The one rule that matters
+
+**Server-side environment variables are baked into the container at
+`bench-up`, not at `bench-run`.**
+
+`benchmarks/targets/axiam/docker-compose.yml` forwards an *explicit allow-list*
+of variable names into the container. Exporting a variable and then running
+`bench-run` against an already-running stack does nothing — the process was
+started with the old value. So:
+
+- put every `AXIAM__…` / `RUST_LOG` export **on the same line as, or before,
+  `bench-up`**;
+- to change any of them, **`bench-down` first, then `bench-up` again**. That is
+  why the A/B blocks below always tear down between arms.
+
+`just` variables (`target=`, `profile=`, `rl=`, `dbcaps=`, `repeat=`,
+`scenario=`, `targets=`, `profiles=`) are a different mechanism — they go
+**before the recipe name**, never after, and are not environment variables:
+
+```bash
+just target=axiam profile=p2-tls13 bench-run     # correct
+just bench-run target=axiam                      # WRONG — silently ignored
+```
+
+### 12.1 Preflight (once, before anything else)
+
+```bash
+cd /path/to/axiam/benchmarks
+
+# 1. Provenance (I18). Replace <build_ref> with the image's build_ref.
+#    run-benchmark.sh now enforces this too, but check it by hand first.
+git fetch origin main
+git merge-base --is-ancestor <build_ref> origin/main \
+  && echo "OK: image built from main" \
+  || echo "STOP: image is NOT built from main — do not start run 5"
+
+# 2. Toolchain sanity.
+just --version && docker compose version
+docker compose -f targets/axiam/docker-compose.yml config >/dev/null && echo "compose OK"
+
+# 3. Throwaway TLS/mTLS certs for the security profiles (idempotent).
+just bench-certs
+```
+
+If step 1 fails and you are *deliberately* validating a pre-merge image, and
+only then:
+
+```bash
+export BENCH_ALLOW_UNMERGED_BUILD_REF=1   # and SAY SO in the writeup + meta.json
+```
+
+### 12.2 The standard matrix (median-of-3)
+
+This is the bulk of the run and needs no special environment.
+
+```bash
+cd /path/to/axiam/benchmarks
+
+just targets="axiam keycloak zitadel" \
+     profiles="p0-plaintext p2-tls13 p3-mtls" \
+     repeat=3 \
+     bench-matrix
+```
+
+`bench-matrix` handles up/seed/run/down per cell and writes each pass to
+`results/run-<i>/`. `bench-report` medians across them later.
+
+> Keycloak's **login** cells are excluded from this pass and run separately in
+> §12.3 — they need a 4 GiB envelope. If you would rather run the matrix
+> per-target by hand, use this shape:
+>
+> ```bash
+> just target=axiam profile=p0-plaintext bench-up
+> just target=axiam bench-seed
+> just target=axiam profile=p0-plaintext bench-run
+> just target=axiam bench-down
+> ```
+
+### 12.3 Keycloak login cells — 4 GiB, separately (I16)
+
+Run 4 gave Keycloak 2 048 MiB; that was necessary but not sufficient (H7
+observed a 3.28 GiB peak) and login cells were still 1/3 valid.
+
+```bash
+cd /path/to/axiam/benchmarks
+
+for P in p0-plaintext p2-tls13; do
+  BENCH_MEM=4096m just target=keycloak profile="$P" bench-up
+  just target=keycloak bench-seed
+  just target=keycloak profile="$P" scenario=oauth2_password_login.js bench-run
+  just target=keycloak bench-down
+done
+```
+
+And, if you ran §12.2 per-target by hand rather than via `bench-matrix`, the
+rest of Keycloak's matrix at the default cap with login excluded:
+
+```bash
+export BENCH_SCENARIO_EXCLUDE="oauth2_password_login.js"
+just target=keycloak profile=p0-plaintext bench-up
+just target=keycloak bench-seed
+just target=keycloak profile=p0-plaintext bench-run
+just target=keycloak bench-down
+unset BENCH_SCENARIO_EXCLUDE
+```
+
+`BENCH_MEM` is recorded into `meta.json` automatically by the C2 machinery, so
+the 4 GiB cells are self-labelling.
+
+### 12.4 I5 — the TLS client-credentials plateau
+
+Two arms plus a control. **Tear down between arms** — `TCP_NODELAY` is read at
+container start.
+
+```bash
+cd /path/to/axiam/benchmarks
+
+# ---- Arm A: post-fix (the new shipped default) --------------------------
+export RUST_LOG="axiam=warn,axiam_oauth2=debug,axiam_api_rest=debug"
+export AXIAM__SERVER__TCP_NODELAY=true
+
+just target=axiam profile=p2-tls13 bench-up
+just target=axiam bench-seed
+just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
+docker logs axiam-bench-app > ../i5-armA-tls-nodelay-on.log 2>&1   # capture stage timings
+just target=axiam bench-down
+
+# ---- Arm B: pre-I5 behaviour (Nagle left on) ----------------------------
+export AXIAM__SERVER__TCP_NODELAY=false
+
+just target=axiam profile=p2-tls13 bench-up
+just target=axiam bench-seed
+just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
+docker logs axiam-bench-app > ../i5-armB-tls-nodelay-off.log 2>&1
+just target=axiam bench-down
+
+# ---- Control: same two arms at p0 (plaintext) ---------------------------
+for N in true false; do
+  export AXIAM__SERVER__TCP_NODELAY=$N
+  just target=axiam profile=p0-plaintext bench-up
+  just target=axiam bench-seed
+  just target=axiam profile=p0-plaintext scenario=oauth2_client_credentials.js bench-run
+  docker logs axiam-bench-app > "../i5-p0-nodelay-$N.log" 2>&1
+  just target=axiam bench-down
+done
+
+unset AXIAM__SERVER__TCP_NODELAY
+export RUST_LOG="axiam=warn"
+```
+
+> Confirm the container name first with `docker ps --format '{{.Names}}'` if
+> `docker logs axiam-bench-app` errors — the compose project prefix can vary.
+
+**What to pull out of those logs** — DEBUG events on target `axiam::perf`:
+
+```bash
+grep -o 'stage="oauth2.client_credentials".*' ../i5-armA-tls-nodelay-on.log | head
+grep -o 'stage="oauth2.token_endpoint".*'     ../i5-armA-tls-nodelay-on.log | head
+```
+
+Fields: `client_lookup_us`, `secret_verify_us`, `tenant_lookup_us`,
+`token_mint_us`, `handler_total_us`; and `exchange_us`, `serialize_us`,
+`response_body_bytes`.
+
+**The VU sweep** (H6 §6 — blocked since H6, finally runnable):
+
+```bash
+for VUS in 1 2 5 10 20 50 100; do
+  for PROF in p0-plaintext p2-tls13; do
+    just target=axiam profile="$PROF" bench-up
+    just target=axiam bench-seed
+    BENCH_VUS=$VUS just target=axiam profile="$PROF" \
+      scenario=oauth2_client_credentials.js bench-run
+    just target=axiam bench-down
+  done
+done
+```
+
+**Kernel-level confirmation**, while an arm-B run is in flight (separate shell):
+
+```bash
+docker exec axiam-bench-app sh -c 'ss -ti' | head -40
+# A Nagle stall shows unacked bytes sitting with an idle congestion window.
+```
+
+Decision rule is §4.4.
+
+### 12.5 I6 — REST/gRPC authz asymmetry (the 2×2)
+
+**`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` defaults to `0` (OFF). If
+you skip these exports, this section produces nothing new.**
+
+```bash
+cd /path/to/axiam/benchmarks
+
+for DEC in false true; do
+  for SESS in 0 5; do
+    export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$DEC
+    export AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=$SESS
+
+    just target=axiam profile=p0-plaintext bench-up
+
+    # Verify the knobs actually took effect BEFORE spending a cell on it:
+    docker exec axiam-bench-app env | grep -E 'DECISION_CACHE_ENABLED|SESSION_VALIDATION_CACHE_TTL'
+    docker logs axiam-bench-app 2>&1 | grep -i 'session.validation' | head -3
+    # With SESS=5 you MUST see a startup WARN naming the TTL.
+    # No WARN => the cache is off => the cell is worthless. Stop and fix.
+
+    just target=axiam bench-seed
+    just target=axiam profile=p0-plaintext scenario=authz_check_rest.js bench-run
+    just target=axiam profile=p0-plaintext scenario=authz_check_grpc.js bench-run
+    just target=axiam bench-down
+  done
+done
+
+unset AXIAM__AUTHZ__DECISION_CACHE_ENABLED AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS
+```
+
+This 2×2 **replaces** the 1-D H5 K-sweep — the two caches cover disjoint
+round-trips, so a single-variable sweep cannot separate them.
+
+**Revocation regression cell — mandatory, not optional.** A cache that speeds
+up authz by breaking revocation is not a win:
+
+```bash
+export AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5
+just target=axiam profile=p0-plaintext bench-up
+just target=axiam bench-seed
+bash runner/h5-revocation-check.sh
+just target=axiam bench-down
+unset AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS
+# Expect: revocation still immediate on a single replica (<= 5s if 2+ replicas).
+```
+
+Decision rule is §5.3.
+
+### 12.6 I7 — SurrealDB ceiling (both caches OFF)
+
+The table-scan fixes are unconditional, so nothing to enable — but the caches
+must be **off** or they mask the effect being measured.
+
+```bash
+cd /path/to/axiam/benchmarks
+
+export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false
+export AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0
+
+for CAPS in capped uncapped; do
+  just target=axiam profile=p0-plaintext dbcaps="$CAPS" bench-up
+  just target=axiam bench-seed
+  for S in authz_check_rest.js authz_check_grpc.js authz_batch_rest.js; do
+    just target=axiam profile=p0-plaintext dbcaps="$CAPS" scenario="$S" bench-run
+  done
+  just target=axiam bench-down
+done
+
+unset AXIAM__AUTHZ__DECISION_CACHE_ENABLED AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS
+```
+
+> Scenario filenames verified present: `authz_check_rest.js`,
+> `authz_check_grpc.js`, `authz_batch_rest.js`, `authz_batch_grpc.js`,
+> `oauth2_client_credentials.js`, `oauth2_password_login.js`,
+> `token_refresh.js`. Add `authz_batch_grpc.js` to the inner loop if you want
+> the gRPC batch surface too.
+
+**Seed-size sensitivity — NOT RUNNABLE with the current harness. Skip it, or
+build the tooling first.**
+
+§6.3 describes this as the cleanest single demonstration that the I7 fix is
+real, and that reasoning still holds: pre-fix, the scan cost scaled with total
+row count, so post-fix it should be flat. But **the harness cannot do it
+today**, and this was verified rather than assumed:
+
+- `runner/seed.sh` provisions a *fixture* — one org, one tenant, one user, one
+  client — not a bulk dataset. It exposes no volume knob (`BENCH_SEED_DIR` is a
+  path, not a size).
+- There is no `BENCH_SEED_SCALE`, `SEED_USERS` or equivalent anywhere in the
+  harness. Do not invent one and expect it to be honoured; it will be silently
+  ignored and you will measure the normal seed twice.
+
+If you want this cell, it needs new tooling first: a bulk loader that inserts
+~10x the `grants` and `has_role` edge rows **across many tenants** (the whole
+point is that both tables grow with the entire database, not with one tenant),
+run after `bench-seed` and before `bench-run`. Label the resulting cell
+explicitly so it is never averaged in with normal-seed cells.
+
+Without it, the I7 evidence for run 5 rests on the §6.2 decision rule — the
+capped-envelope ≥ 1 000/s target and the narrowing of the DB-uncapped delta —
+which is weaker but still decisive, plus the `EXPLAIN` plan pins that already
+run in CI.
+
+Decision rule is §6.2. CI guard:
+`cargo test -p axiam-db --test authz_query_plan_test`.
+
+### 12.7 Prod-posture pass + the I19 assertions
+
+```bash
+cd /path/to/axiam/benchmarks
+
+just rl=prod target=axiam profile=p0-plaintext bench-up
+just target=axiam bench-seed
+just rl=prod target=axiam profile=p0-plaintext bench-run
+just target=axiam bench-down
+
+# I19: configured-vs-admitted per endpoint. Exit 1 on any endpoint outside +/-10%.
+just rl-prod-check
+# artifact: results/rl-prod-summary.md
+```
+
+`rl=prod` sets the real shipped limits, and `rl_prod_check.py` re-extracts them
+**read-only from the Rust source** — so if the two ever drift, the check fails
+loudly instead of publishing a wrong comparison. Expected configured values on
+this branch:
+
+| endpoint | configured |
+|---|---|
+| token | 120/min |
+| introspect | 600/min |
+| authz_check | 1 800/min |
+| revoke | 60/min |
+| gRPC authz | 6 000/min (100/s x 60) |
+| gRPC identity | 30 000/min (500/s x 60) |
+| gRPC admin | 6 000/min (100/s x 60) |
+| login / register / reset / MFA | 10 / 5 / 3 / 5 per min |
+
+**I4 — refresh-under-prod errors.** Run 4 saw 2 833 failures (2.4%) on
+`token_refresh` under prod posture, which line up with the harness's periodic
+re-login tripping the 10/min login bucket. After the pass above, check:
+
+```bash
+grep -h "token_refresh" results/run-*/axiam/p0-plaintext/*/summary.json 2>/dev/null | head
+# Expect the failure count to have dropped. If it has not, the re-login budget
+# still needs fixing (or a pre-minted session pool in setup).
+```
+
+### 12.8 SDK pass (median-of-3, with the wire baseline)
+
+```bash
+cd /path/to/axiam/benchmarks
+
+just target=axiam profile=p0-plaintext repeat=3 SDK_BENCH_CONCURRENCY=16 sdk-bench-all
+```
+
+The matched-VU k6 wire baseline now runs automatically first
+(`BENCH_VUS = SDK_BENCH_CONCURRENCY`) so the `p95 overhead vs wire` column is
+populated. **Do not override that coupling** — an unmatched baseline produces
+bogus negative overheads (the draft-4 lesson). `SDK_BENCH_SKIP_WIRE=1` exists
+for quick re-runs; never use it for the run of record.
+
+Then verify the three things run 4 got wrong:
+
+```bash
+# I9 — C# refresh must now be a REAL call: expect ~1.2 ms, NOT 1.2 us.
+grep -h '"op": *"refresh"' results/sdk/p0-plaintext/*.json | grep -i csharp
+
+# I13 — client telemetry must be non-zero (it was 0.0 for every SDK in run 4).
+grep -ho '"client_cpu_ms_total": *[0-9.]*' results/sdk/p0-plaintext/*.json | sort -u | head
+grep -ho '"client_rss_mib_peak": *[0-9.]*' results/sdk/p0-plaintext/*.json | sort -u | head
+
+# I10 — C and PHP must render under the separate serial-bench table.
+grep -n "conc=1\|serial benches" results/sdk/sdk-report.md
+```
+
+If any refresh row still reads in microseconds, the I9 guard should already
+have failed the run — treat a microsecond row plus a passing run as a harness
+bug, not a fast SDK.
+
+### 12.9 Report
+
+```bash
+cd /path/to/axiam/benchmarks
+just bench-report        # -> results/report.md, SDK section with conc=1 labelling
+```
+
+### 12.10 If something goes wrong
+
+```bash
+# Tear everything down and start the cell again:
+just target=axiam bench-down
+
+# Wipe accumulated results (DESTRUCTIVE — archive first if you care):
+just bench-clean
+
+# Archive a completed run:
+just bench-pack
+
+# Prove a cell can connect/seed/answer without spending a real measurement:
+just target=axiam profile=p0-plaintext dry=1 bench-run     # -> results/dry-run/
+just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-dry-run
+```
+
+A dry run is the cheapest way to validate a whole matrix invocation before
+committing hours to it. **If you change any command in this section, dry-run it
+first.**

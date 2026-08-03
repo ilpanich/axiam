@@ -317,8 +317,13 @@ impl Default for RateLimitConfig {
             // anything the raised ones fail to protect — they broke the first
             // healthy integration behind a NAT while sitting 4–5 orders of
             // magnitude below the machine's ceiling. Each revised value still
-            // stays >=500x below measured capacity, so the abuse posture is
-            // intact.
+            // stays well below measured capacity — 25x at the tightest
+            // (authz_check, deliberately so: it is the endpoint a real service
+            // calls per request), 400-2 700x on the rest — so the abuse
+            // posture is intact. See `revised_defaults_keep_capacity_margin`
+            // for the pinned arithmetic. (Do NOT restate this as ">=500x":
+            // the run-4 planning docs made that claim and it is false for
+            // authz_check and introspect.)
             //
             // Previous shipped values, for the record: token 20,
             // introspect 10, revoke 10, authz_check 300.

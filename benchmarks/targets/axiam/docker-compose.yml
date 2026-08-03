@@ -99,6 +99,18 @@ services:
       AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS: "${AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS:-5}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
+      # --- I5: Nagle on the REST listener ---------------------------------
+      # actix-web leaves the socket at its OS default (Nagle ON) unless told
+      # otherwise; tonic sets TCP_NODELAY itself. Shipped default is `true`.
+      # Set to "false" to reproduce the pre-I5 behaviour for the run-5 A/B —
+      # this MUST be listed here or a shell `export` never reaches the
+      # container (compose forwards only the names in this block).
+      AXIAM__SERVER__TCP_NODELAY: "${AXIAM__SERVER__TCP_NODELAY:-true}"
+      # --- I6: session-validation cache ------------------------------------
+      # Shipped default is 0 = OFF. The run-5 I6 matrix needs it set to a
+      # non-zero TTL (5) or the cell measures nothing new. The server logs a
+      # WARN naming the active TTL at startup; its absence means it is off.
+      AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS: "${AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS:-0}"
       # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so
       # runner/seed.sh can POST /api/v1/admin/bootstrap without a setup_token.
       # Bench-only; the production compose deliberately does not preset this.
@@ -133,6 +145,13 @@ services:
       AXIAM__RATE_LIMIT__REVOKE_PER_MIN: "${AXIAM__RATE_LIMIT__REVOKE_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN: "${AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN:-1000000}"
       AXIAM__GRPC__GRPC_AUTHZ_PER_SEC: "${AXIAM__GRPC__GRPC_AUTHZ_PER_SEC:-1000000}"
+      # I2: the gRPC limiter is per-method-family. Unset, identity derives as
+      # 5x authz and admin as 1x authz inside the server; neutralized runs
+      # therefore stay unlimited either way. Pinned here so `rl=prod` can set
+      # all three explicitly and rl-prod-check can assert each family — a
+      # server-wide assertion would not have caught the I2 scoping bug.
+      AXIAM__GRPC__GRPC_IDENTITY_PER_SEC: "${AXIAM__GRPC__GRPC_IDENTITY_PER_SEC:-5000000}"
+      AXIAM__GRPC__GRPC_ADMIN_PER_SEC: "${AXIAM__GRPC__GRPC_ADMIN_PER_SEC:-1000000}"
       RUST_LOG: "${RUST_LOG:-axiam=warn}"
     depends_on:
       surrealdb: { condition: service_healthy }

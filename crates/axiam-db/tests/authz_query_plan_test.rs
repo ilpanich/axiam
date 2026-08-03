@@ -44,6 +44,15 @@ use surrealdb::engine::local::{Db, Mem};
 use surrealdb_types::RecordId;
 use uuid::Uuid;
 
+/// A non-hard-coded test password. These tests assert *query plans*; nothing
+/// here ever verifies a password, so the seeded user's credential is
+/// irrelevant — generate a fresh random value each run so there is no
+/// hard-coded credential for CodeQL's `rust/hardcoded-credentials` to flag.
+/// Comfortably exceeds the 12-char minimum.
+fn test_password() -> String {
+    format!("pw-{}", Uuid::new_v4())
+}
+
 /// Boot an in-memory SurrealDB with the production schema applied.
 async fn fresh_db() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -80,7 +89,7 @@ async fn seeded_db() -> (Surreal<Db>, Uuid, Uuid) {
             tenant_id: tenant.id,
             username: "planner".into(),
             email: "planner@example.com".into(),
-            password: "pass123".into(),
+            password: test_password(),
             metadata: None,
         })
         .await

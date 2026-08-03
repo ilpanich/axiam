@@ -334,13 +334,14 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` | Write-behind flush interval for the shared counter, in milliseconds (default `1000`, clamped `50`–`60000`). Directly scales the cross-replica overshoot bound — see [Shared-store consistency model](#shared-store-consistency-model-write-behind) below. |
 
 The gRPC listener has its own per-second ceilings, one bucket per gRPC
-**method family** (reflection and health are never limited):
+**method family** (reflection and health share a fixed, deliberately
+generous 100/s bucket):
 
 | Key | Purpose |
 |---|---|
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | Max `axiam.v1.AuthorizationService` requests per second per IP (default `100`). |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | Max `axiam.v1.UserInfoService` + `axiam.v1.TokenService` requests per second per IP. Unset = 5x the authz ceiling (default `500`). |
-| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` requests per second per IP. Unset = the authz ceiling (default `100`). `ValidateCredentials` is Argon2id-bound, so this is a CPU guard. |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` requests per second per IP. Unset = a flat `10` (600/min per IP) in **every** posture — `ValidateCredentials` is Argon2id-bound, so this is a CPU guard on online password guessing and is deliberately not derived from the read-sized authz ceiling (SEC-079). |
 | `AXIAM__GRPC__KEY` | Reserved for D8 parity; currently a no-op (the gRPC limiters are always per-IP — see [Sizing your rate limits § 5](rate-limit-sizing.md)). |
 
 > **Which numbers should you actually run?** See

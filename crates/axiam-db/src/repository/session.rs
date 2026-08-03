@@ -279,12 +279,21 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .await
             .map_err(DbError::from)?;
 
-        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
         // I6: invalidate unconditionally — whether or not this caller won the
         // single-use race, the row is gone once any caller consumed it.
+        //
+        // This MUST come before `take(0)` (security re-verification
+        // 2026-08-03, residual 2). The DELETE has already committed by the
+        // time the `.await` returns `Ok`; if the BEFORE image then failed to
+        // deserialize, an early `?` would leave a *positive* cache entry live
+        // for up to the TTL — i.e. a deleted session would keep validating.
+        // Invalidation is infallible and idempotent, so running it first is
+        // free.
         if let Some(cache) = &self.validation_cache {
             cache.invalidate(tenant_id, id);
         }
+
+        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
         Ok(!deleted.is_empty())
     }
 
@@ -330,11 +339,18 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .await
             .map_err(DbError::from)?;
 
-        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
         // I6: same set, minus the session the caller deliberately kept.
+        //
+        // Ordered before `take(0)` for the same reason as `consume` — the
+        // DELETE is already committed once the `.await` returns, so a
+        // deserialize failure of the BEFORE image must not be able to strand a
+        // positive cache entry for a session that no longer exists
+        // (residual 2).
         if let Some(cache) = &self.validation_cache {
             cache.invalidate_user(tenant_id, user_id, Some(current_session_id));
         }
+
+        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
         Ok(deleted.len() as u64)
     }
 

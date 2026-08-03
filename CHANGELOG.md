@@ -50,9 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`axiam.v1.UserService`), with gRPC reflection and health explicitly never limited and
   an unrecognized path failing safe into the strictest bucket. Two new knobs,
   `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` (default 5x the authz ceiling = 500/s) and
-  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (default 1x = 100/s); leaving them unset derives both
-  from `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, so a posture preset still moves the whole family
-  with one variable. Previously a `GetUserInfo` read — measured at 12 665/s — was throttled
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (default a flat 10/s — see the posture note under
+  *Security* below); leaving `GRPC_IDENTITY_PER_SEC` unset derives it from
+  `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, so a posture preset still moves that pair with one
+  variable. Previously a `GetUserInfo` read — measured at 12 665/s — was throttled
   by the *authz* ceiling, because a single server-wide bucket made an authorization sizing
   decision into a userinfo sizing decision
 - Startup advisory for mis-sized machine limits: when the shipped `internet` defaults are
@@ -131,7 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admitted ~100 requests per *minute*. The per-second → per-window conversion now happens
   once, at the layer boundary, with a saturating multiply, and the production constructor
   takes per-second ceilings so a caller cannot get the units wrong again. Found by benchmark
-  run 4's production-posture pass
+  run 4's production-posture pass. **Read the gRPC admin-ceiling entry under *Security*
+  below before upgrading** — correcting these units raised every gRPC ceiling 60x, which is
+  a posture change and not only a units fix
 - Stale DB handles after a reconnect: every repository was built at boot from a one-time
   `pool.handle_for_repo()` **clone** of the pooled SurrealDB connection, so when the pool's
   reconnect loop evicted a poisoned connection (observed ~7 minutes into a sustained load
@@ -145,6 +148,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker version` against an unreachable daemon prints an empty line and *then* fails, so
   the `|| echo unknown` fallback produced a literal newline mid-string and took `report.py`
   down with an "Invalid control character" for the whole run
+
+### Security
+
+- **gRPC admin/credential-check ceiling is now an absolute 10/s (600/min per IP), not the
+  authz ceiling (SEC-079). This is a posture change — read it even if you skipped the
+  units fix above.** Correcting the gRPC rate-limit units (I1, under *Fixed*) changed what
+  every gRPC ceiling actually enforces from `N` per **minute** to `N` per **second**. The
+  units bug had been accidentally supplying 60x more protection than the configuration
+  said, so an operator who reads only "corrected gRPC units" will not realise their
+  deployed gRPC ceiling rose 60x on upgrade. That matters most on
+  `axiam.v1.UserService/ValidateCredentials`, which performs a real Argon2id password
+  verification (~19 MiB of memory arena each): its per-IP ceiling would have gone from
+  ~100/min to ~6 000/min — a 60x increase in online password-guessing throughput and in the
+  Argon2id CPU a caller can conscript. The admin family therefore no longer derives from
+  `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` at all; it takes a CPU-appropriate absolute default of
+  10/s, unchanged by `AXIAM__RATE_LIMIT__PROFILE`, so raising the authz ceiling for
+  service-mesh capacity can no longer widen credential guessing as a side effect. The
+  family holds only `GetUser` and `ValidateCredentials`; the high-volume identity read is
+  `GetUserInfo` on `UserInfoService`, which is in the identity-read family and unaffected.
+  **Action:** if a provisioning or admin workload legitimately exceeds 600 `UserService`
+  calls per minute from one source IP, pin `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — explicit
+  configuration still wins over both the default and any posture preset. Per-account
+  lockout, the shared failure metering and the process-wide crypto semaphore are unchanged
+- gRPC reflection and health are no longer an **unlimited pass-through**. The family is
+  selected by prefix-matching the client-supplied gRPC `:path` (`/grpc.reflection.`,
+  `/grpc.health.`) and used to bypass both limiter layers entirely. Neither service is
+  registered today — requests terminate `Unimplemented`, so the practical effect was
+  unmetered HTTP/2 stream churn rather than database work — but registering a health
+  service would have made it a genuinely unmetered endpoint. It now has its own bucket at a
+  fixed 100/s per IP: orders of magnitude above any real probe cadence, so a liveness probe
+  still answers during an incident when every other family is saturated, while the surface
+  stops being unbounded
+- Group-membership traversal on the authorization read path now carries a read-time tenant
+  predicate. `get_user_role_assignments` resolved `member_of` edges with no
+  `out.tenant_id` filter; this was not exploitable — group membership is validated against
+  the tenant at write time and the outer `has_role` predicate still confined the resulting
+  role — but it left group-inherited roles as the one authorization edge with no read-time
+  tenant check, so a migration or bulk import writing `member_of` directly would have
+  bypassed it. The predicate is served by the existing `idx_member_of_unique` index; the
+  query-plan pins confirm the plan is still an `IndexScan`
+- Session-cache invalidation now runs immediately after the `DELETE` commits, before the
+  deleted rows are deserialized, in `consume` and `invalidate_user_sessions_except`. The
+  `DELETE` has already succeeded at the database once the await returns, so a deserialize
+  failure of the returned BEFORE image used to return early and leave a **positive**
+  session-validation cache entry live for up to the TTL — a deleted session that kept
+  validating. Only reachable with the opt-in
+  `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` enabled
 
 ## [1.0.0-alpha21] - 2026-07-30
 

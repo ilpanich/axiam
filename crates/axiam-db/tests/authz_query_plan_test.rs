@@ -217,17 +217,27 @@ async fn direct_role_assignment_lookup_is_index_satisfied() {
 // 2. member_of — the group-membership sub-select
 // ---------------------------------------------------------------------------
 
+/// The shipped form carries the read-time tenant predicate added for
+/// residual 1 (`AND out.tenant_id = $tenant_id`). That predicate must remain
+/// free: `in =` still selects the row set through `idx_member_of_unique` and
+/// the tenant comparison is a post-filter, so the plan must stay an
+/// `IndexScan`, not degrade to a `TableScan`.
 #[tokio::test]
 async fn group_membership_lookup_is_index_satisfied() {
     let db = fresh_db().await;
     let mut res = db
         .query(
             "SELECT VALUE out FROM member_of \
-             WHERE in = type::record('user', $user_id) EXPLAIN",
+             WHERE in = type::record('user', $user_id) \
+             AND out.tenant_id = $tenant_id EXPLAIN",
         )
         .bind((
             "user_id",
             "11111111-1111-1111-1111-111111111111".to_string(),
+        ))
+        .bind((
+            "tenant_id",
+            "22222222-2222-2222-2222-222222222222".to_string(),
         ))
         .await
         .unwrap();
@@ -253,7 +263,9 @@ async fn inherited_role_assignment_lookup_is_index_satisfied() {
     let mut res = db
         .query(
             "LET $group_records = (\
-                 SELECT VALUE out FROM member_of WHERE in = type::record('user', $user_id)\
+                 SELECT VALUE out FROM member_of \
+                 WHERE in = type::record('user', $user_id) \
+                 AND out.tenant_id = $tenant_id\
              );",
         )
         .query(
@@ -284,7 +296,9 @@ async fn inlined_membership_subselect_would_be_a_full_table_scan() {
         .query(
             "SELECT resource_id FROM has_role \
              WHERE in IN (\
-                 SELECT VALUE out FROM member_of WHERE in = type::record('user', $user_id)\
+                 SELECT VALUE out FROM member_of \
+                 WHERE in = type::record('user', $user_id) \
+                 AND out.tenant_id = $tenant_id\
              ) AND out.tenant_id = $tenant_id EXPLAIN",
         )
         .bind(("user_id", user_id.to_string()))

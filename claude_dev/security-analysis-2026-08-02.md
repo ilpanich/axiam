@@ -12,6 +12,7 @@
 - **Final verification (2026-08-03, `8c2a5f87`)**: every §12 claim **CONFIRMED**, all eleven SDK repos merged, and the new cross-replica cache-invalidation surface reviewed and found authenticated and fail-safe. One new **HIGH** was raised — **SEC-085**, the PHP framework guards authenticating a failed request as the application's own service account. See **[§13](#13-final-verification-pass-2026-08-03)**, which also records two corrections to my own earlier conclusions.
 - **Verification of §14 (2026-08-03, `f0a750ff`)**: **SEC-085 is closed**, CONTRACT §10.1 gained a **rule 8** (the guard must decide on the caller's credential and no other), and rule-8 conformance is confirmed across all eleven SDKs. Two §14 claims were PARTIAL — the service-account upgrade seam had no production caller, and the invalidation heartbeat left the decision-cache TTL unclamped — plus seven observations. See **[§15](#15-independent-verification-of-14-2026-08-03)**.
 - **Verification of §16 + first review of a new feature (2026-08-03, `5509c2c1`)**: both §15 partials are now closed (TTL clamped to 300 s; the upgrade caller arrived with the new grant). The **service-account `client_credentials` grant** is new authentication surface and was reviewed as such: audience separation (`axiam:m2m` vs `axiam:user`) is correct and enforced bidirectionally, tenant and org are server-derived, status is checked and scope escalation is impossible. It carries one new **LOW** — **SEC-086**, a client-existence oracle in the token endpoint's `error_description` — and the standing recommendation to move the mTLS service-account token to `axiam:m2m`. See **[§17](#17-verification-of-16-and-review-of-the-new-service-account-grant-2026-08-03)**.
+- **Verification of the SEC-086 / §17 remediation (2026-08-03, `d15878a2`)**: the **device audience is narrowed** — the strongest single change in this series, shipped together with the compensating `AuthenticatedPrincipal` grant so no device capability broke. The gRPC audience check, the pre-verification tenant assertion and the publisher-lock generation counter are all confirmed. But **SEC-086 is only PARTIAL** — the same existence oracle survives on the `authorization_code` grant — and closing the audit residual opened **SEC-087** (unauthenticated, tenant-unvalidated audit writes). `CHANGELOG.md` now states the *inverse* of the breaking change it shipped. See **[§18](#18-verification-of-the-sec-086--17-remediation-2026-08-03)**.
 
 ---
 
@@ -1372,3 +1373,67 @@ only the `aud` value differs — but a §10 guard fronting a resource server tha
 accepts device callers must be configured to expect `axiam:m2m`, and any SDK
 device flow that called a non-authz endpoint with the device token must
 migrate that call deliberately.
+
+---
+
+## 18. Verification of the SEC-086 / §17 remediation (2026-08-03)
+
+- **Commit**: server `d15878a2` (PR #268); all eleven SDKs carry the matching CONTRACT doc sync, no code change.
+- **Headline**: the §17.2 recommendation I ranked above the finding — **narrow the device audience** — was actioned, and actioned well. But the SEC-086 fix is **PARTIAL**, and the audit-event residual was closed in a way that opens a small new surface. New findings continue at **SEC-087**.
+
+### 18.1 Device audience narrowing — ✅ CONFIRMED, and correctly sequenced
+
+The mTLS device path now stamps `AUD_M2M` instead of `AUD_USER` (`auth/token.rs:236-237`), so a certificate-authenticated service account no longer passes user-route guards. There is no third `axiam:device` audience — devices were folded into the existing machine audience, which is the simpler choice and matches the stated model ("the same principal however it authenticated").
+
+**What makes this safe rather than merely bold is the sequencing**: the narrowing and its compensating grant land in the *same commit*. A device's one required REST surface (`/api/v1/authz/check{,/batch}`) was simultaneously widened to a new `AuthenticatedPrincipal` extractor (`extractors/auth.rs:386-489`) that accepts both principal kinds, resolves tenant and subject exclusively from verified claims, keeps the `authz:check_as` gate for machines, and — a genuinely good detail — makes the audit `actor_type` follow the principal instead of hardcoding `ActorType::User`, so a device is not recorded as a person in a legally significant trail. I verified the accept/reject matrix and found no required device endpoint that now 401s; `device_auth_test.rs` pins both directions.
+
+Two observations, neither a defect: a cert-bound device token and a secret-bearer service-account token are now byte-identical in both `aud` and `sub_kind`, so possession-of-a-certificate is no longer distinguishable downstream from possession-of-a-secret — the accepted price of not minting a distinct device audience. And the m2m branch of `AuthenticatedPrincipal` parses `sub` as a UUID, so an *OAuth2-client* m2m token 401s there; fail-closed, but an undocumented asymmetry between the two machine principal kinds.
+
+### 18.2 SEC-086 — 🔶 PARTIAL, not closed
+
+A single `CLIENT_AUTH_FAILED` constant was introduced and applied to nine sites, and `"client not found"` no longer appears in the file. The internal `NotFound`-vs-other taxonomy is correctly preserved in `tracing` while kept out of the response. Both halves of that work are sound.
+
+**But the same oracle survives on the `authorization_code` grant** (verified by hand, `token.rs:462-492`). The order is: client lookup → grant-type check → secret-presence check. So an unauthenticated caller posting `grant_type=authorization_code&client_id=X` **with no `client_secret`** gets three distinguishable responses:
+
+| Case | Response |
+|---|---|
+| unknown client | `invalid_client` / `"invalid client credentials"` |
+| client exists, lacks the grant | `unauthorized_client` / `"client not authorized for authorization_code grant"` |
+| client exists, has the grant | `invalid_client` / `"client_secret is required"` |
+
+Client existence is therefore still decidable — on a grant the fix did not walk. The equivalent presence checks on the `client_credentials` and `refresh_token` paths run *before* the lookup and are safe; only `authorization_code` orders them the other way.
+
+**The timing asymmetry is also still open**, and this one is a deliberate, documented decision rather than an oversight: the unknown-client branch returns before any HMAC is computed, and the remediation argues that a sub-microsecond HMAC is dominated by the DB-miss-versus-row-read delta, so a dummy hash would be theatre. That reasoning is defensible and I am not disputing it — but it means SEC-086 is closed in its *description* half only, and the document should say so rather than record the finding as resolved.
+
+**Recommended fix**: move the secret-presence check before the client lookup on the `authorization_code` path, matching the other two grants. Then the description half is genuinely closed everywhere.
+
+### 18.3 New finding
+
+#### SEC-087 [LOW] ❌ — unauthenticated, tenant-unvalidated audit writes at the token endpoint
+
+- **File**: `crates/axiam-api-rest/src/handlers/oauth2.rs:166` (tenant from the query string), `:218-229` (audit write on every `InvalidClient`), writer at `:256-288`.
+- **Verified by hand.** Closing the §17.2 detection residual added an audit row for every failed client authentication — the right instinct, and the secret is correctly never recorded. But `/oauth2/token` is unauthenticated and `tenant_id` comes straight from a caller-supplied query parameter that is never validated before the write. An anonymous caller can therefore append `oauth2.client_auth_failed` rows into **any tenant's audit log, or a nonexistent one**, at request rate — bounded only by the endpoint's rate limit.
+- **Why it matters more than it looks**: the audit log is append-only by design, so polluted rows cannot be removed, and this is precisely the surface an attacker would use to bury a real signal (threat-model `T-117`, alert flooding) or to fabricate activity against a tenant they do not belong to.
+- **Two smaller defects in the same code**: `attempted_client_id` is written to metadata **untruncated**, unlike the sibling `client_ip`/`user_agent` helpers which cap length; and `client_ip` uses `realip_remote_addr()`, so spoofable forwarding headers now land in audit rows on an unauthenticated path.
+- **Fix**: resolve and validate the tenant before writing (or write the row under a system/unknown-tenant sentinel), truncate the client id to a bounded length, and either use `peer_addr()` here or record the IP as explicitly untrusted.
+
+### 18.4 Documentation defect on a breaking change
+
+`CHANGELOG.md:57-59` still states that the service-account `aud` is `axiam:m2m` *"(not the `axiam:user` the device path stamps for backwards compatibility)"*. **That parenthetical is now the exact inverse of reality** — the device path stamps `axiam:m2m` as of this commit. The change is labelled BREAKING, is documented properly in the code (`auth/token.rs:200-217`) and in `CONTRACT.md:1098-1120`, but the CHANGELOG — the one file an operator reads before upgrading — was not touched and now asserts the opposite of what shipped. A stale doc comment at `auth/token.rs:263-267` repeats the same inverted claim two lines away from the code that contradicts it.
+
+This is not a vulnerability, but on a breaking authentication change it is the highest-consequence documentation defect in the set: an operator who reads the CHANGELOG will conclude their device tokens still work on user routes.
+
+### 18.5 Verified sound
+
+- **gRPC audience check** (§17.2 residual 2) — the interceptor now validates `aud`, accepting both audiences and **failing closed on an unknown one**, with absent-`aud` gated on the same back-compat flag as REST. Note it accepts `axiam:m2m` on all four services, so a device token can call `UserService`/`TokenService` over gRPC while being refused the equivalent REST routes: the interceptor fixed the fail-closed gap, not the parity gap. Defensible for a mesh transport, but the m2m/user *split* remains REST-only.
+- **Tenant assertion in the handler** (§17.2 residual 6) — `if sa.tenant_id != tenant_id { … }` now runs **before** secret verification, so a foreign row is never used as a verification oracle and cannot trigger a hash-upgrade write against another tenant's record. Pinned by a test that also asserts the verification log stays empty.
+- **`AuthenticatedServiceAccount.client_id` → `subject`** (§17.2 residual 7) — renamed, no consumers to break.
+- **The §16.5 publisher-lock residual is closed properly**: the compare-before-clear now uses a monotonic generation counter rather than the recyclable `Channel::id()`, which is exactly the fix §17.1 suggested.
+- **Regression scan clean** — no tenant predicate dropped (one added), no limit loosened, no secret in a log, and the only new unauthenticated write surface is SEC-087 above.
+
+### 18.6 Standing status
+
+- **Open findings**: **SEC-086 (LOW, PARTIAL — `authorization_code` existence oracle + accepted timing channel)** and **SEC-087 (LOW, new)**. Both are small and both have concrete one-place fixes.
+- **Highest-consequence non-finding**: the CHANGELOG inversion on a breaking change (§18.4). Fix before anyone upgrades.
+- **Still open from earlier sections**: the gRPC m2m/user parity gap, the rule-8 regression test in ten SDKs, the slug-vs-UUID diagnostic being log-only with PHP undiagnosed.
+- **Assessment**: the device-audience narrowing is the strongest single change in this series — it closed a real authority gap, shipped its compensating grant in the same commit so nothing broke, and got the audit-actor detail right without being asked. The pattern worth naming from this round is the opposite one: **two of the three problems found here were introduced by the fixes themselves** (the audit-write surface, the CHANGELOG inversion), and the third is a fix that stopped one grant short. Remediation continues to be the most productive place to look for new findings.

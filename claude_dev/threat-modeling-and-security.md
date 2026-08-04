@@ -221,13 +221,16 @@ RFC 6749 / 7636 / 7009 / 7662 MUST matrices and OIDC Core/Discovery conformance:
   to the caller's own tenant; unknown tokens return the uniform inactive response.
 - **userinfo is scope-filtered**; JWKS publishes the active key plus a bounded
   rotation-overlap window.
-- **Machine tokens and user tokens are not interchangeable.** A token obtained
-  with a client secret carries a machine audience, and one obtained by a human
-  login carries a user audience; each is rejected where the other is expected,
-  in both directions. Without that split, a service account's credential would
-  silently unlock every endpoint built for people — so it is enforced at the
-  request-extraction layer rather than left to individual handlers, and a token
-  with no audience at all is refused outright on the machine side.
+- **Machine tokens and user tokens are not interchangeable.** Every machine
+  credential — a service account's client secret, or an IoT device's client
+  certificate — yields a token with a machine audience, while a human login
+  yields a user audience; each is rejected where the other is expected, in both
+  directions. Without that split, one device certificate would silently unlock
+  every endpoint built for people. It is enforced at the request-extraction
+  layer rather than left to individual handlers, so a new route inherits it by
+  default, and the endpoints machines legitimately need — authorization checks —
+  accept either principal while still recording which kind it was, so a device
+  is never written into the audit trail as a person.
 
 ### Federation (SAML & OIDC)
 

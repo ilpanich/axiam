@@ -32,6 +32,20 @@ ignore = [
     # Review date: 2026-07-03. Re-evaluate when samael upstream bumps quick-xml to >=0.41.0.
     { id = "RUSTSEC-2026-0194", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
     { id = "RUSTSEC-2026-0195", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
+    # RUSTSEC-2026-0235: rkyv 0.7.46 — insufficient archive validation, out-of-bounds reads in
+    # archives containing Rc/Arc. Solution: upgrade to >=0.8.17.
+    # This one differs in kind from every entry above: the others are real dependencies carrying a
+    # reachability argument, whereas rkyv is NEVER COMPILED. It is an `optional = true` dependency
+    # of rust_decimal, gated behind that crate's `rkyv` feature, and nothing in the AXIAM graph
+    # enables it. Verified: `cargo tree -i rkyv --target all --all-features` reports "nothing to
+    # print", and rkyv occurs zero times in the fully-resolved tree. cargo-audit and cargo-deny
+    # both read Cargo.lock, which records optional dependencies regardless of whether any feature
+    # activates them, so the finding is a lockfile artifact and not a vulnerability in a shipped
+    # artifact. (rust_decimal 1.42.1 is current and still pins rkyv 0.7.x, so there is also no
+    # upgrade path — but that is beside the point here, since the code is not built.)
+    # Review date: 2026-08-04. Re-verify with the command above if rust_decimal's feature defaults
+    # change, or drop this entry if rust_decimal moves to rkyv >=0.8.17.
+    { id = "RUSTSEC-2026-0235", reason = "rkyv is optional in rust_decimal and no feature enables it — zero occurrences in the resolved tree, never compiled; Cargo.lock artifact only. Review: 2026-08-04" },
 ]
 
 [licenses]

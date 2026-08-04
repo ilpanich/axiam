@@ -1376,12 +1376,12 @@ migrate that call deliberately.
 
 ---
 
-## 18. Verification of the SEC-086 / §17 remediation (2026-08-03)
+## 19. Verification of the SEC-086 / §17 remediation (2026-08-04)
 
 - **Commit**: server `d15878a2` (PR #268); all eleven SDKs carry the matching CONTRACT doc sync, no code change.
 - **Headline**: the §17.2 recommendation I ranked above the finding — **narrow the device audience** — was actioned, and actioned well. But the SEC-086 fix is **PARTIAL**, and the audit-event residual was closed in a way that opens a small new surface. New findings continue at **SEC-087**.
 
-### 18.1 Device audience narrowing — ✅ CONFIRMED, and correctly sequenced
+### 19.1 Device audience narrowing — ✅ CONFIRMED, and correctly sequenced
 
 The mTLS device path now stamps `AUD_M2M` instead of `AUD_USER` (`auth/token.rs:236-237`), so a certificate-authenticated service account no longer passes user-route guards. There is no third `axiam:device` audience — devices were folded into the existing machine audience, which is the simpler choice and matches the stated model ("the same principal however it authenticated").
 
@@ -1389,7 +1389,7 @@ The mTLS device path now stamps `AUD_M2M` instead of `AUD_USER` (`auth/token.rs:
 
 Two observations, neither a defect: a cert-bound device token and a secret-bearer service-account token are now byte-identical in both `aud` and `sub_kind`, so possession-of-a-certificate is no longer distinguishable downstream from possession-of-a-secret — the accepted price of not minting a distinct device audience. And the m2m branch of `AuthenticatedPrincipal` parses `sub` as a UUID, so an *OAuth2-client* m2m token 401s there; fail-closed, but an undocumented asymmetry between the two machine principal kinds.
 
-### 18.2 SEC-086 — 🔶 PARTIAL, not closed
+### 19.2 SEC-086 — 🔶 PARTIAL, not closed
 
 A single `CLIENT_AUTH_FAILED` constant was introduced and applied to nine sites, and `"client not found"` no longer appears in the file. The internal `NotFound`-vs-other taxonomy is correctly preserved in `tracing` while kept out of the response. Both halves of that work are sound.
 
@@ -1407,7 +1407,7 @@ Client existence is therefore still decidable — on a grant the fix did not wal
 
 **Recommended fix**: move the secret-presence check before the client lookup on the `authorization_code` path, matching the other two grants. Then the description half is genuinely closed everywhere.
 
-### 18.3 New finding
+### 19.3 New finding
 
 #### SEC-087 [LOW] ❌ — unauthenticated, tenant-unvalidated audit writes at the token endpoint
 
@@ -1417,13 +1417,13 @@ Client existence is therefore still decidable — on a grant the fix did not wal
 - **Two smaller defects in the same code**: `attempted_client_id` is written to metadata **untruncated**, unlike the sibling `client_ip`/`user_agent` helpers which cap length; and `client_ip` uses `realip_remote_addr()`, so spoofable forwarding headers now land in audit rows on an unauthenticated path.
 - **Fix**: resolve and validate the tenant before writing (or write the row under a system/unknown-tenant sentinel), truncate the client id to a bounded length, and either use `peer_addr()` here or record the IP as explicitly untrusted.
 
-### 18.4 Documentation defect on a breaking change
+### 19.4 Documentation defect on a breaking change
 
 `CHANGELOG.md:57-59` still states that the service-account `aud` is `axiam:m2m` *"(not the `axiam:user` the device path stamps for backwards compatibility)"*. **That parenthetical is now the exact inverse of reality** — the device path stamps `axiam:m2m` as of this commit. The change is labelled BREAKING, is documented properly in the code (`auth/token.rs:200-217`) and in `CONTRACT.md:1098-1120`, but the CHANGELOG — the one file an operator reads before upgrading — was not touched and now asserts the opposite of what shipped. A stale doc comment at `auth/token.rs:263-267` repeats the same inverted claim two lines away from the code that contradicts it.
 
 This is not a vulnerability, but on a breaking authentication change it is the highest-consequence documentation defect in the set: an operator who reads the CHANGELOG will conclude their device tokens still work on user routes.
 
-### 18.5 Verified sound
+### 19.5 Verified sound
 
 - **gRPC audience check** (§17.2 residual 2) — the interceptor now validates `aud`, accepting both audiences and **failing closed on an unknown one**, with absent-`aud` gated on the same back-compat flag as REST. Note it accepts `axiam:m2m` on all four services, so a device token can call `UserService`/`TokenService` over gRPC while being refused the equivalent REST routes: the interceptor fixed the fail-closed gap, not the parity gap. Defensible for a mesh transport, but the m2m/user *split* remains REST-only.
 - **Tenant assertion in the handler** (§17.2 residual 6) — `if sa.tenant_id != tenant_id { … }` now runs **before** secret verification, so a foreign row is never used as a verification oracle and cannot trigger a hash-upgrade write against another tenant's record. Pinned by a test that also asserts the verification log stays empty.
@@ -1431,9 +1431,188 @@ This is not a vulnerability, but on a breaking authentication change it is the h
 - **The §16.5 publisher-lock residual is closed properly**: the compare-before-clear now uses a monotonic generation counter rather than the recyclable `Channel::id()`, which is exactly the fix §17.1 suggested.
 - **Regression scan clean** — no tenant predicate dropped (one added), no limit loosened, no secret in a log, and the only new unauthenticated write surface is SEC-087 above.
 
-### 18.6 Standing status
+### 19.6 Standing status
 
 - **Open findings**: **SEC-086 (LOW, PARTIAL — `authorization_code` existence oracle + accepted timing channel)** and **SEC-087 (LOW, new)**. Both are small and both have concrete one-place fixes.
 - **Highest-consequence non-finding**: the CHANGELOG inversion on a breaking change (§18.4). Fix before anyone upgrades.
 - **Still open from earlier sections**: the gRPC m2m/user parity gap, the rule-8 regression test in ten SDKs, the slug-vs-UUID diagnostic being log-only with PHP undiagnosed.
 - **Assessment**: the device-audience narrowing is the strongest single change in this series — it closed a real authority gap, shipped its compensating grant in the same commit so nothing broke, and got the audit-actor detail right without being asked. The pattern worth naming from this round is the opposite one: **two of the three problems found here were introduced by the fixes themselves** (the audit-write surface, the CHANGELOG inversion), and the third is a fix that stopped one grant short. Remediation continues to be the most productive place to look for new findings.
+
+## 20. Remediation of §19 (2026-08-04)
+
+- **Base**: server `a4cd23a2` (the §19 record) on `main`.
+- **Scope**: both open findings — SEC-086 (partial) and SEC-087 (new) — plus the §19.4 documentation defect and the §19.1 undocumented asymmetry.
+- **Result**: SEC-086 fully closed in its description half; SEC-087 closed; the CHANGELOG defect fixed and found to be larger than reported; the asymmetry documented. **One correction to §19**, in §20.1.
+
+### 20.1 SEC-086 — closed, and the recommended fix was not sufficient
+
+§19.2 is right that the oracle survived on `authorization_code`, and right about
+the cause: that grant ran its checks in a different order from the two safe
+ones. **Its recommended fix does not close the finding**, and the difference
+matters enough to state precisely.
+
+The recommendation was to move the secret-presence check ahead of the client
+lookup. That closes the *no-secret* probe §19.2 tabulates. But the grant-type
+check also sat **before** secret verification on this path, and both safe grants
+put it after. So a second probe survives the recommended fix — costing the
+attacker one throwaway secret:
+
+| Probe | Case | Before | After §19's fix alone | After this change |
+|---|---|---|---|---|
+| no secret | unknown client | `invalid_client` | `invalid_client`/"secret required" | `invalid_client`/"secret required" |
+| no secret | exists, lacks grant | `unauthorized_client` | `invalid_client`/"secret required" | `invalid_client`/"secret required" |
+| no secret | exists, has grant | `invalid_client`/"secret required" | `invalid_client`/"secret required" | `invalid_client`/"secret required" |
+| **dummy secret** | unknown client | `invalid_client` | `invalid_client` | `invalid_client` |
+| **dummy secret** | **exists, lacks grant** | `unauthorized_client` | **`unauthorized_client`** ⟵ still leaks | `invalid_client` |
+
+Both orderings are therefore corrected: presence → lookup → **verify** →
+grant-type, exactly matching `client_credentials` and `refresh_token`.
+`unauthorized_client` is now reachable only by a caller who has already proven
+possession of the secret, which is the property that actually makes it safe to
+return a specific error at all.
+
+`authorization_code_does_not_reveal_whether_a_client_exists` asserts both
+probes. It was falsified twice: once against the original ordering (probe 1
+fails) and once against §19's recommended fix applied alone (probe 1 passes,
+**probe 2 fails**) — which is the evidence for the correction above.
+
+**The timing channel remains open and remains accepted**, on the reasoning
+§18.1 gave and §19.2 explicitly declined to dispute. SEC-086's *description*
+half is now genuinely closed on all three grants.
+
+### 20.2 SEC-087 — closed
+
+§19.3 is correct in full: the audit row added for §17.2 residual 3 was written
+from an unauthenticated endpoint whose `tenant_id` is a query parameter, so an
+anonymous caller could append to any tenant's append-only log, or to a uuid
+belonging to no tenant. Three controls, matching the three defects reported:
+
+1. **The tenant is resolved before the write.** An unknown tenant is dropped
+   with a warning. Deliberately, this does **not** try to stop failures against
+   a tenant the caller doesn't belong to: that event is *true* — a failed
+   client authentication did occur against that tenant — and suppressing it
+   would blind an operator to a real attack, which is the opposite of what the
+   row exists for. Rows under a *nonexistent* tenant are different in kind:
+   nobody will ever read that partition and the uuid space is unbounded, so
+   that arm is refused outright. The volumetric control for the real-tenant
+   case stays the endpoint's rate limit.
+2. **The client id is truncated** to 128 chars.
+3. **The IP is recorded at two trust levels**: `ip_address` now carries the
+   transport peer address, which cannot be forged, and the `X-Forwarded-For`
+   value moves to metadata as `forwarded_for_untrusted`. A new `peer_ip`
+   helper sits beside `client_ip`; `client_ip` is unchanged and remains correct
+   on authenticated paths behind a trusted proxy.
+
+Note the failure posture is unchanged: a tenant-lookup outage drops the row
+rather than turning a 401 into a 500 (T-15-04), same as the append itself.
+
+Three tests, each falsified against its own control independently — the
+truncation assertion fires before the IP assertion in the shared test, so the
+IP control was falsified in a separate run rather than assumed. A fourth test,
+`a_failed_client_auth_is_audited_against_a_real_tenant`, pins the control case:
+the hardening must not silence the true event, which is the way this fix could
+most plausibly go wrong later.
+
+### 20.3 §19.4 — the CHANGELOG defect was larger than reported
+
+§19.4 called this the highest-consequence non-finding, and it was right. On
+inspection it was worse than an inverted parenthetical: **the breaking change
+had no CHANGELOG entry at all.** The only mention of the device audience
+anywhere in the file was the stale aside inside the service-account entry. An
+operator reading it would have concluded both that device tokens still work on
+user routes *and* that nothing breaking had shipped.
+
+Fixed by adding a `### Changed` entry that leads with the breaking change,
+states what stops working, points at the compensating grant, tells the reader
+what to check before upgrading, and notes that gRPC is unaffected so the
+m2m/user split is REST-only. The inverted parenthetical is corrected, and
+SEC-086/SEC-087 are recorded under `### Security`.
+
+The stale doc comment at `auth/token.rs` is also fixed — and it was inverted in
+a second way §19 did not mention. It claimed the two issuing functions were
+"deliberately distinct" with "two claims differ", naming `aud` as one of them.
+Since the residual-1 flip they agree on `aud`, `sub` *and* `sub_kind`; what
+actually still differs is `jti` (generated here, caller-supplied there) and
+`scope` (requestable here, absent there). The comment now says that.
+
+### 20.4 §19.1 — the OAuth2-client asymmetry, documented not "fixed"
+
+§19.1 observed that the m2m branch of `AuthenticatedPrincipal` parses `sub` as
+a UUID, so an OAuth2-client m2m token 401s there while a service-account one
+passes — fail-closed, but undocumented.
+
+Documented rather than changed, because the 401 is correct. Role assignments
+are keyed on a subject UUID and an OAuth2 client has no row in that graph, so
+admitting one would produce a principal the engine can only ever evaluate to
+"no grants": a caller that authenticates and then fails every check. That is
+strictly worse than a clean rejection, and it invites a later "fix" that
+invents a subject mapping. The comment says so, and marks that parse as where
+such a modelling change would have to start.
+
+### 20.5 Carried, unchanged
+
+- **The SEC-086 timing channel** — accepted, reasoning in §18.1, undisputed in §19.2.
+- **The gRPC m2m/user parity gap** (§19.5) — the interceptor accepts `axiam:m2m`
+  on all four services, so a device token can reach `UserService` over gRPC
+  while being refused the equivalent REST route. §19.5 calls this defensible for
+  a mesh transport and it is, but the split being REST-only is now stated in the
+  CHANGELOG so it is at least not a surprise.
+- **Residuals 4 and 5** (§18.6) — design changes, not patches.
+- **The rule-8 guardrail tests in nine SDKs** — carried a fourth time. Still a
+  two-tests-across-eight-languages lift that wants its own PR series; §15.1's
+  hand-verification that all eleven guards reject correctly still stands.
+
+### 20.6 What a verifier should look at hardest
+
+1. **The reordered `authorization_code` path.** Confirm nothing between the
+   presence check and secret verification can return a distinguishable error,
+   and that the PKCE/code handling below it is unaffected by the move.
+2. **The tenant gate on the audit write.** Confirm it cannot be turned into a
+   tenant-existence oracle of its own — it is fire-and-forget and changes no
+   response, but that is the obvious way this fix could backfire.
+3. **`peer_ip` adoption.** It is used only on this unauthenticated path.
+   Confirm no authenticated path was switched to it by accident, which would
+   silently degrade audit quality behind a proxy.
+4. **The pattern §19.6 named.** Two of the three problems it found were
+   introduced by the previous round's fixes; SEC-087 was mine. This round adds
+   a tenant lookup and a new helper to an unauthenticated path — the same shape
+   of change that produced SEC-087.
+
+### 20.7 RUSTSEC-2026-0235 — suppressed as a verified false positive
+
+Not a §19 finding; it surfaced as a red `Security Scan` while this round was in
+review, and it was failing on `main` as well — `a4cd23a2`, a docs-only commit
+touching one markdown file, fails the identical check. The RUSTSEC database
+refreshed between the 09:24 and 09:48 runs.
+
+The visible errors (`Path does not exist: *.sarif`) are downstream noise: the
+`cargo-audit` step exits 1, which aborts the job before any scanner writes its
+SARIF file.
+
+The advisory is **rkyv 0.7.46** — out-of-bounds reads in archives containing
+`Rc`/`Arc`, fixed in 0.8.17. Suppressed after verifying it cannot affect any
+AXIAM artifact:
+
+- rkyv is `optional = true` in `rust_decimal`, gated behind that crate's `rkyv`
+  feature, and **nothing in our graph enables it**.
+- `cargo tree -i rkyv --target all --all-features` reports *"nothing to print"*,
+  and rkyv occurs **zero** times in the fully-resolved tree.
+- `cargo-deny`, which resolves features rather than reading the lockfile,
+  independently reports `advisory-not-detected — no crate matched advisory
+  criteria` for this id. Two tools disagreeing in exactly the way the
+  explanation predicts is the strongest evidence available here.
+
+The cause is that `cargo-audit` scans `Cargo.lock`, which records optional
+dependencies whether or not any feature ever pulls them in. So this is a
+lockfile artifact, not a vulnerability in shipped code.
+
+This makes it **different in kind from the five existing ignores**, and the
+entries say so. Those are real dependencies carrying a reachability argument —
+a claim about how the code is used, which can be wrong. This one is a claim
+that the code is never compiled, which is mechanically checkable, and the
+comment records the exact command to re-check it. Both `ci.yml` and `deny.toml`
+were updated, since the former's comment requires them to stay in sync.
+
+`rust_decimal` 1.42.1 is current and still pins rkyv 0.7.x, so there is no
+upgrade path either — but that is incidental: the fix here is not "we accept
+the risk", it is "there is no risk to accept in this build".

@@ -2322,3 +2322,92 @@ async fn an_unknown_client_is_indistinguishable_from_a_wrong_secret() {
         "invalid client credentials"
     );
 }
+
+/// SEC-086 (second pass): the `authorization_code` grant must not reveal
+/// whether a `client_id` exists — under **either** probe.
+///
+/// The first pass unified every `error_description` behind one constant but
+/// left this grant's *ordering* alone, and ordering is what leaked here. Two
+/// distinct probes existed, and the two safe grants
+/// (`client_credentials`, `refresh_token`) were immune to both only because
+/// they happen to check in the right order:
+///
+/// 1. **No `client_secret` at all.** With the lookup running first, an unknown
+///    client answered `invalid_client`, a client lacking the grant answered
+///    `unauthorized_client`, and a client that had it answered
+///    `invalid_client`/"client_secret is required" — three outcomes, so
+///    existence was decidable without presenting any credential.
+/// 2. **Any dummy `client_secret`.** Fixing (1) alone does not close this:
+///    with the grant-type check still ahead of secret verification, a client
+///    that exists but lacks the grant answers `unauthorized_client` while an
+///    unknown client answers `invalid_client`. The probe just costs one
+///    throwaway secret.
+///
+/// Both arms are asserted because the fix for (1) is the one an auditor would
+/// naturally reach for, and it is insufficient on its own.
+#[tokio::test]
+async fn authorization_code_does_not_reveal_whether_a_client_exists() {
+    fn shape(e: &OAuth2Error) -> (String, String) {
+        (e.error_code().to_string(), e.error_description())
+    }
+
+    async fn probe(client: ClientOutcome, secret: Option<&str>) -> OAuth2Error {
+        let svc = build(
+            client,
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        let mut req = auth_code_req(None);
+        req.client_secret = secret.map(String::from);
+        svc.exchange(Uuid::new_v4(), req)
+            .await
+            .expect_err("must not succeed")
+    }
+
+    // A client that exists but is not registered for this grant — the row an
+    // attacker is trying to confirm the existence of.
+    let other_grant = || ClientOutcome::Found(make_client(&["client_credentials"], &[]));
+    // A client that exists and does have the grant, so only the secret is wrong.
+    let right_grant = || ClientOutcome::Found(make_client(&["authorization_code"], &[]));
+
+    // --- Probe 1: no secret presented at all ---
+    let unknown = probe(ClientOutcome::NotFound, None).await;
+    let exists_other_grant = probe(other_grant(), None).await;
+    let exists_right_grant = probe(right_grant(), None).await;
+
+    assert_eq!(
+        shape(&unknown),
+        shape(&exists_other_grant),
+        "probe 1: a client that exists but lacks the grant must be \
+         indistinguishable from one that does not exist"
+    );
+    assert_eq!(
+        shape(&unknown),
+        shape(&exists_right_grant),
+        "probe 1: a client that exists and has the grant must be \
+         indistinguishable from one that does not exist"
+    );
+
+    // --- Probe 2: a dummy secret, which defeats a presence-check-only fix ---
+    let unknown = probe(ClientOutcome::NotFound, Some("wrong")).await;
+    let exists_other_grant = probe(other_grant(), Some("wrong")).await;
+    let exists_right_grant = probe(right_grant(), Some("wrong")).await;
+
+    assert_eq!(
+        shape(&unknown),
+        shape(&exists_other_grant),
+        "probe 2: `unauthorized_client` must be unreachable without first \
+         proving possession of the secret"
+    );
+    assert_eq!(
+        shape(&unknown),
+        shape(&exists_right_grant),
+        "probe 2: a wrong secret must look the same as an unknown client"
+    );
+
+    // Pin the wording, so a future edit cannot re-open the oracle by making
+    // every arm say something that still names the cause.
+    assert_eq!(unknown.error_code(), "invalid_client");
+    assert_eq!(unknown.error_description(), "invalid client credentials");
+}

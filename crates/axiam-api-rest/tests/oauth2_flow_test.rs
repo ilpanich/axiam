@@ -1512,3 +1512,140 @@ async fn oidc_no_id_token_without_openid_scope() {
         "id_token must not be present without openid scope"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SEC-087 — the failed-client-auth audit row is written on an UNAUTHENTICATED
+// endpoint, so every input to it is attacker-controlled.
+// ---------------------------------------------------------------------------
+
+/// POST a deliberately-failing client authentication, with full control over
+/// the tenant, client id and forwarding header.
+async fn failing_token_post(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    client_id: &str,
+    forwarded_for: Option<&str>,
+) -> actix_web::dev::ServiceResponse {
+    let form =
+        format!("grant_type=client_credentials&client_id={client_id}&client_secret=wrong-secret");
+    let mut r = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"));
+    if let Some(f) = forwarded_for {
+        r = r.insert_header(("X-Forwarded-For", f));
+    }
+    test::call_service(app, r.set_payload(form).to_request()).await
+}
+
+async fn client_auth_failure_rows(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+) -> Vec<axiam_core::models::audit::AuditLogEntry> {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository};
+    axiam_db::SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some("oauth2.client_auth_failed".into()),
+                ..Default::default()
+            },
+            axiam_core::repository::Pagination::default(),
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+#[actix_rt::test]
+async fn a_failed_client_auth_is_audited_against_a_real_tenant() {
+    // The control case. Detection is the whole point of this row (§17.2
+    // residual 3), so the SEC-087 hardening must not silence the true event:
+    // a failed authentication against a tenant that exists is still recorded.
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let resp = failing_token_post(&app, tenant_id, "oa_nosuchclient", None).await;
+    assert_eq!(resp.status().as_u16(), 401);
+
+    let rows = client_auth_failure_rows(&db, tenant_id).await;
+    assert_eq!(rows.len(), 1, "the real event must still be recorded");
+}
+
+#[actix_rt::test]
+async fn an_anonymous_caller_cannot_write_audit_rows_into_an_unknown_tenant() {
+    // SEC-087. `/oauth2/token` needs no credential and takes `tenant_id`
+    // straight from the query string, so before the fix any anonymous caller
+    // could append rows to an append-only log under *any* uuid — including one
+    // belonging to no tenant at all — at request rate.
+    //
+    // Rows under a nonexistent tenant are pure garbage: no operator will ever
+    // read that partition, and the uuid space is unbounded, so this is the arm
+    // worth refusing outright.
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let victim = Uuid::new_v4(); // never created
+    let resp = failing_token_post(&app, victim, "oa_nosuchclient", None).await;
+
+    // The caller must not be able to tell the write was refused.
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "dropping the audit row must not change the response"
+    );
+
+    let rows = client_auth_failure_rows(&db, victim).await;
+    assert!(
+        rows.is_empty(),
+        "no audit row may be written into a tenant that does not exist"
+    );
+}
+
+#[actix_rt::test]
+async fn the_audited_client_id_is_truncated_and_the_forwarded_ip_is_untrusted() {
+    // Two smaller SEC-087 defects in the same row, both stemming from the same
+    // cause — this endpoint is unauthenticated, so both values are supplied by
+    // whoever is attacking it.
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // `client_id` was recorded verbatim, unlike the sibling ip/user-agent
+    // helpers which have always capped their inputs.
+    let huge = format!("oa_{}", "A".repeat(5000));
+    let resp = failing_token_post(&app, tenant_id, &huge, Some("203.0.113.9")).await;
+    assert_eq!(resp.status().as_u16(), 401);
+
+    let rows = client_auth_failure_rows(&db, tenant_id).await;
+    assert_eq!(rows.len(), 1);
+    let meta = &rows[0].metadata;
+
+    let recorded = meta["client_id"].as_str().expect("client_id recorded");
+    assert!(
+        recorded.len() <= 128,
+        "client_id must be truncated, got {} chars",
+        recorded.len()
+    );
+
+    // The IP an operator would act on must be the transport peer, which a
+    // caller cannot forge — not the X-Forwarded-For value, which anyone can
+    // assert on an unauthenticated endpoint. Blocking a forged IP means acting
+    // against an innocent host.
+    let ip = rows[0].ip_address.as_deref().expect("ip recorded");
+    assert!(
+        ip.starts_with("127.0.0.1"),
+        "ip_address must be the unforgeable peer address, got {ip}"
+    );
+    assert_eq!(
+        meta["forwarded_for_untrusted"].as_str(),
+        Some("203.0.113.9"),
+        "the forgeable value is kept, but only under a name that says so"
+    );
+}

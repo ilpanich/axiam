@@ -16,13 +16,20 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::repository::AuditLogRepository;
-use axiam_db::SurrealAuditLogRepository;
+use axiam_core::repository::{AuditLogRepository, TenantRepository};
+use axiam_db::{SurrealAuditLogRepository, SurrealTenantRepository};
 
 use crate::extractors::auth::AuthenticatedUser;
-use crate::extractors::client_info::client_ip;
+use crate::extractors::client_info::{client_ip, peer_ip};
 use crate::state::AppState;
+
+/// Cap for the caller-supplied `client_id` recorded in a failed-client-auth
+/// audit row (SEC-087). Server-generated ids are `oa_`/`sa_` + a 32-char
+/// encoding, so this leaves generous headroom for a legitimate value while
+/// bounding what an anonymous caller can push into the log.
+const MAX_CLIENT_ID_LEN: usize = 128;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -218,10 +225,12 @@ pub async fn token<C: Connection + Clone>(
         Err(e) => {
             if matches!(e, OAuth2Error::InvalidClient(_)) {
                 append_client_auth_failure_audit(
+                    &state.tenant_repo,
                     &state.audit_repo,
                     tenant_id,
                     attempted_client_id.as_deref(),
                     &grant_type,
+                    peer_ip(&req),
                     client_ip(&req),
                 )
                 .await;
@@ -253,13 +262,70 @@ pub async fn token<C: Connection + Clone>(
 /// metadata instead, where it is evidence rather than identity.
 ///
 /// The secret is never recorded, in any form.
+///
+/// # SEC-087 — this endpoint is unauthenticated, so nothing here may be trusted
+///
+/// `/oauth2/token` takes its `tenant_id` from a **query parameter** and requires
+/// no credential to reach. The first version of this function wrote the row
+/// unconditionally, which let any anonymous caller append rows into an arbitrary
+/// tenant's append-only log — or into a tenant id that never existed — at
+/// request rate. Three separate controls apply here as a result:
+///
+/// 1. **The tenant is resolved before the write.** An unknown tenant is
+///    dropped with a rate-limited warning instead of minting log rows under an
+///    id no operator will ever read. This bounds the set of writable partitions
+///    to tenants that actually exist. It does *not* stop a caller from
+///    generating failures against a real tenant they do not belong to — and it
+///    deliberately doesn't try to, because that event is **true**: a failed
+///    client authentication did occur against that tenant, and suppressing it
+///    would blind the operator to a real attack. The volumetric control for
+///    that is the endpoint's rate limit, not the audit layer.
+/// 2. **The client id is truncated.** It is caller-supplied and otherwise
+///    unbounded, unlike the `client_ip`/`user_agent` helpers which have always
+///    capped their inputs.
+/// 3. **The IP is recorded at two trust levels.** `ip_address` carries the
+///    transport peer address, which a caller cannot forge. The
+///    `X-Forwarded-For`-derived value goes to metadata under a name that says
+///    it is untrusted: on an authenticated path behind a trusted proxy the
+///    forwarded value is the useful one, but here anyone can assert it, and an
+///    operator who blocks a forged IP has been made to act against the wrong
+///    host.
 async fn append_client_auth_failure_audit<C: Connection + Clone>(
+    tenant_repo: &SurrealTenantRepository<C>,
     audit_repo: &SurrealAuditLogRepository<C>,
     tenant_id: Uuid,
     attempted_client_id: Option<&str>,
     grant_type: &str,
-    ip_address: Option<String>,
+    peer_ip: Option<String>,
+    forwarded_ip_untrusted: Option<String>,
 ) {
+    // Control 1 — never write into a tenant that does not exist.
+    match tenant_repo.get_by_id(tenant_id).await {
+        Ok(_) => {}
+        Err(AxiamError::NotFound { .. }) => {
+            tracing::warn!(
+                %tenant_id,
+                %grant_type,
+                "oauth2: dropping client-auth-failure audit for unknown tenant (SEC-087)"
+            );
+            return;
+        }
+        Err(e) => {
+            // Same fire-and-forget posture as the append below: a tenant-lookup
+            // outage must not turn a 401 into a 500 (T-15-04). Drop the row.
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "oauth2: tenant lookup failed for client-auth-failure audit"
+            );
+            return;
+        }
+    }
+
+    // Control 2 — bound the one remaining caller-controlled string.
+    let attempted_client_id: Option<String> =
+        attempted_client_id.map(|s| s.chars().take(MAX_CLIENT_ID_LEN).collect::<String>());
+
     if let Err(e) = audit_repo
         .append(CreateAuditLogEntry {
             tenant_id,
@@ -268,10 +334,13 @@ async fn append_client_auth_failure_audit<C: Connection + Clone>(
             action: "oauth2.client_auth_failed".into(),
             resource_id: None,
             outcome: AuditOutcome::Failure,
-            ip_address,
+            // Control 3 — the unforgeable half.
+            ip_address: peer_ip,
             metadata: Some(serde_json::json!({
                 "client_id": attempted_client_id,
                 "grant_type": grant_type,
+                // Named so nobody downstream mistakes it for verified input.
+                "forwarded_for_untrusted": forwarded_ip_untrusted,
             })),
         })
         .await

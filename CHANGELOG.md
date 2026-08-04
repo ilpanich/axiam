@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **⚠ BREAKING — a certificate-authenticated device now receives a machine
+  token (`aud: axiam:m2m`), not a user token.** `POST /api/v1/auth/device`
+  stamped `aud: axiam:user`, so any device that authenticated by mTLS passed
+  **every** user-facing route guard. It now stamps `axiam:m2m`, matching the
+  client-credentials grant: a service account is the same principal however it
+  authenticated, and §4.3/`SEC-006` route narrowing finally applies to both.
+
+  **What breaks.** A device token is no longer accepted on user-facing REST
+  routes. It *is* accepted on the authorization-check endpoints — `POST
+  /api/v1/authz/check` and `/api/v1/authz/check/batch` — which are the
+  machine-facing surface and were widened in the same change so that no
+  required device call started failing. Any other endpoint a fleet calls with a
+  device token must be migrated deliberately; that access was implicit rather
+  than designed.
+
+  **Before upgrading**, check whether your devices call anything beyond the
+  authz-check endpoints. SDK guards fronting a resource server that accepts
+  device callers must be configured to expect `axiam:m2m` (`CONTRACT.md` §10.1
+  rule 6, §12.1) — a guard set to `axiam:user` will now reject device tokens,
+  which is the narrowing working as intended.
+
+  gRPC is unchanged: its interceptor accepts both audiences on all services, so
+  the m2m/user split is REST-only.
+
 ### Security
+
+- **A client-existence oracle survived on the `authorization_code` grant
+  (SEC-086, second pass).** The first pass unified every token-endpoint
+  `error_description` behind one constant, but only two of the three grants
+  ordered their checks safely. On `authorization_code` the client lookup ran
+  *before* the secret-presence check and the grant-type check ran *before*
+  secret verification, so an unauthenticated caller could still separate "no
+  such client" from "client exists" — with no secret at all, and again with any
+  dummy secret. Both checks now follow verification, matching
+  `client_credentials` and `refresh_token`. `unauthorized_client` is now
+  reachable only by a caller who has already proven possession of the secret.
+
+- **The failed-client-auth audit row could be written into any tenant
+  (SEC-087).** `/oauth2/token` is unauthenticated and takes `tenant_id` from a
+  query parameter, so the audit row added in the previous change let an
+  anonymous caller append rows to an arbitrary — or nonexistent — tenant's
+  append-only log. The tenant is now resolved before the write; the
+  caller-supplied `client_id` is truncated; and the recorded IP is the
+  transport peer address, with the forgeable `X-Forwarded-For` value kept in
+  metadata under a name marking it untrusted.
 
 - **Neither half of the decision-cache staleness bound is operator-removable any
   more (§15.2).** Two gaps compounded: `decision_cache_ttl_secs` was an
@@ -55,9 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the subset rule leaves the empty set as the only valid request; its
     authorization comes from the roles assigned to it, as on the mTLS path.
   - **The token's `sub` is the service-account id**, not the client id, and its
-    `aud` is `axiam:m2m` (not the `axiam:user` the device path stamps for
-    backwards compatibility) so §4.3/`SEC-006` route narrowing keeps it off user
-    routes. A service account is now the same principal however it authenticated.
+    `aud` is `axiam:m2m`, so §4.3/`SEC-006` route narrowing keeps it off user
+    routes. A service account is now the same principal however it authenticated
+    — see the breaking device-audience change below, which makes the mTLS path
+    stamp `axiam:m2m` as well.
 
 - **Legacy client-secret hashes in `service_account` are now countable
   (§15.2).** `count_legacy_secret_hashes(tenant)` plus a startup warning.

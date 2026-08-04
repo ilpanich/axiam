@@ -257,22 +257,29 @@ pub fn issue_service_account_token(
 /// Mint a service-account access token for the **OAuth2 client-credentials**
 /// grant.
 ///
-/// Deliberately distinct from [`issue_service_account_token`], which the mTLS
-/// device-auth path uses. Two claims differ, and both differences matter:
+/// The sibling of [`issue_service_account_token`], which the mTLS device-auth
+/// path uses. The two now agree on **`aud`, `sub` and `sub_kind`** — this is a
+/// service account either way, and since the residual-1 narrowing both paths
+/// stamp [`AUD_M2M`], so §4.3 / `SEC-006` route narrowing keeps both off user
+/// routes.
 ///
-/// * **`aud` is [`AUD_M2M`], not [`AUD_USER`].** This is a machine token
-///   obtained with a client secret, so the §4.3 / `SEC-006` per-route audience
-///   narrowing must be able to keep it off user routes.
-///   `issue_service_account_token` stamps [`AUD_USER`] for backwards
-///   compatibility with the device path, which is the wrong shape here.
-/// * **`sub` is the service-account id**, exactly as the device path does —
-///   *not* the `client_id`. The authorization engine resolves roles by subject
-///   id, so a token whose `sub` were the opaque `sa_…` client id would
-///   authenticate but carry no resolvable grants. This is what makes a service
-///   account the *same principal* whether it authenticated by certificate or
-///   by secret.
+/// *(This comment previously said the device path stamps [`AUD_USER`] for
+/// backwards compatibility and that the two were "deliberately distinct" in
+/// audience. That has been the inverse of the code since the residual-1 flip.)*
 ///
-/// `sub_kind` is [`SubjectKind::ServiceAccount`] on both paths.
+/// **`sub` is the service-account id**, not the `client_id`, on both paths. The
+/// authorization engine resolves roles by subject id, so a token whose `sub`
+/// were the opaque `sa_…` client id would authenticate but carry no resolvable
+/// grants. This is what makes a service account the *same principal* whether it
+/// authenticated by certificate or by secret.
+///
+/// Two claims still differ, both because of how each path is reached:
+///
+/// * **`jti` is generated here**, whereas the mTLS path takes it from the
+///   caller. Neither path has a session row to derive one from.
+/// * **`scope` may be populated here.** The device path has no way to request
+///   scopes; this grant does, though a service account registers none, so in
+///   practice `scopes` is empty and this collapses to `None` (§12.1).
 pub fn issue_service_account_client_credentials_token(
     service_account_id: Uuid,
     tenant_id: Uuid,

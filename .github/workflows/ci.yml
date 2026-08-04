@@ -100,10 +100,18 @@ jobs:
       #   RUSTSEC-2023-0089 — atomic-polyfill unmaintained; transitive via surrealdb, no CVE.
       #   RUSTSEC-2026-0194 — quick-xml DoS; transitive via samael (SAML), which pins ^0.37 (no >=0.41 path); SAML off by default.
       #   RUSTSEC-2026-0195 — quick-xml DoS; transitive via samael (SAML), which pins ^0.37 (no >=0.41 path); SAML off by default.
+      #   RUSTSEC-2026-0235 — rkyv OOB read. NOT COMPILED INTO ANY AXIAM ARTIFACT: rkyv is an
+      #     `optional = true` dependency of rust_decimal behind its `rkyv` feature, and nothing in
+      #     our graph enables it. `cargo tree -i rkyv --target all --all-features` prints "nothing
+      #     to print", and rkyv appears zero times in the fully-resolved tree. cargo-audit reads
+      #     Cargo.lock, which records optional dependencies whether or not a feature ever pulls
+      #     them in, so this is a lockfile artifact rather than a reachable vulnerability — unlike
+      #     the entries above, which are real dependencies with a reachability argument.
+      #     Re-verify with the command above if rust_decimal's feature defaults ever change.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0235
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       - name: cargo deny

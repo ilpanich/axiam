@@ -186,9 +186,27 @@ impl RequirePermission {
         user: &AuthenticatedUser,
         authz: &dyn AuthzChecker,
     ) -> Result<(), AxiamApiError> {
+        self.check_subject(user.tenant_id, user.user_id, authz)
+            .await
+    }
+
+    /// Same check, against an explicit `(tenant, subject)` pair.
+    ///
+    /// Exists so the authorization-check endpoints can guard a caller that may
+    /// be a machine rather than a user (§17.2 residual 1) without every one of
+    /// the ~100 [`check`](Self::check) call sites having to change. RBAC is
+    /// applied **identically** to both kinds of principal — a service account's
+    /// grants come from the roles assigned to it, exactly as a user's do — so
+    /// there is deliberately no `is_machine` parameter here to branch on.
+    pub async fn check_subject(
+        &self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        authz: &dyn AuthzChecker,
+    ) -> Result<(), AxiamApiError> {
         let request = AccessRequest {
-            tenant_id: user.tenant_id,
-            subject_id: user.user_id,
+            tenant_id,
+            subject_id,
             action: self.action.clone(),
             resource_id: self.resource_id,
             scope: self.scope.clone(),

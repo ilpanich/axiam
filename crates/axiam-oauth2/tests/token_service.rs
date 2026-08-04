@@ -1955,10 +1955,24 @@ fn decode_claims(token: &str) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("payload is JSON")
 }
 
-fn make_service_account(secret_hash: String, status: UserStatus) -> ServiceAccount {
+/// A service account belonging to `tenant_id`.
+///
+/// The tenant is a parameter rather than a fresh UUID because the grant now
+/// asserts that the row the repository returned really belongs to the tenant
+/// the request was made under (§17.2 residual 6). The mock repository ignores
+/// its `tenant_id` argument — that is deliberate, and it is what lets
+/// `a_service_account_from_another_tenant_is_refused` below drive the
+/// assertion — so every *other* test has to hand the fixture the same tenant
+/// it exchanges under, or it would be exercising the cross-tenant refusal
+/// instead of the behaviour it names.
+fn make_service_account(
+    tenant_id: Uuid,
+    secret_hash: String,
+    status: UserStatus,
+) -> ServiceAccount {
     ServiceAccount {
         id: Uuid::new_v4(),
-        tenant_id: Uuid::new_v4(),
+        tenant_id,
         name: "svc".into(),
         description: None,
         client_id: "sa_deadbeefdeadbeefdeadbeefdeadbeef".into(),
@@ -1996,13 +2010,14 @@ fn sa_req(client_id: &str, secret: &str) -> TokenRequest {
 #[tokio::test]
 async fn a_service_account_can_authenticate_with_client_credentials() {
     let secret = "sa-secret-value";
-    let sa = make_service_account(hash_client_secret(secret), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, hash_client_secret(secret), UserStatus::Active);
     let sa_id = sa.id;
     let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     let resp = svc
         .exchange(
-            Uuid::new_v4(),
+            tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
         )
         .await
@@ -2026,12 +2041,13 @@ async fn a_service_account_can_authenticate_with_client_credentials() {
 
 #[tokio::test]
 async fn a_wrong_service_account_secret_is_rejected() {
-    let sa = make_service_account(hash_client_secret("right"), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, hash_client_secret("right"), UserStatus::Active);
     let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     let err = svc
         .exchange(
-            Uuid::new_v4(),
+            tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
         )
         .await
@@ -2049,12 +2065,13 @@ async fn a_disabled_service_account_cannot_authenticate() {
         UserStatus::PendingVerification,
     ] {
         let secret = "sa-secret-value";
-        let sa = make_service_account(hash_client_secret(secret), status.clone());
+        let tenant = Uuid::new_v4();
+        let sa = make_service_account(tenant, hash_client_secret(secret), status.clone());
         let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
         let err = svc
             .exchange(
-                Uuid::new_v4(),
+                tenant,
                 sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
             )
             .await
@@ -2086,14 +2103,15 @@ async fn an_unknown_service_account_is_invalid_client() {
 #[tokio::test]
 async fn a_service_account_cannot_request_a_scope() {
     let secret = "sa-secret-value";
-    let sa = make_service_account(hash_client_secret(secret), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, hash_client_secret(secret), UserStatus::Active);
     let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     let mut req = sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret);
     req.scope = Some("admin:everything".into());
 
     let err = svc
-        .exchange(Uuid::new_v4(), req)
+        .exchange(tenant, req)
         .await
         .expect_err("a service account registers no scopes");
     assert!(matches!(err, OAuth2Error::InvalidScope(_)), "got {err:?}");
@@ -2105,11 +2123,12 @@ async fn a_service_account_cannot_request_a_scope() {
 async fn a_legacy_service_account_hash_authenticates_and_migrates() {
     let secret = "sa-secret-value";
     let legacy = legacy_client_secret_hash(secret);
-    let sa = make_service_account(legacy.clone(), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, legacy.clone(), UserStatus::Active);
     let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     svc.exchange(
-        Uuid::new_v4(),
+        tenant,
         sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
     )
     .await
@@ -2134,12 +2153,17 @@ async fn a_legacy_service_account_hash_authenticates_and_migrates() {
 /// A wrong secret must never cause a migration write.
 #[tokio::test]
 async fn a_failed_service_account_auth_never_migrates() {
-    let sa = make_service_account(legacy_client_secret_hash("right"), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(
+        tenant,
+        legacy_client_secret_hash("right"),
+        UserStatus::Active,
+    );
     let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     let _ = svc
         .exchange(
-            Uuid::new_v4(),
+            tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
         )
         .await;
@@ -2170,12 +2194,13 @@ async fn a_service_account_keyed_to_a_previous_pepper_migrates_on_use() {
          the scheme count cannot see it"
     );
 
-    let sa = make_service_account(old_pepper_hash.clone(), UserStatus::Active);
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, old_pepper_hash.clone(), UserStatus::Active);
     let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
 
     let result = svc
         .exchange(
-            Uuid::new_v4(),
+            tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
         )
         .await;
@@ -2191,5 +2216,109 @@ async fn a_service_account_keyed_to_a_previous_pepper_migrates_on_use() {
     assert!(
         log.lock().unwrap().is_empty(),
         "a failed verification must never trigger a migration write"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §17.2 residual 6 — the cross-tenant boundary is asserted in the auth path
+// ---------------------------------------------------------------------------
+
+/// The grant must refuse a row that belongs to a different tenant than the one
+/// the request was made under.
+///
+/// This is the test §17.2 residual 6 said could not exist: "the mock in the
+/// test suite ignores `tenant_id`, so no test currently proves it; only the
+/// real SQL does." That is precisely why the check belongs in the handler as
+/// well as in the query — the mock's indifference to `tenant_id` models a
+/// repository whose tenant predicate has been dropped, which is the regression
+/// worth catching. Before the assertion this exchange **succeeded** and minted
+/// a token for another tenant's service account.
+#[tokio::test]
+async fn a_service_account_from_another_tenant_is_refused() {
+    let secret = "sa-secret-value";
+    let account_tenant = Uuid::new_v4();
+    let requested_tenant = Uuid::new_v4();
+    assert_ne!(account_tenant, requested_tenant, "precondition");
+
+    let sa = make_service_account(
+        account_tenant,
+        hash_client_secret(secret),
+        UserStatus::Active,
+    );
+    let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let err = svc
+        .exchange(
+            requested_tenant,
+            // The correct secret — so the refusal is attributable to the tenant
+            // mismatch alone and not to a credential failure.
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+        )
+        .await
+        .expect_err("a service account must not authenticate outside its tenant");
+
+    assert!(
+        matches!(err, OAuth2Error::InvalidClient(_)),
+        "must be the generic invalid_client, got {err:?}"
+    );
+
+    // The refusal happens before the secret is ever compared, so a foreign row
+    // cannot be used as a verification oracle and cannot trigger a hash upgrade
+    // write against another tenant's record.
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a cross-tenant row must never reach the secret-verification path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-086 — the token endpoint must not reveal which client ids exist
+// ---------------------------------------------------------------------------
+
+/// An unknown client and a wrong secret must be **indistinguishable** to the
+/// caller — same error code *and* same `error_description`.
+///
+/// Before SEC-086 the codes matched but the descriptions did not ("client not
+/// found" versus "invalid client credentials"), and the description is
+/// serialized verbatim into the 401 body, so an unauthenticated caller could
+/// probe whether any given `sa_…` or `oa_…` client id existed.
+#[tokio::test]
+async fn an_unknown_client_is_indistinguishable_from_a_wrong_secret() {
+    fn shape(e: &OAuth2Error) -> (String, String) {
+        (e.error_code().to_string(), e.error_description())
+    }
+
+    // --- service-account branch (`sa_…`) ---
+    let tenant = Uuid::new_v4();
+    let sa = make_service_account(tenant, hash_client_secret("right"), UserStatus::Active);
+    let (svc_found, _) = build_sa(SaOutcome::Found(Box::new(sa)));
+    let (svc_missing, _) = build_sa(SaOutcome::NotFound);
+
+    let wrong_secret = svc_found
+        .exchange(
+            tenant,
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+        )
+        .await
+        .expect_err("wrong secret");
+    let unknown_client = svc_missing
+        .exchange(
+            tenant,
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+        )
+        .await
+        .expect_err("unknown client");
+
+    assert_eq!(
+        shape(&wrong_secret),
+        shape(&unknown_client),
+        "an unknown service-account client id must be indistinguishable from a bad secret"
+    );
+
+    // Pin the actual wording too, so a future edit cannot reintroduce the
+    // oracle by changing both arms to something that still names the cause.
+    assert_eq!(
+        unknown_client.error_description(),
+        "invalid client credentials"
     );
 }

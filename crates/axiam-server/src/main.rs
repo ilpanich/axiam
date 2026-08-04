@@ -845,7 +845,17 @@ async fn main() -> std::io::Result<()> {
     let decision_cache = config.authz.build_decision_cache();
     if let Some(cache) = decision_cache.as_ref() {
         tracing::info!(
-            ttl_secs = config.authz.decision_cache_ttl_secs,
+            // §17.1: the accessor, not the raw field. This was the workspace's
+            // sole non-test raw read, and it logged the operator's *requested*
+            // TTL while the cache ran on the clamped one — so an operator who
+            // set 86400 saw "86400" here and reasonably concluded the clamp
+            // had not applied. `configured_ttl_secs` is emitted only when the
+            // two differ, which is exactly when the discrepancy needs
+            // explaining.
+            ttl_secs = config.authz.decision_cache_ttl_secs(),
+            configured_ttl_secs = (config.authz.decision_cache_ttl_secs
+                != config.authz.decision_cache_ttl_secs())
+            .then_some(config.authz.decision_cache_ttl_secs),
             max_entries = config.authz.decision_cache_max_entries,
             // Multi-replica posture stated at the point of enablement, not
             // only in the docs. Without the §4.2 broadcast channel,

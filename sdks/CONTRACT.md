@@ -749,7 +749,7 @@ would never have honoured.
 | 3 | `nbf` | **Honoured when present.** A token whose `nbf` is in the future MUST be rejected. Absent `nbf` is valid. |
 | 4 | `tenant_id` | **REQUIRED and asserted.** MUST equal the client's configured tenant. Absent claim, or no configured tenant to compare against, MUST fail closed. The JWKS trust anchor is **organization-wide**, so signature validity alone does not bound a token to a tenant. |
 | 5 | `iss` | **Checked when the SDK is configured with an expected issuer**; absent configuration means no check. When configured, a mismatch MUST be rejected. |
-| 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`. |
+| 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`; one guarding a **machine-facing** resource server SHOULD expect `axiam:m2m`, which is what *every* service-account token now carries — both the client-credentials grant and the mTLS device path (§12.1). |
 | 7 | clock skew | Rules 2 and 3 MAY allow a **small, named, documented** leeway (RECOMMENDED 60 s). It MUST be a named constant, not an inline literal, and MUST NOT be operator-configurable to an unbounded value. |
 | 8 | subject of the decision | The guard MUST decide on **the caller's credential and no other**. When that credential fails any rule above, the guard MUST reject. It MUST NOT retry, refresh, or fall back to a *different* credential — in particular not the SDK client's own session — and MUST NOT admit the request under any identity other than the one the caller presented. |
 
@@ -1094,6 +1094,30 @@ Consequences an SDK MUST respect:
    to work around; it is rule 6 doing its job, and the fix is configuration.
 3. A service-account token carries **no `scope` claim**, so an SDK MUST NOT
    derive authorization from scope for these callers.
+
+**⚠ Breaking change — a device (mTLS) token is now `axiam:m2m` too.**
+`POST /api/v1/auth/device` (§6.1) used to return a token stamped
+`aud: axiam:user`, so a certificate-authenticated device passed every
+user-facing route guard. It now returns `aud: axiam:m2m`, matching the
+client-credentials path above: **both** ways a service account can
+authenticate now yield a machine-audience token. The audience finally
+describes *what kind of principal holds the token* rather than which endpoint
+issued it.
+
+What this means for an SDK:
+
+- **No SDK code change is required.** The device-auth call and its response
+  shape are unchanged; only the `aud` claim value differs.
+- **A §10 guard fronting a resource server that accepts device callers MUST
+  expect `axiam:m2m`** — the same rule-6 consequence as point 2 above, now
+  reaching a second class of caller. A guard configured for `axiam:user` will
+  reject device tokens, correctly.
+- **Server-side, a device token no longer reaches user-facing REST routes.**
+  It is accepted on the authorization-check endpoints (`POST
+  /api/v1/authz/check` and the batch form), which are the machine-facing
+  surface. An SDK whose device flow called any other endpoint with the
+  device token must migrate that call deliberately — the previous access was
+  implicit, not designed.
 
 ### §12.2 Per-language naming map
 

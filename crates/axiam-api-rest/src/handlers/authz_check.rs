@@ -6,7 +6,7 @@
 //!
 //! Both endpoints delegate to the **same** `AuthzChecker::check_access`
 //! path as the gRPC `AuthorizationService` (D-08). Identity is derived
-//! exclusively from the verified JWT (`user.tenant_id`, `user.user_id`);
+//! exclusively from the verified JWT (`user.tenant_id`, `user.subject_id`);
 //! no identity field is accepted from the request body.
 //!
 //! The `subject_id` field in the body enables cross-subject ("check-as")
@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzChecker, AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +98,7 @@ async fn append_check_as_audit<C: Connection + Clone>(
     audit_repo: &SurrealAuditLogRepository<C>,
     tenant_id: Uuid,
     actor_id: Uuid,
+    actor_type: ActorType,
     queried_subject: Uuid,
     resource_id: Uuid,
 ) {
@@ -105,7 +106,11 @@ async fn append_check_as_audit<C: Connection + Clone>(
         .append(CreateAuditLogEntry {
             tenant_id,
             actor_id,
-            actor_type: ActorType::User,
+            // §17.2 residual 1: these endpoints now also serve machine
+            // callers, so the actor type follows the principal rather than
+            // being hardcoded — a device must not be recorded as a User in a
+            // legally significant trail.
+            actor_type,
             action: "authz.check_as".into(),
             resource_id: Some(resource_id),
             outcome: AuditOutcome::Success,
@@ -149,7 +154,7 @@ async fn append_check_as_audit<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn check_access<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    user: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CheckAccessBody>,
@@ -161,20 +166,21 @@ pub async fn check_access<C: Connection + Clone>(
     // is always user.tenant_id (never from body).
     let effective_subject = if let Some(sid) = body.subject_id {
         RequirePermission::new("authz:check_as", user.tenant_id)
-            .check(&user, authz.get_ref().as_ref())
+            .check_subject(user.tenant_id, user.subject_id, authz.get_ref().as_ref())
             .await?;
         // T-15-04: audit every cross-subject query before returning.
         append_check_as_audit(
             &state.audit_repo,
             user.tenant_id,
-            user.user_id,
+            user.subject_id,
+            user.actor_type(),
             sid,
             resource_id,
         )
         .await;
         sid
     } else {
-        user.user_id
+        user.subject_id
     };
 
     let access_req = AccessRequest {
@@ -213,7 +219,7 @@ pub async fn check_access<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn batch_check_access<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    user: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<BatchCheckAccessBody>,
@@ -226,7 +232,7 @@ pub async fn batch_check_access<C: Connection + Clone>(
     let has_override = body.checks.iter().any(|c| c.subject_id.is_some());
     if has_override {
         RequirePermission::new("authz:check_as", user.tenant_id)
-            .check(&user, authz.get_ref().as_ref())
+            .check_subject(user.tenant_id, user.subject_id, authz.get_ref().as_ref())
             .await?;
     }
 
@@ -238,14 +244,23 @@ pub async fn batch_check_access<C: Connection + Clone>(
     let checker: &dyn AuthzChecker = authz.get_ref().as_ref();
     let audit_repo_ref: &SurrealAuditLogRepository<C> = &state.audit_repo;
     let tenant_id = user.tenant_id;
-    let actor_id = user.user_id;
+    let actor_id = user.subject_id;
+    let actor_kind = user.actor_type();
 
     let mut access_requests = Vec::with_capacity(body.checks.len());
     for check in body.checks {
         let resource_id = check.resource_id;
         let effective_subject = if let Some(sid) = check.subject_id {
             // T-15-04: audit each cross-subject item individually.
-            append_check_as_audit(audit_repo_ref, tenant_id, actor_id, sid, resource_id).await;
+            append_check_as_audit(
+                audit_repo_ref,
+                tenant_id,
+                actor_id,
+                actor_kind.clone(),
+                sid,
+                resource_id,
+            )
+            .await;
             sid
         } else {
             actor_id

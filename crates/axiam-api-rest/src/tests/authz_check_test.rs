@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::authz::{AllowAllAuthzChecker, AuthzChecker, AuthzData, DenyAllAuthzChecker};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::handlers::authz_check::{
     BatchCheckAccessBody, CheckAccessBody, batch_check_access, check_access,
 };
@@ -49,7 +49,14 @@ async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     db
 }
 
-fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedUser {
+/// A human principal (`aud = axiam:user`) for these handlers.
+///
+/// The authorization-check endpoints take [`AuthenticatedPrincipal`] since
+/// §17.2 residual 1, because they are the one REST surface a machine token is
+/// allowed to reach. `is_machine: false` here keeps every pre-existing test
+/// asserting exactly what it did before; `make_machine` below covers the new
+/// branch.
+fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
     let session_id = Uuid::new_v4();
     let claims = ValidatedClaims(AccessTokenClaims {
         sub: user_id.to_string(),
@@ -63,11 +70,36 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedUser {
         scope: None,
         sub_kind: SubjectKind::User,
     });
-    AuthenticatedUser {
-        user_id,
+    AuthenticatedPrincipal {
+        subject_id: user_id,
         tenant_id,
         org_id: Uuid::nil(),
-        session_id,
+        is_machine: false,
+        claims,
+    }
+}
+
+/// A machine principal (`aud = axiam:m2m`) — a certificate-authenticated
+/// device or a service account holding a client-credentials token.
+fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrincipal {
+    let claims = ValidatedClaims(AccessTokenClaims {
+        sub: service_account_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: Uuid::nil().to_string(),
+        iss: "test".into(),
+        iat: 0,
+        exp: i64::MAX,
+        jti: Uuid::new_v4().to_string(),
+        aud: Some("axiam:m2m".into()),
+        scope: None,
+        sub_kind: axiam_auth::token::SubjectKind::ServiceAccount,
+    });
+
+    AuthenticatedPrincipal {
+        subject_id: service_account_id,
+        tenant_id,
+        org_id: Uuid::nil(),
+        is_machine: true,
         claims,
     }
 }
@@ -424,4 +456,93 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
             "result[{i}] mismatch between concurrent batch and sequential per-item check_access"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// §17.2 residual 1 — a machine principal reaches the authz-check endpoints
+// ---------------------------------------------------------------------------
+
+/// A certificate-authenticated device (now `aud = axiam:m2m`) can still run an
+/// authorization check.
+///
+/// This is the test that makes the audience flip safe to ship. `aud` moved
+/// from `axiam:user` to `axiam:m2m` so a device stops passing *user*-facing
+/// route guards — but the check endpoints are the surface a device actually
+/// needs, so they must keep working. Without the `AuthenticatedPrincipal`
+/// widening this request would 401, and the narrowing would have been an
+/// outage rather than a fix.
+#[tokio::test]
+async fn a_machine_principal_can_run_an_authz_check() {
+    let tenant_id = Uuid::new_v4();
+    let service_account_id = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+
+    let db = setup_db().await;
+    let state = make_state(db);
+    let authz = make_authz(AllowAllAuthzChecker);
+    let machine = make_machine(tenant_id, service_account_id);
+
+    let body = web::Json(CheckAccessBody {
+        action: "devices:report".into(),
+        resource_id,
+        scope: None,
+        subject_id: None,
+    });
+
+    let result = check_access(machine, authz, state, body).await;
+    assert_eq!(
+        status_code(&result),
+        200,
+        "a machine token must be accepted on the authz-check endpoint"
+    );
+    let json = read_body_json(result.unwrap()).await;
+    assert_eq!(json["allowed"], true);
+}
+
+/// The `authz:check_as` gate applies to machines exactly as it does to users.
+///
+/// Widening the accepted audience must not widen *authorization*: a device
+/// asking about another subject is subject to the same permission check, and
+/// the deny-all checker means it does not have it.
+#[tokio::test]
+async fn a_machine_principal_still_needs_check_as_to_query_another_subject() {
+    let tenant_id = Uuid::new_v4();
+    let service_account_id = Uuid::new_v4();
+    let other_subject = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+
+    let db = setup_db().await;
+    let state = make_state(db);
+    let authz = make_authz(DenyAllAuthzChecker);
+    let machine = make_machine(tenant_id, service_account_id);
+
+    let body = web::Json(CheckAccessBody {
+        action: "users:get".into(),
+        resource_id,
+        scope: None,
+        subject_id: Some(other_subject),
+    });
+
+    let result = check_access(machine, authz, state, body).await;
+    assert_eq!(
+        status_code(&result),
+        403,
+        "a machine without authz:check_as must not query another subject"
+    );
+}
+
+/// The audit trail must record a device as a service account, not as a user.
+///
+/// `authz.check_as` is legally significant, so attributing a machine's
+/// cross-subject query to `ActorType::User` would be a false record. Before
+/// the principal widening the actor type was hardcoded.
+#[test]
+fn a_machine_principal_audits_as_a_service_account() {
+    use axiam_core::models::audit::ActorType;
+
+    let machine = make_machine(Uuid::new_v4(), Uuid::new_v4());
+    let human = make_user(Uuid::new_v4(), Uuid::new_v4());
+
+    assert!(matches!(machine.actor_type(), ActorType::ServiceAccount));
+    assert!(matches!(human.actor_type(), ActorType::User));
 }

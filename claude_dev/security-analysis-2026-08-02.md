@@ -1174,3 +1174,201 @@ This is new authentication surface and was reviewed as such rather than as a dif
 - **Open findings: SEC-086 (LOW)** — the only one, and a one-line fix.
 - **Highest-value follow-up that is not a finding**: move the mTLS service-account token to `axiam:m2m` (residual 1). Everything else above is an observation or an accepted trade-off.
 - **On the new feature**: this is the first *feature* reviewed in this series rather than a fix, and it landed with correct audience separation, server-derived tenant/org, status checks and scope handling on the first pass — the classes that previous rounds had to find the hard way (NEW-1 org derivation, SEC-006 audience confusion, SEC-007 tenant scoping) were all handled up front. The residuals it does carry are mostly inherited parity with the older client-credentials branch, not new mistakes.
+
+## 18. Remediation of §17 (2026-08-04)
+
+- **Base**: server `ca323e7b` (the §17 record) on `main`, itself on top of `5509c2c1` (the new grant).
+- **Scope**: the one open finding (SEC-086), the one partial in §17.1, and the §17.2 residuals.
+- **Result**: SEC-086 closed; the §17.1 partial closed; residuals 1, 2, 3, 6 and 7 actioned — including the audience change §17.4 named as the highest-value follow-up. Residuals 4 and 5 remain accepted trade-offs. No new findings.
+
+### 18.1 SEC-086 — the client-existence oracle
+
+Every token-endpoint client-authentication failure now returns the same
+`error_description` through a single constant, `CLIENT_AUTH_FAILED`
+(`oauth2/token.rs`). Five sites previously said `"client not found"` for an
+unknown client and `"invalid client credentials"` for a bad secret; all five
+now say the latter. The `NotFound`-versus-other-error distinction the
+QUAL-03/D-11 comments protect is untouched — it stays internal, still mapping
+to `invalid_client` versus `server_error` — so a DB outage still cannot read as
+bad credentials. Only the caller-visible wording collapsed.
+
+`authorize.rs:74` was deliberately **left alone**. At the authorization
+endpoint `client_id` is public by construction (it travels in the URL), RFC
+6749 §4.1.2.1 requires informing the resource owner directly rather than
+redirecting, and no credential is presented — so "invalid client credentials"
+there would be actively misleading, and there is no secret for it to protect.
+
+Pinned by `an_unknown_client_is_indistinguishable_from_a_wrong_secret`, which
+asserts the two failures are equal as `(code, description)` pairs and then pins
+the literal wording, so a future edit cannot reintroduce the oracle by changing
+both arms to something that still names the cause.
+
+**On the timing asymmetry the finding also named** — the unknown-client branch
+returns before any HMAC is computed — this was assessed and deliberately not
+"fixed" with a dummy HMAC. The skipped work is a single HMAC-SHA256 over a
+short string: sub-microsecond, and dominated by the DB round-trip that differs
+between the two branches anyway (a miss and a row read are not equal-cost, and
+cannot be made so without a dummy query). Adding a compensating HMAC would
+close the smaller channel while leaving the larger one, which is theatre rather
+than remediation. The honest statement is that the *description* oracle is
+closed and a timing channel bounded by DB variance remains — against 128-bit
+CSPRNG client ids, which is why SEC-086 was LOW to begin with.
+
+### 18.2 The §17.1 partial — compare-before-clear
+
+The cache-invalidation publisher's failure path cleared its channel slot only
+if the slot still held "the same channel", tested with `Channel::id()`. §17.1
+was right that this is the AMQP channel **number** (`u16`), recycled by the
+broker after a close, so it identifies a slot on the connection and not a
+handle. `Arc::ptr_eq` is unavailable — lapin does not expose the inner `Arc` —
+so the slot is now `Option<(u64, Channel)>` stamped from a monotonic
+`AtomicU64` bumped on every fill. Generations are never reused, so `==` means
+"still the very handle that failed" exactly, and the comparison no longer rests
+on an invariant the library does not guarantee.
+
+**Test gap, stated plainly:** this cannot be exercised here. Constructing two
+real `lapin::Channel`s needs a live broker, which this crate's tests do not
+have — the same limitation the existing publisher test already records in its
+own comment. The change is verified by construction, not by a test.
+
+### 18.3 Residual 1 — the mTLS device path now mints `axiam:m2m`
+
+§17.4 called this "the most valuable follow-up", and it was, but §17 did not
+state the fact that determines how to land it: **every guarded REST handler
+takes `AuthenticatedUser`, which requires `aud = axiam:user`, and
+`AuthenticatedServiceAccount` is consumed by no route.** So `axiam:m2m` reached
+*zero* REST endpoints. Flipping the device path on its own would not have
+narrowed a too-wide grant; it would have replaced it with no grant at all —
+an outage for every deployed IoT device, with no migration path.
+
+So the flip landed together with the surface it needs:
+
+1. `issue_service_account_token` stamps `AUD_M2M` (`auth/token.rs`). Both ways
+   a service account can authenticate — mTLS and client-credentials — now yield
+   a machine-audience token. The audience describes the principal, not the
+   issuing endpoint.
+2. A new `AuthenticatedPrincipal` extractor accepts **either** audience and
+   yields `(subject_id, tenant_id, org_id, is_machine)`.
+3. It is used on the authorization-check endpoints **only** — `POST
+   /api/v1/authz/check` and the batch form — which are the machine-facing
+   read-only surface. Every other route keeps `AuthenticatedUser` and still
+   rejects machine tokens outright.
+
+Three properties worth recording because they are what make the widening safe:
+
+- **User tokens are not weakened.** A `axiam:user` token taken through the
+  wider extractor still gets the same session-revocation check (REQ-7 / D-15).
+  That check is skipped only for machines, which have no session row to check.
+  The absent-`aud` back-compat window is still decided by the *same*
+  `check_user_aud_and_parse_jti` the narrow extractor uses, so the two cannot
+  drift, and an absent `aud` is never silently treated as a machine.
+- **Authorization is not widened.** `RequirePermission::check_subject` applies
+  RBAC identically to both kinds of principal — deliberately with no
+  `is_machine` parameter to branch on — so a device still needs
+  `authz:check_as` to query another subject. Pinned by
+  `a_machine_principal_still_needs_check_as_to_query_another_subject`.
+- **The audit trail stays truthful.** `append_check_as_audit` previously
+  hardcoded `ActorType::User`; it now takes the principal's actor type, so a
+  device's cross-subject query is recorded as a `ServiceAccount`. `authz.check_as`
+  is legally significant, so attributing it to a user would have been a false
+  record.
+
+**This is a breaking change**, and the third in this series after the two in
+§9.3. A device can no longer call user-facing routes. That access was implicit
+rather than designed — nothing pinned it, which is precisely why the flip was
+initially invisible to the device-auth suite: it never asserted `aud` at all.
+It does now, and it also asserts the narrowing bites by driving the device
+token at a user route and requiring a 401.
+
+### 18.4 Residual 2 — the gRPC audience check
+
+The real gap was narrower and worse than "no audience check": `decode_access_token`
+accepts both audiences and **skips the audience check entirely when the claim is
+absent** (the D-20 pre-Phase-4 window), so a token with no `aud` reached the
+authorization service with nothing applied and nothing recorded. REST gates that
+case on `allow_missing_aud_as_user` and warns on every use; this transport did
+neither.
+
+The interceptor now states the policy: both audiences accepted (deliberately —
+this is the service-mesh check surface, so machine callers are the norm while
+user tokens reach it through SDK callers), an unknown audience rejected, and an
+absent one gated on the same `allow_missing_aud_as_user` flag with the same
+per-request warning. gRPC was **not** narrowed to m2m-only: that would break
+user-token callers, and nothing in the review suggests it should.
+
+### 18.5 Residuals 3, 6, 7
+
+- **3 — a failed client auth accrued nothing.** The token endpoint now writes
+  an `oauth2.client_auth_failed` audit entry on every `invalid_client`, with
+  the attempted `client_id`, the grant type and the client IP; never the
+  secret. Fire-and-forget, so an audit-sink outage cannot turn a 401 into a
+  500 (T-15-04). Recorded with `actor_id = Uuid::nil()` and `ActorType::System`
+  because the caller is by definition unauthenticated — the presented
+  `client_id` must be evidence in the metadata, not promoted to identity.
+  **Lockout was deliberately not added**: secrets are 256-bit CSPRNG values so
+  online guessing is not the threat, and a lockout keyed on a caller-supplied
+  `client_id` would hand any unauthenticated party a DoS against a known
+  client. This closes the detection half, which is the half that was missing.
+- **6 — the cross-tenant boundary.** The handler now asserts
+  `sa.tenant_id == tenant_id` before the secret is verified, so a foreign row
+  can neither act as a verification oracle nor trigger a hash-upgrade write
+  against another tenant's record. §17.2 noted no test could prove this because
+  the mock ignores `tenant_id`; that indifference is exactly what makes the
+  test possible — it models a repository whose tenant predicate has been
+  dropped. `a_service_account_from_another_tenant_is_refused` fails without the
+  assertion, and before it that exchange **succeeded**. The seven pre-existing
+  service-account tests were handing the fixture a random tenant and exchanging
+  under a different one; they now bind both to the same tenant, so each
+  exercises the behaviour it names rather than the new refusal.
+- **7 — the misleading field name.** `AuthenticatedServiceAccount.client_id`
+  is now `subject`. No route consumes the extractor, so the rename is free —
+  which is why it happened now rather than after something depended on it.
+
+### 18.6 Deliberately not actioned
+
+1. **Residual 4 — disabling a service account does not revoke issued tokens.**
+   Unchanged: m2m tokens have no session row and introspection re-validates the
+   JWT without re-reading the account, so a disabled account's token reports
+   `active: true` until expiry (default 900 s). Identical in shape to the
+   existing OAuth2-client path and the same accepted `T-39` trade-off. Closing
+   it means giving machine tokens a server-side revocation record, which is a
+   design change, not a patch.
+2. **Residual 5 — `ServiceAccount` has no expiry field.** A schema and
+   lifecycle change; rotation remains the control. Not a defect to smuggle into
+   a security remediation.
+3. **§16.3a's remaining SDK work — the rule-8 guardrail tests.** Still landed
+   only in TypeScript and Python; still outstanding in the other nine. Carried
+   again, and it should be said plainly that this is now the third round it has
+   been carried. It is a mechanical but genuinely multi-language lift (two
+   tests each across eight languages) and deserves its own PR series rather
+   than being appended to a round whose subject is a breaking authentication
+   change. §15.1's hand-verification that all eleven guards reject correctly
+   today still stands, so this remains a regression-guard gap, not a defect.
+4. Everything §16.4 listed as deliberately not actioned, unchanged.
+
+### 18.7 What a verifier should look at hardest
+
+1. **The `AuthenticatedPrincipal` widening.** It is the one place a machine
+   token can now enter the REST surface. Confirm it is used on the two authz-check
+   handlers and nowhere else; that the session-revocation check really does still
+   run for user tokens taken through it; and that an absent `aud` cannot reach the
+   machine branch.
+2. **The device audience flip's blast radius.** The claim is that the
+   authorization-check endpoints are the only REST surface a device needs.
+   That is an assertion about deployments, not about code — worth challenging
+   against how fleets actually use the device token.
+3. **The tenant assertion's placement.** It is before secret verification on
+   purpose. Confirm no reordering puts a foreign row through the hasher.
+4. **The audit event's metadata.** Confirm the presented `client_id` is the
+   only caller-controlled value recorded and that no secret can reach it.
+
+### 18.8 SDK impact
+
+`CONTRACT.md` §12.1 gains the device-token breaking change, and §10.1 rule 6
+now states the machine-facing case explicitly: `axiam:m2m` is what *every*
+service-account token carries, by either authentication path. No SDK code
+change is required — the device-auth call and response shape are unchanged,
+only the `aud` value differs — but a §10 guard fronting a resource server that
+accepts device callers must be configured to expect `axiam:m2m`, and any SDK
+device flow that called a non-authz endpoint with the device token must
+migrate that call deliberately.

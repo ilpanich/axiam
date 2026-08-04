@@ -123,7 +123,7 @@ impl actix_web::FromRequest for AuthenticatedUser {
 /// Accepts only tokens with `aud = axiam:m2m`; user tokens are rejected.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedServiceAccount {
-    /// The token's `sub` claim.
+    /// The token's `sub` claim — the **subject** of the machine token.
     ///
     /// **Its meaning depends on which principal obtained the token**, so do not
     /// treat it as an OAuth2 `client_id` without checking `claims.sub_kind`:
@@ -134,10 +134,12 @@ pub struct AuthenticatedServiceAccount {
     ///   service account's grants are resolved by subject id (§16.6). It is
     ///   *not* the `sa_…` client id.
     ///
-    /// The field name predates service accounts being able to use this grant.
-    /// No route consumes this extractor today; the distinction is recorded here
-    /// so the first one that does gets it right.
-    pub client_id: String,
+    /// Named `subject` rather than `client_id` for exactly that reason
+    /// (§17.2 residual 7): the old name was accurate for only one of the two
+    /// principals and invited the first consumer to treat a UUID as a client
+    /// id. No route consumes this extractor today, so the rename is free —
+    /// which is why it happens now rather than after something depends on it.
+    pub subject: String,
     pub tenant_id: Uuid,
     pub claims: ValidatedClaims,
 }
@@ -344,10 +346,148 @@ fn extract_service_account(
         })?;
 
     Ok(AuthenticatedServiceAccount {
-        client_id: validated.0.sub.clone(),
+        subject: validated.0.sub.clone(),
         tenant_id,
         claims: validated,
     })
+}
+
+// ---------------------------------------------------------------------------
+// AuthenticatedPrincipal extractor — accepts either audience
+// ---------------------------------------------------------------------------
+
+/// An authenticated caller that may be **either** a human user
+/// (`aud = axiam:user`) or a machine (`aud = axiam:m2m`).
+///
+/// This exists so the mTLS device path can carry the machine audience
+/// (§17.2 residual 1) without losing the endpoints a device legitimately
+/// needs. Before it, `axiam:m2m` reached **no** REST route at all — every
+/// guarded handler takes [`AuthenticatedUser`], which rejects that audience —
+/// so moving device tokens to `axiam:m2m` on its own would have replaced a
+/// too-wide grant with no grant, which is an outage rather than a narrowing.
+///
+/// **What this deliberately is not:** a general-purpose relaxation. It is used
+/// only on the authorization-check endpoints, which are the machine-facing
+/// read-only surface. Every other route keeps [`AuthenticatedUser`] and so
+/// keeps rejecting machine tokens outright. Widening its use is a security
+/// decision, not a convenience one.
+///
+/// Two properties worth stating because they are easy to lose:
+///
+/// * **User tokens are not weakened.** A `axiam:user` token extracted this way
+///   still goes through the same session-revocation check
+///   [`AuthenticatedUser`] applies, so a revoked session cannot reach these
+///   endpoints through the wider extractor. That check is skipped only for
+///   machine tokens, which have no session row to check by construction.
+/// * **`aud` must be present.** The `allow_missing_aud_as_user` back-compat
+///   window is honoured for the user branch only, exactly as on the narrow
+///   extractor — an absent `aud` is never silently treated as a machine.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedPrincipal {
+    /// The subject the authorization engine should evaluate: the user id for a
+    /// user token, the service-account id for a machine token. Both are the
+    /// token's `sub`, and both are what role assignments are keyed on.
+    pub subject_id: Uuid,
+    pub tenant_id: Uuid,
+    pub org_id: Uuid,
+    /// `true` when the caller authenticated as a machine (`aud = axiam:m2m`).
+    /// Handlers use this for audit attribution, not for authorization — RBAC
+    /// is applied identically to both kinds.
+    pub is_machine: bool,
+    pub claims: ValidatedClaims,
+}
+
+impl AuthenticatedPrincipal {
+    /// Audit actor type matching how this principal authenticated.
+    pub fn actor_type(&self) -> axiam_core::models::audit::ActorType {
+        if self.is_machine {
+            axiam_core::models::audit::ActorType::ServiceAccount
+        } else {
+            axiam_core::models::audit::ActorType::User
+        }
+    }
+}
+
+fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamApiError> {
+    let config = req
+        .app_data::<web::Data<AuthConfig>>()
+        .ok_or(AxiamError::Internal("missing auth config".into()))?;
+
+    let validated = match req.extensions().get::<Arc<CachedUserIdentity>>() {
+        Some(cached) => cached.claims.clone(),
+        None => parse_validated_claims(req)?,
+    };
+
+    // Machine tokens take the m2m branch; everything else (including the
+    // absent-`aud` back-compat window) is decided by the *same* function the
+    // narrow user extractor uses, so the two cannot drift apart.
+    let is_machine = validated.0.aud.as_deref() == Some(AUD_M2M);
+    if !is_machine {
+        check_user_aud_and_parse_jti(&validated, config)?;
+    }
+
+    let subject_id =
+        Uuid::parse_str(&validated.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid sub claim".into(),
+        })?;
+    let tenant_id =
+        Uuid::parse_str(&validated.0.tenant_id).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid tenant_id claim".into(),
+        })?;
+    let org_id =
+        Uuid::parse_str(&validated.0.org_id).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid org_id claim".into(),
+        })?;
+
+    Ok(AuthenticatedPrincipal {
+        subject_id,
+        tenant_id,
+        org_id,
+        is_machine,
+        claims: validated,
+    })
+}
+
+impl actix_web::FromRequest for AuthenticatedPrincipal {
+    type Error = AxiamApiError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let principal_result = extract_principal(req);
+        let validator = req
+            .app_data::<web::Data<Arc<dyn SessionValidator>>>()
+            .map(|d| d.get_ref().clone());
+
+        Box::pin(async move {
+            let principal = principal_result?;
+
+            // A user token reaching these endpoints must satisfy exactly the
+            // same session-revocation rule it would on any other route
+            // (REQ-7 / D-15). Skipping it for machines is not a relaxation:
+            // a machine token has no session row, so there is nothing to
+            // revoke — revocation for machines is disabling the account,
+            // which the token-issuing path checks.
+            if !principal.is_machine
+                && let Some(validator) = validator
+            {
+                let session_id = Uuid::parse_str(&principal.claims.0.jti).map_err(|_| {
+                    AxiamError::AuthenticationFailed {
+                        reason: "invalid jti".into(),
+                    }
+                })?;
+                if !validator
+                    .is_session_active(principal.tenant_id, session_id)
+                    .await
+                {
+                    return Err(AxiamError::AuthenticationFailed {
+                        reason: "session revoked or expired".into(),
+                    }
+                    .into());
+                }
+            }
+            Ok(principal)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

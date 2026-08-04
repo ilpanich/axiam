@@ -13,7 +13,8 @@
 - **Verification of §14 (2026-08-03, `f0a750ff`)**: **SEC-085 is closed**, CONTRACT §10.1 gained a **rule 8** (the guard must decide on the caller's credential and no other), and rule-8 conformance is confirmed across all eleven SDKs. Two §14 claims were PARTIAL — the service-account upgrade seam had no production caller, and the invalidation heartbeat left the decision-cache TTL unclamped — plus seven observations. See **[§15](#15-independent-verification-of-14-2026-08-03)**.
 - **Verification of §16 + first review of a new feature (2026-08-03, `5509c2c1`)**: both §15 partials are now closed (TTL clamped to 300 s; the upgrade caller arrived with the new grant). The **service-account `client_credentials` grant** is new authentication surface and was reviewed as such: audience separation (`axiam:m2m` vs `axiam:user`) is correct and enforced bidirectionally, tenant and org are server-derived, status is checked and scope escalation is impossible. It carries one new **LOW** — **SEC-086**, a client-existence oracle in the token endpoint's `error_description` — and the standing recommendation to move the mTLS service-account token to `axiam:m2m`. See **[§17](#17-verification-of-16-and-review-of-the-new-service-account-grant-2026-08-03)**.
 - **Verification of the SEC-086 / §17 remediation (2026-08-03, `d15878a2`)**: the **device audience is narrowed** — the strongest single change in this series, shipped together with the compensating `AuthenticatedPrincipal` grant so no device capability broke. The gRPC audience check, the pre-verification tenant assertion and the publisher-lock generation counter are all confirmed. But **SEC-086 is only PARTIAL** — the same existence oracle survives on the `authorization_code` grant — and closing the audit residual opened **SEC-087** (unauthenticated, tenant-unvalidated audit writes). `CHANGELOG.md` now states the *inverse* of the breaking change it shipped. See **§19** (that pass was renumbered from §18 when the remediation sections landed).
-- **Final verification (2026-08-04, `50cee941`)**: **every finding in this document is now closed.** SEC-086 is fully closed — the check order on `authorization_code` was corrected so `unauthorized_client` is reachable only after the secret verifies, and the remediation additionally caught a dummy-secret probe that still leaked. SEC-087 is fixed (tenant resolved before the write, client id truncated, IP taken from the peer address), and the CHANGELOG inversion is corrected in both places. Rule-8 guardrail tests now exist in all eleven SDKs, and the Java SDK found a servlet-thread-local variant of the same class on its own. What remains are observations and accepted trade-offs. See **[§22](#22-verification-of-20-and-21-2026-08-04)**.
+- **✅ CLOSED (2026-08-04, `3ede4d19`)** — **this document is complete. No finding remains open.** The last three residuals are fixed, two of them better than recommended: an unknown or indeterminate tenant now routes the audit row to the system partition rather than dropping it, so a caller still cannot write into a real tenant's log *and* a database fault no longer costs the telemetry. See **[§24](#24-final-verification-2026-08-04--closing-this-document)** for the closing status and the four practices that produced the result.
+- **Prior verification (2026-08-04, `50cee941`)**: every finding closed at that point. SEC-086 is fully closed — the check order on `authorization_code` was corrected so `unauthorized_client` is reachable only after the secret verifies, and the remediation additionally caught a dummy-secret probe that still leaked. SEC-087 is fixed (tenant resolved before the write, client id truncated, IP taken from the peer address), and the CHANGELOG inversion is corrected in both places. Rule-8 guardrail tests now exist in all eleven SDKs, and the Java SDK found a servlet-thread-local variant of the same class on its own. What remains are observations and accepted trade-offs. See **[§22](#22-verification-of-20-and-21-2026-08-04)**.
 
 ---
 
@@ -1848,3 +1849,42 @@ change deserving its own round.
 3. **That routing to nil did not re-open SEC-087.** The property is that a
    caller cannot steer a row into a *chosen* tenant. Confirm no path lets the
    claimed tenant id become the written one without the existence check.
+
+---
+
+## 24. Final verification (2026-08-04) — closing this document
+
+- **Commit**: server `3ede4d19` (PR #272), HEAD of `main`. SDK repositories carry only dependabot merges since the last pass; no SDK code changed.
+- **Scope**: the §22.3 residuals. The diff is small and confined to one handler plus its tests, so it was verified directly rather than delegated.
+- **Result**: **all three residuals are fixed, and two of them better than recommended.** No open findings, no new findings. This is the closing entry.
+
+### 24.1 Verification
+
+| Residual | Verdict |
+|---|---|
+| **1 — tenant-existence timing differential** | ✅ **CONFIRMED FIXED, at the root rather than the symptom.** The audit write is moved off the response path entirely (`handlers/oauth2.rs:260`, `actix_web::rt::spawn`), so the 401 is returned without awaiting either the tenant lookup or the insert. The differential cannot exist because no branch of the audit path is on the response path any more. |
+| **2 — audit telemetry failed open on a lookup error** | ✅ **CONFIRMED FIXED, better than recommended.** I suggested resolving the tenant before writing; the implementation goes further and **never drops the row at all**. An unknown tenant and an indeterminate one (DB fault) both route to the system partition (`Uuid::nil()`) with a distinguishing note — `unknown_tenant` or `tenant_lookup_failed` (`:355-377`). This satisfies both halves of the constraint simultaneously: a caller still cannot place a row in a real tenant's log by naming one, and a database fault no longer costs the telemetry that a fault makes most valuable. |
+| **3 — 128 chars vs bytes** | ✅ **CONFIRMED FIXED.** `truncate_bytes_on_char_boundary` bounds by **bytes** and walks back to a character boundary, so the stored value stays valid UTF-8 and the cap means what the test asserts. |
+
+### 24.2 One consequence worth recording
+
+Moving the audit write into a spawned task removes the natural backpressure it used to provide. Previously a failed client authentication held its request open for two database operations; now the response returns immediately and the work queues behind it, unbounded and uninstrumented. The total work is unchanged and is still bounded by the endpoint's rate limit, so this is not a finding — but under a sustained credential-guessing flood the spawned queue can grow without any signal, and an in-flight write is lost on shutdown. If the audit trail for this event is ever treated as complete rather than best-effort, that assumption should be revisited. Recorded as an observation only.
+
+### 24.3 Final status of this document
+
+- **Findings: none open.** SEC-071 through SEC-087, `T-145`, OBS-1 … OBS-4 and every numbered residual are closed and independently verified.
+- **Open items are observations and accepted trade-offs only**: the SEC-086 timing channel (accepted, reasoned), the gRPC m2m/user parity gap, `client_ip`'s overstated docstring, the spawned-audit backpressure note above, and the long-standing design decisions carried in the threat model (`T-16`/`T-87` no deny-override, `T-39` token revocation lag, `T-110`/`T-118` append-only audit versus erasure, plus the deployment-responsibility items).
+- **Threat model**: 149 threats, **128 mitigated / 21 open**, synchronised at source (`ThreatDragonModels/Axiam/Axiam.json`) and in the generated document. No threat status changed in this round.
+
+### 24.4 What this series produced
+
+Eight verification passes over four days, each independent of the remediation it checked. The findings ran SEC-071 → SEC-087: two HIGH cross-tenant authentication bypasses, one HIGH guard-credential substitution, an eight-SDK expiry gap, a 60× brute-force ceiling regression introduced by a performance fix, and a tail of low-severity oracles. Every one is closed.
+
+Four practices did the work, and they are the part worth carrying into the next effort:
+
+1. **Verification stays separate from remediation.** Every pass found something the preceding self-report had missed — without exception, across eight rounds. Not because the remediation was careless, but because writing a fix and checking a fix are different activities.
+2. **A remediation that names its own weakest points is the cheapest possible input to the next pass.** §14.5 started this voluntarily and it was the single highest-leverage habit in the series.
+3. **Evidence must resolve on the default branch.** A commit hash proves authorship, not shipment — one correct fix sat unmerged while recorded as done, and a CI gate now enforces the distinction.
+4. **A control that N implementations must satisfy gets written down once, normatively.** CONTRACT §10.1 and its rule 8 surfaced two HIGH bypasses and a UB defect that three prior per-SDK passes had not, because there had been no complete set to check against.
+
+The severity curve — HIGH cross-tenant bypass at the start, an error-string oracle at the end, and this round's items being second-order consequences of fixes rather than defects in the design — is the signal that the process converged rather than merely stopped.

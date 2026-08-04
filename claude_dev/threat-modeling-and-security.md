@@ -10,12 +10,44 @@
 > [`security-audit.md`](security-audit.md) compliance index — this page is the
 > readable summary those documents hang from.
 >
-> **Porting note for the site.** The headings and blocks below map directly onto
-> the website's `DocBlock` content model (`website/src/docs.ts`): `##`→`h`,
-> paragraphs→`p`, bullet lists→`list`, tables→`table`, and the callouts marked
-> **Note**/**Caution**→`note`/`warn`. A new `"security"` page type is added to
-> `website/src/types.ts` and a `NAV_ITEM` to `Header.tsx`. The eight subsections
-> under "How AXIAM defends each layer" are the natural sidebar entries.
+> ---
+>
+> ## Handoff — read this first if you are building the website section
+>
+> **Status: ready to publish.** Every factual claim below was verified against
+> the code at `3ede4d19` (2026-08-04) and is current. The security review series
+> that backs it is **closed with no open findings** — see §24 of the analysis.
+> You do not need to re-verify anything to build the page; if you want to check a
+> specific claim, the evidence is cited by file and line in the analysis document.
+>
+> **What to build.** A new top-level **Security** nav entry, alongside Docs, SDKs,
+> Benchmarks and Roadmap. Concretely, in `website/`:
+>
+> 1. `src/types.ts` — add `"security"` to the `Page` union.
+> 2. `src/components/Header.tsx` — add a `NAV_ITEM` (`{ label: "Security", page: "security", active: (p) => p === "security" }`).
+> 3. `src/App.tsx` — add the `{page === "security" && <Security />}` branch.
+> 4. `src/pages/Security.tsx` — the page itself, or extend `src/docs.ts` if you
+>    prefer it inside the existing docs shell with a sidebar.
+>
+> **Content mapping.** The structure here maps onto the existing `DocBlock` model
+> in `src/docs.ts`: `##`→`h`, paragraphs→`p`, bullet lists→`list`, tables→`table`,
+> and the blockquote marked **Caution**→`warn`. The eight subsections under
+> *"How AXIAM defends each layer"* are the natural sidebar entries.
+>
+> **Three things not to change when adapting the prose:**
+>
+> - **Do not upgrade the hedges.** "No open Critical or High finding *in AXIAM's
+>   own request path*", "self-assessment, not a certified audit", and the alpha
+>   caution are all load-bearing and deliberately scoped. Removing a qualifier
+>   turns an accurate statement into a false one.
+> - **Do not add claims.** Everything here is backed by verified code. A plausible
+>   extra bullet is the one thing on the page that would not be.
+> - **Keep the shared-responsibility section.** It is the part that makes the rest
+>   credible, and it is where a real deployment gets its hardening checklist.
+>
+> **One open TODO:** the closing line asks for a security contact. There is no
+> `SECURITY.md` in the repository yet — either add one and link it, or drop the
+> parenthetical and give an email. Do not ship the placeholder as written.
 
 ---
 

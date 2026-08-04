@@ -11,10 +11,23 @@ pub const MAX_IP_LEN: usize = 45;
 /// Maximum length for a User-Agent string.
 pub const MAX_UA_LEN: usize = 512;
 
-/// Extract the real client IP from [`ConnectionInfo`], capped to [`MAX_IP_LEN`].
+/// Extract the client IP as *asserted by the request*, capped to [`MAX_IP_LEN`].
 ///
-/// Uses `realip_remote_addr` which respects the `X-Forwarded-For` / `X-Real-IP`
-/// headers as trusted by the Actix-Web server configuration.
+/// Uses `realip_remote_addr`, which returns the first entry of `X-Forwarded-For`
+/// (else `X-Real-IP`, else the peer address).
+///
+/// # This value is not validated by Actix-Web
+///
+/// An earlier version of this doc said the headers are honoured "as trusted by
+/// the Actix-Web server configuration". That is wrong, and worth correcting
+/// rather than softening: Actix-Web has **no trusted-proxy list**. It reads the
+/// forwarding headers whenever they are present, so behind no proxy — or behind
+/// one that does not overwrite them — this value is whatever the caller typed.
+///
+/// It is still the right choice on an **authenticated** path behind a proxy
+/// that does overwrite `X-Forwarded-For`, which is the deployment this is for.
+/// On an **unauthenticated** path use [`peer_ip`] instead, or record this one
+/// under a name that marks it untrusted (SEC-087, §22.3).
 pub fn client_ip(req: &HttpRequest) -> Option<String> {
     req.connection_info()
         .realip_remote_addr()

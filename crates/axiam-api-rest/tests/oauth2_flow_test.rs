@@ -1561,11 +1561,50 @@ async fn client_auth_failure_rows(
         .items
 }
 
+/// Rows in the **system partition** (`tenant_id = nil`) — where a failure that
+/// cannot be attributed to a real tenant is recorded (§22.3 residual 2).
+async fn client_auth_failure_system_rows(
+    db: &Surreal<TestDb>,
+) -> Vec<axiam_core::models::audit::AuditLogEntry> {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository};
+    axiam_db::SurrealAuditLogRepository::new(db.clone())
+        .list_system(
+            AuditLogFilter {
+                action: Some("oauth2.client_auth_failed".into()),
+                ..Default::default()
+            },
+            axiam_core::repository::Pagination::default(),
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+/// The audit write is deliberately **off the response path** (§22.3 residual 1),
+/// so a row appears shortly after the 401 rather than before it. Poll instead of
+/// sleeping a fixed amount: a fixed sleep is either flaky or slow, and this also
+/// documents that the detachment is the intended behaviour rather than a race.
+async fn eventually<F, Fut, T>(mut f: F) -> Vec<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Vec<T>>,
+{
+    for _ in 0..100 {
+        let rows = f().await;
+        if !rows.is_empty() {
+            return rows;
+        }
+        actix_web::rt::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    Vec::new()
+}
+
 #[actix_rt::test]
 async fn a_failed_client_auth_is_audited_against_a_real_tenant() {
     // The control case. Detection is the whole point of this row (§17.2
     // residual 3), so the SEC-087 hardening must not silence the true event:
-    // a failed authentication against a tenant that exists is still recorded.
+    // a failed authentication against a tenant that exists is still recorded,
+    // and against that tenant, not the system partition.
     let (db, _org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let app = test_app!(db, auth);
@@ -1573,20 +1612,24 @@ async fn a_failed_client_auth_is_audited_against_a_real_tenant() {
     let resp = failing_token_post(&app, tenant_id, "oa_nosuchclient", None).await;
     assert_eq!(resp.status().as_u16(), 401);
 
-    let rows = client_auth_failure_rows(&db, tenant_id).await;
+    let rows = eventually(|| client_auth_failure_rows(&db, tenant_id)).await;
     assert_eq!(rows.len(), 1, "the real event must still be recorded");
+    assert!(
+        rows[0].metadata["unattributed_reason"].is_null(),
+        "a row for a real tenant must not be marked unattributed"
+    );
 }
 
 #[actix_rt::test]
 async fn an_anonymous_caller_cannot_write_audit_rows_into_an_unknown_tenant() {
     // SEC-087. `/oauth2/token` needs no credential and takes `tenant_id`
     // straight from the query string, so before the fix any anonymous caller
-    // could append rows to an append-only log under *any* uuid — including one
-    // belonging to no tenant at all — at request rate.
+    // could append rows to an append-only log under *any* uuid.
     //
-    // Rows under a nonexistent tenant are pure garbage: no operator will ever
-    // read that partition, and the uuid space is unbounded, so this is the arm
-    // worth refusing outright.
+    // §22.3 residual 2 changed what happens to the refused row rather than
+    // whether it is refused: it is no longer dropped, it is routed to the
+    // system partition. The property that matters is unchanged and asserted
+    // here — the caller still cannot place a row under an id of their choosing.
     let (db, _org_id, _tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let app = test_app!(db, auth);
@@ -1594,17 +1637,35 @@ async fn an_anonymous_caller_cannot_write_audit_rows_into_an_unknown_tenant() {
     let victim = Uuid::new_v4(); // never created
     let resp = failing_token_post(&app, victim, "oa_nosuchclient", None).await;
 
-    // The caller must not be able to tell the write was refused.
+    // The caller must not be able to tell where the row went.
     assert_eq!(
         resp.status().as_u16(),
         401,
-        "dropping the audit row must not change the response"
+        "routing the audit row must not change the response"
     );
 
+    // The signal is preserved...
+    let system = eventually(|| client_auth_failure_system_rows(&db)).await;
+    assert_eq!(
+        system.len(),
+        1,
+        "the failure must still be recorded somewhere"
+    );
+    assert_eq!(
+        system[0].metadata["unattributed_reason"].as_str(),
+        Some("unknown_tenant")
+    );
+    assert_eq!(
+        system[0].metadata["claimed_tenant_id_untrusted"].as_str(),
+        Some(victim.to_string().as_str()),
+        "the caller-named tenant is kept as evidence, marked untrusted"
+    );
+
+    // ...but not under the id the caller named.
     let rows = client_auth_failure_rows(&db, victim).await;
     assert!(
         rows.is_empty(),
-        "no audit row may be written into a tenant that does not exist"
+        "no audit row may be written into a tenant the caller merely named"
     );
 }
 
@@ -1623,14 +1684,14 @@ async fn the_audited_client_id_is_truncated_and_the_forwarded_ip_is_untrusted() 
     let resp = failing_token_post(&app, tenant_id, &huge, Some("203.0.113.9")).await;
     assert_eq!(resp.status().as_u16(), 401);
 
-    let rows = client_auth_failure_rows(&db, tenant_id).await;
+    let rows = eventually(|| client_auth_failure_rows(&db, tenant_id)).await;
     assert_eq!(rows.len(), 1);
     let meta = &rows[0].metadata;
 
     let recorded = meta["client_id"].as_str().expect("client_id recorded");
     assert!(
         recorded.len() <= 128,
-        "client_id must be truncated, got {} chars",
+        "client_id must be truncated, got {} bytes",
         recorded.len()
     );
 
@@ -1647,5 +1708,72 @@ async fn the_audited_client_id_is_truncated_and_the_forwarded_ip_is_untrusted() 
         meta["forwarded_for_untrusted"].as_str(),
         Some("203.0.113.9"),
         "the forgeable value is kept, but only under a name that says so"
+    );
+}
+
+#[actix_rt::test]
+async fn a_multibyte_client_id_is_capped_in_bytes_not_code_points() {
+    // §22.3 residual 3. The cap used `chars().take(128)`, so a multibyte id
+    // stored up to 512 bytes — and the previous test could not see it, because
+    // its payload was ASCII and so byte length and code-point count agreed.
+    // 'é' is two bytes in UTF-8, so 5000 of them is 10 000 bytes and would have
+    // stored 256.
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let multibyte = format!("oa_{}", "é".repeat(5000));
+    let resp = failing_token_post(&app, tenant_id, &multibyte, None).await;
+    assert_eq!(resp.status().as_u16(), 401);
+
+    let rows = eventually(|| client_auth_failure_rows(&db, tenant_id)).await;
+    assert_eq!(rows.len(), 1);
+    let recorded = rows[0].metadata["client_id"]
+        .as_str()
+        .expect("client_id recorded");
+
+    assert!(
+        recorded.len() <= 128,
+        "the cap is a BYTE bound: got {} bytes ({} chars)",
+        recorded.len(),
+        recorded.chars().count()
+    );
+    // And the stored value must still be valid UTF-8 — truncating mid-character
+    // would either panic or corrupt the record.
+    assert!(
+        std::str::from_utf8(recorded.as_bytes()).is_ok(),
+        "truncation must land on a character boundary"
+    );
+}
+
+#[actix_rt::test]
+async fn an_audit_sink_problem_does_not_cost_the_failure_signal() {
+    // §22.3 residual 2: a tenant read that fails for any reason other than
+    // NotFound used to drop the row entirely, so a database fault cost exactly
+    // the telemetry this row exists to provide — and a database fault is
+    // plausibly correlated with an incident.
+    //
+    // The indeterminate branch cannot be provoked through the HTTP surface
+    // without tearing down the DB mid-request, so this asserts the reachable
+    // half of the same property: every failed client authentication lands
+    // SOMEWHERE queryable, whatever the tenant turns out to be.
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // A real tenant → its own partition.
+    let r1 = failing_token_post(&app, tenant_id, "oa_a", None).await;
+    assert_eq!(r1.status().as_u16(), 401);
+    let real = eventually(|| client_auth_failure_rows(&db, tenant_id)).await;
+    assert_eq!(real.len(), 1);
+
+    // An unknown tenant → the system partition, never lost.
+    let r2 = failing_token_post(&app, Uuid::new_v4(), "oa_b", None).await;
+    assert_eq!(r2.status().as_u16(), 401);
+    let system = eventually(|| client_auth_failure_system_rows(&db)).await;
+    assert_eq!(
+        system.len(),
+        1,
+        "an unattributable failure must be recorded, not dropped"
     );
 }

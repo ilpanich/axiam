@@ -1740,3 +1740,111 @@ Recording it because of where it came from: rule 8 was written to describe a con
 - **Open findings: none.** SEC-071 … SEC-087 are all closed and independently verified, as are `T-145`, OBS-1 … OBS-4 and every §10.4 residual.
 - **Open items are all observations or accepted trade-offs**: §22.3 items 1–4, the SEC-086 timing channel, and the long-standing design decisions recorded in the threat model (`T-16`/`T-87` no deny-override, `T-39` token revocation lag, `T-110`/`T-118` append-only audit versus erasure).
 - **Closing assessment.** Seven verification passes, each of which found something the preceding remediation's self-report had missed — SEC-080, SEC-079, SEC-085, two partials, SEC-086, SEC-087. The trend is the point: the severity fell from HIGH (a cross-tenant authentication bypass) to LOW (an error-string oracle), and this round's residuals are second-order consequences of fixes rather than defects in the original design. The practices that produced that curve are worth keeping past this document: remediation and verification stay separate; a remediation names its own weakest points; evidence must resolve on the default branch; and a control that eleven implementations must satisfy gets written down once, normatively, rather than inferred eleven times.
+
+## 23. Remediation of §22.3 (2026-08-04)
+
+- **Base**: server `54b39a62` (the §22 record) on `main`.
+- **Scope**: the four residuals in §22.3. There were no open findings to close — §22.4 confirmed that — so this round is entirely second-order cleanup, two items of which §20's own fix created.
+- **Result**: residuals 1, 2 and 3 fixed; residual 4's documentation half fixed; the gRPC parity gap carried deliberately, with the reasoning stated. No new findings.
+
+### 23.1 Residual 1 — the tenant-existence timing differential
+
+§22.3 is right, and right about the cause being mine. The SEC-087 fix awaited a
+tenant read before returning the error, and only performed the insert when the
+tenant existed — so a failed client authentication returned measurably faster
+for a nonexistent tenant than a real one, on an endpoint requiring no
+credential.
+
+Fixed by **detaching the audit operation from the response path entirely**
+(`actix_web::rt::spawn`), rather than by trying to balance the two branches.
+Balancing is the weaker answer: it leaves the differential in place and bets on
+the padding tracking future edits to the branch. Detaching removes the
+dependency, so no ordering of tenant read and insert can be observed from
+outside at all.
+
+It also makes the function honest. Its doc comment has said *"fire-and-forget"*
+since §18, and until now it was awaited — the comment described an intent the
+code did not implement.
+
+**Not falsifiable by a test**, and worth saying rather than implying otherwise:
+a timing assertion at this resolution would be flaky in CI. The property is
+structural — the response is constructed without awaiting the audit future —
+and is verified by reading the call site. What the tests *do* pin is the
+consequence: they poll for the row instead of expecting it synchronously, which
+would fail if anyone re-attached the write.
+
+### 23.2 Residual 2 — the audit row no longer fails open
+
+Also correct, and the sharpest of the four: a non-`NotFound` error from the
+tenant read dropped the row silently. The rationale was sound (a DB fault must
+not turn a 401 into a 500, T-15-04) but the effect was that a database fault
+cost exactly the telemetry the row exists to provide — and a database fault is
+plausibly correlated with an incident.
+
+A row that cannot be attributed to a real tenant now goes to the **system
+partition** (`tenant_id = nil`, which `AuditLogRepository::list_system` already
+exists to serve), carrying `unattributed_reason` (`unknown_tenant` or
+`tenant_lookup_failed`) and the caller-named tenant under
+`claimed_tenant_id_untrusted`.
+
+This preserves SEC-087's actual guarantee while dropping the collateral damage.
+The guarantee was never "no row is written" — it was **"a caller cannot choose
+which real tenant's append-only log a row lands in"**, and nil is a single fixed
+partition nobody can steer toward. So the unknown-tenant case is no longer
+discarded either: a caller probing random tenant ids is itself a signal, and it
+is now visible in one place rather than only in a log line.
+
+### 23.3 Residual 3 — the cap was in the wrong unit
+
+`chars().take(128)` bounds code points, not bytes, so a multibyte `client_id`
+stored up to 512. Replaced with a byte-bounded truncation that walks back to a
+character boundary, keeping the stored value valid UTF-8.
+
+§22.3 also noted the *test* asserted a byte length that passed only because its
+payload was ASCII — the more useful half of the observation, since it explains
+why the defect was invisible. A second test now uses `'é'` (two bytes), and
+falsification confirms the numbers: against the old code it records **253 bytes
+for 128 chars**, while the ASCII test continues to pass. The pre-existing
+char-vs-byte looseness in `client_ip`/`user_agent` is left alone — bounded there
+by much smaller limits, and changing them is unrelated churn.
+
+### 23.4 Residual 4 — the `client_ip` docstring
+
+It claimed the forwarding headers are honoured *"as trusted by the Actix-Web
+server configuration"*. §22.3 is right that this is false: Actix-Web has **no
+trusted-proxy list** and reads `X-Forwarded-For` whenever present.
+
+Corrected explicitly rather than softened, including a note that the previous
+wording was wrong, and pointing at `peer_ip` for unauthenticated paths. A
+docstring that overstates a security property is worth more than a cosmetic fix:
+it is the thing a future reader would rely on when deciding whether the value
+needs treating as untrusted, which is exactly the decision SEC-087 turned on.
+
+### 23.5 Deliberately not actioned
+
+**The gRPC m2m/user parity gap**, carried since §19.5. The interceptor rejects
+an unknown audience and fails closed on an absent one, but accepts both
+`axiam:user` and `axiam:m2m` on all four services — so a device token can reach
+`UserService` over gRPC while being refused the equivalent REST route.
+
+Still not actioned, and the reason has not changed: narrowing it is a
+**deployment-visible decision**, not a defect fix. gRPC is the service-mesh
+surface where machine callers are the norm, and splitting the audiences there
+would break user-token callers that route through the mesh today. §19.5 called
+it defensible and it remains so. It is now stated in the CHANGELOG (§20.3), so
+an operator meets it as documented behaviour rather than discovering it.
+
+If it is ever narrowed it should be per-service and opt-in, which is a design
+change deserving its own round.
+
+### 23.6 What a verifier should look at hardest
+
+1. **The spawned audit task.** Confirm nothing in it can outlive or panic the
+   worker, and that the response path truly no longer awaits it. This is the
+   change most likely to have a second-order effect I have not seen.
+2. **Whether nil-tenant rows are actually reachable to operators.**
+   `list_system` exists, but a partition nobody queries is telemetry only in
+   principle. Worth checking the admin surface exposes it.
+3. **That routing to nil did not re-open SEC-087.** The property is that a
+   caller cannot steer a row into a *chosen* tenant. Confirm no path lets the
+   claimed tenant id become the written one without the existence check.

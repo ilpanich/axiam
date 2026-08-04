@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha24] - 2026-08-04
+
+### Added
+
+- Add the Threat Modeling & Security section
+- Service-account client_credentials grant + SEC review (#267)
+- Cross-replica decision-cache invalidation over RabbitMQ fanout
+- Install the client-secret hasher at startup (OBS-1 fail-closed gate)
+- Key client-secret hashing with the server pepper (OBS-1)
+
+### Changed
+
+- Close the review series; make the website section handoff-ready
+- Fix the §22.3 residuals (#272)
+- Verify §20/§21 — every finding closed
+- Bump the minor-patch group across 1 directory with 3 updates
+- Record the rule-8 guardrail tests as closed (§21)
+- Close SEC-086 fully and SEC-087, fix the CHANGELOG inversion (#269)
+- Verify d15878a2 — device audience narrowed; SEC-086 partial, SEC-087 new
+- Close SEC-086 and the §17 residuals, narrow the device audience (#268)
+- Verify §16 and review the new service-account grant
+- Bump pem from 3.0.6 to 4.0.0
+- Bump the minor-patch group with 2 updates
+- Bump taiki-e/install-action from 2.85.2 to 2.85.5
+- Bump github/codeql-action/upload-sarif
+- Bump the minor-patch group in /frontend with 8 updates
+- Bump docker/login-action from 4.5.1 to 4.6.0
+- Bump hadolint/hadolint-action from 3.3.0 to 3.4.0
+- Close the §15 partials and observations (#259)
+- Verify §14 — SEC-085 closed, no open findings remain
+- Close every open item from the 2026-08-02 security analysis (§13) (#258)
+- Final verification pass — §12 claims confirmed; one new HIGH (SEC-085)
+- Close §4 residual 2 — cross-replica cache invalidation shipped
+- Record the CONTRACT §10.1 sweep — five new findings; correct §10.7
+- Normative SDK local-verification set; close residual 10.4-3 as misdescribed
+- Verify the SEC-079/080 remediation; all findings closed
+- Record §10 remediation status as claims pending verification
+- Independent re-verification pass; sync threat model for T-145
+- Add exact-command reference to the run-5 runbook; fix three harness defects it exposed
+- Generate the query-plan fixture password instead of hard-coding it
+- Add run-5 runbook; add CONTRACT §13 webhook verification
+- Record remediation status for SEC-071..078 and T-145
+- Fix authz-path table scans, add session-validation cache and CC stage timings
+- Add 2026-08-02 code-level security analysis
+- Add public-facing Threat Modeling & Security website section
+- Update benchmarks page to run 4 and add resource usage
+- Run-4 analysis — post-fix matrix verified, resource usage, prod-limit guidance
+
+### Fixed
+
+- Supply the mandatory auth pepper to release-mode stacks
+- Propagate session-revocation failures; warn on mintable rate-limit key; verify remediation evidence
+- Decouple gRPC admin ceiling from authz; bound infra family; tenant-filter member_of; reorder session-cache invalidation
+- SDK bench correctness/telemetry + run-5 harness prep (I9-I19)
+- Correct gRPC units, scope limits per method, revise internet defaults
+
 ## [Unreleased]
 
 ### Changed

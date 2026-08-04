@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-amqp"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-audit",
  "axiam-authz",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-grpc"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-auth",
  "axiam-authz",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-rest"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "actix-cors",
  "actix-governor",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-audit"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "actix-web",
  "axiam-auth",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-auth"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "aes-gcm 0.11.0",
  "argon2",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-authz"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-core",
  "axiam-db",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-core"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "chrono",
  "serde",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-db"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "aes-gcm 0.11.0",
  "arc-swap",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-email"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-core",
  "chrono",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-federation"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-oauth2"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-pki"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "aes-gcm 0.11.0",
  "axiam-core",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-server"
-version = "1.0.0-alpha23"
+version = "1.0.0-alpha24"
 dependencies = [
  "actix-http",
  "actix-rt",

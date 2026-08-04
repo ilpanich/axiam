@@ -23,9 +23,18 @@ that actually own them:
     (`impl Default for RateLimitConfig`: login/register/password_reset/mfa/
     token/introspect/revoke/authz_check, each already expressed per-minute)
   - crates/axiam-api-grpc/src/config.rs + .../middleware/rate_limit.rs
-    (`default_grpc_authz_per_sec()`, `IDENTITY_PER_SEC_MULTIPLE`, the fixed
-    admin=authz 1:1 ratio, and `WINDOW_SECS` — the I1 fix means gRPC admits
-    `per_sec * WINDOW_SECS` per window, not `per_sec` per window)
+    (`default_grpc_authz_per_sec()`, `IDENTITY_PER_SEC_MULTIPLE`,
+    `ADMIN_PER_SEC_DEFAULT`, `INFRA_PER_SEC`, and `WINDOW_SECS` — the I1 fix
+    means gRPC admits `per_sec * WINDOW_SECS` per window, not `per_sec` per
+    window)
+
+SEC-079 note: admin used to track authz 1:1, and this script hard-coded that
+ratio. It no longer does — `GrpcRateLimits::from_authz_per_sec` pins admin to
+the absolute `ADMIN_PER_SEC_DEFAULT`, *independently of authz and of any
+posture preset*, precisely so raising the mesh authz ceiling can never raise
+the administrative one. A fourth family (`Infra`: reflection + health) was
+added at the fixed `INFRA_PER_SEC`; it used to be unlimited. Both are now
+extracted from source like everything else rather than assumed here.
 
 This only reflects the shipped `internet` posture defaults (no
 `AXIAM__RATE_LIMIT__*` override, no `gateway`/`mesh` preset) — pass
@@ -58,8 +67,9 @@ TOLERANCE = 0.10
 
 # endpoint key -> (k6 scenario filename, human label). Endpoints with no k6
 # scenario in this harness (revoke_per_min: no dedicated scenario;
-# grpc_admin: no ValidateCredentials scenario) are listed with scenario=None
-# and reported as "no scenario — not checked" rather than silently omitted.
+# grpc_admin: no ValidateCredentials scenario; grpc_infra: no reflection/health
+# scenario) are listed with scenario=None and reported as "no scenario — not
+# checked" rather than silently omitted.
 ENDPOINTS = {
     "login_per_min": ("oauth2_password_login.js", "POST /api/v1/auth/login"),
     "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
@@ -69,7 +79,8 @@ ENDPOINTS = {
     "authz_batch_per_min": ("authz_batch_rest.js", "POST /api/v1/authz/check/batch (shares authz_check_per_min)"),
     "grpc_authz_per_min": ("authz_check_grpc.js", "gRPC AuthzService/Check (grpc_authz family)"),
     "grpc_identity_per_min": ("userinfo_grpc.js", "gRPC UserInfoService/GetUserInfo (grpc_identity family)"),
-    "grpc_admin_per_min": (None, "gRPC UserService/ValidateCredentials (grpc_admin family)"),
+    "grpc_admin_per_min": (None, "gRPC UserService/ValidateCredentials (grpc_admin family, SEC-079 absolute)"),
+    "grpc_infra_per_min": (None, "gRPC reflection + health (grpc_infra family, fixed ceiling)"),
 }
 
 
@@ -124,9 +135,19 @@ def read_configured_defaults():
         "IDENTITY_PER_SEC_MULTIPLE", GRPC_RATE_LIMIT_RS)
     window_secs = _extract_int(
         grpc_rate_limit_text, r"WINDOW_SECS:\s*i64\s*=\s*([0-9_]+)", "WINDOW_SECS", GRPC_RATE_LIMIT_RS)
-    # admin_per_sec tracks authz_per_sec 1:1 (GrpcRateLimits::from_authz_per_sec).
+    # identity_per_sec is still a MULTIPLE of authz (I2). admin_per_sec is NOT:
+    # SEC-079 decoupled it to an absolute constant so widening the mesh authz
+    # ceiling cannot widen the administrative one. Extract both, assume neither.
+    admin_per_sec_default = _extract_int(
+        grpc_rate_limit_text, r"ADMIN_PER_SEC_DEFAULT:\s*u32\s*=\s*([0-9_]+)",
+        "ADMIN_PER_SEC_DEFAULT", GRPC_RATE_LIMIT_RS)
+    # Infra (reflection + health) is a fixed ceiling, not configurable per
+    # instance — `GrpcRateLimits::per_sec` returns INFRA_PER_SEC directly.
+    infra_per_sec = _extract_int(
+        grpc_rate_limit_text, r"INFRA_PER_SEC:\s*u32\s*=\s*([0-9_]+)",
+        "INFRA_PER_SEC", GRPC_RATE_LIMIT_RS)
     grpc_identity_per_sec = grpc_authz_per_sec * identity_multiple
-    grpc_admin_per_sec = grpc_authz_per_sec
+    grpc_admin_per_sec = admin_per_sec_default
 
     configured = dict(rest_defaults)
     configured["authz_batch_per_min"] = rest_defaults["authz_check_per_min"]
@@ -136,6 +157,7 @@ def read_configured_defaults():
     configured["grpc_authz_per_min"] = grpc_authz_per_sec * window_secs
     configured["grpc_identity_per_min"] = grpc_identity_per_sec * window_secs
     configured["grpc_admin_per_min"] = grpc_admin_per_sec * window_secs
+    configured["grpc_infra_per_min"] = infra_per_sec * window_secs
     return configured
 
 

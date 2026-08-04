@@ -142,14 +142,28 @@ bench-up:
         export AXIAM__RATE_LIMIT__REVOKE_PER_MIN=60
         export AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN=1800
         # gRPC is per-method-family since I2. Leaving identity/admin unset
-        # would let them derive from authz (5x / 1x) inside the server, which
-        # is the shipped behaviour — but pinning them makes the posture the
-        # harness applied explicit in `docker inspect`, so rl-prod-check can
-        # assert all three families separately (a server-wide assertion would
-        # not have caught I2).
+        # would let them derive inside the server, which is the shipped
+        # behaviour — but pinning them makes the posture the harness applied
+        # explicit in `docker inspect`, so rl-prod-check can assert each family
+        # separately (a server-wide assertion would not have caught I2).
+        #
+        # These MUST mirror the server's own derivation or `rl=prod` measures a
+        # posture the product does not ship:
+        #   authz    = default_grpc_authz_per_sec()            = 100/s
+        #   identity = authz x IDENTITY_PER_SEC_MULTIPLE (5)   = 500/s
+        #   admin    = ADMIN_PER_SEC_DEFAULT                   =  10/s
+        # admin is an ABSOLUTE constant, NOT 1x authz — SEC-079 decoupled it so
+        # widening the mesh authz ceiling can never widen the administrative
+        # one. This line said 100 (the old 1:1 ratio), which pinned admin TEN
+        # TIMES above the shipped ceiling and made every rl=prod admin figure
+        # measure a posture no deployment runs.
+        #
+        # The fourth family (Infra: reflection + health) takes the fixed
+        # INFRA_PER_SEC and is deliberately NOT settable per instance, so there
+        # is no env var to pin here.
         export AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100
         export AXIAM__GRPC__GRPC_IDENTITY_PER_SEC=500
-        export AXIAM__GRPC__GRPC_ADMIN_PER_SEC=100
+        export AXIAM__GRPC__GRPC_ADMIN_PER_SEC=10
       elif [ "{{rl}}" != "neutralized" ]; then
         echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
       else

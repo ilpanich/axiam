@@ -40,7 +40,7 @@ item moves a number you will be comparing against run 4.
 | Change | Commit | Effect on run-5 numbers |
 |---|---|---|
 | **gRPC rate limiter ×60 units bug fixed** (I1) | `a15b78d` | gRPC now admits `configured × 60` per minute instead of `configured` per minute. Every run-4 gRPC cell under prod posture was throttled to 1/60th. **Do not compare run-4 gRPC prod cells to run-5 ones as like-for-like.** |
-| **gRPC limiter scoped per method family** (I2) | `a15b78d` | `GetUserInfo` is no longer throttled by the *authz* bucket. New knobs `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` (default 5× authz) and `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (default 1× authz). Reflection and health are unlimited; **unknown paths fail into the strictest bucket**. |
+| **gRPC limiter scoped per method family** (I2) | `a15b78d` | `GetUserInfo` is no longer throttled by the *authz* bucket. New knobs `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` (5× authz) and `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`; **unknown paths fail into the strictest bucket**. ⚠ The admin default (1× authz) and "reflection and health are unlimited" were both superseded by SEC-079 before alpha24 — see §0.1. |
 | **`internet` defaults revised** (I3) | `a15b78d` | token 20→**120**/min, introspect 10→**600**/min, authz_check 300→**1800**/min, revoke 10→**60**/min. Human endpoints unchanged. `gateway`/`mesh` unchanged. |
 | **Nagle disabled on the REST listener** (I5) | `421e3e2` | New `AXIAM__SERVER__TCP_NODELAY`, **default `true`**. This is the I5 candidate fix and it is *on by default*, so a plain run-5 matrix already measures the post-fix world. §4 tells you how to A/B it. |
 | **Session-validation cache** (I6) | `421e3e2` | New `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`, **default `0` = OFF**. Run 5 must set it explicitly or §5 produces nothing. |
@@ -56,6 +56,47 @@ item moves a number you will be comparing against run 4.
 > changed, and two table scans were removed. Treat run 5 as a new baseline.
 > Where you do want a controlled comparison, use the A/B procedures in §4–§6,
 > which toggle exactly one variable at a time.
+
+### 0.1 What the post-run-4 security work changed (audited 2026-08-04)
+
+The I-task fixes above landed in early August; **53 further commits reached
+`main` before alpha24 was cut**, many of them from the security review series.
+Four touch things this runbook asserts or measures. All four are in the alpha24
+image.
+
+| Change | Commit | What it means for run 5 |
+|---|---|---|
+| **gRPC admin ceiling decoupled from authz** (SEC-079) | `04dc674` | `admin_per_sec` is now the absolute `ADMIN_PER_SEC_DEFAULT` = **10/s = 600/min**, *independently of authz and of every posture preset* — it is no longer `1× authz`. Widening the mesh authz ceiling can no longer widen the administrative one. **§7's table said 6 000/min; that was wrong and is corrected below.** |
+| **New gRPC `Infra` family, bounded** (SEC-079) | `04dc674` | Reflection and health used to be *unlimited*; they now take a fixed `INFRA_PER_SEC` = **100/s = 6 000/min**, deliberately not configurable per instance (so there is no env var to pin). The I2 row above still says "unlimited" — read it as historical. |
+| **Client secrets are keyed, not bare SHA-256** (OBS-1) | `2fa25c1`, `8162f00` | Stored client secrets are now `HMAC-SHA256(k, secret)` under a pepper-derived key, and `AXIAM__AUTH__PEPPER` is a **fail-closed startup gate in release builds** — which is what run 5 runs. §4's citation is updated accordingly. The *conclusion* is unchanged and now explicit in the module docs: HMAC-SHA256 rather than Argon2id was chosen precisely to keep client-credentials off the KDF path. |
+| **Cross-replica decision-cache invalidation** | `e5b2a26` | New `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` (**default `false`**) publishing HMAC-signed invalidations to a RabbitMQ fanout, plus skew and heartbeat knobs. Run 5 is single-replica, so leave it off — but §5.4's revocation wording is no longer the whole story (see §5.1). |
+
+Two harness defects that this audit found and **fixed alongside this runbook**,
+both direct consequences of SEC-079:
+
+- `runner/rl_prod_check.py` still computed `grpc_admin = grpc_authz` (1:1) and
+  had no `Infra` family at all. Under `rl=prod` it would have asserted admin
+  against 6 000/min while the server ships 600/min — a guaranteed spurious
+  failure, and exactly the class of drift I19 exists to catch. It now extracts
+  `ADMIN_PER_SEC_DEFAULT` and `INFRA_PER_SEC` from source like every other
+  number.
+- `benchmarks/justfile`'s `rl=prod` posture exported
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC=100`, pinning admin **ten times above** the
+  shipped ceiling. Corrected to `10`. Any pre-alpha24 `rl=prod` admin figure
+  measured a posture no deployment runs.
+
+Checked and found **still accurate**, so §4–§6 stand as written: the gRPC auth
+middleware still performs no session-revocation check (`middleware/auth.rs:42`
+validates the token and stops), the REST extractor still calls
+`is_session_active` unconditionally (`extractors/auth.rs:107`), and the REST
+rate-limit defaults are unchanged at token 120 / introspect 600 / revoke 60 /
+authz_check 1 800 per minute. The §5 asymmetry diagnosis is intact.
+
+One thing to watch rather than change: the gRPC middleware now enforces an
+**audience gate** (`aud` must be `user` or `m2m`, with
+`allow_missing_aud_as_user` as a backward-compat escape). Bench tokens are
+minted by the same server that checks them, so they carry a valid `aud` — the
+§12.1 dry run is what proves it rather than assuming it.
 
 ---
 
@@ -217,11 +258,17 @@ through the same middleware.
 **What the code review established (statically, `421e3e2`).** Two things are now
 *settled* and need no measurement:
 
-- **Client-credentials is not Argon2-bound.** `hash_client_secret` is plain
-  SHA-256 + constant-time compare (`crates/axiam-db/src/repository/service_account.rs:36-40`,
-  consumed at `crates/axiam-oauth2/src/token.rs:408-412`), and nothing on that
-  path touches `crypto_semaphore`. This closes the analysis's open question about
-  whether CC shares the login hasher pool. It does not.
+- **Client-credentials is not Argon2-bound.** Still true, but the mechanism
+  changed after run 4 and the old citation is dead. OBS-1 (`2fa25c1`,
+  `8162f00`) replaced the unsalted SHA-256 digest with a **keyed HMAC-SHA256**
+  tag: `hash_client_secret` is now
+  `client_secret::global()?.hash(secret)` at
+  `crates/axiam-db/src/repository/service_account.rs:47`, delegating to
+  `crates/axiam-auth/src/client_secret.rs`. HMAC-SHA256 over Argon2id was a
+  deliberate choice *made to protect this measurement* — the module docs cite
+  the 2 727 req/s client-credentials figure as the reason. Nothing on the path
+  touches `crypto_semaphore`. The analysis's open question about whether CC
+  shares the login hasher pool stays closed: it does not.
 - **No lock is held across an await on the CC path**, and the rustls session
   cache is not implicated (a `Ticketer` is configured, so TLS 1.3 resumption is
   stateless and the store is off the hot path).
@@ -282,7 +329,14 @@ is `distroless/cc-debian12`, so there is **no shell and no `ss` inside it**;
 
 > There is deliberately **no** "token persist" stage: client-credentials issues
 > no refresh token and writes nothing. If you see a DB write on this path,
-> that is itself a finding.
+> that is itself a finding — **with one now-legitimate exception**. OBS-1's
+> v1→v2 hash migration is lazy: verifying a *legacy* bare-SHA-256 secret
+> returns `MatchNeedsUpgrade` and the caller persists the v2 replacement with a
+> compare-and-swap, so the first successful CC call against a legacy client
+> does write once. This does not affect run 5 — `runner/seed.sh` creates the
+> client through `POST /api/v1/oauth2-clients` on the running server, so it is
+> stored v2 from the start and every measured call is a pure read. Worth
+> knowing before anyone benchmarks against a pre-OBS-1 database.
 
 ### 4.4 Decision rule
 
@@ -350,6 +404,15 @@ usable instantly), entries carry the row's own `expires_at` so expiry is exact,
 and invalidation lives inside the repository itself. Single replica ⇒ revocation
 is immediate. Multi-replica ⇒ bounded by the TTL, the same contract as the
 decision cache.
+
+> **The decision cache's half of that contract improved after run 4** (`e5b2a26`,
+> §0.1): `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` publishes HMAC-signed
+> invalidations to a RabbitMQ fanout so replicas no longer wait out the TTL. It
+> **defaults to `false`**, and run 5 is single-replica, so leave it off — a
+> broadcast-on cell would change what §5.2's 2×2 measures. Mentioned so the
+> "multi-replica ⇒ bounded by the TTL" sentence above is read as *the default
+> posture*, not as the only one the product offers. The session-validation
+> cache has no broadcast path of its own.
 
 ### 5.2 The matrix — a 2×2, replacing the 1-D H5 sweep
 
@@ -490,13 +553,22 @@ Expected values at `v1.0.0-alpha24`:
 | revoke | 60/min |
 | gRPC authz | 6 000/min (100/s × 60) |
 | gRPC identity | 30 000/min (5× authz) |
-| gRPC admin | 6 000/min (1× authz) |
+| gRPC admin | **600/min (10/s × 60)** — absolute, *not* 1× authz (SEC-079) |
+| gRPC infra (reflection + health) | **6 000/min (100/s × 60)** — fixed, not configurable |
 | login / register / password-reset / MFA | 10 / 5 / 3 / 5 per min (unchanged) |
+
+> **Admin and infra changed after run 4 (SEC-079, §0.1).** Admin is now an
+> absolute constant so raising the mesh authz ceiling cannot raise the
+> administrative one; infra went from unlimited to a bounded 100/s. Both
+> `rl_prod_check.py` and the `rl=prod` posture in the justfile were corrected
+> for this alongside this runbook — an older harness asserts admin at 6 000/min
+> and fails spuriously.
 
 This is the check that caught the I1 units bug by hand last time; it has been
 live-tested against a synthetic failure reproducing that exact bug (100/min
-admitted vs 6 000/min configured). **The three gRPC families must be asserted
-separately** — a server-wide assertion would not have caught I2.
+admitted vs 6 000/min configured). **All four gRPC families must be asserted
+separately** — a server-wide assertion would not have caught I2, and an
+authz-relative one would not catch a regression that re-coupled admin to authz.
 
 ### 7.1 I4 — refresh-under-prod errors
 
@@ -619,6 +691,9 @@ When writing up:
 - [ ] `docker login ghcr.io` done and `docker pull …/server:1.0.0-alpha24` succeeded **before** any `bench-up` (§12.1)
 - [ ] No `build=1` anywhere; `docker inspect --format '{{.Config.Image}}' bench-axiam-server` shows the ghcr ref, and `RepoDigests` is non-empty (§12.1)
 - [ ] `git merge-base --is-ancestor HEAD origin/main` passes; `BENCH_ALLOW_UNMERGED_BUILD_REF` **not** set (§1.1)
+- [ ] **`just bench-dry-run` is all-PASS across every target × profile × scenario** (§12.1 step 6)
+- [ ] `read_configured_defaults()` reports `grpc_admin_per_min` 600 and `grpc_infra_per_min` 6 000 (§12.7)
+- [ ] `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` left at its `false` default (§5.1)
 - [ ] Envelope matches run 4, or the difference is recorded (§1.2)
 - [ ] Full matrix run, KC login cells split out at `BENCH_MEM=4096m` (§2, §3)
 - [ ] `RUST_LOG=axiam_oauth2=debug,axiam_api_rest=debug` set for the I5 cells (§4.1)
@@ -722,11 +797,70 @@ export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(
 
 # 4. Toolchain sanity.
 just --version && docker compose version
-docker compose -f targets/axiam/docker-compose.yml config >/dev/null && echo "compose OK"
 
 # 5. Throwaway TLS/mTLS certs for the security profiles (idempotent).
 just bench-certs
 ```
+
+> **Do not run a bare `docker compose -f targets/axiam/docker-compose.yml
+> config`.** It fails with
+> `required variable RABBITMQ_DEFAULT_USER is missing a value: required`,
+> and that is the compose file working correctly, not a broken checkout. The
+> AXIAM target declares eleven secrets with `:?` guards so it **fails closed**
+> rather than starting with a blank credential — `AXIAM__DB__USERNAME`,
+> `AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS`,
+> `AXIAM__AMQP__SIGNING_KEY`, `AXIAM__AUTH__PEPPER`,
+> `AXIAM__AUTH__MFA_ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+> `AXIAM__GDPR_PSEUDONYM_PEPPER` and the two JWT PEMs. `bench-up` bootstraps
+> all of them into `docker/.secrets/` inside its own subshell, so they do not
+> exist in your interactive shell and compose has nothing to interpolate.
+>
+> To render the file anyway — a pure YAML/interpolation syntax check, no
+> secrets involved — stub them:
+>
+> ```bash
+> env AXIAM__DB__USERNAME=x AXIAM__DB__PASSWORD=x \
+>     RABBITMQ_DEFAULT_USER=x RABBITMQ_DEFAULT_PASS=x \
+>     AXIAM__AMQP__SIGNING_KEY=x AXIAM__AUTH__PEPPER=x \
+>     AXIAM__AUTH__MFA_ENCRYPTION_KEY=x AXIAM__EMAIL_ENCRYPTION_KEY=x \
+>     AXIAM__GDPR_PSEUDONYM_PEPPER=x \
+>     AXIAM__AUTH__JWT_PRIVATE_KEY_PEM=x AXIAM__AUTH__JWT_PUBLIC_KEY_PEM=x \
+>   docker compose -f targets/axiam/docker-compose.yml config >/dev/null \
+>   && echo "compose renders OK"
+> ```
+>
+> But step 6 below is the check that actually matters — it exercises the real
+> secrets, the real image and every k6 scenario.
+
+#### 6. Dry-run the whole matrix — the real preflight
+
+`bench-dry-run` rehearses every cell end to end: `bench-up` (real secrets, real
+image), `bench-seed`, then **every k6 scenario** at a collapsed measurement
+window, then `bench-down`. Verdicts grade the *client contract* — can k6
+connect, send its request, and get the expected answer — not performance. It is
+the cheapest way to prove the run will not die three hours in, and on this run
+it is also what catches anything the post-alpha24 security work moved (§0.1):
+a scenario whose token now fails the gRPC audience gate, or a seed step broken
+by a changed auth requirement, shows up here as a FAIL rather than as a hole in
+the results.
+
+```bash
+cd /path/to/axiam/benchmarks
+
+just targets="axiam keycloak zitadel" \
+     profiles="p0-plaintext p2-tls13 p3-mtls" \
+     bench-dry-run
+
+# -> results/dry-run/SUMMARY.md  (verdict table)
+# -> results/dry-run/<target>/<profile>/<scenario>.dryrun.log  (per-cell k6 output)
+# Exits non-zero if ANY cell FAILed. Results land under results/dry-run/ so they
+# never mix into what bench-report aggregates.
+```
+
+**Every scenario must read PASS before you start §12.2.** A FAIL here is a cell
+that would have produced no data in the real matrix. Note the dry run uses the
+same `build=0` default, so it also doubles as proof that the alpha24 image pulls
+and starts under every profile.
 
 **Prove the pull actually took, after the first `bench-up` of the run.** This is
 the one check that distinguishes "measured the release" from "measured a local
@@ -1041,8 +1175,23 @@ values at `v1.0.0-alpha24`:
 | revoke | 60/min |
 | gRPC authz | 6 000/min (100/s x 60) |
 | gRPC identity | 30 000/min (500/s x 60) |
-| gRPC admin | 6 000/min (100/s x 60) |
+| gRPC admin | **600/min (10/s x 60)** — absolute constant, not 1x authz (SEC-079) |
+| gRPC infra (reflection + health) | **6 000/min (100/s x 60)** — fixed, no env var |
 | login / register / reset / MFA | 10 / 5 / 3 / 5 per min |
+
+Verify the extraction agrees with the source before trusting a `rl=prod` pass —
+it takes a second and it is what would have caught the stale admin ratio:
+
+```bash
+python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('rlc', 'runner/rl_prod_check.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+c = m.read_configured_defaults()
+for k in sorted(c): print(f'{k:28} {c[k]:>8,}')
+"
+# grpc_admin_per_min must read 600, grpc_infra_per_min 6,000.
+```
 
 **I4 — refresh-under-prod errors.** Run 4 saw 2 833 failures (2.4%) on
 `token_refresh` under prod posture, which line up with the harness's periodic

@@ -9,7 +9,7 @@
 <a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>chrono::{DateTime, Utc};
 <a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>std::collections::HashMap;
 <a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span>surrealdb::Connection;
-<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span>surrealdb_types::SurrealValue;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span>surrealdb_types::{RecordId, SurrealValue};
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>uuid::Uuid;
 <a href=#14 id=14 data-nosnippet>14</a>
 <a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
@@ -584,44 +584,59 @@
 <a href=#584 id=584 data-nosnippet>584</a>        }
 <a href=#585 id=585 data-nosnippet>585</a>
 <a href=#586 id=586 data-nosnippet>586</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
-<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>role_id_strs: Vec&lt;String&gt; = role_ids.iter().map(|id| id.to_string()).collect();
-<a href=#588 id=588 data-nosnippet>588</a>
-<a href=#589 id=589 data-nosnippet>589</a>        <span class="comment">// Batched mirror of get_role_permission_grants: one query for every
-<a href=#590 id=590 data-nosnippet>590</a>        // applicable role. `meta::id(in)` yields the owning role's UUID so the
-<a href=#591 id=591 data-nosnippet>591</a>        // flattened rows can be regrouped per role. Tenant scoping is enforced on
-<a href=#592 id=592 data-nosnippet>592</a>        // the permission endpoint (out.tenant_id), identical to the single-role
-<a href=#593 id=593 data-nosnippet>593</a>        // query.
-<a href=#594 id=594 data-nosnippet>594</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#595 id=595 data-nosnippet>595</a>            </span>.db
-<a href=#596 id=596 data-nosnippet>596</a>            .current()
-<a href=#597 id=597 data-nosnippet>597</a>            .query(
-<a href=#598 id=598 data-nosnippet>598</a>                <span class="string">"SELECT \
-<a href=#599 id=599 data-nosnippet>599</a>                     meta::id(in) AS role_id, \
-<a href=#600 id=600 data-nosnippet>600</a>                     meta::id(out.id) AS record_id, \
-<a href=#601 id=601 data-nosnippet>601</a>                     out.tenant_id AS tenant_id, \
-<a href=#602 id=602 data-nosnippet>602</a>                     out.action AS action, \
-<a href=#603 id=603 data-nosnippet>603</a>                     out.description AS description, \
-<a href=#604 id=604 data-nosnippet>604</a>                     out.created_at AS created_at, \
-<a href=#605 id=605 data-nosnippet>605</a>                     out.updated_at AS updated_at, \
-<a href=#606 id=606 data-nosnippet>606</a>                     scope_ids \
-<a href=#607 id=607 data-nosnippet>607</a>                 FROM grants \
-<a href=#608 id=608 data-nosnippet>608</a>                 WHERE meta::id(in) IN $role_ids \
-<a href=#609 id=609 data-nosnippet>609</a>                 AND out.tenant_id = $tenant_id"</span>,
-<a href=#610 id=610 data-nosnippet>610</a>            )
-<a href=#611 id=611 data-nosnippet>611</a>            .bind((<span class="string">"role_ids"</span>, role_id_strs))
-<a href=#612 id=612 data-nosnippet>612</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#613 id=613 data-nosnippet>613</a>            .<span class="kw">await
-<a href=#614 id=614 data-nosnippet>614</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#615 id=615 data-nosnippet>615</a>
-<a href=#616 id=616 data-nosnippet>616</a>        <span class="kw">let </span>rows: Vec&lt;RolePermissionGrantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#617 id=617 data-nosnippet>617</a>
-<a href=#618 id=618 data-nosnippet>618</a>        <span class="kw">let </span><span class="kw-2">mut </span>grouped: HashMap&lt;Uuid, Vec&lt;PermissionGrant&gt;&gt; = HashMap::new();
-<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">for </span>row <span class="kw">in </span>rows {
-<a href=#620 id=620 data-nosnippet>620</a>            <span class="kw">let </span>(role_id, grant) = row.try_into_role_grant()<span class="question-mark">?</span>;
-<a href=#621 id=621 data-nosnippet>621</a>            grouped.entry(role_id).or_default().push(grant);
-<a href=#622 id=622 data-nosnippet>622</a>        }
-<a href=#623 id=623 data-nosnippet>623</a>
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="prelude-val">Ok</span>(grouped)
-<a href=#625 id=625 data-nosnippet>625</a>    }
-<a href=#626 id=626 data-nosnippet>626</a>}
+<a href=#587 id=587 data-nosnippet>587</a>
+<a href=#588 id=588 data-nosnippet>588</a>        <span class="comment">// I7(a) — the predicate MUST compare the raw `in` field against record
+<a href=#589 id=589 data-nosnippet>589</a>        // ids, never `meta::id(in)`.
+<a href=#590 id=590 data-nosnippet>590</a>        //
+<a href=#591 id=591 data-nosnippet>591</a>        // Wrapping the indexed field in a function call makes the predicate
+<a href=#592 id=592 data-nosnippet>592</a>        // opaque to the planner: SurrealDB reports
+<a href=#593 id=593 data-nosnippet>593</a>        // `TableScan { pre_decode_filter: "no (unsupported predicate)" }` and
+<a href=#594 id=594 data-nosnippet>594</a>        // walks **every** `grants` edge in the database — i.e. every
+<a href=#595 id=595 data-nosnippet>595</a>        // role→permission grant of every tenant — on every authorization check.
+<a href=#596 id=596 data-nosnippet>596</a>        // Comparing `in` directly lets the `(in, out)` composite index
+<a href=#597 id=597 data-nosnippet>597</a>        // `idx_grants_unique` (schema v19) serve it as an `IndexScan`.
+<a href=#598 id=598 data-nosnippet>598</a>        // `crates/axiam-db/tests/authz_query_plan_test.rs` pins both plans.
+<a href=#599 id=599 data-nosnippet>599</a>        </span><span class="kw">let </span>role_records: Vec&lt;RecordId&gt; = role_ids
+<a href=#600 id=600 data-nosnippet>600</a>            .iter()
+<a href=#601 id=601 data-nosnippet>601</a>            .map(|id| RecordId::new(<span class="string">"role"</span>, id.to_string()))
+<a href=#602 id=602 data-nosnippet>602</a>            .collect();
+<a href=#603 id=603 data-nosnippet>603</a>
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="comment">// Batched mirror of get_role_permission_grants: one query for every
+<a href=#605 id=605 data-nosnippet>605</a>        // applicable role. `meta::id(in)` in the *projection* is fine (it is not
+<a href=#606 id=606 data-nosnippet>606</a>        // a filter) and yields the owning role's UUID so the flattened rows can
+<a href=#607 id=607 data-nosnippet>607</a>        // be regrouped per role. Tenant scoping is enforced on the permission
+<a href=#608 id=608 data-nosnippet>608</a>        // endpoint (out.tenant_id), identical to the single-role query.
+<a href=#609 id=609 data-nosnippet>609</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#610 id=610 data-nosnippet>610</a>            </span>.db
+<a href=#611 id=611 data-nosnippet>611</a>            .current()
+<a href=#612 id=612 data-nosnippet>612</a>            .query(
+<a href=#613 id=613 data-nosnippet>613</a>                <span class="string">"SELECT \
+<a href=#614 id=614 data-nosnippet>614</a>                     meta::id(in) AS role_id, \
+<a href=#615 id=615 data-nosnippet>615</a>                     meta::id(out.id) AS record_id, \
+<a href=#616 id=616 data-nosnippet>616</a>                     out.tenant_id AS tenant_id, \
+<a href=#617 id=617 data-nosnippet>617</a>                     out.action AS action, \
+<a href=#618 id=618 data-nosnippet>618</a>                     out.description AS description, \
+<a href=#619 id=619 data-nosnippet>619</a>                     out.created_at AS created_at, \
+<a href=#620 id=620 data-nosnippet>620</a>                     out.updated_at AS updated_at, \
+<a href=#621 id=621 data-nosnippet>621</a>                     scope_ids \
+<a href=#622 id=622 data-nosnippet>622</a>                 FROM grants \
+<a href=#623 id=623 data-nosnippet>623</a>                 WHERE in IN $role_records \
+<a href=#624 id=624 data-nosnippet>624</a>                 AND out.tenant_id = $tenant_id"</span>,
+<a href=#625 id=625 data-nosnippet>625</a>            )
+<a href=#626 id=626 data-nosnippet>626</a>            .bind((<span class="string">"role_records"</span>, role_records))
+<a href=#627 id=627 data-nosnippet>627</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#628 id=628 data-nosnippet>628</a>            .<span class="kw">await
+<a href=#629 id=629 data-nosnippet>629</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#630 id=630 data-nosnippet>630</a>
+<a href=#631 id=631 data-nosnippet>631</a>        <span class="kw">let </span>rows: Vec&lt;RolePermissionGrantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#632 id=632 data-nosnippet>632</a>
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">let </span><span class="kw-2">mut </span>grouped: HashMap&lt;Uuid, Vec&lt;PermissionGrant&gt;&gt; = HashMap::new();
+<a href=#634 id=634 data-nosnippet>634</a>        <span class="kw">for </span>row <span class="kw">in </span>rows {
+<a href=#635 id=635 data-nosnippet>635</a>            <span class="kw">let </span>(role_id, grant) = row.try_into_role_grant()<span class="question-mark">?</span>;
+<a href=#636 id=636 data-nosnippet>636</a>            grouped.entry(role_id).or_default().push(grant);
+<a href=#637 id=637 data-nosnippet>637</a>        }
+<a href=#638 id=638 data-nosnippet>638</a>
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="prelude-val">Ok</span>(grouped)
+<a href=#640 id=640 data-nosnippet>640</a>    }
+<a href=#641 id=641 data-nosnippet>641</a>}
 </code></pre></div></section></main></body></html>

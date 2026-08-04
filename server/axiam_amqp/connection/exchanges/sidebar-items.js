@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUTHZ_CACHE_INVALIDATE"]};

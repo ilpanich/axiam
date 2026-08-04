@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["queues"],"struct":["AmqpManager"]};
+window.SIDEBAR_ITEMS = {"mod":["exchanges","queues"],"struct":["AmqpManager"]};

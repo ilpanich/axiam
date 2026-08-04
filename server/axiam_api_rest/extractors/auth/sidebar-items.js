@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuthenticatedServiceAccount","AuthenticatedUser"],"trait":["SessionValidator"]};
+window.SIDEBAR_ITEMS = {"struct":["AuthenticatedPrincipal","AuthenticatedServiceAccount","AuthenticatedUser"],"trait":["SessionValidator"]};

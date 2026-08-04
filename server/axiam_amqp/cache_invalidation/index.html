@@ -1,0 +1,141 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Cross-replica authorization decision-cache invalidation over RabbitMQ (§4.2 — closes the multi-replica stale-allow residual / threat-model `T-88`)."><title>axiam_amqp::cache_invalidation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_amqp" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module cache_invalidation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_amqp/index.html">axiam_<wbr>amqp</a><span class="version">1.0.0-alpha24</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module cache_<wbr>invalidation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#1-fan-out-not-a-work-queue--the-decision-everything-else-rests-on" title="1. Fan-out, not a work queue — the decision everything else rests on">1. Fan-out, not a work queue — the decision everything else rests on</a></li><li><a href="#2-what-happens-when-amqp-is-unavailable--the-crux" title="2. What happens when AMQP is unavailable — the crux">2. What happens when AMQP is unavailable — the crux</a><ul><li><a href="#2a-binding-liveness--the-heartbeat-134-observation-1" title="2a. Binding liveness — the heartbeat (§13.4 observation 1)">2a. Binding liveness — the heartbeat (§13.4 observation 1)</a></li></ul></li><li><a href="#3-authenticity" title="3. Authenticity">3. Authenticity</a></li><li><a href="#4-self-echo" title="4. Self-echo">4. Self-echo</a></li><li><a href="#5-opt-in-default-off" title="5. Opt-in, default-off">5. Opt-in, default-off</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>amqp</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_amqp</a></div><h1>Module <span>cache_<wbr>invalidation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_amqp/cache_invalidation.rs.html#1-1222">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Cross-replica authorization <strong>decision-cache invalidation</strong> over RabbitMQ
+(§4.2 — closes the multi-replica stale-allow residual / threat-model
+<code>T-88</code>).</p>
+<p>The <code>axiam-authz</code> decision cache invalidates process-locally. On a replica
+that did not handle the mutation, a revoked grant could stay <code>Allow</code> until
+its entry TTL-expired (default 5 s). This module is the transport that
+makes an invalidation reach <strong>every</strong> replica, built on the AMQP
+infrastructure and the §8 signed-message scheme this crate already has,
+rather than a parallel mechanism.</p>
+<h2 id="1-fan-out-not-a-work-queue--the-decision-everything-else-rests-on"><a class="doc-anchor" href="#1-fan-out-not-a-work-queue--the-decision-everything-else-rests-on">§</a>1. Fan-out, not a work queue — the decision everything else rests on</h2>
+<p>Invalidation must reach <em>every</em> replica. A work queue (many consumers on
+one shared queue) delivers each message to exactly <strong>one</strong> consumer, so all
+but one replica would stay stale — worse than no channel at all, because
+operators would believe the gap was closed. The topology is therefore:</p>
+<div class="example-wrap"><pre class="language-text"><code>                      ┌──────────────────────────────────────────┐
+  mutation on         │ exchange axiam.authz.cache.invalidate     │
+  replica A  ────────▶│ type: FANOUT, durable                     │
+                      └───┬──────────────┬───────────────┬────────┘
+                          │              │               │
+           queue …invalidate.&lt;A&gt;   …invalidate.&lt;B&gt;  …invalidate.&lt;C&gt;
+           exclusive, auto-delete, non-durable, one per replica
+                          │              │               │
+                    (self-echo:      apply to        apply to
+                     no-op)          B&#39;s cache       C&#39;s cache</code></pre></div>
+<p>Every replica declares <strong>its own</strong> queue, named after its process-unique
+replica id, and binds it to the fanout exchange. <code>exclusive</code> means no other
+connection can steal from it; <code>auto_delete</code> means it disappears with the
+replica rather than accumulating messages for a pod that will never return.
+Nothing is durable on the queue side and messages are published transient:
+a replica that was down has an <strong>empty</strong> cache when it comes back, so
+invalidations it missed are meaningless to it.</p>
+<h2 id="2-what-happens-when-amqp-is-unavailable--the-crux"><a class="doc-anchor" href="#2-what-happens-when-amqp-is-unavailable--the-crux">§</a>2. What happens when AMQP is unavailable — the crux</h2>
+<p>Hard-failing every authorization check when the broker is down would be a
+catastrophic availability regression; silently continuing to serve a cache
+that can no longer be invalidated is the security hole this exists to
+close. The two sides are resolved <strong>differently</strong>, because their failures
+mean different things:</p>
+<ul>
+<li><strong>Publish side → fail the mutation.</strong> <a href="struct.CacheInvalidationPublisher.html" title="struct axiam_amqp::cache_invalidation::CacheInvalidationPublisher"><code>CacheInvalidationPublisher</code></a>
+publishes with publisher confirms and returns <code>Err</code> unless the broker
+acked. <code>AuthorizationEngine::invalidate_*</code> propagates that, and the REST
+mutation handler returns <strong>503</strong>. The operator asked for a revocation;
+the database write is durable but the fan-out did not happen, and saying
+“done” would be a lie. The local cache is always invalidated <em>before</em> the
+publish is attempted, so the failure never leaves the mutating replica
+itself stale, and every one of these mutations is idempotent in the
+narrowing direction, so a retry is safe.</li>
+<li><strong>Consume side → stop trusting the local cache.</strong> When a replica’s
+consumer is not subscribed (startup, subscribe failure, stream end, task
+cancellation), it calls <code>DecisionCache::set_trusted(false)</code>: the cache is
+flushed and every check falls back to full database evaluation — correct,
+just slower — instead of serving allows it can no longer invalidate.
+Availability is preserved; only throughput degrades. The transition is
+logged at ERROR and counted in <code>DecisionCacheStats::bypassed</code>, so the
+degraded mode is loud rather than silent.</li>
+</ul>
+<p><strong>No inbound message can revoke trust</strong> — not a stale one, not a replayed
+one. Otherwise an attacker holding a single captured, validly-signed
+broadcast could disable every replica’s cache at will. A rejected message is
+logged and counted; it never moves the flag.</p>
+<h3 id="2a-binding-liveness--the-heartbeat-134-observation-1"><a class="doc-anchor" href="#2a-binding-liveness--the-heartbeat-134-observation-1">§</a>2a. Binding liveness — the heartbeat (§13.4 observation 1)</h3>
+<p>Consumer liveness alone is not sufficient evidence, and this was a real gap.
+A party with broker <strong>configure</strong> rights can <code>queue.unbind</code> a replica’s queue
+from the fanout exchange. Nothing visibly breaks: the consumer stays
+subscribed to a queue nothing routes to any more, so trust stays <code>true</code> and
+the replica keeps serving cached allows it will never be told to invalidate.
+The publisher cannot see it either — <code>mandatory</code> is off, so the broker acks
+an unroutable message. Invalidations are silently suppressed, bounded only by
+<code>decision_cache_ttl_secs</code>.</p>
+<p>Each replica therefore publishes a <strong>self-addressed heartbeat</strong> on an
+interval (<a href="fn.build_signed_heartbeat.html" title="fn axiam_amqp::cache_invalidation::build_signed_heartbeat"><code>build_signed_heartbeat</code></a>) and watches for its own to come back.
+That round trip is the smallest thing that actually exercises the property in
+question — publish → exchange → binding → queue → consumer — so an unbound
+queue breaks it immediately. After
+<a href="constant.HEARTBEAT_MISS_THRESHOLD.html" title="constant axiam_amqp::cache_invalidation::HEARTBEAT_MISS_THRESHOLD"><code>HEARTBEAT_MISS_THRESHOLD</code></a> consecutive missed intervals, the watchdog calls
+<code>set_trusted(false)</code> (<a href="struct.InvalidationLiveness.html" title="struct axiam_amqp::cache_invalidation::InvalidationLiveness"><code>InvalidationLiveness</code></a>).</p>
+<p>Three properties make this safe rather than a new lever:</p>
+<ul>
+<li>
+<p><strong>The watchdog can only revoke, never grant.</strong> Trust is granted in exactly
+one place — the consumer, on a successful <code>basic_consume</code>. A watchdog able
+to grant it could resurrect trust on a replica whose consumer had died.</p>
+</li>
+<li>
+<p><strong>Only our OWN heartbeat counts.</strong> Another replica’s heartbeat proves that
+replica can publish, which says nothing about <em>our</em> binding.</p>
+</li>
+<li>
+<p><strong>Heartbeats never touch the cache and never enter the nonce guard.</strong> They
+are separated out before any [<code>InvalidationEvent</code>] is constructed, so a
+heartbeat has no path to <code>apply</code>; and since they arrive on a fixed interval
+from every replica, letting them consume the bounded nonce-guard capacity
+would evict real invalidation nonces and weaken replay protection.</p>
+</li>
+<li>
+<p><strong>A replayed heartbeat does not count</strong> (§15.2). Bypassing the nonce guard
+left a narrow path: a party with broker rights who captured one signed
+heartbeat could replay it inside the freshness window to keep this
+replica’s watchdog satisfied while its queue was unbound. Acceptance is
+therefore bound to nonces <em>this</em> replica published and has not yet seen
+back (<a href="struct.InvalidationLiveness.html#method.record_sent_heartbeat" title="method axiam_amqp::cache_invalidation::InvalidationLiveness::record_sent_heartbeat"><code>InvalidationLiveness::record_sent_heartbeat</code></a>), which closes the
+replay without spending the shared guard’s bounded capacity.</p>
+</li>
+</ul>
+<p>Heartbeats <strong>cannot be disabled</strong> while broadcast is on. An earlier revision
+accepted an interval of <code>0</code> as “off”, which meant this whole mitigation could
+be removed with one environment variable and only a warning — leaving the TTL
+as the sole bound, which is the state it exists to escape. The TTL is itself
+now clamped (<code>MAX_DECISION_CACHE_TTL_SECS</code>), so neither half of the bound is
+operator-removable.</p>
+<h2 id="3-authenticity"><a class="doc-anchor" href="#3-authenticity">§</a>3. Authenticity</h2>
+<p>An invalidation is a control-plane instruction, so it carries the full §8
+envelope (<a href="../messages/struct.CacheInvalidationMessage.html" title="struct axiam_amqp::messages::CacheInvalidationMessage"><code>CacheInvalidationMessage</code></a>): per-tenant HKDF-SHA256 subkey,
+<code>key_version &gt;= 2</code> hard floor, per-message <code>nonce</code>, and an <code>issued_at</code>
+freshness window. Broker ACLs are not the only thing standing between an
+attacker with publish rights and everyone’s cache.</p>
+<p>The nonce is deduplicated <strong>per replica, in memory</strong> (<a href="struct.NonceGuard.html" title="struct axiam_amqp::cache_invalidation::NonceGuard"><code>NonceGuard</code></a>) — see
+<a href="../messages/struct.CacheInvalidationMessage.html#structfield.nonce" title="field axiam_amqp::messages::CacheInvalidationMessage::nonce"><code>CacheInvalidationMessage::nonce</code></a> for why the shared durable nonce store
+used by the authz consumer would be exactly wrong on a fanout.</p>
+<h2 id="4-self-echo"><a class="doc-anchor" href="#4-self-echo">§</a>4. Self-echo</h2>
+<p>A fanout delivers the message back to the publisher. The publisher stamps
+its own <code>origin_id</code>; a consumer seeing its own id treats the delivery as a
+<strong>no-op</strong> (it already invalidated locally, before publishing). It cannot
+loop: [<code>InvalidationEvent::apply</code>] talks to the <code>DecisionCache</code> directly and
+has no reachable path to a publish, so nothing a consumer does can emit a
+message.</p>
+<h2 id="5-opt-in-default-off"><a class="doc-anchor" href="#5-opt-in-default-off">§</a>5. Opt-in, default-off</h2>
+<p>Nothing here runs unless <strong>both</strong> <code>AXIAM__AUTHZ__DECISION_CACHE_ENABLED</code>
+and <code>AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED</code> are true. With the
+channel off, the decision cache behaves exactly as documented before §4.2:
+process-local invalidation, TTL-bounded cross-replica staleness, no AMQP
+dependency acquired by enabling the cache.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CacheInvalidationPublisher.html" title="struct axiam_amqp::cache_invalidation::CacheInvalidationPublisher">Cache<wbr>Invalidation<wbr>Publisher</a></dt><dd>Publishes signed invalidation broadcasts to the fanout exchange.</dd><dt><a class="struct" href="struct.InvalidationLiveness.html" title="struct axiam_amqp::cache_invalidation::InvalidationLiveness">Invalidation<wbr>Liveness</a></dt><dd>Tracks whether this replica is still <em>receiving</em> its own broadcasts.</dd><dt><a class="struct" href="struct.NonceGuard.html" title="struct axiam_amqp::cache_invalidation::NonceGuard">Nonce<wbr>Guard</a></dt><dd>Bounded in-memory nonce store for one replica’s invalidation consumer.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.InvalidationOutcome.html" title="enum axiam_amqp::cache_invalidation::InvalidationOutcome">Invalidation<wbr>Outcome</a></dt><dd>Outcome of processing one invalidation delivery.</dd><dt><a class="enum" href="enum.InvalidationReject.html" title="enum axiam_amqp::cache_invalidation::InvalidationReject">Invalidation<wbr>Reject</a></dt><dd>Why a delivery was refused. Every variant is a <em>drop</em>, never a requeue: a
+broadcast has no second consumer to hand it to, and requeueing would
+hot-loop against ourselves.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.HEARTBEAT_MISS_THRESHOLD.html" title="constant axiam_amqp::cache_invalidation::HEARTBEAT_MISS_THRESHOLD">HEARTBEAT_<wbr>MISS_<wbr>THRESHOLD</a></dt><dd>How many heartbeat intervals may pass with no self-echo before this replica
+stops trusting its cache.</dd><dt><a class="constant" href="constant.HEARTBEAT_TENANT_ID.html" title="constant axiam_amqp::cache_invalidation::HEARTBEAT_TENANT_ID">HEARTBEAT_<wbr>TENANT_<wbr>ID</a></dt><dd>Tenant id stamped on a liveness heartbeat.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.PublisherChannelFactory.html" title="trait axiam_amqp::cache_invalidation::PublisherChannelFactory">Publisher<wbr>Channel<wbr>Factory</a></dt><dd>Opens a publisher-confirm channel. Implemented by <code>AmqpManager</code>; a trait so
+this module stays testable without a broker and does not depend on the
+connection layer’s concrete type.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_signed_heartbeat.html" title="fn axiam_amqp::cache_invalidation::build_signed_heartbeat">build_<wbr>signed_<wbr>heartbeat</a></dt><dd>Build the signed wire bytes for one liveness heartbeat (§13.4 observation 1).</dd><dt><a class="fn" href="fn.build_signed_invalidation.html" title="fn axiam_amqp::cache_invalidation::build_signed_invalidation">build_<wbr>signed_<wbr>invalidation</a></dt><dd>Build the signed wire bytes for one invalidation broadcast.</dd><dt><a class="fn" href="fn.declare_cache_invalidation_topology.html" title="fn axiam_amqp::cache_invalidation::declare_cache_invalidation_topology">declare_<wbr>cache_<wbr>invalidation_<wbr>topology</a></dt><dd>Declare the fanout exchange, this replica’s exclusive auto-delete queue, and
+the binding between them. Returns the queue name.</dd><dt><a class="fn" href="fn.handle_invalidation.html" title="fn axiam_amqp::cache_invalidation::handle_invalidation">handle_<wbr>invalidation</a></dt><dd><a href="fn.process_invalidation.html" title="fn axiam_amqp::cache_invalidation::process_invalidation"><code>process_invalidation</code></a> plus application to <code>cache</code>.</dd><dt><a class="fn" href="fn.invalidation_exchange_kind.html" title="fn axiam_amqp::cache_invalidation::invalidation_exchange_kind">invalidation_<wbr>exchange_<wbr>kind</a></dt><dd>Exchange kind for <a href="../connection/exchanges/constant.AUTHZ_CACHE_INVALIDATE.html" title="constant axiam_amqp::connection::exchanges::AUTHZ_CACHE_INVALIDATE"><code>exchanges::AUTHZ_CACHE_INVALIDATE</code></a>.</dd><dt><a class="fn" href="fn.invalidation_queue_name.html" title="fn axiam_amqp::cache_invalidation::invalidation_queue_name">invalidation_<wbr>queue_<wbr>name</a></dt><dd>Per-replica queue name. One queue <strong>per replica</strong>, never a shared one.</dd><dt><a class="fn" href="fn.invalidation_queue_options.html" title="fn axiam_amqp::cache_invalidation::invalidation_queue_options">invalidation_<wbr>queue_<wbr>options</a></dt><dd>Declaration options for a replica’s own invalidation queue.</dd><dt><a class="fn" href="fn.process_invalidation.html" title="fn axiam_amqp::cache_invalidation::process_invalidation">process_<wbr>invalidation</a></dt><dd>Decode, verify, freshness-check, self-echo-check and replay-check one
+invalidation payload. <strong>Pure</strong> — no broker, no cache, <code>now</code> injected — so
+every branch is unit-testable, mirroring <code>process_authz_request</code>.</dd><dt><a class="fn" href="fn.run_cache_invalidation_consumer.html" title="fn axiam_amqp::cache_invalidation::run_cache_invalidation_consumer">run_<wbr>cache_<wbr>invalidation_<wbr>consumer</a></dt><dd>Run this replica’s invalidation consumer until the stream ends.</dd></dl></section></div></main></body></html>

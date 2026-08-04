@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CreateServiceAccount","ServiceAccount","UpdateServiceAccount"]};
+window.SIDEBAR_ITEMS = {"constant":["SERVICE_ACCOUNT_CLIENT_ID_PREFIX"],"struct":["CreateServiceAccount","ServiceAccount","UpdateServiceAccount"]};

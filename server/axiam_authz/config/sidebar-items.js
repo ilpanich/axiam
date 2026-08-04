@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["BatchStrategy"],"struct":["AuthzConfig"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_BROADCAST_HEARTBEAT_SECS","DEFAULT_BROADCAST_SKEW_SECS","MAX_BROADCAST_HEARTBEAT_SECS","MAX_DECISION_CACHE_TTL_SECS","MIN_BROADCAST_HEARTBEAT_SECS"],"enum":["BatchStrategy"],"struct":["AuthzConfig"]};

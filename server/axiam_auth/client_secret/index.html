@@ -1,0 +1,71 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Client-secret hashing (OBS-1)."><title>axiam_auth::client_secret - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module client_secret</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_auth/index.html">axiam_<wbr>auth</a><span class="version">1.0.0-alpha24</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module client_<wbr>secret</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-replaces" title="What this replaces">What this replaces</a></li><li><a href="#on-disk-representation" title="On-disk representation">On-disk representation</a></li><li><a href="#keying" title="Keying">Keying</a><ul><li><a href="#pepper-rotation-134-observation-3" title="Pepper rotation (§13.4 observation 3)">Pepper rotation (§13.4 observation 3)</a></li></ul></li><li><a href="#fail-closed-posture" title="Fail-closed posture">Fail-closed posture</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>auth</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_auth</a></div><h1>Module <span>client_<wbr>secret</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_auth/client_secret.rs.html#1-810">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Client-secret hashing (OBS-1).</p>
+<h2 id="what-this-replaces"><a class="doc-anchor" href="#what-this-replaces">§</a>What this replaces</h2>
+<p>Until OBS-1 was remediated, OAuth2 client secrets and service-account
+secrets were stored as an <strong>unsalted, single-round SHA-256</strong> digest. That
+was safe <em>only</em> because every secret is 32 CSPRNG bytes produced by the
+repository itself, with no operator-supplied path — an assumption held by
+nothing stronger than a code comment. This module removes the dependence on
+secret entropy: a stored hash is now a <strong>keyed</strong> HMAC-SHA256 tag, so an
+attacker holding a dump of the <code>oauth2_client</code> / <code>service_account</code> tables
+cannot mount an offline guessing attack at all without also holding the
+server pepper.</p>
+<p>HMAC-SHA256 (rather than Argon2id) is deliberate. The client-credentials
+grant is a machine-to-machine hot path measured at 2 727 req/s precisely
+because it is <em>not</em> KDF-bound; the threat a KDF defends against — offline
+brute force of a low-entropy secret — is already excluded by the 256-bit
+CSPRNG secrets, and is now additionally excluded by the key. If a
+caller-chosen client secret is ever accepted, revisit this: that is the
+trigger condition OBS-1 recorded, and it would call for a salted KDF.</p>
+<h2 id="on-disk-representation"><a class="doc-anchor" href="#on-disk-representation">§</a>On-disk representation</h2>
+<p>Two schemes coexist during migration. The scheme is identified by the
+stored string itself, so no schema change and no backfill are required:</p>
+<div><table><thead><tr><th>Scheme</th><th>Stored form</th><th>Length</th></tr></thead><tbody>
+<tr><td>v1 (legacy)</td><td><code>&lt;64 lowercase hex&gt;</code> — bare <code>SHA-256(secret)</code></td><td>64</td></tr>
+<tr><td>v2 (current)</td><td><code>v2.hs256$&lt;64 lowercase hex&gt;</code> — <code>HMAC-SHA256(k, secret)</code></td><td>73</td></tr>
+</tbody></table>
+</div>
+<p>v1 hashes <strong>cannot be re-derived</strong> offline — only the digest was ever
+stored, never the secret — so migration is necessarily lazy:
+<a href="struct.ClientSecretHasher.html#method.verify" title="method axiam_auth::client_secret::ClientSecretHasher::verify"><code>ClientSecretHasher::verify</code></a> returns
+<a href="enum.ClientSecretVerdict.html#variant.MatchNeedsUpgrade" title="variant axiam_auth::client_secret::ClientSecretVerdict::MatchNeedsUpgrade"><code>ClientSecretVerdict::MatchNeedsUpgrade</code></a> carrying the v2 replacement, and
+the caller persists it with a compare-and-swap. The upgrade is produced
+<strong>only on a successful verification</strong>; a failed verification never rehashes
+and never writes.</p>
+<h2 id="keying"><a class="doc-anchor" href="#keying">§</a>Keying</h2>
+<p>The HMAC key is derived once, at construction, from the configured server
+pepper (<code>AXIAM__AUTH__PEPPER</code>) with a domain-separation label:</p>
+<div class="example-wrap"><pre class="language-text"><code>k = HMAC-SHA256(pepper, &quot;axiam.client-secret.v2&quot;)</code></pre></div>
+<p>The label keeps this key independent of the pepper’s other use (Argon2id
+password peppering), so the two never share key material directly.</p>
+<h3 id="pepper-rotation-134-observation-3"><a class="doc-anchor" href="#pepper-rotation-134-observation-3">§</a>Pepper rotation (§13.4 observation 3)</h3>
+<p>The <code>v2.hs256$</code> tag versions the <strong>algorithm</strong>, not the <strong>key</strong>. Rotating
+<code>AXIAM__AUTH__PEPPER</code> therefore used to be an unversioned hard break: every
+stored hash became unverifiable at once, so every service account and OAuth2
+client had to be re-issued in lockstep with the restart. The AMQP path
+carries a <code>key_version</code> on the wire for exactly this reason.</p>
+<p>Set <code>AXIAM__AUTH__PEPPER_PREVIOUS</code> to the outgoing value for the duration of
+a rotation. Verification then tries the current key and, failing that, the
+previous one; a match under the previous key returns
+<a href="enum.ClientSecretVerdict.html#variant.MatchNeedsUpgrade" title="variant axiam_auth::client_secret::ClientSecretVerdict::MatchNeedsUpgrade"><code>ClientSecretVerdict::MatchNeedsUpgrade</code></a> carrying the hash under the
+<em>current</em> key, so each secret is rewritten the first time its owner
+authenticates and the rotation drains itself. Nothing is ever <em>written</em>
+under the previous key. Unset it once the fleet has drained.</p>
+<p><strong>Why not a stored key id.</strong> The obvious alternative — derive a kid from the
+pepper and store it beside the hash — would hand anyone holding a table dump
+an offline oracle for testing pepper guesses directly, which does not exist
+today (testing a guess currently requires a known secret/hash pair). Trying
+both keys costs one extra HMAC on rotation-era rows and adds no new verifier
+for an attacker. Both candidates are computed unconditionally while a
+rotation is configured, so the response time does not reveal which pepper era
+a row is in.</p>
+<h2 id="fail-closed-posture"><a class="doc-anchor" href="#fail-closed-posture">§</a>Fail-closed posture</h2>
+<p>The pepper is <strong>mandatory</strong> for client-secret hashing. There is no
+bare-SHA-256 fallback: a missing pepper is a hard error, exactly like the
+mandatory AMQP master signing key (SECHRD-08 / D-05c). Matching that
+precedent, a <em>debug</em> build falls back to a documented dev-only pepper so
+local runs and tests work without extra setup; a <em>release</em> build — the
+production container image — fails closed with
+[<code>AxiamError::ServiceUnavailable</code>].</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ClientSecretHasher.html" title="struct axiam_auth::client_secret::ClientSecretHasher">Client<wbr>Secret<wbr>Hasher</a></dt><dd>Keyed hasher for client secrets. Construct once per process (see
+<a href="fn.install_from_config.html" title="fn axiam_auth::client_secret::install_from_config"><code>install_from_config</code></a>) — construction derives the HMAC key, hashing does
+not.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ClientSecretVerdict.html" title="enum axiam_auth::client_secret::ClientSecretVerdict">Client<wbr>Secret<wbr>Verdict</a></dt><dd>Outcome of verifying a presented client secret against a stored hash.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.V1_HASH_LEN.html" title="constant axiam_auth::client_secret::V1_HASH_LEN">V1_<wbr>HASH_<wbr>LEN</a></dt><dd>Length of a legacy (v1) stored hash: 64 lowercase hex chars of SHA-256.</dd><dt><a class="constant" href="constant.V2_HASH_LEN.html" title="constant axiam_auth::client_secret::V2_HASH_LEN">V2_<wbr>HASH_<wbr>LEN</a></dt><dd>Length of a v2 stored hash: <a href="constant.V2_PREFIX.html" title="constant axiam_auth::client_secret::V2_PREFIX"><code>V2_PREFIX</code></a> plus 64 lowercase hex chars.</dd><dt><a class="constant" href="constant.V2_PREFIX.html" title="constant axiam_auth::client_secret::V2_PREFIX">V2_<wbr>PREFIX</a></dt><dd>Scheme marker for the current (v2) client-secret hash format.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.global.html" title="fn axiam_auth::client_secret::global">global</a></dt><dd>Resolve the process-wide client-secret hasher.</dd><dt><a class="fn" href="fn.install_from_config.html" title="fn axiam_auth::client_secret::install_from_config">install_<wbr>from_<wbr>config</a></dt><dd>Install the process-wide client-secret hasher from configuration.</dd></dl></section></div></main></body></html>

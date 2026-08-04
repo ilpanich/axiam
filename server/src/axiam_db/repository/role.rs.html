@@ -528,239 +528,272 @@
 <a href=#528 id=528 data-nosnippet>528</a>
 <a href=#529 id=529 data-nosnippet>529</a>        <span class="comment">// Query has_role edges (direct + via groups) and join with role data.
 <a href=#530 id=530 data-nosnippet>530</a>        // Each result row contains role fields + the resource_id from the edge.
-<a href=#531 id=531 data-nosnippet>531</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#532 id=532 data-nosnippet>532</a>            </span>.db
-<a href=#533 id=533 data-nosnippet>533</a>            .current()
-<a href=#534 id=534 data-nosnippet>534</a>            .query(
-<a href=#535 id=535 data-nosnippet>535</a>                <span class="string">"SELECT meta::id(out.id) AS record_id, \
-<a href=#536 id=536 data-nosnippet>536</a>                        out.tenant_id AS tenant_id, \
-<a href=#537 id=537 data-nosnippet>537</a>                        out.name AS name, \
-<a href=#538 id=538 data-nosnippet>538</a>                        out.description AS description, \
-<a href=#539 id=539 data-nosnippet>539</a>                        out.is_global AS is_global, \
-<a href=#540 id=540 data-nosnippet>540</a>                        out.created_at AS created_at, \
-<a href=#541 id=541 data-nosnippet>541</a>                        out.updated_at AS updated_at, \
-<a href=#542 id=542 data-nosnippet>542</a>                        resource_id \
-<a href=#543 id=543 data-nosnippet>543</a>                 FROM has_role \
-<a href=#544 id=544 data-nosnippet>544</a>                 WHERE in = type::record('user', $user_id) \
-<a href=#545 id=545 data-nosnippet>545</a>                 AND out.tenant_id = $tenant_id; \
-<a href=#546 id=546 data-nosnippet>546</a>                 SELECT meta::id(out.id) AS record_id, \
-<a href=#547 id=547 data-nosnippet>547</a>                        out.tenant_id AS tenant_id, \
-<a href=#548 id=548 data-nosnippet>548</a>                        out.name AS name, \
-<a href=#549 id=549 data-nosnippet>549</a>                        out.description AS description, \
-<a href=#550 id=550 data-nosnippet>550</a>                        out.is_global AS is_global, \
-<a href=#551 id=551 data-nosnippet>551</a>                        out.created_at AS created_at, \
-<a href=#552 id=552 data-nosnippet>552</a>                        out.updated_at AS updated_at, \
-<a href=#553 id=553 data-nosnippet>553</a>                        resource_id \
-<a href=#554 id=554 data-nosnippet>554</a>                 FROM has_role \
-<a href=#555 id=555 data-nosnippet>555</a>                 WHERE in IN (\
-<a href=#556 id=556 data-nosnippet>556</a>                     SELECT VALUE out FROM member_of \
-<a href=#557 id=557 data-nosnippet>557</a>                     WHERE in = type::record('user', $user_id)\
-<a href=#558 id=558 data-nosnippet>558</a>                 ) \
-<a href=#559 id=559 data-nosnippet>559</a>                 AND out.tenant_id = $tenant_id;"</span>,
-<a href=#560 id=560 data-nosnippet>560</a>            )
-<a href=#561 id=561 data-nosnippet>561</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#562 id=562 data-nosnippet>562</a>            .bind((<span class="string">"user_id"</span>, user_id_str))
-<a href=#563 id=563 data-nosnippet>563</a>            .<span class="kw">await
-<a href=#564 id=564 data-nosnippet>564</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#565 id=565 data-nosnippet>565</a>
-<a href=#566 id=566 data-nosnippet>566</a>        <span class="kw">let </span>direct: Vec&lt;RoleAssignmentRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#567 id=567 data-nosnippet>567</a>        <span class="kw">let </span>inherited: Vec&lt;RoleAssignmentRow&gt; = result.take(<span class="number">1</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#568 id=568 data-nosnippet>568</a>
-<a href=#569 id=569 data-nosnippet>569</a>        <span class="kw">let </span><span class="kw-2">mut </span>assignments = Vec::new();
-<a href=#570 id=570 data-nosnippet>570</a>        <span class="kw">for </span>row <span class="kw">in </span>direct.into_iter().chain(inherited) {
-<a href=#571 id=571 data-nosnippet>571</a>            assignments.push(row.try_into_assignment()<span class="question-mark">?</span>);
-<a href=#572 id=572 data-nosnippet>572</a>        }
-<a href=#573 id=573 data-nosnippet>573</a>
-<a href=#574 id=574 data-nosnippet>574</a>        <span class="prelude-val">Ok</span>(assignments)
-<a href=#575 id=575 data-nosnippet>575</a>    }
-<a href=#576 id=576 data-nosnippet>576</a>
-<a href=#577 id=577 data-nosnippet>577</a>    <span class="kw">async fn </span>assign_to_group(
-<a href=#578 id=578 data-nosnippet>578</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#579 id=579 data-nosnippet>579</a>        tenant_id: Uuid,
-<a href=#580 id=580 data-nosnippet>580</a>        group_id: Uuid,
-<a href=#581 id=581 data-nosnippet>581</a>        role_id: Uuid,
-<a href=#582 id=582 data-nosnippet>582</a>        resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
-<a href=#583 id=583 data-nosnippet>583</a>    ) -&gt; AxiamResult&lt;()&gt; {
-<a href=#584 id=584 data-nosnippet>584</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
-<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">let </span>role_id_str = role_id.to_string();
-<a href=#586 id=586 data-nosnippet>586</a>        <span class="kw">let </span>resource_id_str = resource_id.map(|r| r.to_string());
-<a href=#587 id=587 data-nosnippet>587</a>
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="comment">// CQ-B07: verify both endpoints belong to the same tenant before RELATE.
-<a href=#589 id=589 data-nosnippet>589</a>        </span><span class="kw">let </span>query = <span class="macro">format!</span>(
-<a href=#590 id=590 data-nosnippet>590</a>            <span class="string">"LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
-<a href=#591 id=591 data-nosnippet>591</a>             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-<a href=#592 id=592 data-nosnippet>592</a>             IF array::len($g) = 0 OR array::len($r) = 0 {{\
-<a href=#593 id=593 data-nosnippet>593</a>                 THROW 'cross-tenant edge denied';\
-<a href=#594 id=594 data-nosnippet>594</a>             }};\
-<a href=#595 id=595 data-nosnippet>595</a>             RELATE group:`{group_id_str}` -&gt; has_role -&gt; role:`{role_id_str}` \
-<a href=#596 id=596 data-nosnippet>596</a>             SET resource_id = $resource_id;"
-<a href=#597 id=597 data-nosnippet>597</a>        </span>);
+<a href=#531 id=531 data-nosnippet>531</a>        //
+<a href=#532 id=532 data-nosnippet>532</a>        // I7(a) — the group-inherited half MUST hoist the membership sub-select
+<a href=#533 id=533 data-nosnippet>533</a>        // into a `LET` binding.
+<a href=#534 id=534 data-nosnippet>534</a>        //
+<a href=#535 id=535 data-nosnippet>535</a>        // Written inline as `WHERE in IN (SELECT VALUE out FROM member_of …)`
+<a href=#536 id=536 data-nosnippet>536</a>        // the planner cannot see a constant on the right-hand side; it reports
+<a href=#537 id=537 data-nosnippet>537</a>        // `TableScan { predicate: "in INSIDE (ProjectValue) …",
+<a href=#538 id=538 data-nosnippet>538</a>        // pre_decode_filter: "no (unsupported predicate)" }` and walks **every**
+<a href=#539 id=539 data-nosnippet>539</a>        // `has_role` edge in the database — every role assignment of every user
+<a href=#540 id=540 data-nosnippet>540</a>        // of every tenant — on every authorization check. Evaluating the
+<a href=#541 id=541 data-nosnippet>541</a>        // membership set first and binding it to `$group_records` turns the same
+<a href=#542 id=542 data-nosnippet>542</a>        // predicate into an `IndexScan` over the `(in, out)` composite index
+<a href=#543 id=543 data-nosnippet>543</a>        // `idx_has_role_unique` (schema v19). Rows returned are identical; only
+<a href=#544 id=544 data-nosnippet>544</a>        // the plan changes. Pinned by
+<a href=#545 id=545 data-nosnippet>545</a>        // `crates/axiam-db/tests/authz_query_plan_test.rs`.
+<a href=#546 id=546 data-nosnippet>546</a>        //
+<a href=#547 id=547 data-nosnippet>547</a>        // Defence in depth (security re-verification 2026-08-03, residual 1):
+<a href=#548 id=548 data-nosnippet>548</a>        // the `member_of` traversal carries its own `out.tenant_id =
+<a href=#549 id=549 data-nosnippet>549</a>        // $tenant_id` predicate. It is not reachable today — `group.rs`
+<a href=#550 id=550 data-nosnippet>550</a>        // validates BOTH endpoints against the tenant before writing a
+<a href=#551 id=551 data-nosnippet>551</a>        // `member_of` edge, and the outer `has_role` predicate still confines
+<a href=#552 id=552 data-nosnippet>552</a>        // the resulting role to the tenant — but without it this was the one
+<a href=#553 id=553 data-nosnippet>553</a>        // authorization edge with no read-time tenant check, so a migration or
+<a href=#554 id=554 data-nosnippet>554</a>        // bulk import writing `member_of` directly would have bypassed it.
+<a href=#555 id=555 data-nosnippet>555</a>        // `out` is a `group` record and `idx_member_of_unique` still serves the
+<a href=#556 id=556 data-nosnippet>556</a>        // `in =` half, so the added predicate is a post-filter on an already
+<a href=#557 id=557 data-nosnippet>557</a>        // index-selected row set: no plan change (pinned by
+<a href=#558 id=558 data-nosnippet>558</a>        // `authz_query_plan_test::group_membership_lookup_is_index_satisfied`).
+<a href=#559 id=559 data-nosnippet>559</a>        //
+<a href=#560 id=560 data-nosnippet>560</a>        // Statement indices below: 0 = direct SELECT, 1 = LET, 2 = inherited
+<a href=#561 id=561 data-nosnippet>561</a>        // SELECT.
+<a href=#562 id=562 data-nosnippet>562</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#563 id=563 data-nosnippet>563</a>            </span>.db
+<a href=#564 id=564 data-nosnippet>564</a>            .current()
+<a href=#565 id=565 data-nosnippet>565</a>            .query(
+<a href=#566 id=566 data-nosnippet>566</a>                <span class="string">"SELECT meta::id(out.id) AS record_id, \
+<a href=#567 id=567 data-nosnippet>567</a>                        out.tenant_id AS tenant_id, \
+<a href=#568 id=568 data-nosnippet>568</a>                        out.name AS name, \
+<a href=#569 id=569 data-nosnippet>569</a>                        out.description AS description, \
+<a href=#570 id=570 data-nosnippet>570</a>                        out.is_global AS is_global, \
+<a href=#571 id=571 data-nosnippet>571</a>                        out.created_at AS created_at, \
+<a href=#572 id=572 data-nosnippet>572</a>                        out.updated_at AS updated_at, \
+<a href=#573 id=573 data-nosnippet>573</a>                        resource_id \
+<a href=#574 id=574 data-nosnippet>574</a>                 FROM has_role \
+<a href=#575 id=575 data-nosnippet>575</a>                 WHERE in = type::record('user', $user_id) \
+<a href=#576 id=576 data-nosnippet>576</a>                 AND out.tenant_id = $tenant_id; \
+<a href=#577 id=577 data-nosnippet>577</a>                 LET $group_records = (\
+<a href=#578 id=578 data-nosnippet>578</a>                     SELECT VALUE out FROM member_of \
+<a href=#579 id=579 data-nosnippet>579</a>                     WHERE in = type::record('user', $user_id) \
+<a href=#580 id=580 data-nosnippet>580</a>                     AND out.tenant_id = $tenant_id\
+<a href=#581 id=581 data-nosnippet>581</a>                 ); \
+<a href=#582 id=582 data-nosnippet>582</a>                 SELECT meta::id(out.id) AS record_id, \
+<a href=#583 id=583 data-nosnippet>583</a>                        out.tenant_id AS tenant_id, \
+<a href=#584 id=584 data-nosnippet>584</a>                        out.name AS name, \
+<a href=#585 id=585 data-nosnippet>585</a>                        out.description AS description, \
+<a href=#586 id=586 data-nosnippet>586</a>                        out.is_global AS is_global, \
+<a href=#587 id=587 data-nosnippet>587</a>                        out.created_at AS created_at, \
+<a href=#588 id=588 data-nosnippet>588</a>                        out.updated_at AS updated_at, \
+<a href=#589 id=589 data-nosnippet>589</a>                        resource_id \
+<a href=#590 id=590 data-nosnippet>590</a>                 FROM has_role \
+<a href=#591 id=591 data-nosnippet>591</a>                 WHERE in IN $group_records \
+<a href=#592 id=592 data-nosnippet>592</a>                 AND out.tenant_id = $tenant_id;"</span>,
+<a href=#593 id=593 data-nosnippet>593</a>            )
+<a href=#594 id=594 data-nosnippet>594</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#595 id=595 data-nosnippet>595</a>            .bind((<span class="string">"user_id"</span>, user_id_str))
+<a href=#596 id=596 data-nosnippet>596</a>            .<span class="kw">await
+<a href=#597 id=597 data-nosnippet>597</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#598 id=598 data-nosnippet>598</a>
-<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#600 id=600 data-nosnippet>600</a>            </span>.db
-<a href=#601 id=601 data-nosnippet>601</a>            .current()
-<a href=#602 id=602 data-nosnippet>602</a>            .query(query)
-<a href=#603 id=603 data-nosnippet>603</a>            .bind((<span class="string">"tid"</span>, tenant_id.to_string()))
-<a href=#604 id=604 data-nosnippet>604</a>            .bind((<span class="string">"resource_id"</span>, resource_id_str))
-<a href=#605 id=605 data-nosnippet>605</a>            .<span class="kw">await
-<a href=#606 id=606 data-nosnippet>606</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#607 id=607 data-nosnippet>607</a>
-<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = result.check() {
-<a href=#609 id=609 data-nosnippet>609</a>            <span class="kw">let </span>msg = e.to_string();
-<a href=#610 id=610 data-nosnippet>610</a>            <span class="kw">if </span>msg.contains(<span class="string">"cross-tenant edge denied"</span>) {
-<a href=#611 id=611 data-nosnippet>611</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::AuthorizationDenied {
-<a href=#612 id=612 data-nosnippet>612</a>                    reason: <span class="string">"cross-tenant group role assignment denied"</span>.into(),
-<a href=#613 id=613 data-nosnippet>613</a>                    action: <span class="prelude-val">None</span>,
-<a href=#614 id=614 data-nosnippet>614</a>                    resource_id: <span class="prelude-val">None</span>,
-<a href=#615 id=615 data-nosnippet>615</a>                });
-<a href=#616 id=616 data-nosnippet>616</a>            }
-<a href=#617 id=617 data-nosnippet>617</a>            <span class="comment">// QUAL-03/D-09: a duplicate has_role edge violates the
-<a href=#618 id=618 data-nosnippet>618</a>            // idx_has_role_unique UNIQUE(in,out) index — classify_write_error
-<a href=#619 id=619 data-nosnippet>619</a>            // routes that (and only that) to 409, not this generic Migration
-<a href=#620 id=620 data-nosnippet>620</a>            // fallback.
-<a href=#621 id=621 data-nosnippet>621</a>            </span><span class="kw">return </span><span class="prelude-val">Err</span>(classify_write_error(msg, <span class="string">"role_assignment"</span>).into());
-<a href=#622 id=622 data-nosnippet>622</a>        }
-<a href=#623 id=623 data-nosnippet>623</a>
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="prelude-val">Ok</span>(())
-<a href=#625 id=625 data-nosnippet>625</a>    }
-<a href=#626 id=626 data-nosnippet>626</a>
-<a href=#627 id=627 data-nosnippet>627</a>    <span class="kw">async fn </span>unassign_from_group(
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#629 id=629 data-nosnippet>629</a>        tenant_id: Uuid,
-<a href=#630 id=630 data-nosnippet>630</a>        group_id: Uuid,
-<a href=#631 id=631 data-nosnippet>631</a>        role_id: Uuid,
-<a href=#632 id=632 data-nosnippet>632</a>        resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
-<a href=#633 id=633 data-nosnippet>633</a>    ) -&gt; AxiamResult&lt;()&gt; {
-<a href=#634 id=634 data-nosnippet>634</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
-<a href=#635 id=635 data-nosnippet>635</a>        <span class="kw">let </span>role_id_str = role_id.to_string();
-<a href=#636 id=636 data-nosnippet>636</a>        <span class="kw">let </span>resource_id_str = resource_id.map(|r| r.to_string());
-<a href=#637 id=637 data-nosnippet>637</a>
-<a href=#638 id=638 data-nosnippet>638</a>        <span class="comment">// CQ-B07: verify both endpoints belong to the same tenant before DELETE.
-<a href=#639 id=639 data-nosnippet>639</a>        </span><span class="kw">let </span>delete_clause = <span class="kw">if </span>resource_id_str.is_some() {
-<a href=#640 id=640 data-nosnippet>640</a>            <span class="macro">format!</span>(
-<a href=#641 id=641 data-nosnippet>641</a>                <span class="string">"DELETE has_role WHERE \
-<a href=#642 id=642 data-nosnippet>642</a>                 in = group:`{group_id_str}` AND \
-<a href=#643 id=643 data-nosnippet>643</a>                 out = role:`{role_id_str}` AND \
-<a href=#644 id=644 data-nosnippet>644</a>                 resource_id = $resource_id"
-<a href=#645 id=645 data-nosnippet>645</a>            </span>)
-<a href=#646 id=646 data-nosnippet>646</a>        } <span class="kw">else </span>{
-<a href=#647 id=647 data-nosnippet>647</a>            <span class="macro">format!</span>(
-<a href=#648 id=648 data-nosnippet>648</a>                <span class="string">"DELETE has_role WHERE \
-<a href=#649 id=649 data-nosnippet>649</a>                 in = group:`{group_id_str}` AND \
-<a href=#650 id=650 data-nosnippet>650</a>                 out = role:`{role_id_str}` AND \
-<a href=#651 id=651 data-nosnippet>651</a>                 resource_id = NONE"
-<a href=#652 id=652 data-nosnippet>652</a>            </span>)
-<a href=#653 id=653 data-nosnippet>653</a>        };
-<a href=#654 id=654 data-nosnippet>654</a>
-<a href=#655 id=655 data-nosnippet>655</a>        <span class="kw">let </span>query = <span class="macro">format!</span>(
-<a href=#656 id=656 data-nosnippet>656</a>            <span class="string">"LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
-<a href=#657 id=657 data-nosnippet>657</a>             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-<a href=#658 id=658 data-nosnippet>658</a>             IF array::len($g) = 0 OR array::len($r) = 0 {{\
-<a href=#659 id=659 data-nosnippet>659</a>                 THROW 'cross-tenant edge denied';\
-<a href=#660 id=660 data-nosnippet>660</a>             }};\
-<a href=#661 id=661 data-nosnippet>661</a>             {delete_clause}"
-<a href=#662 id=662 data-nosnippet>662</a>        </span>);
-<a href=#663 id=663 data-nosnippet>663</a>
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#665 id=665 data-nosnippet>665</a>            </span>.db
-<a href=#666 id=666 data-nosnippet>666</a>            .current()
-<a href=#667 id=667 data-nosnippet>667</a>            .query(query)
-<a href=#668 id=668 data-nosnippet>668</a>            .bind((<span class="string">"tid"</span>, tenant_id.to_string()))
-<a href=#669 id=669 data-nosnippet>669</a>            .bind((<span class="string">"resource_id"</span>, resource_id_str))
-<a href=#670 id=670 data-nosnippet>670</a>            .<span class="kw">await
-<a href=#671 id=671 data-nosnippet>671</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#672 id=672 data-nosnippet>672</a>
-<a href=#673 id=673 data-nosnippet>673</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = result.check() {
-<a href=#674 id=674 data-nosnippet>674</a>            <span class="kw">let </span>msg = e.to_string();
-<a href=#675 id=675 data-nosnippet>675</a>            <span class="kw">if </span>msg.contains(<span class="string">"cross-tenant edge denied"</span>) {
-<a href=#676 id=676 data-nosnippet>676</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::AuthorizationDenied {
-<a href=#677 id=677 data-nosnippet>677</a>                    reason: <span class="string">"cross-tenant group role unassignment denied"</span>.into(),
-<a href=#678 id=678 data-nosnippet>678</a>                    action: <span class="prelude-val">None</span>,
-<a href=#679 id=679 data-nosnippet>679</a>                    resource_id: <span class="prelude-val">None</span>,
-<a href=#680 id=680 data-nosnippet>680</a>                });
-<a href=#681 id=681 data-nosnippet>681</a>            }
-<a href=#682 id=682 data-nosnippet>682</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::Migration(msg).into());
-<a href=#683 id=683 data-nosnippet>683</a>        }
-<a href=#684 id=684 data-nosnippet>684</a>
-<a href=#685 id=685 data-nosnippet>685</a>        <span class="prelude-val">Ok</span>(())
-<a href=#686 id=686 data-nosnippet>686</a>    }
+<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>direct: Vec&lt;RoleAssignmentRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="kw">let </span>inherited: Vec&lt;RoleAssignmentRow&gt; = result.take(<span class="number">2</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#601 id=601 data-nosnippet>601</a>
+<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">let </span><span class="kw-2">mut </span>assignments = Vec::new();
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">for </span>row <span class="kw">in </span>direct.into_iter().chain(inherited) {
+<a href=#604 id=604 data-nosnippet>604</a>            assignments.push(row.try_into_assignment()<span class="question-mark">?</span>);
+<a href=#605 id=605 data-nosnippet>605</a>        }
+<a href=#606 id=606 data-nosnippet>606</a>
+<a href=#607 id=607 data-nosnippet>607</a>        <span class="prelude-val">Ok</span>(assignments)
+<a href=#608 id=608 data-nosnippet>608</a>    }
+<a href=#609 id=609 data-nosnippet>609</a>
+<a href=#610 id=610 data-nosnippet>610</a>    <span class="kw">async fn </span>assign_to_group(
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#612 id=612 data-nosnippet>612</a>        tenant_id: Uuid,
+<a href=#613 id=613 data-nosnippet>613</a>        group_id: Uuid,
+<a href=#614 id=614 data-nosnippet>614</a>        role_id: Uuid,
+<a href=#615 id=615 data-nosnippet>615</a>        resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#616 id=616 data-nosnippet>616</a>    ) -&gt; AxiamResult&lt;()&gt; {
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
+<a href=#618 id=618 data-nosnippet>618</a>        <span class="kw">let </span>role_id_str = role_id.to_string();
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">let </span>resource_id_str = resource_id.map(|r| r.to_string());
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a>        <span class="comment">// CQ-B07: verify both endpoints belong to the same tenant before RELATE.
+<a href=#622 id=622 data-nosnippet>622</a>        </span><span class="kw">let </span>query = <span class="macro">format!</span>(
+<a href=#623 id=623 data-nosnippet>623</a>            <span class="string">"LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
+<a href=#624 id=624 data-nosnippet>624</a>             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+<a href=#625 id=625 data-nosnippet>625</a>             IF array::len($g) = 0 OR array::len($r) = 0 {{\
+<a href=#626 id=626 data-nosnippet>626</a>                 THROW 'cross-tenant edge denied';\
+<a href=#627 id=627 data-nosnippet>627</a>             }};\
+<a href=#628 id=628 data-nosnippet>628</a>             RELATE group:`{group_id_str}` -&gt; has_role -&gt; role:`{role_id_str}` \
+<a href=#629 id=629 data-nosnippet>629</a>             SET resource_id = $resource_id;"
+<a href=#630 id=630 data-nosnippet>630</a>        </span>);
+<a href=#631 id=631 data-nosnippet>631</a>
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#633 id=633 data-nosnippet>633</a>            </span>.db
+<a href=#634 id=634 data-nosnippet>634</a>            .current()
+<a href=#635 id=635 data-nosnippet>635</a>            .query(query)
+<a href=#636 id=636 data-nosnippet>636</a>            .bind((<span class="string">"tid"</span>, tenant_id.to_string()))
+<a href=#637 id=637 data-nosnippet>637</a>            .bind((<span class="string">"resource_id"</span>, resource_id_str))
+<a href=#638 id=638 data-nosnippet>638</a>            .<span class="kw">await
+<a href=#639 id=639 data-nosnippet>639</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#640 id=640 data-nosnippet>640</a>
+<a href=#641 id=641 data-nosnippet>641</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = result.check() {
+<a href=#642 id=642 data-nosnippet>642</a>            <span class="kw">let </span>msg = e.to_string();
+<a href=#643 id=643 data-nosnippet>643</a>            <span class="kw">if </span>msg.contains(<span class="string">"cross-tenant edge denied"</span>) {
+<a href=#644 id=644 data-nosnippet>644</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::AuthorizationDenied {
+<a href=#645 id=645 data-nosnippet>645</a>                    reason: <span class="string">"cross-tenant group role assignment denied"</span>.into(),
+<a href=#646 id=646 data-nosnippet>646</a>                    action: <span class="prelude-val">None</span>,
+<a href=#647 id=647 data-nosnippet>647</a>                    resource_id: <span class="prelude-val">None</span>,
+<a href=#648 id=648 data-nosnippet>648</a>                });
+<a href=#649 id=649 data-nosnippet>649</a>            }
+<a href=#650 id=650 data-nosnippet>650</a>            <span class="comment">// QUAL-03/D-09: a duplicate has_role edge violates the
+<a href=#651 id=651 data-nosnippet>651</a>            // idx_has_role_unique UNIQUE(in,out) index — classify_write_error
+<a href=#652 id=652 data-nosnippet>652</a>            // routes that (and only that) to 409, not this generic Migration
+<a href=#653 id=653 data-nosnippet>653</a>            // fallback.
+<a href=#654 id=654 data-nosnippet>654</a>            </span><span class="kw">return </span><span class="prelude-val">Err</span>(classify_write_error(msg, <span class="string">"role_assignment"</span>).into());
+<a href=#655 id=655 data-nosnippet>655</a>        }
+<a href=#656 id=656 data-nosnippet>656</a>
+<a href=#657 id=657 data-nosnippet>657</a>        <span class="prelude-val">Ok</span>(())
+<a href=#658 id=658 data-nosnippet>658</a>    }
+<a href=#659 id=659 data-nosnippet>659</a>
+<a href=#660 id=660 data-nosnippet>660</a>    <span class="kw">async fn </span>unassign_from_group(
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#662 id=662 data-nosnippet>662</a>        tenant_id: Uuid,
+<a href=#663 id=663 data-nosnippet>663</a>        group_id: Uuid,
+<a href=#664 id=664 data-nosnippet>664</a>        role_id: Uuid,
+<a href=#665 id=665 data-nosnippet>665</a>        resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#666 id=666 data-nosnippet>666</a>    ) -&gt; AxiamResult&lt;()&gt; {
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="kw">let </span>role_id_str = role_id.to_string();
+<a href=#669 id=669 data-nosnippet>669</a>        <span class="kw">let </span>resource_id_str = resource_id.map(|r| r.to_string());
+<a href=#670 id=670 data-nosnippet>670</a>
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="comment">// CQ-B07: verify both endpoints belong to the same tenant before DELETE.
+<a href=#672 id=672 data-nosnippet>672</a>        </span><span class="kw">let </span>delete_clause = <span class="kw">if </span>resource_id_str.is_some() {
+<a href=#673 id=673 data-nosnippet>673</a>            <span class="macro">format!</span>(
+<a href=#674 id=674 data-nosnippet>674</a>                <span class="string">"DELETE has_role WHERE \
+<a href=#675 id=675 data-nosnippet>675</a>                 in = group:`{group_id_str}` AND \
+<a href=#676 id=676 data-nosnippet>676</a>                 out = role:`{role_id_str}` AND \
+<a href=#677 id=677 data-nosnippet>677</a>                 resource_id = $resource_id"
+<a href=#678 id=678 data-nosnippet>678</a>            </span>)
+<a href=#679 id=679 data-nosnippet>679</a>        } <span class="kw">else </span>{
+<a href=#680 id=680 data-nosnippet>680</a>            <span class="macro">format!</span>(
+<a href=#681 id=681 data-nosnippet>681</a>                <span class="string">"DELETE has_role WHERE \
+<a href=#682 id=682 data-nosnippet>682</a>                 in = group:`{group_id_str}` AND \
+<a href=#683 id=683 data-nosnippet>683</a>                 out = role:`{role_id_str}` AND \
+<a href=#684 id=684 data-nosnippet>684</a>                 resource_id = NONE"
+<a href=#685 id=685 data-nosnippet>685</a>            </span>)
+<a href=#686 id=686 data-nosnippet>686</a>        };
 <a href=#687 id=687 data-nosnippet>687</a>
-<a href=#688 id=688 data-nosnippet>688</a>    <span class="kw">async fn </span>get_group_roles(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, group_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Role&gt;&gt; {
-<a href=#689 id=689 data-nosnippet>689</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
-<a href=#690 id=690 data-nosnippet>690</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
-<a href=#691 id=691 data-nosnippet>691</a>
-<a href=#692 id=692 data-nosnippet>692</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#693 id=693 data-nosnippet>693</a>            </span>.db
-<a href=#694 id=694 data-nosnippet>694</a>            .current()
-<a href=#695 id=695 data-nosnippet>695</a>            .query(
-<a href=#696 id=696 data-nosnippet>696</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM role \
-<a href=#697 id=697 data-nosnippet>697</a>                 WHERE tenant_id = $tenant_id \
-<a href=#698 id=698 data-nosnippet>698</a>                 AND id IN (\
-<a href=#699 id=699 data-nosnippet>699</a>                     SELECT VALUE out FROM has_role \
-<a href=#700 id=700 data-nosnippet>700</a>                     WHERE in = type::record('group', $group_id)\
-<a href=#701 id=701 data-nosnippet>701</a>                 )"</span>,
-<a href=#702 id=702 data-nosnippet>702</a>            )
-<a href=#703 id=703 data-nosnippet>703</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#704 id=704 data-nosnippet>704</a>            .bind((<span class="string">"group_id"</span>, group_id_str))
-<a href=#705 id=705 data-nosnippet>705</a>            .<span class="kw">await
-<a href=#706 id=706 data-nosnippet>706</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#707 id=707 data-nosnippet>707</a>
-<a href=#708 id=708 data-nosnippet>708</a>        <span class="kw">let </span>rows: Vec&lt;RoleRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#709 id=709 data-nosnippet>709</a>
-<a href=#710 id=710 data-nosnippet>710</a>        <span class="kw">let </span>roles = rows
-<a href=#711 id=711 data-nosnippet>711</a>            .into_iter()
-<a href=#712 id=712 data-nosnippet>712</a>            .map(|row| row.try_into_role())
-<a href=#713 id=713 data-nosnippet>713</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
-<a href=#714 id=714 data-nosnippet>714</a>
-<a href=#715 id=715 data-nosnippet>715</a>        <span class="prelude-val">Ok</span>(roles)
-<a href=#716 id=716 data-nosnippet>716</a>    }
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="kw">let </span>query = <span class="macro">format!</span>(
+<a href=#689 id=689 data-nosnippet>689</a>            <span class="string">"LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
+<a href=#690 id=690 data-nosnippet>690</a>             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+<a href=#691 id=691 data-nosnippet>691</a>             IF array::len($g) = 0 OR array::len($r) = 0 {{\
+<a href=#692 id=692 data-nosnippet>692</a>                 THROW 'cross-tenant edge denied';\
+<a href=#693 id=693 data-nosnippet>693</a>             }};\
+<a href=#694 id=694 data-nosnippet>694</a>             {delete_clause}"
+<a href=#695 id=695 data-nosnippet>695</a>        </span>);
+<a href=#696 id=696 data-nosnippet>696</a>
+<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#698 id=698 data-nosnippet>698</a>            </span>.db
+<a href=#699 id=699 data-nosnippet>699</a>            .current()
+<a href=#700 id=700 data-nosnippet>700</a>            .query(query)
+<a href=#701 id=701 data-nosnippet>701</a>            .bind((<span class="string">"tid"</span>, tenant_id.to_string()))
+<a href=#702 id=702 data-nosnippet>702</a>            .bind((<span class="string">"resource_id"</span>, resource_id_str))
+<a href=#703 id=703 data-nosnippet>703</a>            .<span class="kw">await
+<a href=#704 id=704 data-nosnippet>704</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#705 id=705 data-nosnippet>705</a>
+<a href=#706 id=706 data-nosnippet>706</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = result.check() {
+<a href=#707 id=707 data-nosnippet>707</a>            <span class="kw">let </span>msg = e.to_string();
+<a href=#708 id=708 data-nosnippet>708</a>            <span class="kw">if </span>msg.contains(<span class="string">"cross-tenant edge denied"</span>) {
+<a href=#709 id=709 data-nosnippet>709</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::AuthorizationDenied {
+<a href=#710 id=710 data-nosnippet>710</a>                    reason: <span class="string">"cross-tenant group role unassignment denied"</span>.into(),
+<a href=#711 id=711 data-nosnippet>711</a>                    action: <span class="prelude-val">None</span>,
+<a href=#712 id=712 data-nosnippet>712</a>                    resource_id: <span class="prelude-val">None</span>,
+<a href=#713 id=713 data-nosnippet>713</a>                });
+<a href=#714 id=714 data-nosnippet>714</a>            }
+<a href=#715 id=715 data-nosnippet>715</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::Migration(msg).into());
+<a href=#716 id=716 data-nosnippet>716</a>        }
 <a href=#717 id=717 data-nosnippet>717</a>
-<a href=#718 id=718 data-nosnippet>718</a>    <span class="kw">async fn </span>get_role_user_ids(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, role_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Uuid&gt;&gt; {
-<a href=#719 id=719 data-nosnippet>719</a>        <span class="comment">// Select user IDs directly assigned this role. Selecting FROM `user`
-<a href=#720 id=720 data-nosnippet>720</a>        // naturally excludes group edges (group links never match a user id).
-<a href=#721 id=721 data-nosnippet>721</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#722 id=722 data-nosnippet>722</a>            </span>.db
-<a href=#723 id=723 data-nosnippet>723</a>            .current()
-<a href=#724 id=724 data-nosnippet>724</a>            .query(
-<a href=#725 id=725 data-nosnippet>725</a>                <span class="string">"SELECT VALUE meta::id(id) FROM user \
-<a href=#726 id=726 data-nosnippet>726</a>                 WHERE tenant_id = $tenant_id \
-<a href=#727 id=727 data-nosnippet>727</a>                 AND id IN (\
-<a href=#728 id=728 data-nosnippet>728</a>                     SELECT VALUE in FROM has_role \
-<a href=#729 id=729 data-nosnippet>729</a>                     WHERE out = type::record('role', $role_id)\
-<a href=#730 id=730 data-nosnippet>730</a>                 )"</span>,
-<a href=#731 id=731 data-nosnippet>731</a>            )
-<a href=#732 id=732 data-nosnippet>732</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#733 id=733 data-nosnippet>733</a>            .bind((<span class="string">"role_id"</span>, role_id.to_string()))
-<a href=#734 id=734 data-nosnippet>734</a>            .<span class="kw">await
-<a href=#735 id=735 data-nosnippet>735</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#736 id=736 data-nosnippet>736</a>
-<a href=#737 id=737 data-nosnippet>737</a>        <span class="kw">let </span>ids: Vec&lt;String&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#738 id=738 data-nosnippet>738</a>        ids.iter()
-<a href=#739 id=739 data-nosnippet>739</a>            .map(|s| parse_uuid(s, <span class="string">"user_id"</span>).map_err(Into::into))
-<a href=#740 id=740 data-nosnippet>740</a>            .collect()
-<a href=#741 id=741 data-nosnippet>741</a>    }
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="prelude-val">Ok</span>(())
+<a href=#719 id=719 data-nosnippet>719</a>    }
+<a href=#720 id=720 data-nosnippet>720</a>
+<a href=#721 id=721 data-nosnippet>721</a>    <span class="kw">async fn </span>get_group_roles(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, group_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Role&gt;&gt; {
+<a href=#722 id=722 data-nosnippet>722</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="kw">let </span>group_id_str = group_id.to_string();
+<a href=#724 id=724 data-nosnippet>724</a>
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#726 id=726 data-nosnippet>726</a>            </span>.db
+<a href=#727 id=727 data-nosnippet>727</a>            .current()
+<a href=#728 id=728 data-nosnippet>728</a>            .query(
+<a href=#729 id=729 data-nosnippet>729</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM role \
+<a href=#730 id=730 data-nosnippet>730</a>                 WHERE tenant_id = $tenant_id \
+<a href=#731 id=731 data-nosnippet>731</a>                 AND id IN (\
+<a href=#732 id=732 data-nosnippet>732</a>                     SELECT VALUE out FROM has_role \
+<a href=#733 id=733 data-nosnippet>733</a>                     WHERE in = type::record('group', $group_id)\
+<a href=#734 id=734 data-nosnippet>734</a>                 )"</span>,
+<a href=#735 id=735 data-nosnippet>735</a>            )
+<a href=#736 id=736 data-nosnippet>736</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#737 id=737 data-nosnippet>737</a>            .bind((<span class="string">"group_id"</span>, group_id_str))
+<a href=#738 id=738 data-nosnippet>738</a>            .<span class="kw">await
+<a href=#739 id=739 data-nosnippet>739</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#740 id=740 data-nosnippet>740</a>
+<a href=#741 id=741 data-nosnippet>741</a>        <span class="kw">let </span>rows: Vec&lt;RoleRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#742 id=742 data-nosnippet>742</a>
-<a href=#743 id=743 data-nosnippet>743</a>    <span class="kw">async fn </span>get_role_group_ids(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, role_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Uuid&gt;&gt; {
-<a href=#744 id=744 data-nosnippet>744</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#745 id=745 data-nosnippet>745</a>            </span>.db
-<a href=#746 id=746 data-nosnippet>746</a>            .current()
-<a href=#747 id=747 data-nosnippet>747</a>            .query(
-<a href=#748 id=748 data-nosnippet>748</a>                <span class="string">"SELECT VALUE meta::id(id) FROM group \
-<a href=#749 id=749 data-nosnippet>749</a>                 WHERE tenant_id = $tenant_id \
-<a href=#750 id=750 data-nosnippet>750</a>                 AND id IN (\
-<a href=#751 id=751 data-nosnippet>751</a>                     SELECT VALUE in FROM has_role \
-<a href=#752 id=752 data-nosnippet>752</a>                     WHERE out = type::record('role', $role_id)\
-<a href=#753 id=753 data-nosnippet>753</a>                 )"</span>,
-<a href=#754 id=754 data-nosnippet>754</a>            )
-<a href=#755 id=755 data-nosnippet>755</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#756 id=756 data-nosnippet>756</a>            .bind((<span class="string">"role_id"</span>, role_id.to_string()))
-<a href=#757 id=757 data-nosnippet>757</a>            .<span class="kw">await
-<a href=#758 id=758 data-nosnippet>758</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#759 id=759 data-nosnippet>759</a>
-<a href=#760 id=760 data-nosnippet>760</a>        <span class="kw">let </span>ids: Vec&lt;String&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#761 id=761 data-nosnippet>761</a>        ids.iter()
-<a href=#762 id=762 data-nosnippet>762</a>            .map(|s| parse_uuid(s, <span class="string">"group_id"</span>).map_err(Into::into))
-<a href=#763 id=763 data-nosnippet>763</a>            .collect()
-<a href=#764 id=764 data-nosnippet>764</a>    }
-<a href=#765 id=765 data-nosnippet>765</a>}
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="kw">let </span>roles = rows
+<a href=#744 id=744 data-nosnippet>744</a>            .into_iter()
+<a href=#745 id=745 data-nosnippet>745</a>            .map(|row| row.try_into_role())
+<a href=#746 id=746 data-nosnippet>746</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#747 id=747 data-nosnippet>747</a>
+<a href=#748 id=748 data-nosnippet>748</a>        <span class="prelude-val">Ok</span>(roles)
+<a href=#749 id=749 data-nosnippet>749</a>    }
+<a href=#750 id=750 data-nosnippet>750</a>
+<a href=#751 id=751 data-nosnippet>751</a>    <span class="kw">async fn </span>get_role_user_ids(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, role_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Uuid&gt;&gt; {
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="comment">// Select user IDs directly assigned this role. Selecting FROM `user`
+<a href=#753 id=753 data-nosnippet>753</a>        // naturally excludes group edges (group links never match a user id).
+<a href=#754 id=754 data-nosnippet>754</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#755 id=755 data-nosnippet>755</a>            </span>.db
+<a href=#756 id=756 data-nosnippet>756</a>            .current()
+<a href=#757 id=757 data-nosnippet>757</a>            .query(
+<a href=#758 id=758 data-nosnippet>758</a>                <span class="string">"SELECT VALUE meta::id(id) FROM user \
+<a href=#759 id=759 data-nosnippet>759</a>                 WHERE tenant_id = $tenant_id \
+<a href=#760 id=760 data-nosnippet>760</a>                 AND id IN (\
+<a href=#761 id=761 data-nosnippet>761</a>                     SELECT VALUE in FROM has_role \
+<a href=#762 id=762 data-nosnippet>762</a>                     WHERE out = type::record('role', $role_id)\
+<a href=#763 id=763 data-nosnippet>763</a>                 )"</span>,
+<a href=#764 id=764 data-nosnippet>764</a>            )
+<a href=#765 id=765 data-nosnippet>765</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#766 id=766 data-nosnippet>766</a>            .bind((<span class="string">"role_id"</span>, role_id.to_string()))
+<a href=#767 id=767 data-nosnippet>767</a>            .<span class="kw">await
+<a href=#768 id=768 data-nosnippet>768</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#769 id=769 data-nosnippet>769</a>
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="kw">let </span>ids: Vec&lt;String&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#771 id=771 data-nosnippet>771</a>        ids.iter()
+<a href=#772 id=772 data-nosnippet>772</a>            .map(|s| parse_uuid(s, <span class="string">"user_id"</span>).map_err(Into::into))
+<a href=#773 id=773 data-nosnippet>773</a>            .collect()
+<a href=#774 id=774 data-nosnippet>774</a>    }
+<a href=#775 id=775 data-nosnippet>775</a>
+<a href=#776 id=776 data-nosnippet>776</a>    <span class="kw">async fn </span>get_role_group_ids(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, role_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Uuid&gt;&gt; {
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#778 id=778 data-nosnippet>778</a>            </span>.db
+<a href=#779 id=779 data-nosnippet>779</a>            .current()
+<a href=#780 id=780 data-nosnippet>780</a>            .query(
+<a href=#781 id=781 data-nosnippet>781</a>                <span class="string">"SELECT VALUE meta::id(id) FROM group \
+<a href=#782 id=782 data-nosnippet>782</a>                 WHERE tenant_id = $tenant_id \
+<a href=#783 id=783 data-nosnippet>783</a>                 AND id IN (\
+<a href=#784 id=784 data-nosnippet>784</a>                     SELECT VALUE in FROM has_role \
+<a href=#785 id=785 data-nosnippet>785</a>                     WHERE out = type::record('role', $role_id)\
+<a href=#786 id=786 data-nosnippet>786</a>                 )"</span>,
+<a href=#787 id=787 data-nosnippet>787</a>            )
+<a href=#788 id=788 data-nosnippet>788</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#789 id=789 data-nosnippet>789</a>            .bind((<span class="string">"role_id"</span>, role_id.to_string()))
+<a href=#790 id=790 data-nosnippet>790</a>            .<span class="kw">await
+<a href=#791 id=791 data-nosnippet>791</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#792 id=792 data-nosnippet>792</a>
+<a href=#793 id=793 data-nosnippet>793</a>        <span class="kw">let </span>ids: Vec&lt;String&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#794 id=794 data-nosnippet>794</a>        ids.iter()
+<a href=#795 id=795 data-nosnippet>795</a>            .map(|s| parse_uuid(s, <span class="string">"group_id"</span>).map_err(Into::into))
+<a href=#796 id=796 data-nosnippet>796</a>            .collect()
+<a href=#797 id=797 data-nosnippet>797</a>    }
+<a href=#798 id=798 data-nosnippet>798</a>}
 </code></pre></div></section></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_IP_LEN","MAX_UA_LEN"],"fn":["client_ip","user_agent"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_IP_LEN","MAX_UA_LEN"],"fn":["client_ip","peer_ip","user_agent"]};

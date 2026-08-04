@@ -4,7 +4,7 @@ use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::service_account::{
-    CreateServiceAccount, ServiceAccount, UpdateServiceAccount,
+    CreateServiceAccount, SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount, UpdateServiceAccount,
 };
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountRepository};
@@ -22,7 +22,7 @@ use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 fn generate_client_id() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
-    format!("sa_{}", hex::encode(bytes))
+    format!("{SERVICE_ACCOUNT_CLIENT_ID_PREFIX}{}", hex::encode(bytes))
 }
 
 /// Generate a random client secret (64 hex chars = 32 bytes of entropy).

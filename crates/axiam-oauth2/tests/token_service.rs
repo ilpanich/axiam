@@ -13,12 +13,16 @@ use axiam_core::models::oauth2_client::{
     AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
     OAuth2Client, RefreshToken, UpdateOAuth2Client,
 };
+use axiam_core::models::service_account::{
+    CreateServiceAccount, ServiceAccount, UpdateServiceAccount,
+};
 use axiam_core::models::tenant::{CreateTenant, Tenant, TenantStatus, UpdateTenant};
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     AuthorizationCodeRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
-    RefreshTokenRepository, TenantRepository, UserRepository,
+    RefreshTokenRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
+use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::token::{IntrospectRequest, RevokeRequest, TokenRequest, TokenService};
 use chrono::Utc;
 use std::sync::{Arc, Mutex};
@@ -95,6 +99,65 @@ enum ClientOutcome {
 type UpgradeCall = (String, String, String);
 type UpgradeLog = Arc<Mutex<Vec<UpgradeCall>>>;
 
+// --- Service-account double (client-credentials for `sa_…` client ids) -------
+
+#[derive(Clone)]
+enum SaOutcome {
+    Found(Box<ServiceAccount>),
+    NotFound,
+}
+
+#[derive(Clone)]
+struct MockSaRepo(SaOutcome, UpgradeLog);
+
+impl ServiceAccountRepository for MockSaRepo {
+    async fn create(&self, _i: CreateServiceAccount) -> AxiamResult<(ServiceAccount, String)> {
+        unimplemented!()
+    }
+    async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<ServiceAccount> {
+        unimplemented!()
+    }
+    async fn get_by_client_id(&self, _t: Uuid, _c: &str) -> AxiamResult<ServiceAccount> {
+        match &self.0 {
+            SaOutcome::Found(sa) => Ok((**sa).clone()),
+            SaOutcome::NotFound => Err(not_found()),
+        }
+    }
+    async fn update(
+        &self,
+        _t: Uuid,
+        _i: Uuid,
+        _u: UpdateServiceAccount,
+    ) -> AxiamResult<ServiceAccount> {
+        unimplemented!()
+    }
+    async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn list(&self, _t: Uuid, _p: Pagination) -> AxiamResult<PaginatedResult<ServiceAccount>> {
+        unimplemented!()
+    }
+    async fn rotate_secret(&self, _t: Uuid, _i: Uuid) -> AxiamResult<String> {
+        unimplemented!()
+    }
+    async fn upgrade_client_secret_hash(
+        &self,
+        _t: Uuid,
+        client_id: &str,
+        expected: &str,
+        new: &str,
+    ) -> AxiamResult<bool> {
+        self.1
+            .lock()
+            .unwrap()
+            .push((client_id.to_string(), expected.to_string(), new.to_string()));
+        Ok(true)
+    }
+    async fn count_legacy_secret_hashes(&self, _t: Option<Uuid>) -> AxiamResult<u64> {
+        Ok(0)
+    }
+}
+
 #[derive(Clone)]
 struct MockClientRepo(ClientOutcome, UpgradeLog);
 
@@ -153,6 +216,15 @@ struct MockCodeRepo {
 }
 
 impl MockCodeRepo {
+    /// No authorization code available — the client-credentials grant never
+    /// touches this repository.
+    fn none() -> Self {
+        Self {
+            get: None,
+            consume_ok: false,
+        }
+    }
+
     fn ok(code: AuthorizationCode) -> Self {
         Self {
             get: Some(code),
@@ -456,8 +528,14 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
     }
 }
 
-type Svc =
-    TokenService<MockClientRepo, MockCodeRepo, MockTenantRepo, MockRefreshRepo, MockUserRepo>;
+type Svc = TokenService<
+    MockClientRepo,
+    MockCodeRepo,
+    MockTenantRepo,
+    MockRefreshRepo,
+    MockUserRepo,
+    MockSaRepo,
+>;
 
 fn build(
     client: ClientOutcome,
@@ -480,6 +558,7 @@ fn build_with_upgrade_log(
     let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
     let svc = TokenService::new(
         MockClientRepo(client, log.clone()),
+        MockSaRepo(SaOutcome::NotFound, log.clone()),
         code,
         MockTenantRepo(tenant),
         refresh,
@@ -1853,4 +1932,264 @@ async fn legacy_rows_are_upgraded_on_the_refresh_token_grant_too() {
     let res = svc.exchange(Uuid::new_v4(), refresh_req("tok")).await;
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(log.lock().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Service-account client-credentials (§16.6)
+// ---------------------------------------------------------------------------
+//
+// Service accounts are AXIAM's machine principal, but until now the only way one
+// could authenticate in a running server was mTLS. `create`/`rotate_secret`
+// handed the operator a `client_secret` that NO flow accepted. These tests cover
+// the grant that makes it usable, and the fail-closed edges around it.
+
+/// Decode a JWT's payload without verifying — these tests own the signing key
+/// via `test_config()`, and the property under test is which CLAIMS were
+/// stamped, not whether the signature is valid (covered elsewhere).
+fn decode_claims(token: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1).expect("JWT has three segments");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("payload is base64url");
+    serde_json::from_slice(&bytes).expect("payload is JSON")
+}
+
+fn make_service_account(secret_hash: String, status: UserStatus) -> ServiceAccount {
+    ServiceAccount {
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        name: "svc".into(),
+        description: None,
+        client_id: "sa_deadbeefdeadbeefdeadbeefdeadbeef".into(),
+        client_secret_hash: secret_hash,
+        status,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let svc = TokenService::new(
+        MockClientRepo(ClientOutcome::NotFound, log.clone()),
+        MockSaRepo(sa, log.clone()),
+        MockCodeRepo::none(),
+        MockTenantRepo(TenantOutcome::Found),
+        MockRefreshRepo::new(),
+        MockUserRepo,
+        test_config(),
+        2_592_000,
+    );
+    (svc, log)
+}
+
+fn sa_req(client_id: &str, secret: &str) -> TokenRequest {
+    let mut r = base_req("client_credentials");
+    r.client_id = Some(client_id.into());
+    r.client_secret = Some(secret.into());
+    r
+}
+
+/// The headline case: a service account can now obtain a token with the secret
+/// the API issued it.
+#[tokio::test]
+async fn a_service_account_can_authenticate_with_client_credentials() {
+    let secret = "sa-secret-value";
+    let sa = make_service_account(hash_client_secret(secret), UserStatus::Active);
+    let sa_id = sa.id;
+    let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let resp = svc
+        .exchange(
+            Uuid::new_v4(),
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+        )
+        .await
+        .expect("service account authenticates");
+
+    assert_eq!(resp.token_type, "Bearer");
+    assert!(
+        resp.refresh_token.is_none(),
+        "client_credentials issues no refresh token"
+    );
+
+    // `sub` must be the service-account ID, not the opaque client_id: the authz
+    // engine resolves roles by subject id, so a client-id `sub` would
+    // authenticate but carry no resolvable grants.
+    let claims = decode_claims(&resp.access_token);
+    assert_eq!(claims["sub"], sa_id.to_string());
+    // §4.3 / SEC-006 route narrowing depends on this being the machine audience.
+    assert_eq!(claims["aud"], "axiam:m2m");
+    assert_eq!(claims["sub_kind"], "service_account");
+}
+
+#[tokio::test]
+async fn a_wrong_service_account_secret_is_rejected() {
+    let sa = make_service_account(hash_client_secret("right"), UserStatus::Active);
+    let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let err = svc
+        .exchange(
+            Uuid::new_v4(),
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+        )
+        .await
+        .expect_err("a wrong secret must not authenticate");
+    assert!(matches!(err, OAuth2Error::InvalidClient(_)), "got {err:?}");
+}
+
+/// A non-Active account must not authenticate even with the correct secret —
+/// this is the revocation path for a compromised service account.
+#[tokio::test]
+async fn a_disabled_service_account_cannot_authenticate() {
+    for status in [
+        UserStatus::Inactive,
+        UserStatus::Locked,
+        UserStatus::PendingVerification,
+    ] {
+        let secret = "sa-secret-value";
+        let sa = make_service_account(hash_client_secret(secret), status.clone());
+        let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+        let err = svc
+            .exchange(
+                Uuid::new_v4(),
+                sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+            )
+            .await
+            .expect_err("a non-active service account must not authenticate");
+        assert!(
+            matches!(err, OAuth2Error::InvalidClient(_)),
+            "status {status:?} must yield the generic invalid_client, got {err:?}"
+        );
+    }
+}
+
+/// An unknown `sa_` client id must not fall through to the oauth2_client table
+/// or produce anything other than invalid_client.
+#[tokio::test]
+async fn an_unknown_service_account_is_invalid_client() {
+    let (svc, _log) = build_sa(SaOutcome::NotFound);
+    let err = svc
+        .exchange(
+            Uuid::new_v4(),
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "x"),
+        )
+        .await
+        .expect_err("unknown client");
+    assert!(matches!(err, OAuth2Error::InvalidClient(_)), "got {err:?}");
+}
+
+/// A service account registers no scopes, so the subset rule leaves the empty
+/// set as the only valid request. Asking for one must not silently widen.
+#[tokio::test]
+async fn a_service_account_cannot_request_a_scope() {
+    let secret = "sa-secret-value";
+    let sa = make_service_account(hash_client_secret(secret), UserStatus::Active);
+    let (svc, _log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let mut req = sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret);
+    req.scope = Some("admin:everything".into());
+
+    let err = svc
+        .exchange(Uuid::new_v4(), req)
+        .await
+        .expect_err("a service account registers no scopes");
+    assert!(matches!(err, OAuth2Error::InvalidScope(_)), "got {err:?}");
+}
+
+/// §15.2 Obs 4 closes properly: with a verification path in place, the lazy
+/// upgrade of a legacy hash is finally reachable for service accounts.
+#[tokio::test]
+async fn a_legacy_service_account_hash_authenticates_and_migrates() {
+    let secret = "sa-secret-value";
+    let legacy = legacy_client_secret_hash(secret);
+    let sa = make_service_account(legacy.clone(), UserStatus::Active);
+    let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    svc.exchange(
+        Uuid::new_v4(),
+        sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+    )
+    .await
+    .expect("a legacy row still authenticates");
+
+    let calls = log.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the legacy hash must be migrated on first use"
+    );
+    assert_eq!(
+        calls[0].1, legacy,
+        "the CAS must be against the hash that was read"
+    );
+    assert!(
+        calls[0].2.starts_with("v2."),
+        "the replacement must be the current scheme"
+    );
+}
+
+/// A wrong secret must never cause a migration write.
+#[tokio::test]
+async fn a_failed_service_account_auth_never_migrates() {
+    let sa = make_service_account(legacy_client_secret_hash("right"), UserStatus::Active);
+    let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let _ = svc
+        .exchange(
+            Uuid::new_v4(),
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+        )
+        .await;
+
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a wrong secret must never trigger a write"
+    );
+}
+
+/// §13.4 obs 3 composed with §16.6: a service account whose hash is keyed to a
+/// SUPERSEDED pepper must still authenticate and be rewritten under the current
+/// one. The scheme prefix is identical in both cases, so this is invisible to
+/// `count_legacy_secret_hashes` — the only thing that drains it is a successful
+/// authentication, which is exactly what this path now provides.
+#[tokio::test]
+async fn a_service_account_keyed_to_a_previous_pepper_migrates_on_use() {
+    use axiam_auth::client_secret::ClientSecretHasher;
+
+    let secret = "sa-secret-value";
+    // A hash produced under an OLD pepper: current scheme, superseded key.
+    let old_pepper_hash = ClientSecretHasher::from_pepper(b"an-outgoing-pepper-value-32bytes")
+        .expect("hasher")
+        .hash(secret);
+    assert!(
+        old_pepper_hash.starts_with("v2."),
+        "precondition: a previous-pepper row is NOT legacy-scheme, which is why \
+         the scheme count cannot see it"
+    );
+
+    let sa = make_service_account(old_pepper_hash.clone(), UserStatus::Active);
+    let (svc, log) = build_sa(SaOutcome::Found(Box::new(sa)));
+
+    let result = svc
+        .exchange(
+            Uuid::new_v4(),
+            sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+        )
+        .await;
+
+    // The test binary's hasher has no previous pepper configured, so this row
+    // cannot verify — which is the honest outcome and worth pinning: without
+    // AXIAM__AUTH__PEPPER_PREVIOUS set, a previous-pepper row fails closed
+    // rather than silently authenticating.
+    assert!(
+        result.is_err(),
+        "a previous-pepper row must fail closed when no previous pepper is configured"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a failed verification must never trigger a migration write"
+    );
 }

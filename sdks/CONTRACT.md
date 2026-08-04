@@ -1070,6 +1070,31 @@ specialized to comparing the cookie access token's freshness — a comparison wi
 credential exactly as it does for a `login()` result. It requests no `openid` scope and the
 response carries no `id_token`.
 
+**Two kinds of principal use `login_client_credentials`, and the token differs.**
+The `client_id` identifies either an **OAuth2 client** (`oa_…`) or a **service
+account** (`sa_…`); the request is byte-identical, so **no SDK code change is
+required to support either**. What differs is the token that comes back, which
+matters to any SDK that verifies tokens locally (§10.1) or renders an identity:
+
+| | OAuth2 client (`oa_…`) | Service account (`sa_…`) |
+|---|---|---|
+| `sub` | the `client_id` | the service-account **UUID** |
+| `sub_kind` | `oauth2_client` | `service_account` |
+| `aud` | `axiam:m2m` | `axiam:m2m` |
+| `scope` | requested subset of the client's registered scopes | **none** — a service account registers no scopes, so requesting one is `invalid_scope`; its authorization comes from the roles assigned to it |
+
+Consequences an SDK MUST respect:
+
+1. **`sub` is not portable across the two.** An SDK MUST NOT assume `sub` is a
+   `client_id`, nor parse it as a UUID, without first checking `sub_kind`.
+2. **A §10 guard fronting a resource server that accepts machine callers MUST be
+   configured to expect `axiam:m2m`** (§10.1 rule 6). The default guidance —
+   expect `axiam:user` — is for user-facing resource servers and correctly
+   rejects *both* kinds of client-credentials token. That rejection is not a bug
+   to work around; it is rule 6 doing its job, and the fix is configuration.
+3. A service-account token carries **no `scope` claim**, so an SDK MUST NOT
+   derive authorization from scope for these callers.
+
 ### §12.2 Per-language naming map
 
 Casing follows the §1 rules unchanged. Twelve languages are covered: the seven columns below

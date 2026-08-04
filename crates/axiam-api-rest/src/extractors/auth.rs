@@ -123,7 +123,20 @@ impl actix_web::FromRequest for AuthenticatedUser {
 /// Accepts only tokens with `aud = axiam:m2m`; user tokens are rejected.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedServiceAccount {
-    /// OAuth2 `client_id` (the token `sub` for M2M tokens).
+    /// The token's `sub` claim.
+    ///
+    /// **Its meaning depends on which principal obtained the token**, so do not
+    /// treat it as an OAuth2 `client_id` without checking `claims.sub_kind`:
+    ///
+    /// * `sub_kind = oauth2_client` → the OAuth2 `client_id` (`oa_…`), because
+    ///   `issue_client_credentials_token` stamps the client id as `sub`.
+    /// * `sub_kind = service_account` → the service-account **UUID**, because a
+    ///   service account's grants are resolved by subject id (§16.6). It is
+    ///   *not* the `sa_…` client id.
+    ///
+    /// The field name predates service accounts being able to use this grant.
+    /// No route consumes this extractor today; the distinction is recorded here
+    /// so the first one that does gets it right.
     pub client_id: String,
     pub tenant_id: Uuid,
     pub claims: ValidatedClaims,

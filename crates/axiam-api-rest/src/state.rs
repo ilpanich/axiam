@@ -168,6 +168,7 @@ pub type TokenServiceT<C> = TokenService<
     SurrealTenantRepository<C>,
     SurrealRefreshTokenRepository<C>,
     SurrealUserRepository<C>,
+    SurrealServiceAccountRepository<C>,
 >;
 
 pub type PasswordResetServiceT<C> = PasswordResetService<
@@ -423,11 +424,13 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
         );
         let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_cert_repo.clone());
+        let service_account_repo = SurrealServiceAccountRepository::new(db.clone());
         let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), None);
         let authorize_service =
             AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600);
         let token_service = TokenService::new(
             oauth2_client_repo.clone(),
+            service_account_repo.clone(),
             auth_code_repo.clone(),
             tenant_repo.clone(),
             refresh_token_repo.clone(),
@@ -465,7 +468,7 @@ impl<C: Connection + Clone> AppState<C> {
             permission_repo: SurrealPermissionRepository::new(db.clone()),
             resource_repo: SurrealResourceRepository::new(db.clone()),
             scope_repo: SurrealScopeRepository::new(db.clone()),
-            service_account_repo: SurrealServiceAccountRepository::new(db.clone()),
+            service_account_repo: service_account_repo.clone(),
             auth_service,
             webauthn_service,
             mfa_method_service,

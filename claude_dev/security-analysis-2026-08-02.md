@@ -1558,9 +1558,8 @@ such a modelling change would have to start.
   a mesh transport and it is, but the split being REST-only is now stated in the
   CHANGELOG so it is at least not a surprise.
 - **Residuals 4 and 5** (§18.6) — design changes, not patches.
-- **The rule-8 guardrail tests in nine SDKs** — carried a fourth time. Still a
-  two-tests-across-eight-languages lift that wants its own PR series; §15.1's
-  hand-verification that all eleven guards reject correctly still stands.
+- **The rule-8 guardrail tests** — no longer carried. Landed across the
+  remaining SDKs; see §21.
 
 ### 20.6 What a verifier should look at hardest
 
@@ -1616,3 +1615,88 @@ were updated, since the former's comment requires them to stay in sync.
 `rust_decimal` 1.42.1 is current and still pins rkyv 0.7.x, so there is no
 upgrade path either — but that is incidental: the fix here is not "we accept
 the risk", it is "there is no risk to accept in this build".
+
+## 21. Rule-8 guardrail tests — closed (2026-08-04)
+
+The §15.3.1 item carried through §16.3a, §18.6, §19.6 and §20.5 is done. Rule 8
+now has regression coverage in **all eleven SDKs**.
+
+### 21.1 A correction to the count
+
+Every prior section said *nine* SDKs outstanding. It was **eight**. PHP already
+had `Sec085GuardCredentialSubstitutionTest` — it is where the pattern was first
+written, as §15.3.1 itself said — and TypeScript and Python landed in the §16
+round. The "nine" figure came from subtracting only those two from eleven and
+was repeated forward without being re-derived. Merged: Go, Rust, Kotlin, Java,
+C, C++, C#, Swift.
+
+### 21.2 It was not only a guardrail — Java had a live gap
+
+`AxiamAuthenticationFilter` rejected correctly (401, chain not invoked) but
+**never cleared the ambient `SecurityContext`**. A caller presenting a failed
+token therefore left behind whatever identity was already on the thread: placed
+there by an earlier filter, or left over on a pooled container thread. A later
+read of `SecurityContextHolder` then sees an identity the caller never
+authenticated as — the servlet analogue of the SEC-085 substitution.
+
+Worth recording *why* §15.1's hand-verification missed it. That pass asked
+whether each guard **rejects**, and every guard does. This is a different
+question: what the guard **leaves behind** after rejecting. The filter's own
+comment already carried the intent — *"never let an unexpected exception fall
+through to an authenticated SecurityContext"* — but the code only ever avoided
+**setting** an identity, never cleared a **pre-existing** one. Hand-verification
+against a property nobody had stated could not have caught it; writing the test
+did, and the test fails against the filter as it stood.
+
+`writeJsonError` now clears the context, and only on rejection paths — a request
+presenting no credential returns earlier, so session-authenticated traffic
+carrying no AXIAM token is untouched.
+
+### 21.3 Where the tests had the most to say
+
+Three SDKs carry the *structural* shape SEC-085 exploited — the guard is handed
+a stateful client rather than a bare verifier:
+
+| SDK | What the guard holds |
+|---|---|
+| Kotlin | `config.client: AxiamClient`, calls `client.verifySession(token)` |
+| C | `axiam_client_t *`, which carries `authenticated`, the CSRF token, the resolved tenant/org |
+| C# | an `AxiamClient` resolved from DI, reached through to `client.JwksVerifier` |
+
+All three are correct today, and none had anything pinning that. The rest (Go,
+Rust, Java, C++, Swift) receive a verifier and a tenant, so their tests assert
+the *absence* of a second credential in the guard's inputs — Go and Java by
+reflecting over the dependency surface, C++ by `static_assert`, Rust by
+registering a client in `app_data` (a type-keyed bag, so an app really will put
+one there) and proving the extractor ignores it.
+
+### 21.4 What makes these non-vacuous
+
+Every test **asserts its precondition** before testing anything: a second, fully
+valid credential for a *more privileged* principal is shown to pass the same
+guard, so a fallback would genuinely have succeeded. This is the trap the PHP
+reference test documents at length — without it, a test passes against the
+vulnerable shape because there was nothing available to substitute, which proves
+nothing.
+
+All six locally-runnable suites were **falsified** by injecting the SEC-085
+fallback into the guard and confirming failure: Go (1 of 3 fails), Kotlin (3 of
+3), Rust (1 of 3), C (1 of 4), C++ (1 of 3, on both assertions). Java was
+falsified by construction — its test failed against the unfixed filter, which is
+how §21.2 surfaced.
+
+### 21.5 Verification honesty
+
+`dotnet` and `swift` were unavailable in the working environment, so those two
+were written against verified fixture signatures and existing harnesses, with
+CI as first execution. **C# failed** on exactly that risk —
+`FakeAxiamServerHandler` is a `private` nested type in another test class, so
+unreachable — and was fixed with a local JWKS-only handler that 404s anything
+else, so an unexpected round-trip fails loudly. **Swift passed first try** on
+5.9 and 5.10. The other six were run and falsified locally before pushing.
+
+### 21.6 Still carried
+
+Unchanged from §20.5: the SEC-086 timing channel (accepted, §18.1), the gRPC
+m2m/user parity gap (§19.5), and residuals 4 and 5 (§18.6) — all design changes
+or accepted trade-offs rather than open defects.

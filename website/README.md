@@ -11,9 +11,10 @@ which is the authenticated admin SPA.
 
 - **Home** — hero, feature grid, architecture, the vibe-coding story, SDK
   overview and compliance.
-- **SDKs** — the seven official client SDKs, each with a detail page linking to
-  its package-registry entry and package documentation (docs.rs, tsdocs.dev,
-  Read the Docs, javadoc.io, fuget.org, pkg.go.dev).
+- **SDKs** — the eleven official client SDKs, each with a detail page linking to
+  its package-registry entry, package documentation (docs.rs, tsdocs.dev,
+  Read the Docs, javadoc.io, fuget.org, pkg.go.dev, DocC, Doxygen), repository,
+  examples and Coveralls coverage report.
 - **Docs** — a small documentation site: quickstart plus platform and operate
   guides, with a functional sidebar and per-page table of contents.
 - **Security** — the public threat-modeling and security write-up, including an

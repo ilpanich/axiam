@@ -10,7 +10,8 @@
 - **Second re-verification (2026-08-03, `1b416c72`)**: the §10.7 remediation recorded its own statuses as *claims pending verification*; all six are now **CONFIRMED FIXED** from source, with a clean regression scan of the remediation diff. See **[§11](#11-second-independent-re-verification-pass-2026-08-03)** — including a process finding (§11.2) on citing authoring commits rather than merges.
 - **CONTRACT §10.1 sweep (§12)**: §11's carried recommendation was actioned — a normative minimum local-verification set, audited across all eleven SDKs. It surfaced **five findings three prior passes had missed** (SEC-081 … SEC-084, OBS-4), including two HIGH cross-tenant bypasses.
 - **Final verification (2026-08-03, `8c2a5f87`)**: every §12 claim **CONFIRMED**, all eleven SDK repos merged, and the new cross-replica cache-invalidation surface reviewed and found authenticated and fail-safe. One new **HIGH** was raised — **SEC-085**, the PHP framework guards authenticating a failed request as the application's own service account. See **[§13](#13-final-verification-pass-2026-08-03)**, which also records two corrections to my own earlier conclusions.
-- **Verification of §14 (2026-08-03, `f0a750ff`)**: **SEC-085 is closed**, CONTRACT §10.1 gained a **rule 8** (the guard must decide on the caller's credential and no other), and rule-8 conformance is confirmed across all eleven SDKs. **This document now has no open finding.** Two §14 claims are PARTIAL — the service-account upgrade seam has no production caller, and the invalidation heartbeat leaves the decision-cache TTL unclamped — plus seven open observations. See **[§15](#15-independent-verification-of-14-2026-08-03)**.
+- **Verification of §14 (2026-08-03, `f0a750ff`)**: **SEC-085 is closed**, CONTRACT §10.1 gained a **rule 8** (the guard must decide on the caller's credential and no other), and rule-8 conformance is confirmed across all eleven SDKs. Two §14 claims were PARTIAL — the service-account upgrade seam had no production caller, and the invalidation heartbeat left the decision-cache TTL unclamped — plus seven observations. See **[§15](#15-independent-verification-of-14-2026-08-03)**.
+- **Verification of §16 + first review of a new feature (2026-08-03, `5509c2c1`)**: both §15 partials are now closed (TTL clamped to 300 s; the upgrade caller arrived with the new grant). The **service-account `client_credentials` grant** is new authentication surface and was reviewed as such: audience separation (`axiam:m2m` vs `axiam:user`) is correct and enforced bidirectionally, tenant and org are server-derived, status is checked and scope escalation is impossible. It carries one new **LOW** — **SEC-086**, a client-existence oracle in the token endpoint's `error_description` — and the standing recommendation to move the mTLS service-account token to `axiam:m2m`. See **[§17](#17-verification-of-16-and-review-of-the-new-service-account-grant-2026-08-03)**.
 
 ---
 
@@ -1114,3 +1115,62 @@ a wholesale overwrite** — the copies carry legitimate pre-existing drift, and 
 copy would have silently reverted it. Verified: every vendored `CONTRACT.md`
 shows insertions and **zero deletions**.
 
+
+---
+
+## 17. Verification of §16, and review of the new service-account grant (2026-08-03)
+
+- **Commits**: server `1475d541` (§15 closures) and `5509c2c1` (**new feature**: service-account `client_credentials` grant), HEAD `5509c2c1`. SDKs at `origin/main` — all eleven carry only the CONTRACT §10.1 doc sync, no code change.
+- **Scope**: (1) verification of the §16 claims, including the three §16.5 named itself; (2) a **first security review of new authentication surface** — a grant that mints tokens for service accounts, which is the first thing in this review series that is a feature rather than a fix.
+- **Result**: §16's claims hold — the TTL is clamped, the heartbeat nonce lifecycle is sound, the service-account upgrade caller now exists. The new grant is **well built**: correct audience separation, server-derived tenant and org, status checks, no scope escalation. It carries **one new LOW finding** and several residuals worth recording. New findings continue at **SEC-086**.
+
+### 17.1 Verification of the §16 claims
+
+| Item | Verdict |
+|---|---|
+| **TTL clamp** (§15.2 gap 1) | ✅ **CONFIRMED**. `MAX_DECISION_CACHE_TTL_SECS = 300` applied in the accessor (`config.rs:26,285-297`) with a `warn!` on breach. The clamp is on the accessor rather than the field, so I grepped the workspace for raw reads: the sole non-test one is a `tracing::info!` field at `main.rs:848`, which logs the *unclamped* operator value while the cache uses the clamped one — cosmetic, not a bypass. The `0 = disable the watchdog` escape hatch is genuinely gone: the heartbeat interval now clamps to `1..=60` and the warn-only `else` branch was removed. |
+| **Heartbeat nonce lifecycle** (§16.5 item 1) | ✅ **CONFIRMED**. Register-before-publish is unconditional, so the dangerous inverse — publishing without registering, making a replica's own echo look like a replay — cannot occur. Three register-then-fail paths do exist, but the `MAX_OUTSTANDING_HEARTBEATS = 8` FIFO ring bounds them, and **neither wedge direction materialises**: registration alone never touches the clock (so a failing publisher stales out and revokes trust — fail-closed), and evicting a live nonce requires 8 newer registrations, i.e. well past the 3-interval miss threshold. `mark_unsubscribed` clears the ring so a reconnecting consumer cannot inherit its predecessor's nonce. |
+| **Publisher lock change** (§16.5 item 2) | 🔶 **PARTIAL**. Fail-closed is genuinely unchanged — an unconfirmed broadcast still returns `Err` and still fails the mutation — and the lock is correctly released before the confirm await. But the compare-before-clear tests `Channel::id()`, which in lapin is the AMQP channel **number** (`u16`) and is *recycled* after close, not a handle identity. Both misfire directions are benign here (the publisher holds at most one channel, and either outcome self-corrects on the next publish via the `!connected()` check), so this is correct as shipped — but it rests on an invariant the library does not guarantee. `Arc::ptr_eq` or a generation counter would make it exact. |
+| **Service-account upgrade caller** (§15.2 Obs 4) | ✅ **CONFIRMED — but delivered by `5509c2c1`, not `1475d541`.** The latter added only a `count_legacy_secret_hashes` diagnostic. The real production caller is the new grant (`oauth2/token.rs:337-381`): tenant-scoped CAS, fires only on `MatchNeedsUpgrade`, a lost race logs at `debug` without failing auth. The §15 partial is properly closed. |
+| **Heartbeat replay** (§15.2 gap 3) | 🔶 **CLOSED for capture-and-replay; mitigated against a live relay.** `record_own_heartbeat` consumes the nonce from the outstanding ring and refuses one never issued or already consumed, so a captured heartbeat can no longer hold the watchdog open for the freshness window. An adversary with continuous broker read+publish who *relays each fresh heartbeat live* into an unbound replica's queue still succeeds. The bar moved from "replay a stale capture" to "maintain a live relay" — a real improvement, correctly not claimed as elimination. |
+| **Regression scan** (both commits) | ✅ **Clean.** No tenant predicate dropped (the new queries *add* them), every limit movement is tighter, no new fail-open path, no secret in any log line, no new unauthenticated surface. |
+
+### 17.2 The new service-account `client_credentials` grant
+
+This is new authentication surface and was reviewed as such rather than as a diff.
+
+**Sound, verified end to end:**
+
+- **Audience separation is correct and enforced bidirectionally** (verified by hand). The new token carries `aud = axiam:m2m`, `sub_kind = ServiceAccount`, `sub` = the service-account UUID, and no scope (`auth/token.rs:264-282`). The user extractor 401s `Some(AUD_M2M)` explicitly (`extractors/auth.rs:292-297`) — including on the cached-claims fast path, so the audit middleware's cached identity cannot smuggle one past — and the m2m extractor rejects a user token and also rejects an absent `aud` with no back-compat leniency. This is the SEC-006 / §4.3 class and it holds.
+- **Credential verification** uses the same global keyed hasher and constant-time comparison as the OAuth2-client path; no bare SHA-256, and a wrong secret never triggers a write (pinned by a dedicated test).
+- **Tenant and org are server-derived.** The lookup is tenant-scoped in SQL, and `org_id` comes from the tenant record, not client input — the NEW-1 class stays closed.
+- **Status is checked** (anything but `Active` is rejected) and **scope escalation is impossible** — any non-blank requested scope is rejected outright, which is the correct degenerate case since a service account registers no scopes.
+
+#### SEC-086 [LOW] ❌ — client-existence oracle in the token endpoint's `error_description`
+
+- **File**: `crates/axiam-oauth2/src/token.rs:256` (`"client not found"`) versus `:377` and `:276` (`"invalid client credentials"`); echoed to the caller via `error.rs:52-59` → `handlers/oauth2.rs:508-511`.
+- **Verified by hand.** Both failure modes return the same OAuth2 error *code* (`invalid_client`), but different *descriptions*, and the description is serialized verbatim into the 401 body. An unauthenticated caller can therefore distinguish "this `sa_…` client id exists" from "it does not". There is a matching timing asymmetry — the unknown-client branch returns before any HMAC is computed.
+- **The intent was already right**, which is what makes this worth fixing: the comment immediately above the unknown-client arm says *"masquerade as bad credentials (error-oracle, QUAL-03/D-11)"*. The masquerade was applied to the error code and not to the message.
+- **Impact is bounded** — client ids are 128 bits of CSPRNG hex, so enumeration is infeasible, and the same string pair pre-exists on the OAuth2-client branch. That is why this is LOW rather than MEDIUM.
+- **Fix**: return `"invalid client credentials"` from both arms (one change covers all three sites); keep the `NotFound`-versus-other-error distinction internal, which is what the requirement actually asks for.
+
+#### Residuals from the new grant
+
+1. **The mTLS device path still mints `aud = axiam:user` for a service account** (`auth/token.rs:218`). So the same principal gets a *user*-audience token by certificate and a *machine*-audience token by secret, and a cert-authenticated service account passes every user-route guard. This is a documented back-compat decision that predates the grant, but the new grant makes the split explicit and half-applied: until the device path moves to `axiam:m2m` (or gets its own audience), the SEC-006 narrowing goal is only partly achieved. **This is the most valuable follow-up in this section.**
+2. **The gRPC interceptor performs no audience check at all**, so the m2m/user split is not enforced on that transport. Not an escalation — `subject_id` is forced from the verified claims and cross-validated — but the invariant is REST-only.
+3. **A failed secret accrues nothing.** The endpoint is rate-limited, but there is no lockout, failure counter, audit event or metric on `invalid_client` (contrast the login path's `record_failed_login` with exponential backoff), and `/oauth2` is not covered by the audit middleware. Practically defused by 256-bit secrets, so this is a **detection** gap rather than an exploitable one; an audit event on token-endpoint `invalid_client` would close it cheaply.
+4. **Disabling a service account does not revoke issued tokens** — m2m tokens have no session row, and introspection re-validates the JWT without re-reading the account, so it reports `active: true` for a disabled account's token until expiry (default 900 s). Same shape as the existing client path, and the same accepted `T-39` trade-off, but worth stating for a credential-compromise story.
+5. **`ServiceAccount` has no expiry field**, so machine credentials never age out; rotation is the only lifecycle control.
+6. **The handler mints from the request `tenant_id` rather than from `sa.tenant_id`**, so the cross-tenant property rests entirely on one `WHERE` clause two crates away. Parity with the existing client branch, not a regression — but a one-line assertion would make the boundary local to the auth path. The mock in the test suite ignores `tenant_id`, so no test currently proves it; only the real SQL does.
+7. **`AuthenticatedServiceAccount.client_id` now means different things** depending on `sub_kind` (the OAuth2 client id, or a service-account UUID). No route consumes the extractor today, so there is no live confusion, but the field name is a trap for the first consumer — `subject` would be the honest name.
+
+### 17.3 Corrections and observations carried
+
+- §16.6 records a correction the **repository owner** raised against the remediation's own wording (that "nothing in the running server verifies a service-account secret") — the mTLS path always did. Recorded here because it is the first correction in this series to come from outside the agent loop, and it changed the disposition of an item rather than just its phrasing.
+- Carried unchanged from §15.3: the rule-8 regression test still exists only in the PHP SDK; the slug-vs-UUID diagnostic remains log-only with PHP undiagnosed; the Kotlin Ktor plugin still does not reject on its own; `AppState::for_test` is still `pub` and ungated.
+
+### 17.4 Standing status
+
+- **Open findings: SEC-086 (LOW)** — the only one, and a one-line fix.
+- **Highest-value follow-up that is not a finding**: move the mTLS service-account token to `axiam:m2m` (residual 1). Everything else above is an observation or an accepted trade-off.
+- **On the new feature**: this is the first *feature* reviewed in this series rather than a fix, and it landed with correct audience separation, server-derived tenant/org, status checks and scope handling on the first pass — the classes that previous rounds had to find the hard way (NEW-1 org derivation, SEC-006 audience confusion, SEC-007 tenant scoping) were all handled up front. The residuals it does carry are mostly inherited parity with the older client-credentials branch, not new mistakes.

@@ -1,8 +1,12 @@
 # Benchmark run 5 — execution runbook
 
-- **Date written**: 2026-08-02
-- **Branch this describes**: `claude/axiam-fixes-optimization-4qymzu`
-  (commits `a15b78d`, `421e3e2`, `cedbc64`, `d35fa65`)
+- **Date written**: 2026-08-02 (revised 2026-08-04 for the published image)
+- **What run 5 measures**: the released **`1.0.0-alpha24`** server image —
+  `ghcr.io/ilpanich/axiam/server:1.0.0-alpha24`, tag `v1.0.0-alpha24`,
+  commit `a36ee3c`, on `main`. The run-4 fixes this runbook describes
+  (`a15b78d`, `421e3e2`, `cedbc64`, `d35fa65`, originally on
+  `claude/axiam-fixes-optimization-4qymzu`) are **merged and contained in that
+  image**. **Do not build the server from source** — see §1.0.
 - **Predecessor**: [`improvement-after-run4-benchmark.md`](improvement-after-run4-benchmark.md)
   (I-tasks) — run 5 is item 6 of its *Suggested order of execution*
 - **Audience**: whoever executes the matrix. Run 5 is executed **off this
@@ -29,8 +33,9 @@ last run's command lines, §5's data will silently not exist.
 
 ## 0. What changed since run 4 (and what that means for the numbers)
 
-Everything below is already in the image if you build from this branch. It is
-listed because each item moves a number you will be comparing against run 4.
+Everything below is already in the published **`1.0.0-alpha24`** image — no
+source build, no branch checkout, nothing to compile. It is listed because each
+item moves a number you will be comparing against run 4.
 
 | Change | Commit | Effect on run-5 numbers |
 |---|---|---|
@@ -56,24 +61,80 @@ listed because each item moves a number you will be comparing against run 4.
 
 ## 1. Preflight — do not skip
 
+### 1.0 The image — use the published `1.0.0-alpha24`, do not build
+
+Run 5 measures a **released artifact**, not a working tree. Every fix in §0 is
+in `ghcr.io/ilpanich/axiam/server:1.0.0-alpha24`, published by the release
+pipeline from tag `v1.0.0-alpha24` (commit `a36ee3c`, gated on being on `main`
+by the workflow's `verify-tag-on-main` job). A local build is slower, is not
+what any reader of the report will be able to reproduce, and — because the
+sandbox/CI `swagger-ui` egress workaround does not exist on an operator
+machine — is a fresh source of failure for no benefit.
+
+**This is already the harness default.** `benchmarks/justfile` ships `build :=
+"0"`, and `bench-up` derives the tag from the workspace version:
+
+```just
+VER="$(grep -m1 '^version' ../Cargo.toml | cut -d'"' -f2)"
+export BENCH_AXIAM_IMAGE="ghcr.io/ilpanich/axiam/server:${VER}"
+```
+
+So a checkout at tag `v1.0.0-alpha24` resolves to the right image with no
+override at all. Three consequences:
+
+1. **Check out the release tag**, not a feature branch. The workspace version is
+   what picks the image tag, *and* `build_ref` in `meta.json` is this checkout's
+   `HEAD` — so the tag is what makes the recorded provenance describe the image
+   that actually ran (§1.1).
+2. **Never pass `build=1`** to any recipe. It forces `--build` and silently
+   substitutes a locally compiled binary for the released one.
+3. **`docker login ghcr.io` first.** GHCR packages are private by default. If
+   the pull fails, `bench-up` prints a message and **falls back to a local
+   source build anyway** — which in a long `bench-matrix` run scrolls past
+   unnoticed. Pull explicitly as a preflight step so the failure is loud
+   (§12.1).
+
+Competitors are unaffected: Keycloak and Zitadel were always prebuilt images.
+
+> **Pin by digest for a multi-day run.** `BENCH_AXIAM_PULL_POLICY` defaults to
+> `missing`, so a tag already present locally is never re-pulled — fine for an
+> immutable release tag, but resolving the digest once and exporting
+> `BENCH_AXIAM_IMAGE=ghcr.io/ilpanich/axiam/server@sha256:…` removes the
+> question entirely. `meta.json` records `image`, `image_digest` and `image_id`
+> per container either way. §12.1 has the commands.
+
 ### 1.1 Provenance (I18)
 
 Run 4's `build_ref 6875e4b` was **not an ancestor of `origin/main`** — the image
 had been built from a fix branch pre-merge. There was no material doubt about
 content that time, but it is exactly the discipline that stops a run being
-thrown away later. This is now enforced in `run-benchmark.sh`, but check it by
-hand first:
+thrown away later. This is now enforced in `run-benchmark.sh`.
+
+**Running from the release tag makes this check pass by construction.**
+`build_ref` is the benchmarking checkout's `HEAD`; at `v1.0.0-alpha24` that is
+`a36ee3c`, which is on `main`. Verify anyway — it costs nothing and it is what
+proves the checkout and the image agree:
 
 ```bash
 git fetch origin main
-git merge-base --is-ancestor <build_ref> origin/main \
-  && echo "OK: image built from main" \
-  || echo "STOP: image is not built from main"
+git checkout v1.0.0-alpha24          # the commit the alpha24 image was built from
+git merge-base --is-ancestor HEAD origin/main \
+  && echo "OK: checkout is on main" \
+  || echo "STOP: checkout is not on main"
 ```
 
+> **`build_ref` describes the checkout, not the image.** Nothing cross-checks
+> the two, so running the harness from an arbitrary branch while pulling the
+> alpha24 image records a `build_ref` that has no relationship to the binary
+> under test. Checking out the release tag is what collapses that gap — it is
+> the whole reason for step 1 in §1.0.
+
 `BENCH_ALLOW_UNMERGED_BUILD_REF=1` exists as an escape hatch for deliberate
-pre-merge validation. **If you use it, say so in `meta.json` and in the writeup**
-— an unlabelled unmerged run is how run 4's provenance footnote happened.
+pre-merge validation. **Run 5 does not need it** — a released image is on `main`
+by definition. If you find yourself reaching for it, you are not running the
+image this runbook describes; stop and fix the checkout instead. If you use it
+regardless, say so in `meta.json` and in the writeup — an unlabelled unmerged
+run is how run 4's provenance footnote happened.
 
 ### 1.2 Environment sanity
 
@@ -87,6 +148,9 @@ pre-merge validation. **If you use it, say so in `meta.json` and in the writeup*
   is not confounding results.
 - Confirm `just` and `docker compose` resolve, and that `docker compose config`
   renders the target compose files without error.
+- Confirm the alpha24 image **pulls** before spending any k6 time on it (§12.1).
+  No source build is needed for any target in run 5, so a working `docker pull`
+  is the only build-side prerequisite.
 
 ### 1.3 Watch items carried from run 4 (I8) — cheap, no work, just record
 
@@ -99,7 +163,9 @@ pre-merge validation. **If you use it, say so in `meta.json` and in the writeup*
 
 ## 2. Standard matrix
 
-Invocation is unchanged from run 4:
+Invocation is unchanged from run 4 — and note there is no `build=` anywhere in
+it, which is exactly right: the default `build=0` pulls the alpha24 image
+(§1.0), and `bench-matrix` forwards that default to every cell.
 
 ```bash
 just target=axiam profile=p0-plaintext bench-up
@@ -209,8 +275,10 @@ DEBUG events on target `axiam::perf`:
   `response_body_bytes`
 
 Plus k6's `bench_http_proto`, connection-reuse counters, and `tls_handshakes`.
-Capture `ss -ti` against the container during the run — a Nagle stall shows
-unacked bytes with an idle congestion window.
+Capture `ss -ti` against the container's network namespace during the run — a
+Nagle stall shows unacked bytes with an idle congestion window. The server image
+is `distroless/cc-debian12`, so there is **no shell and no `ss` inside it**;
+§12.4 shows how to get there from the host.
 
 > There is deliberately **no** "token persist" stage: client-credentials issues
 > no refresh token and writes nothing. If you see a DB write on this path,
@@ -269,9 +337,12 @@ line before trusting a cell.
 > forwards an explicit allow-list of variable names into the container, and the
 > server reads its config at start — so exporting this against an
 > already-running stack changes nothing. `bench-down` then `bench-up` to change
-> it. (This knob and `AXIAM__SERVER__TCP_NODELAY` were added to that allow-list
-> alongside this runbook; they were not forwarded before.) §12.5 has the exact
-> loop, including the `docker exec … env` check that proves the value landed.
+> it. (This knob and `AXIAM__SERVER__TCP_NODELAY` are in that allow-list in the
+> alpha24 image's compose file; they were not forwarded before.) §12.5 has the
+> exact loop, including the `docker inspect` check that proves the value landed.
+> After the fact, every cell's `meta.json` carries an `axiam_env` object dumped
+> from the running container, so a finished run can be audited without a live
+> stack: `jq '.axiam_env.AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS' meta.json`.
 
 Cache semantics, for interpreting results: **positive answers only** are cached
 (a revoked session is never cached, so it cannot be resurrected; a new session is
@@ -383,6 +454,10 @@ plus the `EXPLAIN` plan pins already enforced in CI.
 regresses to `TableScan`. It includes *witness* tests asserting the old query
 forms genuinely do scan, so the assertions cannot quietly become tautologies.
 
+This one is a **source-side** check and the only step in run 5 that compiles
+anything. It already runs in CI on the alpha24 commit, so it is optional for the
+operator — running the benchmark itself needs no Rust toolchain at all.
+
 ---
 
 ## 7. Prod-posture pass and the I19 assertions
@@ -396,7 +471,16 @@ just target=axiam profile=p0-plaintext rl-prod-check
 `runner/rl_prod_check.py` reads the current defaults **read-only** out of
 `crates/axiam-api-rest/src/config/rate_limit.rs` and
 `crates/axiam-api-grpc/src/{config.rs,middleware/rate_limit.rs}`, so it cannot
-drift from the code. Expected values on this branch:
+drift from the code.
+
+> **This is a second reason the checkout must be at `v1.0.0-alpha24` (§1.0).**
+> The check reads the *local source tree* while the limits it asserts are
+> enforced by the *pulled image*. Those are the same numbers only when the
+> checkout is the commit the image was built from. Run it from any other branch
+> and a mismatch is the harness comparing two different versions, not a bug in
+> the server.
+
+Expected values at `v1.0.0-alpha24`:
 
 | Endpoint | Configured |
 |---|---|
@@ -505,8 +589,13 @@ When writing up:
 
 1. **State the comparability break.** §0's warning belongs in the run-5
    document's opening, not a footnote. Four separate changes moved numbers.
-2. **Record provenance explicitly** — `build_ref`, and whether the merge-base
-   check passed or was overridden.
+2. **Record provenance explicitly** — the image ref **and its digest**
+   (`ghcr.io/ilpanich/axiam/server:1.0.0-alpha24@sha256:…`, straight out of
+   `meta.json`'s `image`/`image_digest`), `build_ref`, and whether the
+   merge-base check passed or was overridden. State plainly that run 5 measured
+   the **published release image**, not a local build — that is what makes the
+   numbers reproducible by a reader. If any cell fell back to a local build
+   (§12.1), it is not part of the run of record; label or drop it.
 3. **Report I5/I6/I7 as confirmed or refuted**, using the decision rules in
    §4.4, §5.3 and §6.2. A hypothesis that survives an honest attempt to refute it
    is worth far more than one that was never tested; and a refuted one is a
@@ -526,7 +615,10 @@ When writing up:
 
 ## 11. Quick checklist
 
-- [ ] `git merge-base --is-ancestor <build_ref> origin/main` passes (§1.1)
+- [ ] Checkout is at tag `v1.0.0-alpha24`; `grep -m1 '^version' Cargo.toml` reads `1.0.0-alpha24` (§1.0)
+- [ ] `docker login ghcr.io` done and `docker pull …/server:1.0.0-alpha24` succeeded **before** any `bench-up` (§12.1)
+- [ ] No `build=1` anywhere; `docker inspect --format '{{.Config.Image}}' bench-axiam-server` shows the ghcr ref, and `RepoDigests` is non-empty (§12.1)
+- [ ] `git merge-base --is-ancestor HEAD origin/main` passes; `BENCH_ALLOW_UNMERGED_BUILD_REF` **not** set (§1.1)
 - [ ] Envelope matches run 4, or the difference is recorded (§1.2)
 - [ ] Full matrix run, KC login cells split out at `BENCH_MEM=4096m` (§2, §3)
 - [ ] `RUST_LOG=axiam_oauth2=debug,axiam_api_rest=debug` set for the I5 cells (§4.1)
@@ -543,14 +635,16 @@ When writing up:
 - [ ] `client_cpu_ms_total` / `client_rss_mib_peak` are non-zero (§8)
 - [ ] Thermals and `mhz_avg` recorded per cell (§1.2)
 
-> Every command in §12 was checked against the harness as it exists on this
-> branch: `just` recipes and variables, the scenario filenames, the runner
-> scripts, and — critically — that each `AXIAM__…` variable is actually
-> forwarded into the container by `targets/axiam/docker-compose.yml`. Compose
-> uses an explicit allow-list, so a variable that is merely exported in your
-> shell but absent from that list reaches nothing. The I5 and I6 knobs were
-> **added to that list** in the same commit as this section; before it, the
-> §5.1 instruction would have been silently ignored.
+> Every command in §12 was checked against the harness as it exists at tag
+> **`v1.0.0-alpha24`** — the same commit the image was built from, so the
+> runbook and the artifact under test cannot disagree: `just` recipes and
+> variables, the scenario filenames, the runner scripts, the container names,
+> and — critically — that each `AXIAM__…` variable is actually forwarded into
+> the container by `targets/axiam/docker-compose.yml`. Compose uses an explicit
+> allow-list, so a variable that is merely exported in your shell but absent
+> from that list reaches nothing. The I5 and I6 knobs are in that list as of
+> alpha24; before they were added, the §5.1 instruction would have been
+> silently ignored.
 
 ---
 
@@ -559,9 +653,14 @@ When writing up:
 Everything below is literal. Run it from `benchmarks/` unless a block says
 otherwise. Blocks are in execution order; do not reorder them.
 
-### 12.0 The one rule that matters
+### 12.0 The two rules that matter
 
-**Server-side environment variables are baked into the container at
+**Rule 1 — run the published image, never a local build.** `build=0` (the
+default) pulls `ghcr.io/ilpanich/axiam/server:1.0.0-alpha24`. Do not pass
+`build=1`, and make the pull succeed in §12.1 rather than discovering the
+silent build-fallback halfway through the matrix. See §1.0.
+
+**Rule 2 — server-side environment variables are baked into the container at
 `bench-up`, not at `bench-run`.**
 
 `benchmarks/targets/axiam/docker-compose.yml` forwards an *explicit allow-list*
@@ -586,29 +685,73 @@ just bench-run target=axiam                      # WRONG — silently ignored
 ### 12.1 Preflight (once, before anything else)
 
 ```bash
-cd /path/to/axiam/benchmarks
+# 1. Check out the commit the alpha24 image was built from. This does two
+#    things at once: it sets the workspace version (which is what `bench-up`
+#    turns into the image tag) and it sets build_ref for meta.json (§1.1).
+cd /path/to/axiam
+git fetch origin main --tags
+git checkout v1.0.0-alpha24
+git merge-base --is-ancestor HEAD origin/main \
+  && echo "OK: checkout is on main" \
+  || echo "STOP: checkout is NOT on main — do not start run 5"
 
-# 1. Provenance (I18). Replace <build_ref> with the image's build_ref.
-#    run-benchmark.sh now enforces this too, but check it by hand first.
-git fetch origin main
-git merge-base --is-ancestor <build_ref> origin/main \
-  && echo "OK: image built from main" \
-  || echo "STOP: image is NOT built from main — do not start run 5"
+grep -m1 '^version' Cargo.toml     # must read: version = "1.0.0-alpha24"
 
-# 2. Toolchain sanity.
+cd benchmarks
+
+# 2. Authenticate to GHCR (packages are private by default) and pull the image
+#    EXPLICITLY. Do not let bench-up be the first thing that tries: on a failed
+#    pull it falls back to a local source build and the run silently stops
+#    measuring the released artifact.
+docker login ghcr.io                 # username = your GitHub handle, password = PAT with read:packages
+docker pull ghcr.io/ilpanich/axiam/server:1.0.0-alpha24 \
+  || echo "STOP: cannot pull the alpha24 image — fix auth before running anything"
+
+# 3. (Recommended) Pin by digest for the whole run, so a re-pull or a stale
+#    local tag can never change what is under test mid-matrix.
+export BENCH_AXIAM_IMAGE="ghcr.io/ilpanich/axiam/server@$(
+  docker inspect --format '{{index .RepoDigests 0}}' \
+    ghcr.io/ilpanich/axiam/server:1.0.0-alpha24 | cut -d@ -f2)"
+echo "$BENCH_AXIAM_IMAGE"            # record this in the writeup
+
+# 3b. Same treatment for SurrealDB — `surrealdb/surrealdb:v3` is a floating tag
+#     (see the A9 note in targets/axiam/docker-compose.yml).
+docker pull surrealdb/surrealdb:v3
+export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(
+  docker inspect --format '{{index .RepoDigests 0}}' surrealdb/surrealdb:v3 | cut -d@ -f2)"
+
+# 4. Toolchain sanity.
 just --version && docker compose version
 docker compose -f targets/axiam/docker-compose.yml config >/dev/null && echo "compose OK"
 
-# 3. Throwaway TLS/mTLS certs for the security profiles (idempotent).
+# 5. Throwaway TLS/mTLS certs for the security profiles (idempotent).
 just bench-certs
 ```
 
-If step 1 fails and you are *deliberately* validating a pre-merge image, and
-only then:
+**Prove the pull actually took, after the first `bench-up` of the run.** This is
+the one check that distinguishes "measured the release" from "measured a local
+build that quietly replaced it":
 
 ```bash
-export BENCH_ALLOW_UNMERGED_BUILD_REF=1   # and SAY SO in the writeup + meta.json
+docker inspect --format '{{.Config.Image}}' bench-axiam-server
+# -> ghcr.io/ilpanich/axiam/server@sha256:...  (or :1.0.0-alpha24 if you skipped 3)
+# A bare "axiam-server:latest" / any locally-built ref means the fallback fired.
+
+docker inspect --format '{{index .RepoDigests 0}}' bench-axiam-server
+# Empty / "<no value>" => locally built, NOT the published image. Stop and fix auth.
 ```
+
+The same facts land in every cell's `meta.json` (`image`, `image_digest`,
+`image_id` per container), so a completed run can be audited after the fact:
+
+```bash
+grep -h '"image"' results/run-*/axiam/*/*/meta.json | sort -u
+```
+
+`build=1` is the deliberate opt-out — **run 5 must not use it**. Likewise
+`BENCH_ALLOW_UNMERGED_BUILD_REF=1`: a released image is on `main` by
+definition, so needing it means the checkout is wrong (§1.1). If you set it
+anyway, SAY SO in the writeup and `meta.json`.
 
 ### 12.2 The standard matrix (median-of-3)
 
@@ -624,7 +767,9 @@ just targets="axiam keycloak zitadel" \
 ```
 
 `bench-matrix` handles up/seed/run/down per cell and writes each pass to
-`results/run-<i>/`. `bench-report` medians across them later.
+`results/run-<i>/`. `bench-report` medians across them later. It forwards
+`build={{build}}` to every `bench-up`, so the default `build=0` — the published
+alpha24 image — applies matrix-wide. **Do not add `build=1`.**
 
 > Keycloak's **login** cells are excluded from this pass and run separately in
 > §12.3 — they need a 4 GiB envelope. If you would rather run the matrix
@@ -683,7 +828,7 @@ export AXIAM__SERVER__TCP_NODELAY=true
 just target=axiam profile=p2-tls13 bench-up
 just target=axiam bench-seed
 just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
-docker logs axiam-bench-app > ../i5-armA-tls-nodelay-on.log 2>&1   # capture stage timings
+docker logs bench-axiam-server > ../i5-armA-tls-nodelay-on.log 2>&1   # capture stage timings
 just target=axiam bench-down
 
 # ---- Arm B: pre-I5 behaviour (Nagle left on) ----------------------------
@@ -692,7 +837,7 @@ export AXIAM__SERVER__TCP_NODELAY=false
 just target=axiam profile=p2-tls13 bench-up
 just target=axiam bench-seed
 just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
-docker logs axiam-bench-app > ../i5-armB-tls-nodelay-off.log 2>&1
+docker logs bench-axiam-server > ../i5-armB-tls-nodelay-off.log 2>&1
 just target=axiam bench-down
 
 # ---- Control: same two arms at p0 (plaintext) ---------------------------
@@ -701,7 +846,7 @@ for N in true false; do
   just target=axiam profile=p0-plaintext bench-up
   just target=axiam bench-seed
   just target=axiam profile=p0-plaintext scenario=oauth2_client_credentials.js bench-run
-  docker logs axiam-bench-app > "../i5-p0-nodelay-$N.log" 2>&1
+  docker logs bench-axiam-server > "../i5-p0-nodelay-$N.log" 2>&1
   just target=axiam bench-down
 done
 
@@ -709,8 +854,10 @@ unset AXIAM__SERVER__TCP_NODELAY
 export RUST_LOG="axiam=warn"
 ```
 
-> Confirm the container name first with `docker ps --format '{{.Names}}'` if
-> `docker logs axiam-bench-app` errors — the compose project prefix can vary.
+> The container name is pinned by `container_name: bench-axiam-server` in
+> `targets/axiam/docker-compose.yml`, so it does not carry a compose-project
+> prefix. If `docker logs` still errors, the stack is not up — check with
+> `docker ps --format '{{.Names}}'`.
 
 **What to pull out of those logs** — DEBUG events on target `axiam::perf`:
 
@@ -739,8 +886,16 @@ done
 
 **Kernel-level confirmation**, while an arm-B run is in flight (separate shell):
 
+The published image is `distroless/cc-debian12:nonroot` — **no shell, no `ss`,
+no `docker exec` into it**. Enter its network namespace from the host instead:
+
 ```bash
-docker exec axiam-bench-app sh -c 'ss -ti' | head -40
+# Preferred: no extra images, Linux host.
+sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' bench-axiam-server)" -n ss -ti | head -40
+
+# Alternative if nsenter is unavailable — a throwaway container sharing the netns:
+docker run --rm --net container:bench-axiam-server nicolaka/netshoot ss -ti | head -40
+
 # A Nagle stall shows unacked bytes sitting with an idle congestion window.
 ```
 
@@ -761,9 +916,12 @@ for DEC in false true; do
 
     just target=axiam profile=p0-plaintext bench-up
 
-    # Verify the knobs actually took effect BEFORE spending a cell on it:
-    docker exec axiam-bench-app env | grep -E 'DECISION_CACHE_ENABLED|SESSION_VALIDATION_CACHE_TTL'
-    docker logs axiam-bench-app 2>&1 | grep -i 'session.validation' | head -3
+    # Verify the knobs actually took effect BEFORE spending a cell on it.
+    # (docker inspect, not `docker exec ... env` — the released image is
+    #  distroless: no shell, no coreutils, nothing to exec.)
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' bench-axiam-server \
+      | grep -E 'DECISION_CACHE_ENABLED|SESSION_VALIDATION_CACHE_TTL'
+    docker logs bench-axiam-server 2>&1 | grep -i 'session.validation' | head -3
     # With SESS=5 you MUST see a startup WARN naming the TTL.
     # No WARN => the cache is off => the cell is worthless. Stop and fix.
 
@@ -870,8 +1028,10 @@ just rl-prod-check
 
 `rl=prod` sets the real shipped limits, and `rl_prod_check.py` re-extracts them
 **read-only from the Rust source** — so if the two ever drift, the check fails
-loudly instead of publishing a wrong comparison. Expected configured values on
-this branch:
+loudly instead of publishing a wrong comparison. That comparison is only
+meaningful with the checkout at `v1.0.0-alpha24`: the script reads the local
+tree, the limits are enforced by the pulled image (§7). Expected configured
+values at `v1.0.0-alpha24`:
 
 | endpoint | configured |
 |---|---|

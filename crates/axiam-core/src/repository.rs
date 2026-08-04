@@ -517,12 +517,23 @@ pub trait ServiceAccountRepository: Send + Sync {
     /// ## Why this exists, stated plainly
     ///
     /// [`Self::upgrade_client_secret_hash`] can only fire on a *successful
-    /// verification*, and **nothing in the running server verifies a service
-    /// account's `client_secret_hash`** — service accounts are CRUD plus
-    /// certificate binding today; the secret is issued at create/rotate and
-    /// never presented back. So unlike `oauth2_client` rows, these rows do not
-    /// drain lazily: a legacy row stays legacy forever, and the same is true of
-    /// a row still keyed to a previous pepper.
+    /// verification*. When this count was introduced there was **no such path**
+    /// for a service account — the secret was issued at create/rotate and no
+    /// flow accepted it — so these rows could not drain lazily at all.
+    ///
+    /// The OAuth2 **client-credentials** grant now accepts a service account's
+    /// `client_id`/`client_secret`, so legacy rows *do* migrate on first use,
+    /// exactly as `oauth2_client` rows do. This count remains useful for the
+    /// case that migration cannot reach: a service account that never
+    /// authenticates. Its backlog is what decides whether the legacy hash arm
+    /// can be retired, and **rotation** clears a row that will never
+    /// authenticate on its own.
+    ///
+    /// **This counts the hash *scheme* only.** A row already in the current
+    /// scheme but keyed to a superseded pepper is indistinguishable on disk —
+    /// the stored format is identical — so it is not counted. That is correct
+    /// for the question this answers (can the legacy *arm* be retired?), and
+    /// such rows migrate on the same first authentication.
     ///
     /// That has one concrete consequence: the v1 arm of the verifier cannot be
     /// retired on the strength of "no v1 `oauth2_client` rows remain", because

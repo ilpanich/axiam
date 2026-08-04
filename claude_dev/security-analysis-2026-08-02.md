@@ -886,11 +886,15 @@ set the TTL to hours *and* switch off the mechanism that shortens the window.
 
 **Obs 4 — service-account hashes: the diagnosis was incomplete, and the fix
 follows the corrected one.** §15.2 said the seam has no production caller. That
-is right, and the reason is stronger than "a caller was forgotten": **nothing in
-the running server verifies a service-account secret at all.** Service accounts
-are CRUD plus certificate binding; the secret is issued at create/rotate and
-never presented back. So no lazy upgrade can ever fire here, and adding a caller
-would mean inventing a whole authentication path — a feature, not a remediation.
+is right, and the reason is stronger than "a caller was forgotten": nothing in
+the running server compared `service_account.client_secret_hash` against a
+presented secret. So no lazy upgrade could fire, and supplying a caller meant
+adding an authentication path — a feature, not a remediation.
+
+> ⚠ **Both the wording and the disposition above were superseded — see §16.6.**
+> "Nothing verifies a service-account secret" was **imprecise as written** and is
+> corrected there, and the authentication path has since been added on the
+> owner's explicit instruction, which makes the lazy upgrade reachable after all.
 
 What actually blocks progress is the *decision* the observation names: the v1
 arm cannot be retired on the strength of "no v1 `oauth2_client` rows remain",
@@ -985,3 +989,128 @@ confirmed by hand that all eleven guards reject correctly today.
    broadcast still returns `Err`) is genuinely unchanged.
 3. **The TTL clamp's placement.** It is on the accessor, not the field. Confirm
    no caller reads `decision_cache_ttl_secs` directly and bypasses it.
+
+### 16.6 Correction and follow-up: service-account authentication
+
+Raised by the repository owner reviewing §16.2, and worth recording in full
+because the first half is a correction to my own wording and the second changes
+the disposition of Obs 4.
+
+**The wording was wrong.** §16.2, the CHANGELOG and two code comments said
+*"nothing in the running server verifies a service-account secret at all"*. Read
+plainly that says AXIAM never checks a machine credential, which is false twice
+over:
+
+- The OAuth2 **client-credentials** grant has always verified a client secret —
+  against the `oauth2_client` table (`TokenService::client_repo`, bound to
+  `OAuth2ClientRepository` and wired to `oauth2_client_repo`).
+- Service accounts have always **authenticated**, by mTLS:
+  `POST /api/v1/auth/device` resolves one from a bound client certificate and
+  mints a token with `sub_kind: service_account`.
+
+The accurate claim — and the one the fix actually rested on — is narrower:
+**nothing verified the `service_account` table's own `client_secret_hash`
+column.** Verified by exhaustion: every reference to it was a write
+(create/rotate/upgrade), a read into a DTO, or a schema/test line. There was no
+comparison against a presented secret anywhere, `axiam-oauth2` contained zero
+references to `service_account`, and creating a service account created no
+`oauth2_client` row. All four sites now name the column.
+
+**The follow-up this exposed.** `create` and `rotate_secret` returned a
+`client_secret` to the operator that **no flow accepted** — a credential the API
+issues and then refuses. Two readings were possible (service accounts are
+mTLS-only and the column is vestigial; or the client-credentials wiring is
+missing). The owner chose the second, so the grant now accepts an `sa_…`
+`client_id`.
+
+Design points worth re-deriving rather than trusting:
+
+1. **Dispatch is by `client_id` prefix** — `oa_` vs `sa_`, both server-generated
+   and disjoint — so the hot path keeps one lookup. This is *not* a security
+   decision: the prefix only selects which table to read, and the presented
+   secret must still verify against the row found. Guessing a prefix routes a
+   caller to a table where their `client_id` does not exist, i.e.
+   `invalid_client`. The constant lives in `axiam-core` beside the model, used by
+   both the generator and the dispatcher, so the two cannot drift.
+2. **Secret verified before the status check.** Rejecting a disabled account
+   first would let an unauthenticated caller separate "exists but disabled" from
+   "does not exist" by timing. Status is now consulted only for a caller who
+   already proved possession, and the error is the same generic
+   `invalid_client` either way.
+3. **`aud` is `axiam:m2m`, `sub` is the service-account id.** The device path's
+   `issue_service_account_token` stamps `axiam:user` for backwards
+   compatibility, which is the wrong shape for a secret-obtained machine token —
+   §4.3/`SEC-006` route narrowing must be able to keep it off user routes. And
+   `sub` must be the account id, not the opaque `sa_…` client id, or the token
+   would authenticate while carrying no resolvable grants. A service account is
+   now the same principal whichever way it authenticated.
+4. **Obs 4's disposition changes.** With a verification path, the lazy upgrade
+   is reachable and legacy service-account rows migrate on first authentication
+   exactly as `oauth2_client` rows do — pinned by a test. The startup count
+   remains useful for the case migration cannot reach: an account that never
+   authenticates. Rotation clears those.
+
+**What a verifier should check here.** That the prefix dispatch cannot be used
+to reach the wrong table with a matching secret; that the secret-then-status
+ordering has not been reversed by a later edit; and that no other call site
+mints a service-account token with `axiam:user` for a secret-obtained grant.
+
+### 16.7 Security review of the new grant against prior findings
+
+The new service-account client-credentials path was checked against every
+relevant finding and observation already closed in this document, rather than
+being assumed clean because it reuses existing machinery.
+
+| Prior item | Result for the new path |
+|---|---|
+| **§15.2 Obs 4** (SA hashes cannot migrate) | ✅ **Now genuinely closed.** The lazy upgrade is reachable at last: a legacy-scheme row authenticates and is rewritten via the tenant-scoped CAS. Pinned by a test, together with its converse — a **wrong secret never triggers a write**. |
+| **OBS-1** (client-secret hashing) | ✅ Same keyed HMAC-SHA256 + constant-time comparison via `client_secret::global()`; no second, weaker verifier was introduced. |
+| **§13.4 obs 3** (pepper rotation) | ✅ Composes. A row keyed to a superseded pepper verifies through the dual read and is rewritten under the current key. Pinned — including that **without** `AXIAM__AUTH__PEPPER_PREVIOUS` such a row fails closed rather than silently authenticating. |
+| **SEC-006 / §4.3** (audience narrowing) | ✅ The token carries `aud: axiam:m2m`, so `check_user_aud_and_parse_jti` keeps it off user routes and `extract_service_account` accepts it. Had it reused the device path's `issue_service_account_token` — which stamps `axiam:user` — it would have been minted onto user routes. |
+| **QUAL-03 / D-11** (error oracle) | ✅ Same taxonomy: only a genuinely unknown client is `invalid_client`; a DB outage is a distinct server error. Extended to a **status** oracle: the secret is verified *before* the status check, so "exists but disabled" is not separable from "does not exist" by timing, and both return the same generic error. |
+| **Tenant isolation** (SEC-007 class) | ✅ Both the lookup and the upgrade CAS are tenant-scoped; the CAS's tenant predicate is already pinned by a test asserting another tenant cannot drive a rewrite. |
+| **Rate limiting** | ✅ No new endpoint — this rides `POST /oauth2/token`, already covered. |
+
+**Two things this review surfaced that were not otherwise visible.**
+
+1. **`AuthenticatedServiceAccount.client_id` no longer means one thing.** The
+   field is populated from `sub`, which is the `client_id` for an `oauth2_client`
+   token but the service-account **UUID** for the new one. No route consumes this
+   extractor today, so nothing is broken — but a future one would silently get
+   two different value shapes. Documented on the field rather than renamed,
+   since renaming a `pub` field for a currently-unused type is churn.
+2. **The device-auth path and this one disagree on `aud`.** `POST /api/v1/auth/device`
+   stamps `axiam:user` on a service-account token (documented there as
+   backwards compatibility), so a device-authenticated service account **cannot**
+   use an `AuthenticatedServiceAccount` route, while a secret-authenticated one
+   can. Pre-existing, not introduced here, and changing it is an
+   operator-visible behaviour change — recorded as an open observation rather
+   than fixed in this pass.
+
+**A precision fix to §16.2's own artefact.** `count_legacy_secret_hashes` counts
+the hash **scheme** only. A row already in the current scheme but keyed to a
+superseded pepper is byte-identical on disk and is therefore *not* counted. That
+is correct for the question the count exists to answer — *can the legacy arm be
+retired?* — but the startup message previously implied it tracked pepper era
+too. Both the message and the trait doc now say so explicitly.
+
+### 16.8 SDK impact
+
+**No SDK code change is required.** `login_client_credentials` already exists in
+all eleven SDKs, and the request is byte-identical whether the `client_id` names
+an OAuth2 client or a service account — so support is automatic.
+
+What *does* change is the **token that comes back**, which matters to any SDK
+that verifies locally (§10.1) or renders an identity. `CONTRACT.md` §12.1 now
+states the difference normatively: `sub` is the service-account UUID rather than
+the `client_id` (so an SDK must not assume `sub` is a client id, nor parse it as
+a UUID, without checking `sub_kind`), there is no `scope` claim, and a §10 guard
+fronting a resource server that accepts machine callers must be configured to
+expect `axiam:m2m` — the default `axiam:user` guidance correctly rejects **both**
+kinds of client-credentials token, which is rule 6 working, not a bug.
+
+The clause was applied to all eleven vendored copies as a **targeted patch, not
+a wholesale overwrite** — the copies carry legitimate pre-existing drift, and a
+copy would have silently reverted it. Verified: every vendored `CONTRACT.md`
+shows insertions and **zero deletions**.
+

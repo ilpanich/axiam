@@ -8,6 +8,15 @@ use uuid::Uuid;
 
 use super::user::UserStatus;
 
+/// Prefix on every service-account `client_id`.
+///
+/// Defined here — beside the model — because **two** places depend on it and
+/// they must never drift: `axiam-db` generates ids with it, and the OAuth2
+/// client-credentials handler uses it to decide which table to look a
+/// `client_id` up in. It is disjoint from the `oauth2_client` prefix (`oa_`),
+/// which is what makes that dispatch unambiguous.
+pub const SERVICE_ACCOUNT_CLIENT_ID_PREFIX: &str = "sa_";
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServiceAccount {
     pub id: Uuid,

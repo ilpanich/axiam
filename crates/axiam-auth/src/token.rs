@@ -235,6 +235,66 @@ pub fn issue_service_account_token(
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
 
+/// Mint a service-account access token for the **OAuth2 client-credentials**
+/// grant.
+///
+/// Deliberately distinct from [`issue_service_account_token`], which the mTLS
+/// device-auth path uses. Two claims differ, and both differences matter:
+///
+/// * **`aud` is [`AUD_M2M`], not [`AUD_USER`].** This is a machine token
+///   obtained with a client secret, so the §4.3 / `SEC-006` per-route audience
+///   narrowing must be able to keep it off user routes.
+///   `issue_service_account_token` stamps [`AUD_USER`] for backwards
+///   compatibility with the device path, which is the wrong shape here.
+/// * **`sub` is the service-account id**, exactly as the device path does —
+///   *not* the `client_id`. The authorization engine resolves roles by subject
+///   id, so a token whose `sub` were the opaque `sa_…` client id would
+///   authenticate but carry no resolvable grants. This is what makes a service
+///   account the *same principal* whether it authenticated by certificate or
+///   by secret.
+///
+/// `sub_kind` is [`SubjectKind::ServiceAccount`] on both paths.
+pub fn issue_service_account_client_credentials_token(
+    service_account_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+    let scope = if scopes.is_empty() {
+        None
+    } else {
+        Some(scopes.join(" "))
+    };
+
+    let claims = AccessTokenClaims {
+        sub: service_account_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        iss: config.effective_issuer().to_owned(),
+        iat: now,
+        exp: now + config.access_token_lifetime_secs as i64,
+        jti: Uuid::new_v4().to_string(),
+        aud: Some(AUD_M2M.to_string()),
+        scope,
+        sub_kind: SubjectKind::ServiceAccount,
+    };
+
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, key)
+        .map_err(|e| AuthError::Crypto(format!("failed to encode token: {e}")))
+}
+
 /// OIDC ID Token claims per OpenID Connect Core 1.0 section 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdTokenClaims {

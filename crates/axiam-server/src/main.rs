@@ -480,19 +480,15 @@ async fn main() -> std::io::Result<()> {
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
 
-    // §15.2 — service-account secret hashes cannot migrate lazily.
+    // §15.2 / §16.6 — legacy service-account secret hashes.
     //
-    // `upgrade_client_secret_hash` only fires on a successful verification, and
-    // nothing in the running server verifies a service account's secret: they
-    // are CRUD plus certificate binding, and the secret is issued at
-    // create/rotate but never presented back. So unlike `oauth2_client` rows,
-    // these do not drain — a legacy row stays legacy forever, and so does one
-    // still keyed to a superseded pepper.
-    //
-    // That matters for exactly one decision: whether the v1 verifier arm can be
-    // retired. "No v1 `oauth2_client` rows remain" does not answer it, because
-    // this table is invisible to that reasoning. Surfacing the count at startup
-    // makes it answerable, and names the only migration route that exists here.
+    // `upgrade_client_secret_hash` only fires on a successful verification.
+    // Service accounts can now authenticate (OAuth2 client-credentials accepts
+    // an `sa_…` client id), so legacy rows migrate on first use just like
+    // `oauth2_client` rows. What migration still cannot reach is a service
+    // account that never authenticates — and its backlog is what decides
+    // whether the legacy hash arm can be retired. Surfacing the count at
+    // startup makes that answerable.
     match service_account_repo.count_legacy_secret_hashes(None).await {
         Ok(0) => {
             tracing::debug!("All service-account client secrets use the current hash scheme");
@@ -500,7 +496,7 @@ async fn main() -> std::io::Result<()> {
         Ok(n) => {
             tracing::warn!(
                 legacy_rows = n,
-                "{n} service account(s) still store a legacy client-secret hash. These CANNOT                  migrate on their own: nothing verifies a service-account secret, so the lazy                  upgrade that drains `oauth2_client` rows never runs here. Rotate them                  (POST /api/v1/service-accounts/{{id}}/rotate-secret) to move them to the                  current scheme and the current pepper. Until this reaches 0, the legacy hash                  arm cannot be retired."
+                "{n} service account(s) still store a legacy-SCHEME client-secret hash. Each migrates automatically the first time it authenticates (OAuth2 client-credentials); one that never authenticates will not, so rotate it (POST /api/v1/service-accounts/{{id}}/rotate-secret). Until this reaches 0, the legacy hash arm cannot be retired. NOTE: this counts the hash SCHEME only — a row already in the current scheme but keyed to a superseded AXIAM__AUTH__PEPPER is not counted here, because the stored format is identical; pepper-era rows migrate on the same first authentication."
             );
         }
         Err(e) => {
@@ -681,6 +677,9 @@ async fn main() -> std::io::Result<()> {
     );
     let token_service = TokenService::new(
         oauth2_client_repo.clone(),
+        // Service accounts authenticate via client-credentials too; the handler
+        // dispatches on the `sa_` client-id prefix.
+        service_account_repo.clone(),
         auth_code_repo,
         tenant_repo.clone(),
         refresh_token_repo,

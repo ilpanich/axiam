@@ -6,13 +6,15 @@ use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     generate_refresh_token, hash_refresh_token, issue_access_token, issue_client_credentials_token,
-    issue_id_token, validate_access_token,
+    issue_id_token, issue_service_account_client_credentials_token, validate_access_token,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
+use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
+use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
-    AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
-    UserRepository,
+    AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository,
+    ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -95,8 +97,10 @@ pub struct IntrospectionResponse {
 /// OAuth2 token service — handles token exchange, revocation, and
 /// introspection.
 #[derive(Clone)]
-pub struct TokenService<OC, AC, TR, RT, UR> {
+pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     client_repo: OC,
+    /// Service-account repository (client-credentials for `sa_…` clients).
+    service_account_repo: SA,
     code_repo: AC,
     tenant_repo: TR,
     refresh_token_repo: RT,
@@ -105,16 +109,19 @@ pub struct TokenService<OC, AC, TR, RT, UR> {
     refresh_token_lifetime_secs: i64,
 }
 
-impl<OC, AC, TR, RT, UR> TokenService<OC, AC, TR, RT, UR>
+impl<OC, AC, TR, RT, UR, SA> TokenService<OC, AC, TR, RT, UR, SA>
 where
     OC: OAuth2ClientRepository,
+    SA: ServiceAccountRepository,
     AC: AuthorizationCodeRepository,
     TR: TenantRepository,
     RT: RefreshTokenRepository,
     UR: UserRepository,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client_repo: OC,
+        service_account_repo: SA,
         code_repo: AC,
         tenant_repo: TR,
         refresh_token_repo: RT,
@@ -124,6 +131,7 @@ where
     ) -> Self {
         Self {
             client_repo,
+            service_account_repo,
             code_repo,
             tenant_repo,
             refresh_token_repo,
@@ -191,6 +199,176 @@ where
                         client_id = %client.client_id,
                         error = %e,
                         "failed to persist the legacy client-secret hash upgrade (OBS-1); \
+                         authentication succeeded, the upgrade will be retried"
+                    ),
+                }
+                Ok(())
+            }
+            ClientSecretVerdict::Mismatch => Err(OAuth2Error::InvalidClient(
+                "invalid client credentials".into(),
+            )),
+        }
+    }
+
+    /// Client-credentials for a **service account** (`sa_…` client id).
+    ///
+    /// Service accounts are AXIAM's machine principal, and until now the only
+    /// way one could authenticate in a running server was mTLS
+    /// (`POST /api/v1/auth/device`). `create`/`rotate_secret` handed the
+    /// operator a `client_secret` that **no flow accepted** — this is the path
+    /// that makes it usable.
+    ///
+    /// Three deliberate differences from the `oauth2_client` branch:
+    ///
+    /// 1. **The secret is verified BEFORE the status check.** Rejecting a
+    ///    disabled account without verifying would let an unauthenticated
+    ///    caller distinguish "exists but disabled" from "does not exist" by
+    ///    timing. Verifying first means status is only ever consulted for a
+    ///    caller who already proved possession of the secret — and even then
+    ///    the error returned is the same generic `invalid_client`.
+    /// 2. **No scope may be requested.** A service account registers no scopes,
+    ///    and the `oauth2_client` branch's rule is that a requested scope must
+    ///    be a subset of the registered ones. With an empty registered set the
+    ///    only subset is the empty one, so any requested scope is
+    ///    `invalid_scope`. Authorization for a service account comes from the
+    ///    roles assigned to its subject, exactly as on the mTLS path.
+    /// 3. **The token's `sub` is the service-account id**, not the client id,
+    ///    so the RBAC engine resolves the same principal whether the account
+    ///    authenticated by certificate or by secret.
+    async fn handle_client_credentials_service_account(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        client_secret: &str,
+        requested_scope: Option<&str>,
+        started: std::time::Instant,
+    ) -> Result<TokenResponse, OAuth2Error> {
+        let t_client_lookup = std::time::Instant::now();
+        let sa = self
+            .service_account_repo
+            .get_by_client_id(tenant_id, client_id)
+            .await
+            .map_err(|e| match e {
+                // Same taxonomy as the oauth2_client branch: only a genuinely
+                // unknown client is `invalid_client`; a DB outage must never
+                // masquerade as bad credentials (error-oracle, QUAL-03/D-11).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
+        let client_lookup_us = t_client_lookup.elapsed().as_micros() as u64;
+
+        let t_secret_verify = std::time::Instant::now();
+        let secret_result = self
+            .verify_service_account_secret(tenant_id, &sa, client_secret)
+            .await;
+        let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
+        secret_result?;
+
+        // Only now — see point 1 in the doc comment.
+        if sa.status != UserStatus::Active {
+            tracing::info!(
+                client_id = %sa.client_id,
+                status = ?sa.status,
+                "service-account client-credentials refused: account is not active"
+            );
+            return Err(OAuth2Error::InvalidClient(
+                "invalid client credentials".into(),
+            ));
+        }
+
+        if let Some(scope) = requested_scope.filter(|s| !s.trim().is_empty()) {
+            return Err(OAuth2Error::InvalidScope(format!(
+                "unregistered scopes: {} — a service account registers no scopes; \
+                 its authorization comes from the roles assigned to it",
+                scope.split_whitespace().collect::<Vec<_>>().join(", ")
+            )));
+        }
+
+        let t_tenant_lookup = std::time::Instant::now();
+        let tenant = self
+            .tenant_repo
+            .get_by_id(tenant_id)
+            .await
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
+        let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
+
+        let t_token_mint = std::time::Instant::now();
+        let access_token = issue_service_account_client_credentials_token(
+            sa.id,
+            tenant_id,
+            tenant.organization_id,
+            &[],
+            &self.auth_config,
+        )
+        .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
+
+        let span = tracing::Span::current();
+        span.record("client_lookup_us", client_lookup_us);
+        span.record("secret_verify_us", secret_verify_us);
+        span.record("tenant_lookup_us", tenant_lookup_us);
+        span.record("token_mint_us", token_mint_us);
+        span.record("handler_total_us", started.elapsed().as_micros() as u64);
+
+        Ok(TokenResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+            expires_in: self.auth_config.access_token_lifetime_secs,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        })
+    }
+
+    /// [`Self::verify_client_secret`] for a service account.
+    ///
+    /// Same contract, against the service-account table: the upgrade is driven
+    /// only by `MatchNeedsUpgrade` (so a wrong secret can never cause a write),
+    /// and a failed write is a warning rather than a failed authentication.
+    ///
+    /// This is also what makes the §15.2 Obs 4 lazy migration *reachable*: with
+    /// no verification path, `upgrade_client_secret_hash` could never fire for a
+    /// service account, so legacy rows could not drain. They can now.
+    async fn verify_service_account_secret(
+        &self,
+        tenant_id: Uuid,
+        sa: &ServiceAccount,
+        presented: &str,
+    ) -> Result<(), OAuth2Error> {
+        let hasher =
+            client_secret::global().map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        match hasher.verify(presented, &sa.client_secret_hash) {
+            ClientSecretVerdict::Match => Ok(()),
+            ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
+                match self
+                    .service_account_repo
+                    .upgrade_client_secret_hash(
+                        tenant_id,
+                        &sa.client_id,
+                        &sa.client_secret_hash,
+                        &upgraded_hash,
+                    )
+                    .await
+                {
+                    Ok(true) => tracing::info!(
+                        client_id = %sa.client_id,
+                        "upgraded legacy service-account secret hash to the peppered scheme"
+                    ),
+                    Ok(false) => tracing::debug!(
+                        client_id = %sa.client_id,
+                        "legacy service-account secret-hash upgrade skipped — a concurrent \
+                         write won the compare-and-swap"
+                    ),
+                    Err(e) => tracing::warn!(
+                        client_id = %sa.client_id,
+                        error = %e,
+                        "failed to persist the legacy service-account secret-hash upgrade; \
                          authentication succeeded, the upgrade will be retried"
                     ),
                 }
@@ -445,6 +623,29 @@ where
             .client_secret
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
+
+        // Service accounts are the other machine principal in AXIAM and live in
+        // their own table. Both client-id families are **server-generated** with
+        // disjoint prefixes (`oa_` for `oauth2_client`, `sa_` for
+        // `service_account`), so the prefix selects the table unambiguously and
+        // keeps this path at one lookup.
+        //
+        // The prefix is NOT a security decision: it only picks which table to
+        // look in. The presented secret must still verify against the row that
+        // is actually found, so guessing a prefix only routes a caller to a
+        // table where their `client_id` does not exist — an `invalid_client`,
+        // exactly as before.
+        if client_id.starts_with(SERVICE_ACCOUNT_CLIENT_ID_PREFIX) {
+            return self
+                .handle_client_credentials_service_account(
+                    tenant_id,
+                    client_id,
+                    client_secret,
+                    req.scope.as_deref(),
+                    started,
+                )
+                .await;
+        }
 
         // Stage 1 — client lookup (DB round-trip #1).
         let t_client_lookup = std::time::Instant::now();

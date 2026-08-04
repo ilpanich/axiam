@@ -34,19 +34,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Legacy client-secret hashes in `service_account` are now countable, and the
-  situation is stated honestly (§15.2).** These rows cannot migrate lazily:
-  `upgrade_client_secret_hash` only fires on a successful verification, and
-  **nothing in the running server verifies a service-account secret** — they are
-  CRUD plus certificate binding, and the secret is issued at create/rotate but
-  never presented back. So unlike `oauth2_client` rows they never drain, which
-  is what blocked retiring the legacy hash arm: "no v1 `oauth2_client` rows
-  remain" does not answer the question, because this table is invisible to it.
+- **Service accounts can now authenticate via OAuth2 client-credentials.**
+  `POST /api/v1/service-accounts` and `rotate-secret` have always returned a
+  `client_secret` to the operator — but **no flow accepted it**. A service
+  account's only working authentication path was mTLS
+  (`POST /api/v1/auth/device`); the client-credentials grant verified against
+  the `oauth2_client` table only, and nothing ever compared
+  `service_account.client_secret_hash` against a presented secret.
 
-  `count_legacy_secret_hashes(tenant)` makes the backlog answerable, and startup
-  warns with the count and the only migration route that exists here —
-  **rotation**, which rewrites under the current scheme and current pepper. The
-  same applies to rows still keyed to a superseded pepper.
+  The grant now dispatches on the `client_id` prefix — `oa_` for `oauth2_client`,
+  `sa_` for `service_account`, both server-generated and disjoint, so one lookup
+  still suffices. The prefix is **not** a security decision: it only selects the
+  table, and the presented secret must still verify against the row found.
+
+  Three deliberate properties:
+  - **The secret is verified before the status check**, so a caller cannot
+    distinguish "exists but disabled" from "does not exist" by timing. A
+    non-Active account returns the same generic `invalid_client`.
+  - **No scope may be requested.** A service account registers no scopes, and
+    the subset rule leaves the empty set as the only valid request; its
+    authorization comes from the roles assigned to it, as on the mTLS path.
+  - **The token's `sub` is the service-account id**, not the client id, and its
+    `aud` is `axiam:m2m` (not the `axiam:user` the device path stamps for
+    backwards compatibility) so §4.3/`SEC-006` route narrowing keeps it off user
+    routes. A service account is now the same principal however it authenticated.
+
+- **Legacy client-secret hashes in `service_account` are now countable
+  (§15.2).** `count_legacy_secret_hashes(tenant)` plus a startup warning.
+  With the grant above in place these rows now migrate lazily on first
+  authentication, exactly as `oauth2_client` rows do; the count covers the case
+  migration cannot reach — a service account that never authenticates — which is
+  what decides whether the legacy hash arm can be retired. **Rotation** clears
+  such a row.
 
 ### Fixed
 

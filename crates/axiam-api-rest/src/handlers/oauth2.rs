@@ -31,6 +31,24 @@ use crate::state::AppState;
 /// bounding what an anonymous caller can push into the log.
 const MAX_CLIENT_ID_LEN: usize = 128;
 
+/// Truncate to at most [`MAX_CLIENT_ID_LEN`] **bytes**, cutting on a character
+/// boundary so the result is still valid UTF-8.
+///
+/// §22.3 residual 3: the previous `chars().take(N)` capped code points, not
+/// bytes, so a multibyte id could still store 4× the intended size. The cap
+/// exists to bound what an anonymous caller can push into an append-only log,
+/// and a bound expressed in the wrong unit is not the bound that was intended.
+fn truncate_bytes_on_char_boundary(s: &str) -> String {
+    if s.len() <= MAX_CLIENT_ID_LEN {
+        return s.to_owned();
+    }
+    let mut end = MAX_CLIENT_ID_LEN;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -224,16 +242,33 @@ pub async fn token<C: Connection + Clone>(
         }
         Err(e) => {
             if matches!(e, OAuth2Error::InvalidClient(_)) {
-                append_client_auth_failure_audit(
-                    &state.tenant_repo,
-                    &state.audit_repo,
-                    tenant_id,
-                    attempted_client_id.as_deref(),
-                    &grant_type,
-                    peer_ip(&req),
-                    client_ip(&req),
-                )
-                .await;
+                // §22.3 residual 1: this used to be awaited, which put a tenant
+                // read (and, when it succeeded, an insert) on the response path
+                // — so a failed client auth returned measurably faster for a
+                // NONEXISTENT tenant than a real one, on an unauthenticated
+                // endpoint. Detaching it removes the differential at its source
+                // rather than trying to balance the two branches, and makes the
+                // "fire-and-forget" this function has always claimed actually
+                // true. The response below no longer waits on the audit sink at
+                // all.
+                let tenant_repo = state.tenant_repo.clone();
+                let audit_repo = state.audit_repo.clone();
+                let attempted = attempted_client_id.clone();
+                let grant = grant_type.clone();
+                let peer = peer_ip(&req);
+                let forwarded = client_ip(&req);
+                actix_web::rt::spawn(async move {
+                    append_client_auth_failure_audit(
+                        &tenant_repo,
+                        &audit_repo,
+                        tenant_id,
+                        attempted.as_deref(),
+                        &grant,
+                        peer,
+                        forwarded,
+                    )
+                    .await;
+                });
             }
             build_oauth2_error_response(&e)
         }
@@ -271,18 +306,31 @@ pub async fn token<C: Connection + Clone>(
 /// tenant's append-only log — or into a tenant id that never existed — at
 /// request rate. Three separate controls apply here as a result:
 ///
-/// 1. **The tenant is resolved before the write.** An unknown tenant is
-///    dropped with a rate-limited warning instead of minting log rows under an
-///    id no operator will ever read. This bounds the set of writable partitions
-///    to tenants that actually exist. It does *not* stop a caller from
-///    generating failures against a real tenant they do not belong to — and it
-///    deliberately doesn't try to, because that event is **true**: a failed
-///    client authentication did occur against that tenant, and suppressing it
-///    would blind the operator to a real attack. The volumetric control for
-///    that is the endpoint's rate limit, not the audit layer.
-/// 2. **The client id is truncated.** It is caller-supplied and otherwise
-///    unbounded, unlike the `client_ip`/`user_agent` helpers which have always
-///    capped their inputs.
+/// 1. **The tenant is resolved before the write**, and a row that cannot be
+///    attributed to a real tenant goes to the **system partition**
+///    (`tenant_id = nil`, the one [`AuditLogRepository::list_system`] serves)
+///    rather than to a caller-chosen id. This bounds what an anonymous caller
+///    can steer: they may cause a row, but never choose which real tenant's
+///    append-only log it lands in. It does *not* stop a caller from generating
+///    failures against a real tenant they do not belong to — and deliberately
+///    doesn't try to, because that event is **true**: a failed client
+///    authentication did occur against that tenant, and suppressing it would
+///    blind the operator to a real attack. The volumetric control is the
+///    endpoint's rate limit, not the audit layer.
+///
+///    §22.3 residual 2: an earlier version *dropped* the row whenever the
+///    tenant read failed for any reason other than `NotFound`. The reasoning
+///    (a DB outage must not turn a 401 into a 500) was right, but the effect
+///    was that a database fault cost exactly the telemetry this row exists to
+///    provide — and a database fault is plausibly correlated with an incident.
+///    Routing to the system partition keeps the signal in precisely the case
+///    where losing it hurts most, while still refusing to guess a tenant.
+/// 2. **The client id is truncated on a character boundary, by bytes.**
+///    §22.3 residual 3: the cap was applied with `chars().take(N)`, so a
+///    multibyte id still stored up to 4N bytes. It is caller-supplied and
+///    otherwise unbounded, unlike the `client_ip`/`user_agent` helpers which
+///    have always capped their inputs (and which share the same char-vs-byte
+///    looseness, bounded there by much smaller limits).
 /// 3. **The IP is recorded at two trust levels.** `ip_address` carries the
 ///    transport peer address, which a caller cannot forge. The
 ///    `X-Forwarded-For`-derived value goes to metadata under a name that says
@@ -299,36 +347,43 @@ async fn append_client_auth_failure_audit<C: Connection + Clone>(
     peer_ip: Option<String>,
     forwarded_ip_untrusted: Option<String>,
 ) {
-    // Control 1 — never write into a tenant that does not exist.
-    match tenant_repo.get_by_id(tenant_id).await {
-        Ok(_) => {}
+    // Control 1 — attribute the row to the request's tenant only when that
+    // tenant demonstrably exists; otherwise fall back to the system partition.
+    // `attributed_tenant` is nil in both the unknown and the indeterminate
+    // case, so a caller can never place a row in a real tenant's log by naming
+    // one.
+    let (attributed_tenant, tenant_note) = match tenant_repo.get_by_id(tenant_id).await {
+        Ok(_) => (tenant_id, None),
         Err(AxiamError::NotFound { .. }) => {
             tracing::warn!(
-                %tenant_id,
+                claimed_tenant_id = %tenant_id,
                 %grant_type,
-                "oauth2: dropping client-auth-failure audit for unknown tenant (SEC-087)"
+                "oauth2: client-auth-failure audit routed to the system partition — unknown tenant (SEC-087)"
             );
-            return;
+            (Uuid::nil(), Some("unknown_tenant"))
         }
         Err(e) => {
-            // Same fire-and-forget posture as the append below: a tenant-lookup
-            // outage must not turn a 401 into a 500 (T-15-04). Drop the row.
+            // A DB fault must not turn a 401 into a 500 (T-15-04), and must not
+            // cost the telemetry either (§22.3 residual 2). Record it as
+            // unattributed rather than dropping it.
             tracing::error!(
                 error = %e,
-                %tenant_id,
-                "oauth2: tenant lookup failed for client-auth-failure audit"
+                claimed_tenant_id = %tenant_id,
+                "oauth2: tenant lookup failed for client-auth-failure audit; \
+                 routing to the system partition"
             );
-            return;
+            (Uuid::nil(), Some("tenant_lookup_failed"))
         }
-    }
+    };
 
-    // Control 2 — bound the one remaining caller-controlled string.
+    // Control 2 — bound the one remaining caller-controlled string, by BYTES,
+    // truncating on a character boundary so the stored value stays valid UTF-8.
     let attempted_client_id: Option<String> =
-        attempted_client_id.map(|s| s.chars().take(MAX_CLIENT_ID_LEN).collect::<String>());
+        attempted_client_id.map(truncate_bytes_on_char_boundary);
 
     if let Err(e) = audit_repo
         .append(CreateAuditLogEntry {
-            tenant_id,
+            tenant_id: attributed_tenant,
             actor_id: Uuid::nil(),
             actor_type: ActorType::System,
             action: "oauth2.client_auth_failed".into(),
@@ -341,6 +396,10 @@ async fn append_client_auth_failure_audit<C: Connection + Clone>(
                 "grant_type": grant_type,
                 // Named so nobody downstream mistakes it for verified input.
                 "forwarded_for_untrusted": forwarded_ip_untrusted,
+                // Present only on a system-partition row: the tenant the caller
+                // named, and why it could not be attributed. Also caller-supplied.
+                "claimed_tenant_id_untrusted": tenant_note.map(|_| tenant_id.to_string()),
+                "unattributed_reason": tenant_note,
             })),
         })
         .await
@@ -349,7 +408,7 @@ async fn append_client_auth_failure_audit<C: Connection + Clone>(
         // the audit sink is unavailable (T-15-04).
         tracing::error!(
             error = %e,
-            %tenant_id,
+            tenant_id = %attributed_tenant,
             %grant_type,
             "oauth2: failed to write oauth2.client_auth_failed audit log"
         );

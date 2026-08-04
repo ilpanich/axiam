@@ -70,6 +70,9 @@ export default function Footer({ go }: FooterProps) {
             <button className="ax-navlink" onClick={() => go("sdks")}>
               SDKs
             </button>
+            <button className="ax-navlink" onClick={() => go("security")}>
+              Security
+            </button>
             <a
               className="ax-navlink"
               href={GITHUB_URL}

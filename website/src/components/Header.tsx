@@ -18,6 +18,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Home", page: "home", active: (p) => p === "home" },
   { label: "SDKs", page: "sdks", active: (p) => p === "sdks" || p === "sdk" },
   { label: "Docs", page: "docs", active: (p) => p === "docs" },
+  { label: "Security", page: "security", active: (p) => p === "security" },
   { label: "Benchmarks", page: "bench", active: (p) => p === "bench" },
   { label: "Roadmap", page: "roadmap", active: (p) => p === "roadmap" },
   { label: "News", page: "news", active: (p) => p === "news" || p === "post" },

@@ -11,6 +11,7 @@ import NewsIndex from "./pages/NewsIndex";
 import NewsPost from "./pages/NewsPost";
 import Benchmarks from "./pages/Benchmarks";
 import Roadmap from "./pages/Roadmap";
+import Security from "./pages/Security";
 
 const scrollTop = () => {
   if (typeof window !== "undefined") window.scrollTo(0, 0);
@@ -51,6 +52,7 @@ export default function App() {
         {page === "post" && <NewsPost post={post} go={go} />}
         {page === "bench" && <Benchmarks />}
         {page === "roadmap" && <Roadmap />}
+        {page === "security" && <Security go={go} />}
       </main>
       <Footer go={go} />
     </div>

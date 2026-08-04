@@ -10,7 +10,12 @@ const inlineCodeStyle = {
   padding: "1px 5px",
 } as const;
 
-/** Render prose text, turning `backtick` spans into inline <code>. */
+/**
+ * Render prose text, turning `backtick` spans into inline <code>,
+ * `**double-asterisk**` spans into bold and `*single-asterisk*` spans into
+ * italics. Code wins: asterisks inside a backtick span are left alone, so a
+ * code sample never gets reinterpreted as markup.
+ */
 export function renderInline(text: string): ReactNode {
   const parts = text.split("`");
   return parts.map((part, i) =>
@@ -19,8 +24,30 @@ export function renderInline(text: string): ReactNode {
         {part}
       </code>
     ) : (
-      <Fragment key={i}>{part}</Fragment>
+      <Fragment key={i}>{renderBold(part)}</Fragment>
     ),
+  );
+}
+
+function renderBold(text: string): ReactNode {
+  if (!text.includes("*")) return text;
+  const parts = text.split("**");
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <strong key={i} style={{ color: "#e2e8f0", fontWeight: 700 }}>
+        {part}
+      </strong>
+    ) : (
+      <Fragment key={i}>{renderItalic(part)}</Fragment>
+    ),
+  );
+}
+
+function renderItalic(text: string): ReactNode {
+  if (!text.includes("*")) return text;
+  const parts = text.split("*");
+  return parts.map((part, i) =>
+    i % 2 === 1 ? <em key={i}>{part}</em> : <Fragment key={i}>{part}</Fragment>,
   );
 }
 

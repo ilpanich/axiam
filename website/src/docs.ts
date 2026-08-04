@@ -10,6 +10,13 @@ import type { Page } from "./types";
  * contents (built from the `h` blocks).
  */
 
+/** An external reference rendered as a labelled link with an optional note. */
+export interface DocLink {
+  label: string;
+  href: string;
+  note?: string;
+}
+
 export interface DocCard {
   title: string;
   body: string;
@@ -23,8 +30,20 @@ export type DocBlock =
   | { type: "code"; caption?: string; code: string }
   | { type: "note"; text: string }
   | { type: "warn"; text: string }
-  | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "cards"; cards: DocCard[] };
+  | {
+      type: "table";
+      headers: string[];
+      rows: string[][];
+      /**
+       * Render the first column as ordinary prose rather than the default
+       * monospace, non-wrapping key column — used where the first cell is a
+       * phrase (an asset, a trust boundary, a framework) rather than an
+       * identifier.
+       */
+      proseFirstCol?: boolean;
+    }
+  | { type: "cards"; cards: DocCard[] }
+  | { type: "links"; links: DocLink[] };
 
 export interface DocPage {
   slug: string;

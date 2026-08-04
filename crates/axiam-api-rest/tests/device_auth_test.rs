@@ -334,6 +334,33 @@ async fn device_auth_mints_service_account_sub_kind() {
 
     let claims = decode_access_token(access_token, &auth).unwrap();
     assert_eq!(claims.sub_kind, SubjectKind::ServiceAccount);
+
+    // §17.2 residual 1: the device path now mints the MACHINE audience. It
+    // used to stamp `axiam:user`, which meant a certificate-authenticated
+    // device passed every user-facing route guard — the same principal got a
+    // user token by certificate and a machine token by secret, leaving the
+    // SEC-006 / §4.3 narrowing half applied.
+    //
+    // Nothing pinned the audience on this path before, which is why the flip
+    // was invisible to this suite.
+    assert_eq!(
+        claims.aud.as_deref(),
+        Some(axiam_auth::token::AUD_M2M),
+        "a device token must carry the machine audience"
+    );
+
+    // And the narrowing must actually bite: the same token is refused by a
+    // user-facing route. Without this the assertion above only pins a string.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/users")
+        .insert_header(("Authorization", format!("Bearer {access_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "a device token must not be accepted on a user-facing route"
+    );
 }
 
 #[actix_rt::test]

@@ -147,6 +147,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axiam_authz::decision_cache::DecisionCache;
@@ -798,7 +799,21 @@ pub struct CacheInvalidationPublisher {
     ///
     /// `tokio::sync::Mutex`, not `std::sync::Mutex`: the guard is held across
     /// the `.await` on the broker's confirm.
-    channel: TokioMutex<Option<Channel>>,
+    ///
+    /// Paired with a **generation counter**, bumped every time the slot is
+    /// filled. §17.1 recorded that the compare-before-clear below originally
+    /// tested `Channel::id()`, which in lapin is the AMQP channel *number*
+    /// (`u16`) — the broker recycles it after a close, so it identifies a slot
+    /// on the connection rather than a particular handle. Two channels that
+    /// are genuinely different could therefore compare equal (a reopen that
+    /// happened to be assigned the same number), and the clear would discard a
+    /// healthy replacement. The generation is monotonic and process-local, so
+    /// the comparison is exact and does not rest on a lapin invariant.
+    channel: TokioMutex<Option<(u64, Channel)>>,
+    /// Source of the generation stamps above. Every increment happens while
+    /// the `channel` lock is held, which supplies all the ordering that
+    /// matters; the counter is atomic purely so the slot's type stays simple.
+    next_generation: AtomicU64,
     master_key: Vec<u8>,
     origin_id: Uuid,
 }
@@ -819,6 +834,7 @@ impl CacheInvalidationPublisher {
         Self {
             channels,
             channel: TokioMutex::new(None),
+            next_generation: AtomicU64::new(0),
             master_key,
             origin_id,
         }
@@ -878,19 +894,22 @@ impl CacheInvalidationPublisher {
     /// reopen logic single-threaded while letting publishes proceed
     /// concurrently — which is what the AMQP channel already supports.
     async fn publish_payload(&self, payload: &[u8]) -> Result<(), AmqpError> {
-        let channel = {
+        let (generation, channel) = {
             let mut slot = self.channel.lock().await;
 
             // Drop a channel the broker has already closed, so the next block
             // opens a fresh one instead of publishing into a dead handle.
-            if slot.as_ref().is_some_and(|c| !c.status().connected()) {
+            if slot.as_ref().is_some_and(|(_, c)| !c.status().connected()) {
                 warn!("Cache-invalidation publisher channel is closed — reopening");
                 *slot = None;
             }
             if slot.is_none() {
-                *slot = Some(self.channels.open().await?);
+                let opened = self.channels.open().await?;
+                let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                *slot = Some((generation, opened));
             }
-            slot.as_ref().expect("channel opened above").clone()
+            let (generation, channel) = slot.as_ref().expect("channel opened above");
+            (*generation, channel.clone())
             // Guard dropped here — the confirm below is awaited unlocked.
         };
 
@@ -909,8 +928,16 @@ impl CacheInvalidationPublisher {
                 // replaced the slot with a healthy channel. Clearing
                 // unconditionally would discard that one too, and a burst of
                 // failures could then thrash the slot indefinitely.
+                //
+                // The comparison is on the generation stamp, not on
+                // `Channel::id()`: the latter is the broker's channel *number*
+                // and is recycled after a close, so a reopened channel could
+                // wear the same id as the dead one this call was holding and
+                // be cleared in its place (§17.1). Generations are monotonic
+                // and never reused, so `==` here means "still the very handle
+                // that failed" and nothing else.
                 let mut slot = self.channel.lock().await;
-                if slot.as_ref().is_some_and(|c| c.id() == channel.id()) {
+                if slot.as_ref().is_some_and(|(g, _)| *g == generation) {
                     *slot = None;
                 }
                 Err(e)

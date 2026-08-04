@@ -194,10 +194,28 @@ pub fn issue_client_credentials_token(
 /// The `sub` claim is the service account's `user_id` (mirrors the shape
 /// the device-auth handler previously passed to [`issue_access_token`]).
 /// `jti` is caller-supplied — service-account/device auth has no session
-/// row, so callers pass a random UUID. `aud` and `scope` mirror the values
-/// the device-auth call previously passed to `issue_access_token`
-/// ([`AUD_USER`], no scopes) — only `sub_kind` differs (D-09). This claim
-/// is informational only (D-10): validation and authz are unaffected.
+/// row, so callers pass a random UUID. `scope` is empty: a device's
+/// authorization comes from the roles assigned to its service account.
+///
+/// # ⚠ Breaking change — `aud` is now [`AUD_M2M`]
+///
+/// This function used to stamp [`AUD_USER`], so a certificate-authenticated
+/// device received a **user**-audience token and passed every user-facing
+/// route guard. That was a documented back-compat decision, but it meant the
+/// same principal got a user token by certificate and a machine token by
+/// secret, leaving the SEC-006 / §4.3 audience narrowing only half applied
+/// (§17.2 residual 1).
+///
+/// Both service-account authentication paths — mTLS here, and
+/// [`issue_service_account_client_credentials_token`] — now mint
+/// [`AUD_M2M`]. The audience finally describes *what kind of principal
+/// holds the token* rather than which endpoint happened to issue it.
+///
+/// **Operator impact:** a device can no longer call user-facing routes. The
+/// authorization-check endpoints accept machine tokens via
+/// `AuthenticatedPrincipal`; any other route a fleet depends on must be
+/// migrated deliberately, which is the point — those grants were previously
+/// implicit.
 pub fn issue_service_account_token(
     user_id: Uuid,
     tenant_id: Uuid,
@@ -215,7 +233,8 @@ pub fn issue_service_account_token(
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti,
-        aud: Some(AUD_USER.to_string()),
+        // §17.2 residual 1: was AUD_USER. See the breaking-change note above.
+        aud: Some(AUD_M2M.to_string()),
         scope: None,
         sub_kind: SubjectKind::ServiceAccount,
     };

@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+use axiam_core::repository::AuditLogRepository;
+use axiam_db::SurrealAuditLogRepository;
+
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::client_info::client_ip;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -153,6 +158,7 @@ pub async fn authorize<C: Connection + Clone>(
     ),
 )]
 pub async fn token<C: Connection + Clone>(
+    req: HttpRequest,
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<TokenRequest>,
     state: web::Data<AppState<C>>,
@@ -163,6 +169,10 @@ pub async fn token<C: Connection + Clone>(
     // I5: keep the grant type for the stage-timing event below. The token
     // service moves `form`, so copy the (short) discriminator first.
     let grant_type = form.grant_type.clone();
+    // §17.2 residual 3: same reason, for the failed-client-auth audit event
+    // below. Never the secret — only the client id, which is the caller's own
+    // input and is what an operator needs to correlate an attack.
+    let attempted_client_id = form.client_id.clone();
     let started = std::time::Instant::now();
 
     match state.token_service.exchange(tenant_id, form).await {
@@ -205,7 +215,75 @@ pub async fn token<C: Connection + Clone>(
                 .content_type("application/json")
                 .body(body)
         }
-        Err(e) => build_oauth2_error_response(&e),
+        Err(e) => {
+            if matches!(e, OAuth2Error::InvalidClient(_)) {
+                append_client_auth_failure_audit(
+                    &state.audit_repo,
+                    tenant_id,
+                    attempted_client_id.as_deref(),
+                    &grant_type,
+                    client_ip(&req),
+                )
+                .await;
+            }
+            build_oauth2_error_response(&e)
+        }
+    }
+}
+
+/// Append an `oauth2.client_auth_failed` audit entry, fire-and-forget.
+///
+/// §17.2 residual 3: a failed client authentication at the token endpoint used
+/// to accrue **nothing** — no counter, no lockout, no audit row, no metric —
+/// and `/oauth2` is not covered by the audit middleware, so nothing else
+/// filled the gap either. Contrast the interactive login path, which records
+/// every failure and applies exponential backoff.
+///
+/// This closes the **detection** half only, which is the half that was
+/// genuinely missing. Lockout is deliberately *not* added here: client
+/// credentials are 256-bit CSPRNG values, so online guessing is not the threat
+/// — and a lockout keyed on a caller-supplied `client_id` would hand any
+/// unauthenticated party a denial-of-service against a known client. The
+/// endpoint's existing rate limit remains the volumetric control.
+///
+/// Recorded with `actor_id = Uuid::nil()` and [`ActorType::System`] because
+/// the caller is by definition unauthenticated: the presented `client_id`
+/// either does not exist or did not prove possession of its secret, so it must
+/// not be promoted into the actor field as though it had. It goes in the
+/// metadata instead, where it is evidence rather than identity.
+///
+/// The secret is never recorded, in any form.
+async fn append_client_auth_failure_audit<C: Connection + Clone>(
+    audit_repo: &SurrealAuditLogRepository<C>,
+    tenant_id: Uuid,
+    attempted_client_id: Option<&str>,
+    grant_type: &str,
+    ip_address: Option<String>,
+) {
+    if let Err(e) = audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "oauth2.client_auth_failed".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Failure,
+            ip_address,
+            metadata: Some(serde_json::json!({
+                "client_id": attempted_client_id,
+                "grant_type": grant_type,
+            })),
+        })
+        .await
+    {
+        // Never propagated: a token-endpoint 401 must not become a 500 because
+        // the audit sink is unavailable (T-15-04).
+        tracing::error!(
+            error = %e,
+            %tenant_id,
+            %grant_type,
+            "oauth2: failed to write oauth2.client_auth_failed audit log"
+        );
     }
 }
 

@@ -23,6 +23,28 @@ use uuid::Uuid;
 use crate::error::OAuth2Error;
 use crate::pkce;
 
+/// The single `error_description` every token-endpoint client-authentication
+/// failure returns, whatever actually went wrong (SEC-086).
+///
+/// The `invalid_client` error *code* was already uniform across "no such
+/// client" and "wrong secret". The *description* was not: an unknown client
+/// said `"client not found"`, which let an unauthenticated caller probe
+/// whether a given `client_id` — including an `sa_…` service-account id —
+/// exists. The masquerade the QUAL-03/D-11 comments describe was applied to
+/// the code and not to the message; this constant applies it to both.
+///
+/// The `NotFound`-versus-other-error distinction those comments protect is
+/// unaffected: it stays internal, mapping to `invalid_client` versus
+/// `server_error`, so a DB outage still never reads as bad credentials. Only
+/// the caller-visible wording is collapsed.
+///
+/// Deliberately **not** used at the authorization endpoint
+/// (`authorize.rs`): there `client_id` is public by construction, RFC 6749
+/// §4.1.2.1 requires informing the resource owner directly rather than
+/// redirecting, and no credential is presented — so "invalid client
+/// credentials" would be actively misleading there.
+const CLIENT_AUTH_FAILED: &str = "invalid client credentials";
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -204,9 +226,9 @@ where
                 }
                 Ok(())
             }
-            ClientSecretVerdict::Mismatch => Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            )),
+            ClientSecretVerdict::Mismatch => {
+                Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))
+            }
         }
     }
 
@@ -252,12 +274,37 @@ where
                 // Same taxonomy as the oauth2_client branch: only a genuinely
                 // unknown client is `invalid_client`; a DB outage must never
                 // masquerade as bad credentials (error-oracle, QUAL-03/D-11).
+                // The description is CLIENT_AUTH_FAILED here too, so an
+                // unauthenticated caller cannot learn whether an `sa_…`
+                // client id exists (SEC-086).
                 AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient("client not found".into())
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
         let client_lookup_us = t_client_lookup.elapsed().as_micros() as u64;
+
+        // Defence in depth (§17.2 residual 6). The lookup above is already
+        // tenant-scoped in SQL, so this can only fire if that predicate is
+        // ever dropped or a repository implementation ignores `tenant_id` —
+        // exactly the regression the assertion exists to catch. Without it the
+        // cross-tenant property of this grant lives entirely in a `WHERE`
+        // clause two crates away, and no test in this crate can prove it
+        // because the mocks do not filter by tenant.
+        //
+        // Deliberately checked *before* the secret is verified: a row from the
+        // wrong tenant must not have its secret compared at all, and the
+        // presented client id is the caller's own input, so refusing early
+        // leaks nothing it did not already know.
+        if sa.tenant_id != tenant_id {
+            tracing::error!(
+                requested_tenant = %tenant_id,
+                account_tenant = %sa.tenant_id,
+                "service-account lookup returned a row from another tenant — refusing; \
+                 this indicates a dropped tenant predicate in the repository layer"
+            );
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        }
 
         let t_secret_verify = std::time::Instant::now();
         let secret_result = self
@@ -273,9 +320,7 @@ where
                 status = ?sa.status,
                 "service-account client-credentials refused: account is not active"
             );
-            return Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            ));
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 
         if let Some(scope) = requested_scope.filter(|s| !s.trim().is_empty()) {
@@ -374,9 +419,9 @@ where
                 }
                 Ok(())
             }
-            ClientSecretVerdict::Mismatch => Err(OAuth2Error::InvalidClient(
-                "invalid client credentials".into(),
-            )),
+            ClientSecretVerdict::Mismatch => {
+                Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))
+            }
         }
     }
 
@@ -422,9 +467,12 @@ where
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
-                // bad client credentials (error-oracle).
+                // bad client credentials (error-oracle). The distinction is
+                // internal only — the caller-visible description is
+                // CLIENT_AUTH_FAILED either way, so it cannot be used to
+                // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient("client not found".into())
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
@@ -657,9 +705,12 @@ where
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
-                // bad client credentials (error-oracle).
+                // bad client credentials (error-oracle). The distinction is
+                // internal only — the caller-visible description is
+                // CLIENT_AUTH_FAILED either way, so it cannot be used to
+                // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient("client not found".into())
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
@@ -802,9 +853,12 @@ where
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
-                // bad client credentials (error-oracle).
+                // bad client credentials (error-oracle). The distinction is
+                // internal only — the caller-visible description is
+                // CLIENT_AUTH_FAILED either way, so it cannot be used to
+                // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient("client not found".into())
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
@@ -1094,9 +1148,12 @@ where
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
-                // bad client credentials (error-oracle).
+                // bad client credentials (error-oracle). The distinction is
+                // internal only — the caller-visible description is
+                // CLIENT_AUTH_FAILED either way, so it cannot be used to
+                // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient("client not found".into())
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;

@@ -1,6 +1,6 @@
 import type { Page } from "../types";
-import { GITHUB_URL } from "../data";
-import { GithubIcon } from "./icons";
+import { GITHUB_URL, COVERALLS_URL } from "../data";
+import { CoverallsIcon, GithubIcon } from "./icons";
 import { logoMark } from "../assets";
 
 interface HeaderProps {
@@ -66,6 +66,23 @@ export default function Header({ page, go }: HeaderProps) {
         >
           <GithubIcon />
           Star
+        </a>
+        <a
+          className="ax-navlink"
+          href={COVERALLS_URL}
+          target="_blank"
+          rel="noreferrer"
+          title="Test coverage on Coveralls"
+          aria-label="AXIAM test coverage on Coveralls"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 7,
+            color: "#cbd5e1",
+          }}
+        >
+          <CoverallsIcon />
+          Coverage
         </a>
         <button className="ax-cta btn-primary" onClick={() => go("docs")}>
           Get started

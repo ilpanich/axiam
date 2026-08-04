@@ -8,6 +8,18 @@ export function GithubIcon({ size = 17 }: { size?: number }) {
   );
 }
 
+/**
+ * Coveralls' mark — the five-pointed star from their favicon, drawn in
+ * `currentColor` so it sits alongside the GitHub icon in the header.
+ */
+export function CoverallsIcon({ size = 17 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 1.6l2.94 7.24 7.8.54-5.99 5.02 1.9 7.58L12 17.9l-6.65 4.08 1.9-7.58-5.99-5.02 7.8-.54L12 1.6z" />
+    </svg>
+  );
+}
+
 const strokeProps = {
   width: 24,
   height: 24,

@@ -24,6 +24,7 @@ export const SDKS: Sdk[] = [
     docsUrl: "https://docs.rs/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-rust-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-rust-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-rust-sdk?branch=main",
     pkg: "axiam-sdk",
     install: "cargo add axiam-sdk",
     blurb: "Native async client with the full REST, gRPC and AMQP surface.",
@@ -62,6 +63,7 @@ async fn get_doc(path: web::Path<String>) -> impl Responder {
     docsUrl: "https://tsdocs.dev/docs/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-typescript-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-typescript-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-typescript-sdk?branch=main",
     pkg: "axiam-sdk",
     install: "npm install axiam-sdk",
     blurb:
@@ -104,6 +106,7 @@ export class DocsController {
     docsUrl: "https://axiam-sdk.readthedocs.io/",
     repoUrl: "https://github.com/ilpanich/axiam-python-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-python-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-python-sdk?branch=main",
     pkg: "axiam-sdk",
     install: "pip install axiam-sdk",
     blurb:
@@ -143,6 +146,7 @@ def read_doc(doc_id: str,
     docsUrl: "https://javadoc.io/doc/io.github.ilpanich/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-java-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-java-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-java-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk",
     install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0")',
     blurb:
@@ -183,6 +187,7 @@ class DocController {
     docsUrl: "https://www.fuget.org/packages/Axiam.Sdk",
     repoUrl: "https://github.com/ilpanich/axiam-csharp-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-csharp-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-csharp-sdk?branch=main",
     pkg: "Axiam.Sdk",
     install: "dotnet add package Axiam.Sdk",
     blurb:
@@ -219,6 +224,7 @@ public class DocsController : ControllerBase
     registryUrl: "https://packagist.org/packages/axiam/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-php-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-php-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-php-sdk?branch=main",
     pkg: "axiam/axiam-sdk",
     install: "composer require axiam/axiam-sdk",
     blurb: "PSR-friendly client with middleware for Laravel and Symfony apps.",
@@ -260,6 +266,7 @@ class DocController
     docsUrl: "https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk#section-documentation",
     repoUrl: "https://github.com/ilpanich/axiam-go-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-go-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-go-sdk?branch=main",
     pkg: "github.com/ilpanich/axiam-go-sdk",
     install: "go get github.com/ilpanich/axiam-go-sdk",
     blurb:
@@ -296,6 +303,7 @@ mux.Handle("GET /docs/{id}",
     docsUrl: "https://javadoc.io/doc/io.github.ilpanich/axiam-sdk-kotlin",
     repoUrl: "https://github.com/ilpanich/axiam-kotlin-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-kotlin-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-kotlin-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk-kotlin",
     install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha15")',
     blurb:
@@ -343,6 +351,7 @@ routing {
     docsUrl: "https://ilpanich.github.io/axiam-swift-sdk/",
     repoUrl: "https://github.com/ilpanich/axiam-swift-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-swift-sdk/tree/main/Examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-swift-sdk?branch=main",
     pkg: "AxiamSDK",
     install:
       '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-alpha15")',
@@ -389,6 +398,7 @@ let user = try await requireRead(ctx)`,
     docsUrl: "https://ilpanich.github.io/axiam-c-sdk/",
     repoUrl: "https://github.com/ilpanich/axiam-c-sdk",
     examplesUrl: "https://github.com/ilpanich/axiam-c-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-c-sdk?branch=main",
     pkg: "axiam-c-sdk",
     install: "vcpkg install axiam-c-sdk --overlay-ports=./ports",
     blurb:
@@ -437,6 +447,7 @@ if (st != AXIAM_GUARD_ALLOW)
     repoUrl: "https://github.com/ilpanich/axiam-cplusplus-sdk",
     examplesUrl:
       "https://github.com/ilpanich/axiam-cplusplus-sdk/tree/main/examples",
+    coverageUrl: "https://coveralls.io/github/ilpanich/axiam-cplusplus-sdk?branch=main",
     pkg: "axiam-cpp-sdk",
     install: "vcpkg install axiam-cpp-sdk --overlay-ports=./ports",
     blurb:
@@ -940,3 +951,12 @@ export const BENCH_RPS_PER_GIB: BenchResourceRow[] = [
 ];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";
+
+/**
+ * Line coverage for the server workspace and the admin frontend, reported to
+ * Coveralls by `.github/workflows/coverage.yml` on every push to main. Each
+ * SDK repository reports its own coverage the same way — see `coverageUrl` on
+ * the entries in `SDKS`.
+ */
+export const COVERALLS_URL =
+  "https://coveralls.io/github/ilpanich/axiam?branch=main";

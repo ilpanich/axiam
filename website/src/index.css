@@ -354,6 +354,11 @@ code {
 .ax-footer-col {
   display: flex;
   flex-direction: column;
+  /* Shrink-wrap each link to its text. Without this the items stretch to the
+     full column width, and a <button>'s UA `text-align: center` then floats
+     its label away from the column heading while the <a> items stay flush
+     left — the two kinds of link in a column no longer line up. */
+  align-items: flex-start;
   gap: 10px;
   font-size: 14px;
 }

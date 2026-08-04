@@ -1,4 +1,5 @@
 import type { Page, Sdk } from "../types";
+import { CoverallsIcon } from "../components/icons";
 
 interface SdkDetailProps {
   sdk: Sdk;
@@ -170,6 +171,17 @@ export default function SdkDetail({ sdk, go }: SdkDetailProps) {
           rel="noreferrer"
         >
           Examples ↗
+        </a>
+        <a
+          className="ax-ghost"
+          href={sdk.coverageUrl}
+          target="_blank"
+          rel="noreferrer"
+          title={`${sdk.name} SDK test coverage on Coveralls`}
+          style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+        >
+          <CoverallsIcon size={15} />
+          Coverage ↗
         </a>
       </div>
 

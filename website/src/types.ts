@@ -25,6 +25,12 @@ export interface Sdk {
   repoUrl: string;
   /** Link to the runnable examples folder inside the SDK repository. */
   examplesUrl: string;
+  /**
+   * The SDK's Coveralls page. Every SDK repository reports line coverage to
+   * Coveralls on each push to its main branch, the same way the server
+   * workspace does.
+   */
+  coverageUrl: string;
   pkg: string;
   install: string;
   blurb: string;

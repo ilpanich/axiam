@@ -1577,3 +1577,42 @@ such a modelling change would have to start.
    introduced by the previous round's fixes; SEC-087 was mine. This round adds
    a tenant lookup and a new helper to an unauthenticated path — the same shape
    of change that produced SEC-087.
+
+### 20.7 RUSTSEC-2026-0235 — suppressed as a verified false positive
+
+Not a §19 finding; it surfaced as a red `Security Scan` while this round was in
+review, and it was failing on `main` as well — `a4cd23a2`, a docs-only commit
+touching one markdown file, fails the identical check. The RUSTSEC database
+refreshed between the 09:24 and 09:48 runs.
+
+The visible errors (`Path does not exist: *.sarif`) are downstream noise: the
+`cargo-audit` step exits 1, which aborts the job before any scanner writes its
+SARIF file.
+
+The advisory is **rkyv 0.7.46** — out-of-bounds reads in archives containing
+`Rc`/`Arc`, fixed in 0.8.17. Suppressed after verifying it cannot affect any
+AXIAM artifact:
+
+- rkyv is `optional = true` in `rust_decimal`, gated behind that crate's `rkyv`
+  feature, and **nothing in our graph enables it**.
+- `cargo tree -i rkyv --target all --all-features` reports *"nothing to print"*,
+  and rkyv occurs **zero** times in the fully-resolved tree.
+- `cargo-deny`, which resolves features rather than reading the lockfile,
+  independently reports `advisory-not-detected — no crate matched advisory
+  criteria` for this id. Two tools disagreeing in exactly the way the
+  explanation predicts is the strongest evidence available here.
+
+The cause is that `cargo-audit` scans `Cargo.lock`, which records optional
+dependencies whether or not any feature ever pulls them in. So this is a
+lockfile artifact, not a vulnerability in shipped code.
+
+This makes it **different in kind from the five existing ignores**, and the
+entries say so. Those are real dependencies carrying a reachability argument —
+a claim about how the code is used, which can be wrong. This one is a claim
+that the code is never compiled, which is mechanically checkable, and the
+comment records the exact command to re-check it. Both `ci.yml` and `deny.toml`
+were updated, since the former's comment requires them to stay in sync.
+
+`rust_decimal` 1.42.1 is current and still pins rkyv 0.7.x, so there is no
+upgrade path either — but that is incidental: the fix here is not "we accept
+the risk", it is "there is no risk to accept in this build".

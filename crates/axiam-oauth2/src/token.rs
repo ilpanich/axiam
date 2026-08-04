@@ -458,6 +458,23 @@ where
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
 
+        // Require client_secret — all clients are confidential (no
+        // public-client distinction exists yet).
+        //
+        // SEC-086 (second pass): this check MUST precede the client lookup.
+        // When it ran after, a caller posting no `client_secret` at all got
+        // three distinguishable answers — `invalid_client`/generic for an
+        // unknown client, `unauthorized_client` for a client lacking the
+        // grant, and `invalid_client`/"client_secret is required" for a
+        // client that had it — so client existence stayed decidable on this
+        // grant even after the description was unified everywhere else.
+        // `client_credentials` and `refresh_token` already ordered it this
+        // way; only this grant did not.
+        let client_secret = req
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
+
         // Authenticate client
         let client = self
             .client_repo
@@ -477,21 +494,22 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
+        // Secret verification must also precede the grant-type check, and for
+        // the same reason: `unauthorized_client` is only reachable by a caller
+        // who has *already proven possession of the secret*. Ordered the other
+        // way, supplying any dummy secret still separated "client exists but
+        // lacks this grant" from "no such client" — a second oracle on the
+        // same grant, which moving the presence check alone does not close.
+        // Both safe grants verify first; this now matches them exactly.
+        self.verify_client_secret(tenant_id, &client, client_secret)
+            .await?;
+
         // Verify client is authorized for authorization_code grant
         if !client.grant_types.iter().any(|s| s == "authorization_code") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for authorization_code grant".into(),
             ));
         }
-
-        // Require client_secret — all clients are confidential
-        // (no public-client distinction exists yet).
-        let client_secret = req
-            .client_secret
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
-        self.verify_client_secret(tenant_id, &client, client_secret)
-            .await?;
 
         // Look up the authorization code without consuming it so we
         // can verify PKCE *before* marking it as used.  This prevents

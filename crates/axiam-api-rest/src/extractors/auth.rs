@@ -426,6 +426,23 @@ fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamA
         check_user_aud_and_parse_jti(&validated, config)?;
     }
 
+    // `sub` must be a UUID, which quietly makes this extractor reject one of
+    // the two machine principal kinds — an asymmetry worth stating rather than
+    // leaving to be rediscovered.
+    //
+    // A *service account*'s `sub` is its UUID, so it parses. An *OAuth2
+    // client*'s `sub` is its `oa_…` client id, so it does not, and such a
+    // caller gets 401 here even though its token carries `axiam:m2m` and is
+    // accepted elsewhere.
+    //
+    // That is the correct outcome, not a gap to close: role assignments are
+    // keyed on a subject UUID, and an OAuth2 client has no row in that graph.
+    // Admitting one would produce a principal the authorization engine can
+    // only ever evaluate to "no grants" — a caller that authenticates and then
+    // fails every check, which is a worse experience than a clean 401 and
+    // invites someone to "fix" it later by inventing a subject mapping. If
+    // OAuth2 clients ever need to be RBAC subjects, that is a deliberate
+    // modelling change, and this parse is where it would start.
     let subject_id =
         Uuid::parse_str(&validated.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
             reason: "invalid sub claim".into(),

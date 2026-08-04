@@ -21,6 +21,24 @@ pub fn client_ip(req: &HttpRequest) -> Option<String> {
         .map(|s| s.chars().take(MAX_IP_LEN).collect())
 }
 
+/// Extract the **transport peer address**, capped to [`MAX_IP_LEN`].
+///
+/// Unlike [`client_ip`], this ignores `X-Forwarded-For` / `X-Real-IP` entirely
+/// and reports the address the connection actually came from. Behind a trusted
+/// reverse proxy that is the proxy's own address, which is why [`client_ip`]
+/// remains the right choice on authenticated paths.
+///
+/// Use this on **unauthenticated** endpoints, where the forwarding headers are
+/// caller-supplied and therefore forgeable (SEC-087): an attacker who can pick
+/// the IP written to an audit row can make an operator act against an innocent
+/// host. Callers that want both should record this as the trusted value and
+/// keep [`client_ip`] alongside it, explicitly labelled untrusted.
+pub fn peer_ip(req: &HttpRequest) -> Option<String> {
+    req.connection_info()
+        .peer_addr()
+        .map(|s| s.chars().take(MAX_IP_LEN).collect())
+}
+
 /// Extract the `User-Agent` header value, capped to [`MAX_UA_LEN`].
 pub fn user_agent(req: &HttpRequest) -> Option<String> {
     req.headers()

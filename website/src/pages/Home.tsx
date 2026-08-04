@@ -627,6 +627,13 @@ export default function Home({ go, openSdk }: HomeProps) {
             Argon2id, EdDSA (Ed25519) and AES-256-GCM under the hood — with data
             export/deletion, consent tracking and access control built in.
           </p>
+          <button
+            className="ax-ghost"
+            style={{ marginTop: 22 }}
+            onClick={() => go("security")}
+          >
+            Read the threat model →
+          </button>
         </div>
       </section>
     </div>

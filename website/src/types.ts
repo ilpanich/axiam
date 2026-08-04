@@ -6,7 +6,8 @@ export type Page =
   | "news"
   | "post"
   | "bench"
-  | "roadmap";
+  | "roadmap"
+  | "security";
 
 export interface Sdk {
   id: string;

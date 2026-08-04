@@ -16,6 +16,9 @@ which is the authenticated admin SPA.
   Read the Docs, javadoc.io, fuget.org, pkg.go.dev).
 - **Docs** — a small documentation site: quickstart plus platform and operate
   guides, with a functional sidebar and per-page table of contents.
+- **Security** — the public threat-modeling and security write-up, including an
+  interactive browser for all nine OWASP Threat Dragon diagrams and the 149
+  STRIDE threats behind them.
 - **Benchmarks** — currently a **draft** with placeholder figures; real,
   measured results will be published here after the benchmark runs.
 - **Roadmap** — the 19-phase, 64-task delivery plan.
@@ -37,6 +40,21 @@ Page content lives in plain TypeScript data modules so it is easy to edit:
 
 - `src/data.ts` — SDKs, news posts, roadmap phases, benchmark rows.
 - `src/docs.ts` — the documentation pages (sidebar groups + page blocks).
+- `src/security.ts` — the Security section, transcribed from
+  [`claude_dev/threat-modeling-and-security.md`](../claude_dev/threat-modeling-and-security.md).
+
+`src/threatModel.ts` and `src/threatModelSummary.ts` are **generated** — never
+edit them by hand. They are built from the OWASP Threat Dragon model at
+`ThreatDragonModels/Axiam/Axiam.json`, which is the source of truth for the
+diagrams, the threats and the counts quoted on the page:
+
+```bash
+npm run gen:threat-model   # re-emit both modules after editing the model
+```
+
+The generator resolves the model's geometry into SVG coordinates and routes each
+data flow into a path string, so `ThreatModelExplorer.tsx` stays a pure renderer.
+The generated modules are committed; CI does not regenerate them.
 
 ## Deployment
 

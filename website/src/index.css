@@ -305,6 +305,30 @@ code {
   font-size: 13px;
 }
 
+/* ---- Security section ---------------------------------------------------- */
+
+/* Like the docs grid, but with no right-hand ToC: the section index on the left
+   is the only navigation, which leaves the article column wide enough for the
+   threat-model diagrams. */
+.ax-sec {
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 28px 40px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+.ax-sec-side {
+  position: sticky;
+  top: 90px;
+}
+.ax-sec-hero {
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 56px 40px 0;
+}
+
 /* ---- Footer -------------------------------------------------------------- */
 
 .ax-footer {
@@ -402,6 +426,35 @@ code {
     flex-wrap: wrap;
     align-items: center;
     gap: 4px;
+  }
+
+  /* Security: same treatment — the section index becomes a chip row on top. */
+  .ax-sec {
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding: 24px 20px 64px;
+  }
+  .ax-sec-side {
+    position: static;
+    top: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 2px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(0, 212, 255, 0.12);
+  }
+  .ax-sec-side > div {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .ax-sec-side .ax-side {
+    width: auto;
+  }
+  .ax-sec-hero {
+    padding: 36px 20px 0;
   }
 }
 

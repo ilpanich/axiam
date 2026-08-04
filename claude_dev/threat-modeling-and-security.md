@@ -12,27 +12,36 @@
 >
 > ---
 >
-> ## Handoff — read this first if you are building the website section
+> ## Handoff — the website section is live
 >
-> **Status: ready to publish.** Every factual claim below was verified against
-> the code at `3ede4d19` (2026-08-04) and is current. The security review series
-> that backs it is **closed with no open findings** — see §24 of the analysis.
-> You do not need to re-verify anything to build the page; if you want to check a
-> specific claim, the evidence is cited by file and line in the analysis document.
+> **Status: published.** Every factual claim below was verified against the code
+> at `3ede4d19` (2026-08-04) and is current. The security review series that backs
+> it is **closed with no open findings** — see §24 of the analysis. If you want to
+> check a specific claim, the evidence is cited by file and line in the analysis
+> document.
 >
-> **What to build.** A new top-level **Security** nav entry, alongside Docs, SDKs,
-> Benchmarks and Roadmap. Concretely, in `website/`:
+> **Where it lives.** A top-level **Security** nav entry, alongside Docs, SDKs,
+> Benchmarks and Roadmap. In `website/`:
 >
-> 1. `src/types.ts` — add `"security"` to the `Page` union.
-> 2. `src/components/Header.tsx` — add a `NAV_ITEM` (`{ label: "Security", page: "security", active: (p) => p === "security" }`).
-> 3. `src/App.tsx` — add the `{page === "security" && <Security />}` branch.
-> 4. `src/pages/Security.tsx` — the page itself, or extend `src/docs.ts` if you
->    prefer it inside the existing docs shell with a sidebar.
+> 1. `src/types.ts` — `"security"` is part of the `Page` union.
+> 2. `src/components/Header.tsx` — the `Security` nav item; `src/App.tsx` routes it.
+> 3. `src/security.ts` — this document as `DocBlock` content, one entry per section.
+> 4. `src/pages/Security.tsx` — the page: hero, sticky section index, article.
+> 5. `src/components/ThreatModelExplorer.tsx` — the interactive diagram browser.
+> 6. `src/threatModel.ts` / `src/threatModelSummary.ts` — **generated**, do not edit.
+>    Run `npm run gen:threat-model` after changing the Threat Dragon model; the
+>    generator (`website/scripts/gen-threat-model.mjs`) reads
+>    `ThreatDragonModels/Axiam/Axiam.json` and re-emits both.
+>
+> All nine diagrams render from that model, and the threat counts on the page —
+> the headline stats and the coverage-by-area table — are interpolated from the
+> generated summary rather than typed in, so the page cannot drift from the model.
+> Prose numbers quoted in this document are the only ones maintained by hand.
 >
 > **Content mapping.** The structure here maps onto the existing `DocBlock` model
 > in `src/docs.ts`: `##`→`h`, paragraphs→`p`, bullet lists→`list`, tables→`table`,
 > and the blockquote marked **Caution**→`warn`. The eight subsections under
-> *"How AXIAM defends each layer"* are the natural sidebar entries.
+> *"How AXIAM defends each layer"* are the sidebar entries under that group.
 >
 > **Three things not to change when adapting the prose:**
 >
@@ -45,9 +54,11 @@
 > - **Keep the shared-responsibility section.** It is the part that makes the rest
 >   credible, and it is where a real deployment gets its hardening checklist.
 >
-> **One open TODO:** the closing line asks for a security contact. There is no
-> `SECURITY.md` in the repository yet — either add one and link it, or drop the
-> parenthetical and give an email. Do not ship the placeholder as written.
+> **Resolved TODO:** the closing line used to carry a placeholder security
+> contact. [`SECURITY.md`](../SECURITY.md) now exists at the repository root —
+> supported versions, what to include in a report, the response and disclosure
+> timeline, and what is out of scope — and the page links to it alongside GitHub's
+> private advisory form. Keep the two in step if either changes.
 
 ---
 
@@ -484,8 +495,10 @@ checklist — most of the threat model's open items live here.
 
 **Reporting a vulnerability.** If you find a security issue, please report it
 privately to the maintainers rather than opening a public issue, and give us a
-reasonable window to remediate before disclosure. *(Publish a security contact /
-`SECURITY.md` policy link here when the section goes live.)*
+reasonable window to remediate before disclosure. Use
+[GitHub's private advisory form](https://github.com/ilpanich/axiam/security/advisories/new);
+[`SECURITY.md`](../SECURITY.md) sets out what to include, what to expect and the
+disclosure window.
 
 ---
 

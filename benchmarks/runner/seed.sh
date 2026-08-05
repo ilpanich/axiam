@@ -149,16 +149,55 @@ seed_axiam() {
       *) echo "[seed/axiam] $method $path -> HTTP $code: $body" >&2; exit 1 ;;
     esac
   }
-  # Create an entity, or find the existing one on re-seed. `.. | objects` walks
-  # any response wrapper (bare array, {data:[…]}, {items:[…]}) to find the row
-  # whose FIELD == VALUE and return its id.
+  # Find the row whose FIELD == VALUE and print its id (empty if absent).
+  # `.. | objects` walks any response wrapper (bare array, {data:[…]},
+  # {items:[…]}).
+  #
+  # This MUST page. AXIAM list endpoints are paginated
+  # (`{items,total,offset,limit}`; default limit 50, server-clamped to 200) and
+  # every tenant is back-filled with the ~100 built-in registry permissions, so
+  # the bench "read" permission lands at offset 100 — invisible to a single
+  # unparameterised GET. That was the "could not create/find bench permission"
+  # failure on all three axiam cells. Paging rather than one limit=200 request
+  # keeps this correct as the registry grows past the clamp.
+  find_id() {  # PATH MATCH_FIELD MATCH_VALUE
+    local path="$1" field="$2" val="$3" id sep page n off=0
+    case "$path" in *\?*) sep='&' ;; *) sep='?' ;; esac
+    while :; do
+      page=$(api GET "${path}${sep}offset=${off}&limit=200")
+      id=$(printf '%s' "$page" | jq -r --arg f "$field" --arg v "$val" \
+        '[.. | objects | select(.[$f]==$v) | .id] | first // empty' 2>/dev/null || true)
+      if [ -n "$id" ]; then break; fi
+      # A short (or unrecognised) page is the last one.
+      n=$(printf '%s' "$page" \
+        | jq -r 'if type=="array" then length elif (.items|type)=="array" then (.items|length) elif (.data|type)=="array" then (.data|length) else 0 end' \
+          2>/dev/null || echo 0)
+      [ "${n:-0}" -ge 200 ] || break
+      off=$(( off + 200 ))
+    done
+    printf '%s' "$id"
+  }
+  # Reuse the existing fixture, or create it. FIND FIRST, create second —
+  # create-first is only idempotent for entities the server constrains as
+  # unique, and /api/v1/resources does NOT constrain `name`: a re-seed POSTed a
+  # SECOND "bench-resource", got 201, and exported its id as BENCH_RESOURCE_ID
+  # while the role grant stayed bound to the first — so the post-seed authz
+  # smoke check failed with {"allowed":false,"reason":"no applicable roles for
+  # this resource"}. Finding first makes the fixture stable across re-seeds for
+  # every entity regardless of which ones the server happens to dedupe.
+  #
+  # The create half goes through api_checked so a genuine error (403 from a
+  # missing admin grant, 500) prints its status+body instead of degrading into
+  # the caller's vague "could not create/find" — note api_checked's `exit 1`
+  # only leaves this command substitution's subshell, so the caller's own
+  # emptiness check is still what aborts the seed.
   create_or_find() {  # PATH CREATE_JSON MATCH_FIELD MATCH_VALUE
     local path="$1" cjson="$2" field="$3" val="$4" id
-    id=$(api POST "$path" "$cjson" | jq -r '.id // empty' 2>/dev/null || true)
-    if [ -z "$id" ]; then
-      id=$(api GET "$path" | jq -r --arg f "$field" --arg v "$val" \
-        '[.. | objects | select(.[$f]==$v) | .id] | first // empty' 2>/dev/null || true)
-    fi
+    id=$(find_id "$path" "$field" "$val")
+    if [ -n "$id" ]; then echo "$id"; return 0; fi
+    id=$(api_checked POST "$path" "$cjson" | jq -r '.id // empty' 2>/dev/null || true)
+    # A 409 here means someone else won the race — re-read rather than fail.
+    if [ -z "$id" ]; then id=$(find_id "$path" "$field" "$val"); fi
     echo "$id"
   }
 

@@ -348,11 +348,22 @@ bench-up:
     esac
     echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
     ready_deadline=$(( $(date +%s) + 180 ))
-    # Native mTLS (axiam p3-mtls, client_auth=required): the listener rejects any
-    # connection without a verified client cert, so the readiness probe must
-    # present one too. BENCH_CLIENT_CERT/KEY come from the sourced profile env.
+    # Under p3-mtls the listener may demand a verified client cert (axiam's
+    # rustls client_auth=required; keycloak's KC_HTTPS_CLIENT_AUTH=required), so
+    # the readiness probe must present one too. BENCH_CLIENT_CERT/KEY come from
+    # the sourced profile env.
+    #
+    # Keyed on the PROFILE, never on the target: the old `target = axiam` guard
+    # left keycloak/p3-mtls probing an mTLS listener bare-handed, so every
+    # attempt was refused at the TLS handshake and the cell burned the full 180s
+    # into "TIMEOUT: keycloak did not become ready" — a healthy server misread as
+    # a dead one. (It only ever surfaced once the bench-down fix stopped the
+    # earlier port conflict from killing that cell first.) Presenting a cert to a
+    # target that does not ask for one is free: TLS only sends the client
+    # certificate when the server requests it, which is what keeps this correct
+    # for zitadel, whose built-in TLS has no client-cert mode at all.
     READY_MTLS=""
-    if [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p3-mtls" ] \
+    if [ "{{profile}}" = "p3-mtls" ] \
        && [ -n "${BENCH_CLIENT_CERT:-}" ] && [ -n "${BENCH_CLIENT_KEY:-}" ]; then
       READY_MTLS="--cert ${BENCH_CLIENT_CERT} --key ${BENCH_CLIENT_KEY}"
     fi
@@ -419,16 +430,21 @@ bench-run:
 bench-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    # `docker compose down` interpolates the ENTIRE compose file, so the AXIAM
-    # target's required (:?) secret vars must still resolve — even though teardown
-    # never uses them. Provide harmless placeholders so down never needs the real
-    # secrets (competitors ignore these).
-    export AXIAM__DB__USERNAME=x AXIAM__DB__PASSWORD=x \
-           RABBITMQ_DEFAULT_USER=x RABBITMQ_DEFAULT_PASS=x \
-           AXIAM__AUTH__JWT_PRIVATE_KEY_PEM=x AXIAM__AUTH__JWT_PUBLIC_KEY_PEM=x \
-           AXIAM__AMQP__SIGNING_KEY=x AXIAM__AUTH__MFA_ENCRYPTION_KEY=x \
-           AXIAM__EMAIL_ENCRYPTION_KEY=x AXIAM__GDPR_PSEUDONYM_PEPPER=x
     COMPOSE="targets/{{target}}/docker-compose.yml"
+    # `docker compose down` interpolates the ENTIRE compose file, so every
+    # required (`${VAR:?…}`) secret must still resolve — even though teardown
+    # never uses one. Derive that set FROM the compose file instead of keeping a
+    # hand-written copy of it: the old hardcoded list went stale the moment
+    # AXIAM__AUTH__PEPPER (OBS-1) became mandatory, so EVERY `bench-down` failed
+    # with "required variable … is missing a value", left the stack running, and
+    # the leftover listener then failed the NEXT target's port pre-flight
+    # ("port 8443 is already in use") — surfacing three cells away from its
+    # cause. A real value already in the environment always wins; the `x`
+    # placeholder only fills the gaps (competitors ignore these entirely).
+    while read -r v; do
+      if [ -n "${v:-}" ]; then export "$v=${!v:-x}"; fi
+    done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:\?' "$COMPOSE" \
+             | sed 's/^\${//; s/:?$//' | sort -u)
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v
 
@@ -547,23 +563,32 @@ bench-dry-run:
     : > "$BENCH_DRY_RUN_TSV"
     started=$(date +%s)
     note() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$BENCH_DRY_RUN_TSV"; }
+    # Teardown is graded on EVERY path, including the failure paths. The old
+    # `bench-down >/dev/null 2>&1 || true` after a failed bring-up/seed hid the
+    # one error that poisons the rest of the sweep: a stack that would not go
+    # down keeps its published ports, and every later target then dies in its
+    # port pre-flight with a message pointing at the port rather than at the
+    # cell that leaked it.
+    teardown() {  # TARGET PROFILE
+      just target=$1 bench-down >/dev/null 2>&1 || \
+        note "$1" "$2" "(bench-down)" WARN "teardown failed — the stack is STILL RUNNING and its ports will fail the next cell's pre-flight; run 'just target=$1 bench-down' by hand"
+    }
 
     for t in {{targets}}; do
       for p in {{profiles}}; do
         echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
         if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up; then
           note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
-          just target=$t bench-down >/dev/null 2>&1 || true
+          teardown "$t" "$p"
           continue
         fi
         if ! just target=$t profile=$p bench-seed; then
           note "$t" "$p" "(bench-seed)" FAIL "seeding or its post-seed smoke checks failed — this is the failure that would abort the real matrix"
-          just target=$t bench-down >/dev/null 2>&1 || true
+          teardown "$t" "$p"
           continue
         fi
         just target=$t profile=$p dry=1 bench-run || true
-        just target=$t bench-down || \
-          note "$t" "$p" "(bench-down)" WARN "teardown failed — a leftover container/volume can break the NEXT cell's port pre-flight"
+        teardown "$t" "$p"
       done
     done
 

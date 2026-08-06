@@ -129,3 +129,43 @@ export interface BenchResourceRow {
   /** Optional footnote marker appended to the scenario label. */
   marker?: string;
 }
+
+/**
+ * One SDK's row in the client-side benchmark table. Latencies are
+ * pre-formatted milliseconds; `overhead` is the authorization-check p95
+ * measured against a matched-concurrency raw-wire baseline on the same host.
+ */
+export interface BenchSdkRow {
+  sdk: string;
+  /** Password-login p50, ms — server-side Argon2id dominates it. */
+  login: string;
+  /** Session-refresh p50, ms. */
+  refresh: string;
+  /** Authorization-check p50 / p95, ms. */
+  checkP50: string;
+  checkP95: string;
+  /** Authorization-check throughput, requests/s. */
+  thr: string;
+  /** Check p95 overhead over the wire baseline, ms. */
+  overhead: string;
+  /**
+   * Serial harnesses run a single worker by their own design, so their
+   * throughput is not comparable with the concurrency-16 SDKs.
+   */
+  serial?: boolean;
+  /** A caveat carried onto the row rather than buried in a footnote. */
+  flag?: string;
+  /** Fastest concurrent SDK — highlighted, never sorted differently. */
+  best?: boolean;
+}
+
+/** One SDK's own client-process cost over the whole benchmark. */
+export interface BenchSdkFootprintRow {
+  sdk: string;
+  runtime: string;
+  /** Total client CPU seconds consumed by the SDK's own process. */
+  cpu: number;
+  /** Peak client resident memory, MiB. */
+  rss: number;
+  serial?: boolean;
+}

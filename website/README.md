@@ -20,8 +20,12 @@ which is the authenticated admin SPA.
 - **Security** — the public threat-modeling and security write-up, including an
   interactive browser for all nine OWASP Threat Dragon diagrams and the 149
   STRIDE threats behind them.
-- **Benchmarks** — currently a **draft** with placeholder figures; real,
-  measured results will be published here after the benchmark runs.
+- **Benchmarks** — the measured head-to-head against Keycloak and Zitadel,
+  transcribed from [`benchmarks/PUBLIC_BENCH_ANALYSIS.md`](../benchmarks/PUBLIC_BENCH_ANALYSIS.md)
+  (currently run 5): throughput, efficiency and resource charts, the TLS/mTLS
+  cost table, the eleven-SDK client benchmarks, the labelled investigation
+  passes, the honest caveats and the report's §10 "why build AXIAM at all?"
+  excerpt.
 - **Roadmap** — the 19-phase, 64-task delivery plan.
 - **News** — project milestones and engineering notes.
 

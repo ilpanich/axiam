@@ -12,6 +12,13 @@
 > passes (I5/I6/I7, KC-4GiB, rl-prod), and the first **median-of-3 SDK pass
 > with a matched-VU wire baseline**. Run-4 findings that are resolved are
 > compressed; everything still open is carried forward.
+>
+> **2026-08-06, second pass:** re-analyzed against the operator's *full*
+> `results/` copy — the first `bench-pack` archive silently omitted every
+> non-k6 artifact (`rl-prod-summary.md`, `h5-revocation.log`, the I5
+> docker/nsenter logs, `sdk-report.md`). §1.1, §2.6, §3.1 and §3.2 are
+> updated from those artifacts; `bench-pack`'s include patterns get a work
+> item (J13).
 
 ## 0. Run-5 executive summary
 
@@ -55,62 +62,74 @@ finally `coalesced`):
 | oauth2_password_login | 69 | 69 (±2.0%) | 0% | Argon2id-bound by design |
 | token_refresh | 839 | **545** (±1.2%) | **−35%** | ⚠ REGRESSION — §1.2, top new work item |
 
-Two new problems found, one artifact gap, in descending order of importance:
+Two new problems found, plus the formal verdicts from the recovered
+investigation artifacts:
 
-1. **gRPC prod-posture admission is still broken under sustained flood**
-   (~1/20–1/33 of configured across all three gRPC families) despite the I1
-   ×60 units fix being in the image (§1.1).
+1. **The I19 limiter assertions ran — and FAILED on every measured
+   endpoint except login.** gRPC under-admits ×20–33 under sustained
+   flood despite the I1 ×60 units fix; the REST families **over**-admit
+   +12–50% against the ±10% bar; three limiter families have no scenario
+   coverage at all (§1.1).
 2. **token_refresh lost a third of its throughput** since run 4 with no
    harness change on that path (§1.2).
-3. Several §12 artifacts are **missing from the archive** (rl-prod-summary,
-   revocation-check output, I5 stage-timing logs), so three runbook
-   checkboxes can't be independently verified from the data alone (§2.6).
+3. The **revocation regression cell passed** (event-driven invalidation
+   deny in 262 ms; out-of-band deletes TTL-bounded), unblocking the
+   session-cache guidance (§3.2) — while the I5 stage-timing logs turned
+   out to contain **zero perf events** because `RUST_LOG` never reached
+   the container (§2.6); the arm-B socket capture supplies the missing
+   proof instead (§3.1).
 
 ## 1. ⚠ Run-5 discoveries
 
-### 1.1 gRPC prod posture: admitted ≈ 1/20–1/33 of configured under flood — the I1 fix is in, and it is still not enough
+### 1.1 The I19 limiter assertions ran, and the shipped posture fails them in both directions
 
-The §12.7 rl-prod pass (shipped `internet` posture, single-IP 50-VU flood,
-alpha24 image with the I1/I2/SEC-079 fixes) admitted, over the ~160 s
-session (bench_ok counts from the k6 summaries):
+`section-12_7/rl-prod-summary.md` (recovered in the full archive) is the
+official verdict table — `rl_prod_check.py`, configured limits extracted
+read-only from source at the alpha24-descendant checkout, ±10% tolerance
+(I1's own acceptance bar), single-IP 50-VU flood:
 
-| Endpoint | Configured | Admitted | Ratio | Verdict |
-|---|---|---|---|---|
-| oauth2_client_credentials (REST) | 120/min | 360 (~135/min eff.) | ~1.1–1.2× | ✅ bucket+burst semantics |
-| token_introspection (REST) | 600/min | 2 372 (~890/min eff.) | ~1.5× | ⚠ overshoot beyond burst — check |
-| authz_check_rest | 1 800/min | 7 200 (~2 700/min eff.) | ~1.5× | ⚠ 〃 |
-| authz_check_grpc | 100/s | **484 total ≈ 3/s** | **~1/33** | ❌ |
-| authz_batch_grpc | 100/s | 692 ≈ 4.3/s | ~1/23 | ❌ |
-| userinfo_grpc | 500/s (identity family) | 4 011 ≈ 27/s | ~1/19 | ❌ |
+| Endpoint | Configured (per min) | Admitted (per min) | Verdict |
+|---|---|---|---|
+| POST /api/v1/auth/login | 10 | 11 | **PASS** |
+| POST /oauth2/token (CC) | 120 | 135 | **FAIL** (+12%) |
+| POST /oauth2/introspect | 600 | 889 | **FAIL** (+48%) |
+| POST /api/v1/authz/check (+ batch, shared bucket) | 1 800 | 2 699 | **FAIL** (+50%) |
+| gRPC authz family | 6 000 | **181** | **FAIL** (~1/33) |
+| gRPC identity family | 30 000 | **1 504** | **FAIL** (~1/20) |
+| POST /oauth2/revoke | 60 | — | **no scenario — not checked** |
+| gRPC admin family (SEC-079 absolute) | 600 | — | **no scenario — not checked** |
+| gRPC infra family (fixed) | 6 000 | — | **no scenario — not checked** |
 
-The REST families behave like a token bucket with a full-burst allowance —
-admitted ≈ burst + rate×time, mild overshoot, defensible (though the ~1.5×
-on introspect/authz_check exceeds the ±10% assertion band and needs the
-rl-prod-summary numbers to adjudicate). The gRPC families are the story:
-the ×60 *units* bug is fixed (we are no longer at exactly 1/60), but under
-a ~25 k attempts/s flood the admitted rate collapses to a few per second.
+Three separate findings in one table:
 
-**Working hypothesis (from the two-layer design, not yet verified):** the
-shared write-behind pre-check enforces its quota over a 60 s window, so
-under flood it admits its entire 6 000-request window allowance in the
-first ~fraction of a second of each window; the in-memory governor behind
-it (per-second quota, small burst) then only passes ~burst + rate×t of that
-front-loaded spike before the pre-check is exhausted for the rest of the
-window. Two limiters, same nominal rate, mismatched windows ⇒ multiplied
-rejection. If that's right, the fix is to align the pre-check's window with
-the governor's (per-second) or drop one layer for gRPC. **Task J1.** Note
-this only manifests under sustained overload — a compliant client under the
-limit is unaffected — but "the abuse posture starves to ~3% of its
-advertised ceiling under abuse" is exactly the situation the posture exists
-for, so this blocks advertising gRPC prod-posture numbers, again.
+1. **REST over-admission is a formal FAIL, not a footnote** — +12% on
+   token (just outside the bar), +48–50% on introspect/authz_check.
+   Shape-wise it's token-bucket burst-allowance bleeding into a sustained
+   window; whether that's acceptable-and-documented (relax the assertion
+   to model burst) or a bug (tighten the bucket) is a product decision —
+   but today the code fails its own test.
+2. **gRPC under-admission confirmed at ×20–33.** The ×60 *units* bug is
+   fixed (we are no longer at exactly 1/60), but under a ~25 k attempts/s
+   flood the admitted rate collapses to a few per second.
+3. **Coverage gaps**: revoke, gRPC admin and gRPC infra families have no
+   scenario at all — the SEC-079 ceilings that were specifically
+   realigned for this run were never actually exercised (J1c).
 
-`rl-prod-summary.md` (the I19 artifact that would assert all of this
-mechanically) is **not in the results archive** — either it wasn't run or
-wasn't packed. Either way I19's ±10% gate cannot be checked from the
-archive; re-run `just rl-prod-check` against these results or next run
-(§2.6). Also: the login cell under prod posture records 215 ok / 0 errors
-at p50 33 ms — the scenario appears to count 429s as expected there;
-harness look needed before trusting any rl-prod login number (J1b).
+**Working hypothesis for the gRPC starvation (from the two-layer design,
+not yet verified):** the shared write-behind pre-check enforces its quota
+over a 60 s window, so under flood it admits its entire 6 000-request
+window allowance in the first ~fraction of a second of each window; the
+in-memory governor behind it (per-second quota, small burst) then only
+passes ~burst + rate×t of that front-loaded spike before the pre-check is
+exhausted for the rest of the window. Two limiters, same nominal rate,
+mismatched windows ⇒ multiplied rejection. If that's right, the fix is to
+align the pre-check's window with the governor's (per-second) or drop one
+layer for gRPC. **Task J1** (now covering both directions: the gRPC
+starvation *and* the REST +48–50% overshoot). Note the starvation only
+manifests under sustained overload — a compliant client under the limit is
+unaffected — but "the abuse posture starves to ~3% of its advertised
+ceiling under abuse" is exactly the situation the posture exists for, so
+this blocks advertising gRPC prod-posture numbers, again.
 
 ### 1.2 token_refresh −35% (839 → 545/s, p50 47.5 → 88.8 ms) — real regression, cause unknown
 
@@ -203,6 +222,14 @@ Cross-language consistency otherwise excellent again: login p50 232–257 ms
 the E1.3 deliverable: **SDK overhead on the hot op is single-digit ms at
 p95 for 7 of 9 concurrent SDKs.**
 
+The I13 client telemetry (first pass) adds the footprint axis: client CPU
+over the bench ranges from **Go 3.3 s** to **Python 40 s**; peak RSS from
+**C 13 / Rust 23 MiB** to JVM 306–458 MiB. One anomaly for the list:
+**Rust's client CPU reads 23.4 s** — highest of the compiled SDKs and 7×
+Go's — despite the best latency/throughput. Suspect the harness (CPU
+counter possibly including build/spawn, or a busy-poll in the bench loop)
+before the SDK; second look queued (J8b).
+
 ## 2. Data-validity notes
 
 ### 2.1 Validity: 64/72 matrix cells, all 8 exclusions explained, none AXIAM's
@@ -256,20 +283,27 @@ cells, except batch gRPC/REST at ±12–17% (coalescing makes throughput
 sensitive to arrival phasing — worth a note, not a gate). Server-class
 re-run remains the standing caveat.
 
-### 2.6 Missing artifacts (runbook checkboxes not verifiable from the archive)
+### 2.6 Artifacts: all recovered in the full archive — with two harness findings
 
-Not in the tarball: `rl-prod-summary.md` (I19 assertions — §1.1),
-`h5-revocation-check` output with the session cache on (§5.4 of the
-runbook — **mandatory** cell; if it ran, the artifact wasn't packed; if it
-didn't run, the session-validation cache's revocation contract is
-unverified this run — either way it must exist before the cache is
-recommended anywhere), and the I5 `axiam::perf` stage-timing logs (the
-A/B result is decisive without them, but the handler-vs-wire breakdown
-was part of §4.4's confirming evidence). The VU-sweep, A/B, 2×2 and
-capped/uncapped section data are all present and complete. **Task J9: ask
-the operator for the three missing artifacts or re-run those cells; do not
-ship the session-validation cache guidance until the revocation cell is
-seen.**
+The first `bench-pack` tarball contained only the k6/meta/CSV files; the
+operator's full `results/` copy adds `rl-prod-summary.md` (§1.1),
+`section-12_5-h5/h5-revocation.log` (§3.2), the I5 docker-log captures
+plus `nsenter.log` socket snapshots (§3.1), and `sdk-report.md`
+(identical to report.md's SDK section). Two findings from the recovery:
+
+- **`bench-pack` silently drops every non-k6 artifact** — exactly the
+  `.md`/`.log` files that carry the investigation verdicts. Fix the
+  include patterns (J13).
+- **The I5 stage-timing instrumentation produced nothing**: both arm logs
+  contain zero `axiam::perf` DEBUG events, and `RUST_LOG` is absent from
+  every cell's recorded `axiam_env` — the variable never reached the
+  container (the §12.0 allow-list failure mode the runbook itself warned
+  about, biting the one variable the runbook forgot to verify). The I5
+  *conclusion* is unaffected — the A/B + VU sweep + socket capture are
+  decisive (§3.1) — but the handler-stage breakdown planned in §4.3 of
+  the runbook still doesn't exist. Add `RUST_LOG` to the compose
+  allow-list check and to the §12.5-style `docker inspect` verification
+  (J9, repurposed).
 
 ## 3. What the investigation passes taught
 
@@ -288,9 +322,18 @@ figures; arm A collapses to the p0 shape. That is the §4.4 decision rule's
 missing dynamics: p2 tracks p0 within 2–6% at *every* VU count
 (533→2 737/s p0; 501→2 683/s p2), saturating ~2.7 k/s from 20 VUs — a
 constant small per-request TLS cost plus the DB ceiling, no serialization
-point anywhere. B2/H6/G8-TLS is closed. The 40 ms number can go in the
-public doc as the smoking gun (delayed-ACK timer), with the honest note
-that the stage-timing logs didn't make the archive (§2.6).
+point anywhere.
+
+The full archive adds the wire-level smoking gun: arm B's `ss -ti`
+snapshot (`section-12_4-B1/nsenter.log`) shows **18 of 20 established
+connections frozen with `Send-Q 707`, `unacked:1`, `notsent:31` and
+`ato:40`** — 707 bytes sitting in the send queue, 31 more held back
+behind one unacked segment, waiting out the peer's 40 ms delayed-ACK
+timer. The p0 control snapshot shows zero `notsent` connections and
+Send-Q 0 on 15/20. That is Nagle photographed in the act. (The planned
+in-handler stage timings do *not* exist — `RUST_LOG` never reached the
+container, §2.6 — but they're no longer needed for the verdict.)
+B2/H6/G8-TLS is closed.
 
 ### 3.2 I6 closed: the 2×2 says it was the session read
 
@@ -308,10 +351,19 @@ in level (5 597 — because I7's scan removal cheapened the remaining
 session read massively) but the asymmetry mechanism is confirmed in full.
 Ship-decision consequences:
 
+- **The §5.4 revocation cell ran and passed** (`h5-revocation.log`,
+  cache=on, TTL 5 s): (A) event-driven invalidation — REST role unassign
+  → deny served **262 ms** later, the invalidation hook fires end to end;
+  (B) suppressed invalidation — an out-of-band `has_role` edge delete
+  directly in SurrealDB produced 22 stale allows, first deny at entry age
+  5 179 ms, **bounded by TTL + slack as the contract promises**. So the
+  cache guidance can ship, contract stated: event-path revocation is
+  immediate; only writes that bypass the API entirely wait out the TTL.
 - The session-validation cache is worth ~2× on cached REST checks and
-  ~16% uncached; it stays **default-off** until the §5.4 revocation cell
-  is produced (§2.6) — same stays-opt-in reasoning as the decision cache
-  (H5), and the K=1 ceiling caveat applies to the 11.6 k number verbatim.
+  ~16% uncached; it stays **default-off** (same stays-opt-in reasoning as
+  the decision cache, H5, and the K=1 ceiling caveat applies to the
+  11.6 k number verbatim) — but with the revocation cell green it can now
+  be *documented and recommended* for measured workloads.
 - The security note is unchanged and now measured: gRPC's speed advantage
   partly *is* the absence of the per-request revocation check
   (`middleware/auth.rs:42` validates the token and stops). That tradeoff
@@ -381,20 +433,27 @@ per-container bars).
 
 ## 5. Work items (evidence-ranked, post-run-5)
 
-1. **J1 — gRPC prod-posture flood starvation** (§1.1): verify the
-   two-layer window-mismatch hypothesis, fix (align windows or drop a
-   layer), add an I19 assertion that runs *under sustained flood*, not
-   just at compliant rates. Blocks advertising gRPC prod posture.
-   **J1b**: rl-prod login scenario counts 429s as ok — harness fix.
+1. **J1 — limiter enforcement fails I19 in both directions** (§1.1):
+   gRPC flood starvation (verify the two-layer window-mismatch
+   hypothesis; align windows or drop a layer) *and* REST +48–50%
+   over-admission (decide: model burst in the assertion, or tighten the
+   bucket). Keep the assertion running *under sustained flood*. Blocks
+   advertising gRPC prod posture. **J1c**: add scenarios for the three
+   unchecked families (revoke, gRPC admin, gRPC infra — the SEC-079
+   ceilings were realigned for this run and then never exercised).
 2. **J2 — token_refresh −35% regression** (§1.2): stage-time the refresh
    handler, bisect security-series commits vs SurrealDB drift.
-3. **J9 — recover missing artifacts** (§2.6): rl-prod-summary, revocation
-   cell (blocks session-cache guidance), I5 stage logs.
+3. **J9 — RUST_LOG never reaches the container** (§2.6): add it to the
+   compose allow-list + a `docker inspect` preflight check, so the I5/J2
+   stage-timing instrumentation can actually emit. **J13 — fix
+   `bench-pack`** to include `*.md`/`*.log` investigation artifacts (this
+   run's verdict files were all silently dropped).
 4. **J5/J6/J7/J8 — SDK**: Python async residual; C++ tail (now suspect
    server-side idle timeout); TS negative-overhead baseline audit; C#
    2/3-pass + refresh-throughput quirk.
 5. **J10 — document the gRPC no-revocation-check posture** (§3.2); design
-   opt-in strict mode.
+   opt-in strict mode. Also ship the session-cache docs with the measured
+   revocation contract (262 ms event-path / TTL-bounded out-of-band).
 6. **J11 — DB concurrency ceiling**: one measured CP-3 pass; read-replica
    design doc to review (staleness contract).
 7. **J12 — bulk-seed tooling** for the 10× seed-size cell (carried).
@@ -418,10 +477,17 @@ per-container bars).
 - Publish the **refresh regression openly** (545, −35%, under
   investigation) — same honesty pattern as the H2 write and the ×60 bug.
 - Publish mTLS parity from the run of record.
-- Do NOT publish: gRPC prod-posture numbers (J1 open), session-cache
-  recommendations (revocation cell missing), TS-vs-wire overhead (J7),
-  any KC-login number other than "51/s at p2 (2/3 valid); 4 GiB attempt
-  made it stable but slower and still invalid".
+- Publish the revocation-cell result alongside the cache numbers (262 ms
+  event-path deny; TTL-bounded out-of-band window) — it is the honest
+  answer to "does the cache break revocation" and we now have it.
+- Publish the I19 verdict table honestly (login PASS, everything else
+  measured FAIL) — "our own assertion script fails our shipped posture"
+  is the same credibility pattern as the ×60 bug, and it's what makes
+  the eventual fix verifiable.
+- Do NOT publish: gRPC prod-posture *throughput* numbers (J1 open),
+  TS-vs-wire overhead (J7), any KC-login number other than "51/s at p2
+  (2/3 valid); 4 GiB attempt made it stable but slower and still
+  invalid".
 - Keep verbatim: protocol-variant refresh label, cc-token-setup label,
   h1→h2 protocol-confound note, D8 client_id-keying caveat, the corrected
   "25–2 700×, authz tightest" capacity-margin range (never "≥500×").

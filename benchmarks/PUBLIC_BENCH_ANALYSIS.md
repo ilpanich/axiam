@@ -234,7 +234,12 @@ write and never noticed. The controlled A/B on the TLS profile:
 A VU sweep (1→100) at both profiles shows TLS tracking plaintext within
 2–6% at every concurrency, both saturating ~2.7 k/s from 20 VUs — a small
 constant TLS cost plus the database ceiling, no serialization anywhere.
-Closed.
+And the wire-level photograph, from an `ss -ti` snapshot inside the
+server's network namespace during the old-behavior arm: **18 of 20
+established connections frozen with bytes sitting in the send queue
+(`Send-Q 707`, `notsent:31`) behind a single unacked segment, each
+waiting out the peer's 40 ms delayed-ACK timer** — versus zero held-back
+connections in the control. Closed, at every layer we can observe.
 
 ### 3.2 The REST/gRPC authorization asymmetry was the session-revocation read — confirmed by a 2×2
 
@@ -252,13 +257,21 @@ session-validation cache, plaintext, checks/s):
 The session cache does nothing for gRPC (it never did the read) and lifts
 fully-cached REST to parity with gRPC — mechanism confirmed. Both caches
 remain **off by default**: these are best-case (hot-key) ceilings, not
-expectations, and the session-validation cache will not be recommended
-until its revocation-latency regression cell is published (it caches
-positive answers only, TTL-bounded — but we hold guidance until the
-measurement is in hand). The flip side is stated plainly: part of gRPC's
-speed *is* that it does not re-check session revocation per call — token
-expiry (15 min max) is its revocation bound. That is a documented posture
-choice, and a strict mode is on the roadmap.
+expectations.
+
+**Does caching break revocation? Measured, not assumed.** The revocation
+regression cell ran with caching on (TTL 5 s), twice over: (A) revoke a
+role through the API — the cache invalidation hook fires end to end and a
+**deny is served 262 ms after the revocation call**; (B) delete the
+grant *behind the server's back*, directly in the database, suppressing
+every invalidation hook — stale allows persist for up to the TTL and
+stop at 5.2 s, inside the promised TTL-plus-slack bound. In short:
+revoke through the API and revocation is immediate even with caches on;
+only out-of-band database surgery waits out the TTL, which is the
+documented contract. The flip side is stated with the same candor: part
+of gRPC's speed *is* that it does not re-check session revocation per
+call — token expiry (15 min max) is its revocation bound. That is a
+documented posture choice, and a strict mode is on the roadmap.
 
 ### 3.3 The database ceiling: per-query waste removed, concurrency remains
 
@@ -348,16 +361,22 @@ draft. Every other cell, both axes, AXIAM leads by 1.6× to 24×.
   drift; a stage-timed bisection is queued. We found it, we're publishing
   it, and the next draft will explain it — the same treatment the
   rate-limit write and the ×60 bug got.
-- **The gRPC rate limiter still misbehaves under sustained flood.** The
-  ×60 units bug draft 5 reported is fixed — but this run's abuse-posture
-  pass shows that under a single-IP ~25 k-attempts/s flood, the gRPC
-  endpoints admit only a few requests per second against configured
-  ceilings of 100–500/s (REST endpoints enforce as configured, within
-  token-bucket burst semantics). The suspected cause is two cooperating
-  limiter layers with mismatched windows compounding under overload.
-  Compliant clients under the limit are unaffected, but until this is
-  fixed and re-measured, **we do not advertise gRPC throughput under the
-  abuse posture.**
+- **The rate limiter fails our own enforcement assertions — in both
+  directions.** This run added an automated check that compares
+  configured limits against admitted rates under a single-IP flood, with
+  a ±10% bar. Verdicts: login **passes** (11/min vs 10 configured);
+  the REST machine endpoints **over-admit** (+12% token, +48%
+  introspect, +50% authz check — token-bucket burst bleeding into the
+  sustained window); and the gRPC families **under-admit by ×20–33**
+  (181/min admitted vs 6 000 configured on authz) — the ×60 units bug
+  draft 5 reported is fixed, but two cooperating limiter layers with
+  mismatched windows appear to compound under overload. Three limiter
+  families (revoke, gRPC admin, gRPC infra) have no test scenario yet,
+  so their ceilings are asserted only in code review. Compliant clients
+  under the limit are unaffected by any of this, but until it's fixed
+  and re-measured, **we do not advertise gRPC throughput under the abuse
+  posture**, and we publish the failing table rather than the passing
+  subset (§7).
 - **Keycloak's login story is genuinely hard to measure fairly.** We
   raised its cap to 4 GiB as promised; it got *slower* (§1). We report its
   one valid cell (51/s at p2/2 GiB) and our failed rescue attempt rather
@@ -388,13 +407,25 @@ AXIAM ships enforcing abuse limits by default; the competitors ship none.
 The revised `internet` defaults (draft 5 §7.2) are now re-measured on the
 released image against a single-IP 50-VU flood:
 
-| endpoint | shipped default (`internet`, per-IP) | measured capacity (this run, 2c server / 2c DB) | default as % of capacity | flood enforcement |
+| endpoint | shipped default (`internet`, per-IP) | measured capacity (this run, 2c server / 2c DB) | default as % of capacity | flood enforcement (admitted vs configured, ±10% bar) |
 |---|---|---|---|---|
-| `POST /oauth2/token` | 120/min | ~2 804/s ≈ 168 000/min | 0.07% | ✅ ≈ configured (+ burst) |
-| `POST /oauth2/introspect` | 600/min | ~4 504/s ≈ 270 000/min | 0.22% | ⚠ ~1.5× configured admitted — burst semantics under review |
-| `POST /api/v1/authz/check` | 1 800/min | ~1 032/s ≈ 62 000/min (REST) | 2.9% | ⚠ 〃 |
-| gRPC authz / identity | 100/s / 500/s | ~1 268/s checks, 12 307/s reads | 8% / 4% | ❌ under-admits under flood — open bug, §6 |
-| `POST /api/v1/auth/login` | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% | (harness measurement of this cell under review) |
+| `POST /api/v1/auth/login` | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% | ✅ **PASS** — 11/min admitted |
+| `POST /oauth2/token` | 120/min | ~2 804/s ≈ 168 000/min | 0.07% | ❌ FAIL — 135/min (+12%) |
+| `POST /oauth2/introspect` | 600/min | ~4 504/s ≈ 270 000/min | 0.22% | ❌ FAIL — 889/min (+48%) |
+| `POST /api/v1/authz/check` (+ batch, shared bucket) | 1 800/min | ~1 032/s ≈ 62 000/min (REST) | 2.9% | ❌ FAIL — 2 699/min (+50%) |
+| gRPC authz | 100/s (= 6 000/min) | ~1 268/s checks | 8% | ❌ FAIL — **181/min admitted (~1/33)** |
+| gRPC identity | 500/s (= 30 000/min) | ~12 307/s reads | 4% | ❌ FAIL — 1 504/min (~1/20) |
+| `POST /oauth2/revoke`; gRPC admin; gRPC infra | 60/min; 10/s; 100/s | — | — | not yet covered by a test scenario |
+
+Yes, that column is mostly FAIL, and we're publishing it anyway: the
+assertion script and its ±10% bar are ours, this is the second limiter
+bug class it has caught (the ×60 units bug was the first), and a public
+failing table is what makes the fix verifiable next run. The abuse
+*direction* of the posture is intact — the critical human endpoint
+(login) enforces exactly, and every machine endpoint still throttles a
+flood to within 1.5× of its configured trickle — but "within 1.5×" is
+not "as configured", and the gRPC starvation is a real availability bug
+under attack. Both are open work items.
 
 The margin between defaults and capacity is **25–2 700×, with authz the
 tightest** — deliberate on an internet edge. Posture guidance is unchanged
@@ -512,6 +543,33 @@ Serial harnesses, labeled and excluded from cross-SDK throughput
 comparison (single worker, by their harness design): **C** (check p50
 3.0 ms, p95 3.8 ms, 318 rps) and **PHP** (3.6 / 4.3 ms, 272 rps).
 
+**Client-side footprint (new this run — first pass of this telemetry).**
+Each SDK's own process CPU (total over its bench) and peak RSS, which is
+half the story for IoT and sidecar deployments:
+
+| sdk | runtime | client CPU (s, whole bench) | peak RSS (MiB) |
+|---|---|---|---|
+| go | go 1.26 | **3.3** | 36 |
+| c *(serial)* | gcc 16, C11 | 13.9 | **13** |
+| php *(serial)* | php 8.5 | 5.6 | 59 |
+| csharp | .NET 8 | 10.3 | 105 |
+| typescript | node 22 | 13.1 | 125 |
+| swift | swift 6.3 | 13.3 | 48 |
+| kotlin | JVM 21 | 17.1 | 458 |
+| cpp | g++ 16 | 17.6 | 39 |
+| java | JVM 21 | 21.1 | 306 |
+| rust | cargo | 23.4 | **23** |
+| python | python 3.14 | 40.0 | 88 |
+
+Highlights: Go is by far the cheapest concurrent client on CPU; C and
+Rust are the smallest on memory (13/23 MiB — the embedded/IoT lane); the
+JVM SDKs pay the expected 300–460 MiB runtime tax at equal wire
+performance; Python is the most expensive on CPU *and* the slowest, a
+consistent picture. One number we flag rather than explain: Rust's
+client CPU reads high relative to its (excellent) latency profile —
+this is the first run of this telemetry and that figure gets a second
+look before we draw conclusions from it.
+
 What the table shows, and the flags (\*), stated plainly:
 
 - **The server, not the SDKs, sets the floor**: ten SDKs measure refresh
@@ -568,8 +626,10 @@ that workload is what AXIAM is shaped around.
 
 **3. Security posture as measured defaults, not documentation.** AXIAM is
 the only target here that ships abuse rate-limits on by default — sized
-from these measurements, enforced-as-configured under flood on the REST
-surface, with human endpoints locked strictly regardless of posture.
+from these measurements, with human endpoints locked strictly regardless
+of posture (and login enforcement measured exact under flood; the
+machine-endpoint enforcement gaps §7 reports are published, tracked
+bugs, not fine print).
 Argon2id, EdDSA short-lived tokens, single-use rotating refresh
 tokens, append-only audit, encrypted-at-rest secrets are defaults, not
 options. And the process is part of the posture: this benchmark series
@@ -611,19 +671,22 @@ under flood; a Keycloak login cell that resists fair measurement in both
 directions; Python and C++ SDK outliers that survived their first fixes;
 laptop hardware.
 
-**Next round:** the refresh-regression bisection, the gRPC flood-behavior
-fix with an under-flood assertion in CI, the session-cache revocation
-cell (required before that cache gets recommended anywhere), the
-TypeScript baseline audit — and the long-promised server-class hardware
-re-run, which remains the biggest single upgrade this series can make.
+**Next round:** the refresh-regression bisection, the limiter-enforcement
+fixes (gRPC starvation and REST overshoot) re-verified by the same
+assertion script that failed them here, scenario coverage for the three
+untested limiter families, the TypeScript baseline audit — and the
+long-promised server-class hardware re-run, which remains the biggest
+single upgrade this series can make.
 
 ---
 *Sources: G-box run-5 of 2026-08-05/06 (median-of-3 capped matrix ×
 p0/p2/p3 × 3 targets; §12.3–12.7 labeled investigation passes: KC-login
-4 GiB, TCP_NODELAY A/B + VU sweep, session/decision cache 2×2, DB
-capped/uncapped, prod rate-limit posture; 11-SDK median-of-3 pass with
-matched-VU wire baseline; per-cell k6 summaries, 1 s container + host
-telemetry, digest-recorded image metadata), aggregated by
-`runner/report.py`. Target versions: AXIAM 1.0.0-alpha24 (digest-pinned),
+4 GiB, TCP_NODELAY A/B + VU sweep + in-namespace `ss -ti` socket
+captures, session/decision cache 2×2, cache-on revocation cell, DB
+capped/uncapped, prod rate-limit posture with the `rl-prod-summary.md`
+assertion artifact; 11-SDK median-of-3 pass with matched-VU wire
+baseline and client CPU/RSS telemetry; per-cell k6 summaries, 1 s
+container + host telemetry, digest-recorded image metadata), aggregated
+by `runner/report.py`. Target versions: AXIAM 1.0.0-alpha24 (digest-pinned),
 Keycloak 26.7.0, Zitadel v4.16.2, SurrealDB v3 (digest-pinned),
 Postgres 16. Metric definitions: [`docs/methodology.md`](docs/methodology.md).*

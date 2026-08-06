@@ -412,10 +412,11 @@ released image against a single-IP 50-VU flood:
 | `POST /api/v1/auth/login` | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% | ✅ **PASS** — 11/min admitted |
 | `POST /oauth2/token` | 120/min | ~2 804/s ≈ 168 000/min | 0.07% | ❌ FAIL — 135/min (+12%) |
 | `POST /oauth2/introspect` | 600/min | ~4 504/s ≈ 270 000/min | 0.22% | ❌ FAIL — 889/min (+48%) |
-| `POST /api/v1/authz/check` (+ batch, shared bucket) | 1 800/min | ~1 032/s ≈ 62 000/min (REST) | 2.9% | ❌ FAIL — 2 699/min (+50%) |
+| `POST /api/v1/authz/check` | 1 800/min | ~1 032/s ≈ 62 000/min (REST; batch shares this bucket) | 2.9% | ❌ FAIL — 2 699/min (+50%) |
 | gRPC authz | 100/s (= 6 000/min) | ~1 268/s checks | 8% | ❌ FAIL — **181/min admitted (~1/33)** |
 | gRPC identity | 500/s (= 30 000/min) | ~12 307/s reads | 4% | ❌ FAIL — 1 504/min (~1/20) |
-| `POST /oauth2/revoke`; gRPC admin; gRPC infra | 60/min; 10/s; 100/s | — | — | not yet covered by a test scenario |
+| `POST /oauth2/revoke` | 60/min | (tracks issuance) | — | not yet covered by a test scenario |
+| gRPC admin / gRPC infra | 10/s / 100/s | — | — | not yet covered by a test scenario |
 
 Yes, that column is mostly FAIL, and we're publishing it anyway: the
 assertion script and its ±10% bar are ours, this is the second limiter

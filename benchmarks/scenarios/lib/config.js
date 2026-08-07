@@ -72,6 +72,17 @@ export const cfg = {
   duration: str('BENCH_DURATION', '120s'),
   cooldown: str('BENCH_COOLDOWN', '10s'),
 
+  // A5/J4: the login-bucket budget the harness must stay inside while
+  // pre-minting its refresh-session pool. 0 (the default) = unthrottled, so
+  // an ordinary run pre-mints as fast as it can and this knob costs nothing.
+  //
+  // Under the shipped `internet` posture `/api/v1/auth/login` is 10/min per
+  // IP, and the whole k6 fleet is ONE IP. Run 5's rl-prod refresh cell burned
+  // that budget on re-logins and reported 4.4% errors that were really login
+  // throttling wearing a refresh cell's clothes. The rl-prod profile sets this
+  // to the configured login ceiling so setup paces itself instead.
+  loginPerMin: num('BENCH_LOGIN_PER_MIN', 0),
+
   // --- validity gates ---
   maxErrorRate: num('BENCH_MAX_ERROR', 0.01),
   maxP95: num('BENCH_MAX_P95_MS', 2000),

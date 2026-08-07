@@ -194,6 +194,27 @@ Notes:
   not, which made the effective gRPC ceiling 1/60th of the configured one
   (fixed; `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100` now really means 100/s).
 
+### 3.1a Sizing login also sizes refresh capacity
+
+`login_per_min` is usually reasoned about as "how many password guesses will I
+let one source make per minute". It is also, less obviously, a **ceiling on
+session churn**: every session that expires costs one login to replace, so a
+deployment with short sessions has its sustainable refresh rate bounded by its
+login limit rather than by the refresh endpoint's capacity.
+
+This matters in exactly one shape of deployment — short sessions behind a
+shared egress IP (a NAT'd fleet, a mobile app behind a carrier gateway, a CI
+farm). There, `login_per_min` is doing two jobs at once, and sizing it for the
+brute-force job alone will silently cap the other.
+
+If that is you: lengthen the session rather than raising the login limit. A
+longer session reduces logins without widening the password-guessing surface,
+whereas raising `login_per_min` widens both.
+
+(Run 5's benchmark harness rediscovered this the hard way — its refresh cell
+reported a 4.4 % error rate that was login throttling, not refresh failures.
+See `benchmarks/docs/methodology.md`.)
+
 ### 3.2 The two layers, and which one decides
 
 Every rate-limited surface runs **two** cooperating limiters. Knowing which

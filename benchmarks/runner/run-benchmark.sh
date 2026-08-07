@@ -163,6 +163,7 @@ fi
 
 export BENCH_TARGET="$TARGET"
 export BENCH_HOST="${BENCH_HOST:-localhost}"
+
 # BENCH_PORT is set by the profile env (8090 plaintext, 8443 TLS).
 
 # G2: base URL for the post-seed settle gate's canary probes (same
@@ -320,6 +321,31 @@ detect_rl_posture() {
 }
 RL_POSTURE="$(detect_rl_posture)"
 echo "[run] rate-limit posture: $RL_POSTURE"
+
+# A5/J4: the login-bucket budget `token_refresh.js` paces its session-pool
+# pre-mint inside.
+#
+# Under `rl=prod` the whole k6 fleet is ONE IP against a 10/min login ceiling.
+# Run 5's rl-prod refresh cell burned that budget on re-logins and reported
+# 4.4% errors (run 4: 2.4%) that were login throttling wearing a refresh
+# cell's clothes. Pre-minting one session per VU, paced inside the bucket,
+# means the cell measures the refresh path and any error it does report is the
+# refresh path's.
+#
+# Read from the ceiling the RUNNING container actually has, not from a second
+# copy of the number in this script -- the same reason `detect_rl_posture`
+# above reads the container rather than trusting intent. 0 (the neutralized
+# default) means no pacing, so every non-prod cell is untouched.
+detect_login_per_min() {
+  [ "$RL_POSTURE" = "prod" ] || { echo 0; return; }
+  local limit
+  limit="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null \
+    | sed -n 's/^AXIAM__RATE_LIMIT__LOGIN_PER_MIN=//p' | head -1)"
+  # Shipped `internet` default when the container leaves it unset.
+  echo "${limit:-10}"
+}
+export BENCH_LOGIN_PER_MIN="${BENCH_LOGIN_PER_MIN:-$(detect_login_per_min)}"
+echo "[run] refresh session-pool login budget: ${BENCH_LOGIN_PER_MIN}/min (0 = unpaced)"
 
 # --- Reproducibility metadata (methodology.md §7 / A4) ----------------------
 # A9: git commit of the working tree this run executed from. Recorded

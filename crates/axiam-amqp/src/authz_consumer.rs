@@ -165,15 +165,22 @@ where
     };
 
     let response = match engine.check_access(&access_request).await {
-        Ok(AccessDecision::Allow) => AuthzResponse {
+        // B1: `reason_code` distinguishes "nothing granted this" from "an
+        // explicit deny rule refuses it" — see AccessDecision's docs. Matched
+        // on the decision itself rather than reconstructed from `allowed`, so
+        // the async path cannot drift from the REST and gRPC ones.
+        Ok(
+            decision @ (AccessDecision::Allow
+            | AccessDecision::Deny(_)
+            | AccessDecision::DeniedByRule(_)),
+        ) => AuthzResponse {
             correlation_id,
-            allowed: true,
-            reason: None,
-        },
-        Ok(AccessDecision::Deny(reason)) => AuthzResponse {
-            correlation_id,
-            allowed: false,
-            reason: Some(reason),
+            allowed: decision.is_allowed(),
+            reason: match &decision {
+                AccessDecision::Allow => None,
+                _ => Some(decision.reason().to_string()),
+            },
+            reason_code: Some(decision.reason_code().to_string()),
         },
         Err(e) => {
             error!(
@@ -185,6 +192,10 @@ where
                 correlation_id,
                 allowed: false,
                 reason: Some("internal error".to_string()),
+                // Deliberately no reason_code: an engine error is not an
+                // authorization outcome, and labelling it `no_grant` would tell
+                // the caller to go ask an admin for access they may already have.
+                reason_code: None,
             }
         }
     };

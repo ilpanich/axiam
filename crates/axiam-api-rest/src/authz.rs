@@ -218,7 +218,14 @@ impl RequirePermission {
             .map_err(AxiamApiError::from)?
         {
             AccessDecision::Allow => Ok(()),
-            AccessDecision::Deny(reason) => {
+            // B1: both refusal shapes are the same 403 here. The route guard's
+            // job is to stop the request, and it stops it identically whether
+            // nothing granted access or an explicit deny rule refused it —
+            // widening the guard's behaviour on `denied_by_rule` would be a
+            // change in enforcement, not in reporting. The distinction is
+            // surfaced by the /authz/check endpoints, which exist to answer
+            // "why", not by the guard, which exists to answer "no".
+            AccessDecision::Deny(reason) | AccessDecision::DeniedByRule(reason) => {
                 // SDK-Q02: surface the checked action/resource so clients can
                 // parse them from the 403 body. `Uuid::nil()` is the
                 // "global" (not resource-scoped) sentinel — omit it.

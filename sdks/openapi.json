@@ -7900,7 +7900,8 @@
         "type": "object",
         "description": "Result of a single authorization check.",
         "required": [
-          "allowed"
+          "allowed",
+          "reason_code"
         ],
         "properties": {
           "allowed": {
@@ -7913,6 +7914,10 @@
               "null"
             ],
             "description": "Engine-provided deny reason (T-15-02: generic string only, no resource-structure hints)."
+          },
+          "reason_code": {
+            "type": "string",
+            "description": "B1: machine-readable decision reason — `allowed`, `no_grant`, or\n`denied_by_rule` (SDK contract §11).\n\nBoth refusals still return `allowed: false` and still map to 403, so a\nclient that reads only `allowed` is unaffected. The distinction matters\nto the person on the other end: `no_grant` means \"ask an admin for\naccess\", `denied_by_rule` means \"an admin has already decided\" — and a\nUI that cannot tell them apart sends users to raise tickets that will\nbe refused.\n\nT-15-02 still holds: this is a fixed, closed vocabulary of three\nvalues. It says which *kind* of decision was made, never which rule\nmade it or where in the resource tree it sits."
           }
         }
       },
@@ -9051,6 +9056,10 @@
           "permission_id"
         ],
         "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/PermissionEffect",
+            "description": "B1: `\"allow\"` (the default) or `\"deny\"`.\n\nA deny grant **overrides every allow**, at any depth of the resource\nhierarchy and at equal specificity — it is not most-specific-wins. See\n`claude_dev/deny-override-design.md` for the precedence table and for\nwhy that trade was made.\n\nOmitting the field means `\"allow\"`, so every existing client keeps\nworking unchanged and no migration is required."
+          },
           "permission_id": {
             "type": "string",
             "format": "uuid"
@@ -10222,6 +10231,14 @@
           }
         }
       },
+      "PermissionEffect": {
+        "type": "string",
+        "description": "Whether a grant permits an action or refuses it (B1, deny-override).\n\n# Precedence\n\nDefault deny -> an [`PermissionEffect::Allow`] grant permits ->\na [`PermissionEffect::Deny`] grant refuses, **and beats every allow**,\nwherever either sits in the resource hierarchy. Deny wins; there is no\nmost-specific-wins tie-break.\n\nThat choice is deliberate and is argued in full in\n`claude_dev/deny-override-design.md` §2.1. The short version: deny-override\nbuys one checkable property — **adding a deny rule can never widen access,\nand can never be undone by adding allows** — and most-specific-wins buys\nexpressiveness at the cost of making \"is X denied?\" unanswerable without\nenumerating every other rule that might out-specify it.\n\n[`PermissionEffect::Allow`] is the default, so data written before this\nexisted, and clients that send no `effect`, both mean \"allow\". No migration.",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
       "PermissionGrant": {
         "type": "object",
         "description": "A permission grant with optional scope constraints.\nEmpty `scope_ids` means the grant covers all scopes (wildcard).",
@@ -10230,6 +10247,10 @@
           "scope_ids"
         ],
         "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/PermissionEffect",
+            "description": "B1: whether this grant permits or refuses. Defaults to\n[`PermissionEffect::Allow`], which is what every pre-B1 row and every\n`effect`-less request means.\n\nScope interaction: an empty `scope_ids` is a **wildcard**, so a deny\nwith no scopes masks the action entirely on this node and its\ndescendants — every scope, and unscoped checks too. A scoped deny masks\nonly the scopes it names."
+          },
           "permission": {
             "$ref": "#/components/schemas/Permission"
           },

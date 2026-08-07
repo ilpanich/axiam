@@ -56,6 +56,20 @@ pub struct CheckAccessResponse {
     /// Engine-provided deny reason (T-15-02: generic string only, no resource-structure hints).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// B1: machine-readable decision reason — `allowed`, `no_grant`, or
+    /// `denied_by_rule` (SDK contract §11).
+    ///
+    /// Both refusals still return `allowed: false` and still map to 403, so a
+    /// client that reads only `allowed` is unaffected. The distinction matters
+    /// to the person on the other end: `no_grant` means "ask an admin for
+    /// access", `denied_by_rule` means "an admin has already decided" — and a
+    /// UI that cannot tell them apart sends users to raise tickets that will
+    /// be refused.
+    ///
+    /// T-15-02 still holds: this is a fixed, closed vocabulary of three
+    /// values. It says which *kind* of decision was made, never which rule
+    /// made it or where in the resource tree it sits.
+    pub reason_code: String,
 }
 
 /// Body for a batch authorization check.
@@ -77,16 +91,15 @@ pub struct BatchCheckAccessResponse {
 // ---------------------------------------------------------------------------
 
 fn decision_to_response(decision: AccessDecision) -> CheckAccessResponse {
-    match decision {
-        AccessDecision::Allow => CheckAccessResponse {
-            allowed: true,
-            reason: None,
+    CheckAccessResponse {
+        allowed: decision.is_allowed(),
+        // T-15-02: reason is the engine's generic string — no structural hints
+        // added, for either kind of refusal.
+        reason: match &decision {
+            AccessDecision::Allow => None,
+            _ => Some(decision.reason().to_string()),
         },
-        AccessDecision::Deny(reason) => CheckAccessResponse {
-            allowed: false,
-            // T-15-02: reason is the engine's generic string — no structural hints added.
-            reason: Some(reason),
-        },
+        reason_code: decision.reason_code().to_string(),
     }
 }
 

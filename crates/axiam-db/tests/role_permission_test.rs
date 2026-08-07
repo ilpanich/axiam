@@ -887,3 +887,227 @@ async fn revoke_permission_from_role() {
         .unwrap();
     assert!(perms.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// B1 — deny-override persistence
+// ---------------------------------------------------------------------------
+
+/// A grant written with `PermissionEffect::Deny` must read back as a deny.
+///
+/// This is the seam between the design's semantics (which the engine's unit
+/// tests cover exhaustively) and the datastore: the engine cannot deny what
+/// the repository does not report.
+#[tokio::test]
+async fn grant_effect_round_trips_through_the_datastore() {
+    use axiam_core::models::permission::PermissionEffect;
+
+    let (db, tenant_id, _a, _b, _g) = setup().await;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "fleet-operator".into(),
+            description: "".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let allowed = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "read".into(),
+            description: "".into(),
+        })
+        .await
+        .unwrap();
+    let denied = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "decommission".into(),
+            description: "".into(),
+        })
+        .await
+        .unwrap();
+
+    perm_repo
+        .grant_to_role_with_effect(
+            tenant_id,
+            role.id,
+            allowed.id,
+            vec![],
+            PermissionEffect::Allow,
+        )
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_effect(
+            tenant_id,
+            role.id,
+            denied.id,
+            vec![],
+            PermissionEffect::Deny,
+        )
+        .await
+        .unwrap();
+
+    let grants = perm_repo
+        .get_role_permission_grants(tenant_id, role.id)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 2);
+
+    let by_action = |action: &str| {
+        grants
+            .iter()
+            .find(|g| g.permission.action == action)
+            .unwrap_or_else(|| panic!("no grant for {action}"))
+            .effect
+    };
+    assert_eq!(by_action("read"), PermissionEffect::Allow);
+    assert_eq!(by_action("decommission"), PermissionEffect::Deny);
+
+    // The batched query the authorization hot path actually uses must agree
+    // with the single-role one — they are two projections of the same edge,
+    // and a divergence would mean denies work in single checks and vanish in
+    // batches.
+    let batched = perm_repo
+        .get_role_permission_grants_for_roles(tenant_id, &[role.id])
+        .await
+        .unwrap();
+    let batched_grants = batched.get(&role.id).expect("role present in batch result");
+    assert_eq!(batched_grants.len(), 2);
+    assert_eq!(
+        batched_grants
+            .iter()
+            .find(|g| g.permission.action == "decommission")
+            .unwrap()
+            .effect,
+        PermissionEffect::Deny,
+        "the batched grant query must project `effect` too"
+    );
+}
+
+/// An edge written the pre-B1 way (no `effect` at all) must read back as
+/// **allow** — that is the entire migration story, and it must hold against
+/// the real datastore rather than only in the row-mapping unit test.
+#[tokio::test]
+async fn a_grant_written_without_an_effect_reads_back_as_allow() {
+    use axiam_core::models::permission::PermissionEffect;
+
+    let (db, tenant_id, _a, _b, _g) = setup().await;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "legacy".into(),
+            description: "".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "read".into(),
+            description: "".into(),
+        })
+        .await
+        .unwrap();
+
+    // `grant_to_role` is the oldest entry point and never mentions `effect`.
+    perm_repo
+        .grant_to_role(tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+
+    let grants = perm_repo
+        .get_role_permission_grants(tenant_id, role.id)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(
+        grants[0].effect,
+        PermissionEffect::Allow,
+        "an absent effect must mean allow — otherwise upgrading would revoke \
+         every existing grant in the deployment"
+    );
+}
+
+/// Scoped denies must carry their scope list through the datastore, or a deny
+/// intended for one scope would silently become a wildcard (or vice versa) —
+/// both directions are wrong, and one of them is a privilege escalation.
+#[tokio::test]
+async fn a_scoped_deny_keeps_its_scopes() {
+    use axiam_core::models::permission::PermissionEffect;
+
+    let (db, tenant_id, _a, _b, _g) = setup().await;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let resource_repo = SurrealResourceRepository::new(db.clone());
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+
+    let resource = resource_repo
+        .create(CreateResource {
+            tenant_id,
+            name: "fleet".into(),
+            resource_type: "collection".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: resource.id,
+            name: "pii".into(),
+            description: "".into(),
+        })
+        .await
+        .unwrap();
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "analyst".into(),
+            description: "".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "read".into(),
+            description: "".into(),
+        })
+        .await
+        .unwrap();
+
+    perm_repo
+        .grant_to_role_with_effect(
+            tenant_id,
+            role.id,
+            perm.id,
+            vec![scope.id],
+            PermissionEffect::Deny,
+        )
+        .await
+        .unwrap();
+
+    let grants = perm_repo
+        .get_role_permission_grants(tenant_id, role.id)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].effect, PermissionEffect::Deny);
+    assert_eq!(
+        grants[0].scope_ids,
+        vec![scope.id],
+        "a scoped deny that lost its scopes would become a wildcard deny"
+    );
+}

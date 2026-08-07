@@ -162,6 +162,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_status_and_sa_description",
         sql: SCHEMA_V24,
     },
+    Migration {
+        version: 25,
+        name: "grant_effect_deny_override",
+        sql: SCHEMA_V25,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1245,6 +1250,35 @@ UPDATE tenant SET status = 'Active' WHERE status = NONE;
 -- Service account optional description (no backfill: option<string> reads
 -- back as NONE when absent).
 DEFINE FIELD IF NOT EXISTS description ON TABLE service_account TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v25 — grants.effect (B1, deny-override)
+// -----------------------------------------------------------------------
+//
+// `grants` is the role->permission edge and is SCHEMAFULL, so the new
+// `effect` column has to be declared before the repository can project it —
+// SurrealDB rejects an unknown field on a SCHEMAFULL table outright, which is
+// exactly what this migration exists to stop.
+//
+// **`option<string>`, and therefore no backfill.** An absent effect reads back
+// as NONE, which the row mapper turns into `PermissionEffect::Allow` — the
+// meaning every pre-B1 grant already had. Making the field required and
+// backfilling it would work too, but it would touch every grant edge in the
+// deployment to write a value that changes nothing, and a migration that
+// rewrites the authorization tables is a migration that can fail halfway
+// through the authorization tables.
+//
+// The ASSERT is the load-bearing half. `effect` decides whether a grant
+// permits or refuses, so a value that is neither 'allow' nor 'deny' has no
+// defined meaning; the read path defaults such a value to 'allow' rather than
+// erroring (it must not take authorization down over one bad row), which means
+// the *write* path is the only place that can keep the column honest. Rejecting
+// it here makes "a grant edge always says allow, deny, or nothing" an invariant
+// of the datastore rather than a convention of the code above it.
+const SCHEMA_V25: &str = "\
+DEFINE FIELD IF NOT EXISTS effect ON TABLE grants TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['allow', 'deny'];
 ";
 
 // -----------------------------------------------------------------------

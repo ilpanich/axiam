@@ -958,6 +958,35 @@ macro over an `axiam_require_access(...)` guard function. All compose strictly o
    gRPC where the SDK's dispatcher already prefers it, e.g. PHP). No new transport code.
 8. **Redaction.** Deny/error paths MUST NOT log or echo the token, and SHOULD log the
    denied `action` + `resource_id` at debug level only (consistent with §2 rules).
+9. **Decision reason (B1 — deny-override).** `check_access` and `batch_check`
+   responses carry a `reason_code` alongside `allowed`:
+
+   | `reason_code` | Meaning |
+   |---|---|
+   | `allowed` | an allow grant matched and no deny did |
+   | `no_grant` | nothing matched — default deny |
+   | `denied_by_rule` | an explicit deny rule matched and overrode any allow |
+
+   **SDKs MUST surface `reason_code` on the result type**, and MUST NOT collapse
+   the two refusals into a bare `false`. They mean opposite things to the person
+   on the other end: `no_grant` says *ask an admin for access*, `denied_by_rule`
+   says *an admin has already decided*. An application that cannot tell them
+   apart sends users to raise tickets that will be refused.
+
+   **Middleware behaviour is unchanged.** Both refusals are still 403
+   `authorization_denied` — the route guard's job is to stop the request, and it
+   stops it identically either way. This clause is about *reporting*, not
+   enforcement, and an SDK MUST NOT vary its guard behaviour on `reason_code`.
+
+   A `reason_code` an SDK does not recognise MUST be surfaced verbatim and MUST
+   NOT change the allow/deny outcome, which is carried by `allowed` alone. An
+   older SDK against a newer server therefore degrades to today's behaviour, and
+   a newer SDK against an older server (which omits the field) MUST treat it as
+   absent rather than as an error.
+
+   Required tests: an allow, a `no_grant` deny and a `denied_by_rule` deny each
+   surface their own reason code; the guard returns 403 for both refusals; an
+   unknown reason code does not alter the outcome.
 9. **`require_role` is local.** It reads the verified claims already in the request
    context; it never calls the server. Docs in every SDK must state that role names are
    tenant-defined and that `require_access` is the authoritative check.

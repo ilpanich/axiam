@@ -251,6 +251,16 @@ impl PermissionRepository for MockPermissionRepo {
     ) -> AxiamResult<()> {
         unimplemented!()
     }
+    async fn grant_to_role_with_effect(
+        &self,
+        _t: Uuid,
+        _r: Uuid,
+        _p: Uuid,
+        _s: Vec<Uuid>,
+        _e: axiam_core::models::permission::PermissionEffect,
+    ) -> AxiamResult<()> {
+        unimplemented!()
+    }
     async fn get_role_permission_grants(
         &self,
         _t: Uuid,
@@ -400,6 +410,7 @@ fn build_engine(
         vec![PermissionGrant {
             permission: permission(action, tenant),
             scope_ids: vec![],
+            effect: Default::default(),
         }],
     );
 
@@ -533,6 +544,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         vec![PermissionGrant {
             permission: permission("read", tenant),
             scope_ids: vec![],
+            effect: Default::default(),
         }],
     );
     by_role.insert(
@@ -540,6 +552,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         vec![PermissionGrant {
             permission: permission("write", tenant),
             scope_ids: vec![],
+            effect: Default::default(),
         }],
     );
 
@@ -768,6 +781,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
         vec![PermissionGrant {
             permission: permission("read", tenant),
             scope_ids: vec![scope_id],
+            effect: Default::default(),
         }],
     );
 

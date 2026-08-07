@@ -33,7 +33,9 @@ use crate::models::{
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
     password_reset::{CreatePasswordResetToken, PasswordResetToken},
-    permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
+    permission::{
+        CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
+    },
     pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
@@ -378,6 +380,21 @@ pub trait PermissionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Get all permission grants for a role, including scope constraints.
+    /// Grant a permission to a role with an explicit [`PermissionEffect`]
+    /// (B1, deny-override).
+    ///
+    /// `PermissionEffect::Allow` is exactly what `grant_to_role_with_scopes`
+    /// does, so that method delegates here. `PermissionEffect::Deny` writes a
+    /// deny rule, which the engine treats as overriding **every** allow —
+    /// see `claude_dev/deny-override-design.md`.
+    fn grant_to_role_with_effect(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+        effect: PermissionEffect,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
     fn get_role_permission_grants(
         &self,
         tenant_id: Uuid,

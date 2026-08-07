@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RBAC deny-override (explicit deny).** A role→permission grant now carries
+  `effect: "allow" | "deny"`, defaulting to `"allow"`. A deny grant overrides
+  **every** allow, at any depth of the resource hierarchy and at equal
+  specificity — deny-override, not most-specific-wins. Closes SEC-040 and the
+  "no explicit deny" entry in the comparison page's cons list. Check responses
+  gain `reason_code` (`allowed` | `no_grant` | `denied_by_rule`) so a caller
+  can tell "ask an admin for access" apart from "an admin has already
+  decided". Fully backward compatible: existing grants and `effect`-less
+  requests both mean allow, and no migration is required beyond the additive
+  schema field.
+
 - **AMQP transport encryption (`amqps://`).** Broker traffic was plaintext in
   every deployment artifact. `AmqpConfig` now accepts `amqps://` URLs with an
   optional TLS block (custom CA bundle, optional client certificate for mutual

@@ -250,7 +250,15 @@ A caller that can set XFF freely attributes every request to a different source 
 
 The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource — the only way to remove access to a subtree is to restructure the grant.
 
-> SEC-040, accepted for v1.0-beta and documented in the design document and the roadmap. Deny-override cascade is deferred to post-v1.0-beta. Operators must model exclusions by narrowing the grant rather than by adding a deny.
+> SEC-040 — **CLOSED (B1).** The engine now supports explicit deny. A grant
+> carries `effect: "allow" | "deny"`, and a deny **overrides every allow**, at
+> any depth of the resource hierarchy and at equal specificity (deny-override,
+> not most-specific-wins). Exclusions no longer have to be modelled by narrowing
+> the grant. See `claude_dev/deny-override-design.md` for the precedence table,
+> the scope-interaction rules, and the argument for deny-override over
+> most-specific-wins — the property it buys is that adding a deny rule can never
+> widen access and can never be undone by adding allows, which is asserted by an
+> exhaustive property test.
 
 **T-17 — Direct datastore access bypasses every application control**  
 `SurrealDB cluster (all tenant data)` (Store) · Information disclosure · Critical · Mitigated
@@ -869,7 +877,10 @@ Ancestor walking on a deliberately deep — or cyclic — resource tree turns a 
 
 The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.
 
-> SEC-040, accepted for v1.0-beta and documented in the design document. Deny-override cascade is deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy instead of granting high and excluding.
+> SEC-040 — **CLOSED (B1).** Explicit deny is implemented; a deny grant
+> overrides every allow at any depth. Modelling exclusions by granting lower in
+> the hierarchy is still valid, but it is no longer the only option. See
+> `claude_dev/deny-override-design.md`.
 
 **T-88 — Stale allow served after revocation**  
 `Decision cache` (Process) · Elevation of privilege · High · Mitigated

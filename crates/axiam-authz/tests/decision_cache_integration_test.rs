@@ -242,6 +242,16 @@ impl PermissionRepository for MockPermissionRepo {
     ) -> AxiamResult<()> {
         unimplemented!()
     }
+    async fn grant_to_role_with_effect(
+        &self,
+        _t: Uuid,
+        _r: Uuid,
+        _p: Uuid,
+        _s: Vec<Uuid>,
+        _e: axiam_core::models::permission::PermissionEffect,
+    ) -> AxiamResult<()> {
+        unimplemented!()
+    }
     async fn get_role_permission_grants(
         &self,
         _t: Uuid,
@@ -378,6 +388,7 @@ fn build_engine(
         vec![PermissionGrant {
             permission: permission(action, tenant),
             scope_ids: vec![],
+            effect: Default::default(),
         }],
     );
 

@@ -205,6 +205,15 @@ pub struct AuthzResponse {
     pub allowed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// B1: machine-readable decision reason — `allowed`, `no_grant`, or
+    /// `denied_by_rule` (SDK contract §11).
+    ///
+    /// `no_grant` and `denied_by_rule` are both refusals, but they mean
+    /// opposite things to the caller: one says "ask an admin for access", the
+    /// other says "an admin has already decided". A consumer that only reads
+    /// `allowed` behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 /// Audit event received from external services via `axiam.audit.events`.

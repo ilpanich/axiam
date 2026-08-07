@@ -95,37 +95,98 @@ fn applicable_role_ids(
         .collect()
 }
 
-/// Given the applicable role IDs and the (shared) grants-by-role map, decide
-/// whether any grant matches `action` under the optional `requested_scope_id`.
+/// Whether a single grant applies to `action` under `requested_scope_id`.
 ///
 /// Wildcard grants (empty `scope_ids`) match any requested scope; otherwise the
 /// requested scope must be present in the grant's scope list. When no scope is
 /// requested, an action match is sufficient.
-fn grants_allow(
+///
+/// **The wildcard rule is what makes a resource-level deny stronger than a
+/// scope-level one** (B1 design §2.3): a deny with no scopes matches every
+/// request for that action regardless of the scope named, so it masks the
+/// action entirely. A scoped deny masks only the scopes it names.
+fn grant_applies(grant: &PermissionGrant, action: &str, requested_scope_id: Option<Uuid>) -> bool {
+    if grant.permission.action != action {
+        return false;
+    }
+    match requested_scope_id {
+        Some(scope_id) => grant.scope_ids.is_empty() || grant.scope_ids.contains(&scope_id),
+        None => true,
+    }
+}
+
+/// Outcome of evaluating the applicable grants (B1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantOutcome {
+    /// At least one allow matched and no deny did.
+    Allowed,
+    /// An explicit deny matched. Beats any allow, matched or not.
+    DeniedByRule,
+    /// Nothing matched — default deny.
+    NoGrant,
+}
+
+/// Given the applicable role IDs and the (shared) grants-by-role map, decide
+/// the outcome for `action` under the optional `requested_scope_id`.
+///
+/// # Deny-override, in one pass (B1)
+///
+/// A matched deny **short-circuits**; a matched allow is only remembered. Two
+/// consequences worth naming:
+///
+/// 1. **The common case pays one enum comparison per grant already being
+///    examined.** Denies live on the same `grants` edge as allows and arrive in
+///    the same batched fetch that already happens, so a tenant with no deny
+///    rules issues exactly the queries it issued before. There is no
+///    deny-specific round trip, and therefore no need for a per-tenant
+///    `has_denies` flag to gate one — which would have been a second source of
+///    truth able to go stale.
+/// 2. **The result does not depend on grant order.** Because deny
+///    short-circuits and allow only accumulates, a rule set has one answer, not
+///    one answer per query plan.
+fn evaluate_grants(
     unique_role_ids: &[Uuid],
     grants_by_role: &HashMap<Uuid, Vec<PermissionGrant>>,
     action: &str,
     requested_scope_id: Option<Uuid>,
-) -> bool {
+) -> GrantOutcome {
+    let mut saw_allow = false;
     for role_id in unique_role_ids {
         let Some(grants) = grants_by_role.get(role_id) else {
             continue;
         };
         for grant in grants {
-            if grant.permission.action != action {
+            if !grant_applies(grant, action, requested_scope_id) {
                 continue;
             }
-            match requested_scope_id {
-                Some(scope_id) => {
-                    if grant.scope_ids.is_empty() || grant.scope_ids.contains(&scope_id) {
-                        return true;
-                    }
-                }
-                None => return true,
+            if grant.effect.is_deny() {
+                // Deny wins over every allow, matched or not, at any depth of
+                // the hierarchy and at equal specificity. There is nothing
+                // later in the scan that could overturn this.
+                return GrantOutcome::DeniedByRule;
             }
+            saw_allow = true;
         }
     }
-    false
+    if saw_allow {
+        GrantOutcome::Allowed
+    } else {
+        GrantOutcome::NoGrant
+    }
+}
+
+/// Turn a [`GrantOutcome`] into the engine's public decision, with the deny
+/// reason text the single-check and coalesced-batch paths must share.
+fn decision_for(outcome: GrantOutcome, action: &str) -> AccessDecision {
+    match outcome {
+        GrantOutcome::Allowed => AccessDecision::Allow,
+        GrantOutcome::DeniedByRule => {
+            AccessDecision::DeniedByRule(format!("an explicit deny rule refuses action '{action}'"))
+        }
+        GrantOutcome::NoGrant => {
+            AccessDecision::Deny(format!("no permission grants action '{action}'"))
+        }
+    }
 }
 
 impl<R, P, Res, S, G> AuthorizationEngine<R, P, Res, S, G>
@@ -351,19 +412,15 @@ where
             ))
             .await?;
 
-        if grants_allow(
-            &unique_role_ids,
-            &grants_by_role,
+        Ok(decision_for(
+            evaluate_grants(
+                &unique_role_ids,
+                &grants_by_role,
+                &request.action,
+                requested_scope_id,
+            ),
             &request.action,
-            requested_scope_id,
-        ) {
-            Ok(AccessDecision::Allow)
-        } else {
-            Ok(AccessDecision::Deny(format!(
-                "no permission grants action '{}'",
-                request.action
-            )))
-        }
+        ))
     }
 
     /// Resolve the request's optional scope name to a scope ID on the target
@@ -696,19 +753,18 @@ where
                     unique_role_ids,
                     requested_scope_id,
                 } => {
-                    if grants_allow(
-                        &unique_role_ids,
-                        &grants_by_role,
+                    // Same two helpers the single-check path uses, so the
+                    // batch path's deny-override semantics and reason codes
+                    // cannot diverge from it.
+                    decisions.push(decision_for(
+                        evaluate_grants(
+                            &unique_role_ids,
+                            &grants_by_role,
+                            &req.action,
+                            requested_scope_id,
+                        ),
                         &req.action,
-                        requested_scope_id,
-                    ) {
-                        decisions.push(AccessDecision::Allow);
-                    } else {
-                        decisions.push(AccessDecision::Deny(format!(
-                            "no permission grants action '{}'",
-                            req.action
-                        )));
-                    }
+                    ));
                 }
             }
         }
@@ -730,13 +786,14 @@ enum ScopeResolution {
 
 #[cfg(test)]
 mod tests {
-    use super::grants_allow;
-    use axiam_core::models::permission::PermissionGrant;
+    use super::{GrantOutcome, decision_for, evaluate_grants};
+    use crate::types::AccessDecision;
+    use axiam_core::models::permission::{PermissionEffect, PermissionGrant};
     use chrono::Utc;
     use std::collections::HashMap;
     use uuid::Uuid;
 
-    fn grant(action: &str) -> PermissionGrant {
+    fn grant_with(action: &str, effect: PermissionEffect, scope_ids: Vec<Uuid>) -> PermissionGrant {
         PermissionGrant {
             permission: axiam_core::models::permission::Permission {
                 id: Uuid::new_v4(),
@@ -746,53 +803,318 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
-            scope_ids: vec![],
+            scope_ids,
+            effect,
         }
     }
 
-    /// `grants_allow` must skip over a role that has NO entry at all in the
-    /// grants-by-role map (its `grants_by_role.get(role_id)` lookup misses,
-    /// hitting the `continue` arm) rather than stopping there, and still find
-    /// a match on a later applicable role. Ordering is deliberately controlled
-    /// here (unlike a DB-backed integration test) so the grants-less role is
-    /// evaluated *before* the matching one, forcing the `continue` branch.
-    #[test]
-    fn grants_allow_skips_role_with_no_grants_entry_and_checks_the_next() {
-        let empty_role_id = Uuid::new_v4();
-        let matching_role_id = Uuid::new_v4();
-
-        let mut grants_by_role = HashMap::new();
-        // `empty_role_id` intentionally has NO entry in the map at all.
-        grants_by_role.insert(matching_role_id, vec![grant("read")]);
-
-        let unique_role_ids = vec![empty_role_id, matching_role_id];
-
-        assert!(grants_allow(
-            &unique_role_ids,
-            &grants_by_role,
-            "read",
-            None
-        ));
+    fn allow(action: &str) -> PermissionGrant {
+        grant_with(action, PermissionEffect::Allow, vec![])
     }
 
-    /// Same map shape, but no role grants the requested action at all — every
-    /// role_id either misses the map (`continue`) or has grants that don't
-    /// match the action — so the function falls through to `false`.
+    fn deny(action: &str) -> PermissionGrant {
+        grant_with(action, PermissionEffect::Deny, vec![])
+    }
+
+    /// Build a `(role_ids, grants_by_role)` pair from `(role, grants)` groups,
+    /// preserving the order the roles are listed in — which is how these tests
+    /// control whether a deny is scanned before or after an allow.
+    fn roles(
+        groups: Vec<Vec<PermissionGrant>>,
+    ) -> (Vec<Uuid>, HashMap<Uuid, Vec<PermissionGrant>>) {
+        let mut ids = Vec::new();
+        let mut map = HashMap::new();
+        for grants in groups {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            map.insert(id, grants);
+        }
+        (ids, map)
+    }
+
+    // -----------------------------------------------------------------
+    // Pre-B1 behaviour, unchanged
+    // -----------------------------------------------------------------
+
+    /// A role with NO entry at all in the grants-by-role map must be skipped
+    /// (the `grants_by_role.get(role_id)` lookup misses) rather than stopping
+    /// the scan, so a later applicable role still matches. Order is controlled
+    /// here so the grants-less role is scanned first.
     #[test]
-    fn grants_allow_denies_when_no_role_grants_the_action() {
-        let empty_role_id = Uuid::new_v4();
-        let other_role_id = Uuid::new_v4();
+    fn skips_a_role_with_no_grants_entry_and_checks_the_next() {
+        let matching = Uuid::new_v4();
+        let mut map = HashMap::new();
+        map.insert(matching, vec![allow("read")]);
+        let ids = vec![Uuid::new_v4(), matching];
 
-        let mut grants_by_role = HashMap::new();
-        grants_by_role.insert(other_role_id, vec![grant("write")]);
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::Allowed
+        );
+    }
 
-        let unique_role_ids = vec![empty_role_id, other_role_id];
+    #[test]
+    fn no_role_granting_the_action_is_no_grant_not_denied_by_rule() {
+        let (ids, map) = roles(vec![vec![allow("write")]]);
 
-        assert!(!grants_allow(
-            &unique_role_ids,
-            &grants_by_role,
-            "read",
-            None
-        ));
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::NoGrant,
+            "absence of a grant must not masquerade as an explicit deny — the \
+             two mean opposite things to the caller"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // B1 — the deny-override precedence table
+    // (claude_dev/deny-override-design.md §2.2)
+    // -----------------------------------------------------------------
+
+    /// Row 6: allow and deny of the same action at equal specificity. Deny
+    /// wins — there is no tie to break.
+    #[test]
+    fn deny_beats_allow_on_the_same_role() {
+        let (ids, map) = roles(vec![vec![allow("read"), deny("read")]]);
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    /// The result must not depend on the order grants are scanned in — a rule
+    /// set has one answer, not one answer per query plan.
+    #[test]
+    fn deny_wins_regardless_of_scan_order() {
+        let deny_first = roles(vec![vec![deny("read")], vec![allow("read")]]);
+        let allow_first = roles(vec![vec![allow("read")], vec![deny("read")]]);
+
+        assert_eq!(
+            evaluate_grants(&deny_first.0, &deny_first.1, "read", None),
+            GrantOutcome::DeniedByRule
+        );
+        assert_eq!(
+            evaluate_grants(&allow_first.0, &allow_first.1, "read", None),
+            GrantOutcome::DeniedByRule,
+            "an allow scanned before a deny must still lose to it"
+        );
+    }
+
+    /// Rows 3 and 4: hierarchy direction does not matter. Both an
+    /// ancestor-scoped and a descendant-scoped role reach this function as
+    /// applicable roles, so "deny on the parent, allow on the child" and its
+    /// mirror both reduce to the same set here — and both deny.
+    ///
+    /// Row 4 is the one to read twice: **a child allow does not override an
+    /// inherited deny.**
+    #[test]
+    fn a_child_allow_does_not_override_an_inherited_deny() {
+        // The ancestor-scoped role carries the deny; the target-scoped role
+        // carries the allow.
+        let (ids, map) = roles(vec![vec![deny("read")], vec![allow("read")]]);
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    /// Row 7/8: a deny arriving via a group-inherited or global role is still
+    /// a deny. Applicability decides which roles are in the set; it does not
+    /// decide precedence within it.
+    #[test]
+    fn deny_from_any_applicable_role_wins() {
+        let (ids, map) = roles(vec![
+            vec![allow("read")], // directly assigned
+            vec![allow("read")], // global
+            vec![deny("read")],  // group-inherited
+        ]);
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    /// Row 5: denies are per action. A deny on `write` says nothing about
+    /// `read`.
+    #[test]
+    fn a_deny_on_another_action_does_not_leak() {
+        let (ids, map) = roles(vec![vec![allow("read"), deny("write")]]);
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::Allowed
+        );
+        assert_eq!(
+            evaluate_grants(&ids, &map, "write", None),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // B1 §2.3 — scope interaction
+    // -----------------------------------------------------------------
+
+    /// A deny with NO scopes is a wildcard: it masks the action for every
+    /// scope, and for unscoped checks too.
+    #[test]
+    fn an_unscoped_deny_masks_every_scope() {
+        let pii = Uuid::new_v4();
+        let billing = Uuid::new_v4();
+        let (ids, map) = roles(vec![vec![
+            grant_with("read", PermissionEffect::Allow, vec![pii, billing]),
+            deny("read"),
+        ]]);
+
+        for scope in [None, Some(pii), Some(billing)] {
+            assert_eq!(
+                evaluate_grants(&ids, &map, "read", scope),
+                GrantOutcome::DeniedByRule,
+                "a resource-level deny is stronger than any scope-level allow"
+            );
+        }
+    }
+
+    /// A scoped deny masks only the scopes it names.
+    #[test]
+    fn a_scoped_deny_masks_only_that_scope() {
+        let pii = Uuid::new_v4();
+        let billing = Uuid::new_v4();
+        let (ids, map) = roles(vec![vec![
+            allow("read"), // wildcard allow
+            grant_with("read", PermissionEffect::Deny, vec![pii]),
+        ]]);
+
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", Some(pii)),
+            GrantOutcome::DeniedByRule
+        );
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", Some(billing)),
+            GrantOutcome::Allowed,
+            "a deny scoped to `pii` must not touch `billing`"
+        );
+    }
+
+    /// An unscoped *request* against a scoped deny: the deny's scope list does
+    /// not contain "no scope", but the request names no scope either, so the
+    /// grant applies. This is the same rule allows have always followed —
+    /// stated as a test because getting it wrong in the deny direction is a
+    /// silent privilege escalation.
+    #[test]
+    fn an_unscoped_request_matches_a_scoped_deny() {
+        let pii = Uuid::new_v4();
+        let (ids, map) = roles(vec![vec![
+            allow("read"),
+            grant_with("read", PermissionEffect::Deny, vec![pii]),
+        ]]);
+
+        assert_eq!(
+            evaluate_grants(&ids, &map, "read", None),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // B1 §5 — the property that motivates deny-override
+    // -----------------------------------------------------------------
+
+    /// **Adding a deny rule can never widen access.**
+    ///
+    /// This is the one guarantee deny-override buys over most-specific-wins,
+    /// and it is what a future "most-specific-wins" refactor would break. The
+    /// search is exhaustive over a small rule space rather than randomised, so
+    /// it fails deterministically.
+    #[test]
+    fn adding_a_deny_can_never_widen_access() {
+        let scope_a = Uuid::new_v4();
+        let scope_b = Uuid::new_v4();
+
+        let candidate_grants = [
+            allow("read"),
+            allow("write"),
+            grant_with("read", PermissionEffect::Allow, vec![scope_a]),
+            deny("read"),
+            grant_with("read", PermissionEffect::Deny, vec![scope_a]),
+            grant_with("write", PermissionEffect::Deny, vec![scope_b]),
+        ];
+        let requests = [
+            ("read", None),
+            ("read", Some(scope_a)),
+            ("read", Some(scope_b)),
+            ("write", None),
+            ("write", Some(scope_b)),
+        ];
+
+        // Every subset of the candidate grants, as a base rule set.
+        for mask in 0u32..(1 << candidate_grants.len()) {
+            let base: Vec<PermissionGrant> = candidate_grants
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, g)| g.clone())
+                .collect();
+
+            // Every possible additional DENY rule.
+            for extra in candidate_grants.iter().filter(|g| g.effect.is_deny()) {
+                let mut widened = base.clone();
+                widened.push(extra.clone());
+
+                let (base_ids, base_map) = roles(vec![base.clone()]);
+                let (wide_ids, wide_map) = roles(vec![widened]);
+
+                for (action, scope) in requests {
+                    let before = evaluate_grants(&base_ids, &base_map, action, scope);
+                    let after = evaluate_grants(&wide_ids, &wide_map, action, scope);
+
+                    if before != GrantOutcome::Allowed {
+                        assert_ne!(
+                            after,
+                            GrantOutcome::Allowed,
+                            "adding a deny turned a non-allow into an allow for \
+                             ({action}, {scope:?}) — deny-override is broken"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Reason codes (SDK contract §11)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reason_codes_distinguish_the_two_denials() {
+        assert_eq!(
+            decision_for(GrantOutcome::Allowed, "read").reason_code(),
+            "allowed"
+        );
+        assert_eq!(
+            decision_for(GrantOutcome::NoGrant, "read").reason_code(),
+            "no_grant"
+        );
+        assert_eq!(
+            decision_for(GrantOutcome::DeniedByRule, "read").reason_code(),
+            "denied_by_rule"
+        );
+    }
+
+    #[test]
+    fn both_denials_refuse_access() {
+        for outcome in [GrantOutcome::NoGrant, GrantOutcome::DeniedByRule] {
+            assert!(!decision_for(outcome, "read").is_allowed());
+        }
+        assert!(decision_for(GrantOutcome::Allowed, "read").is_allowed());
+    }
+
+    #[test]
+    fn deny_reasons_name_the_action() {
+        for outcome in [GrantOutcome::NoGrant, GrantOutcome::DeniedByRule] {
+            assert!(
+                decision_for(outcome, "publish")
+                    .reason()
+                    .contains("publish"),
+                "a deny reason must name the action it refused"
+            );
+        }
+        assert_eq!(AccessDecision::Allow.reason(), "");
     }
 }

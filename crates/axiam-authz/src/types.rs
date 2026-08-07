@@ -3,15 +3,56 @@
 use uuid::Uuid;
 
 /// The result of an authorization check.
+///
+/// # Why deny has two shapes (B1)
+///
+/// `Deny` and `DeniedByRule` are both refusals and both become a 403. They are
+/// distinguished because they mean opposite things to the person who hit them:
+///
+/// - `Deny` — nothing granted this. **Ask an admin for access.**
+/// - `DeniedByRule` — an explicit deny rule matched. **An admin has already
+///   decided.**
+///
+/// Collapsing the two into a bare `false`, which is what a client does without
+/// this distinction, throws away the only information that tells a user which
+/// of those two situations they are in. SDK contract §11 requires helpers to
+/// surface the reason rather than flatten it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessDecision {
     Allow,
+    /// Default deny — no grant matched.
     Deny(String),
+    /// An explicit deny grant matched and overrode any allow (B1).
+    DeniedByRule(String),
 }
 
 impl AccessDecision {
     pub fn is_allowed(&self) -> bool {
         matches!(self, AccessDecision::Allow)
+    }
+
+    /// Whether this refusal came from an explicit deny rule rather than from
+    /// the absence of a grant.
+    pub fn is_denied_by_rule(&self) -> bool {
+        matches!(self, AccessDecision::DeniedByRule(_))
+    }
+
+    /// The stable machine-readable reason code carried on the wire
+    /// (`allowed` | `no_grant` | `denied_by_rule`) — SDK contract §11.
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Allow => "allowed",
+            Self::Deny(_) => "no_grant",
+            Self::DeniedByRule(_) => "denied_by_rule",
+        }
+    }
+
+    /// The human-readable reason, empty for an allow.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Allow => "",
+            Self::Deny(r) | Self::DeniedByRule(r) => r,
+        }
     }
 }
 

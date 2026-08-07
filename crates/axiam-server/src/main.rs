@@ -1320,6 +1320,20 @@ async fn main() -> std::io::Result<()> {
     // `AXIAM__RATE_LIMIT__SHARED*` env knobs, so they behave identically.
     let grpc_db = db_handle.clone();
     let grpc_batch_max_concurrency = config.authz.batch_max_concurrency;
+    // A4/J10: hand the gRPC listener the SAME session repository the REST path
+    // uses — same instance, therefore same validation cache, therefore every
+    // REST-side invalidation hook (logout, password change, MFA reset, refresh
+    // rotation) already serves gRPC and event-path revocation is immediate in
+    // strict mode too. A freshly constructed repository here would have its own
+    // cache that nothing invalidates, which is precisely the stale allow this
+    // mode exists to prevent.
+    let grpc_strict_revocation: Option<
+        std::sync::Arc<dyn axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck>,
+    > = if grpc_config.strict_revocation {
+        Some(std::sync::Arc::new(session_repo.clone()))
+    } else {
+        None
+    };
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -1329,6 +1343,7 @@ async fn main() -> std::io::Result<()> {
             &grpc_config,
             grpc_db,
             grpc_batch_max_concurrency,
+            grpc_strict_revocation,
         )
         .await
         {

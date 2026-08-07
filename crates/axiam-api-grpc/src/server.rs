@@ -30,6 +30,7 @@
 //! 1.3-*exclusive*.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_auth::config::AuthConfig;
@@ -47,6 +48,7 @@ use crate::middleware::auth::AuthInterceptor;
 use crate::middleware::rate_limit::{
     GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
 };
+use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
 use crate::proto::user_info_service_server::UserInfoServiceServer;
@@ -87,6 +89,16 @@ use crate::services::{
 /// TLS (REQ-15 AC-1): env-gated via `AXIAM__GRPC_TLS_CERT_PATH` /
 /// `AXIAM__GRPC_TLS_KEY_PATH`. When absent, TLS is disabled and a warning
 /// is logged (acceptable for in-mesh/loopback deployments).
+///
+/// # `strict_revocation_checker` (A4/J10)
+///
+/// `Some(..)` only when `AXIAM__GRPC__STRICT_REVOCATION=true`, and it MUST be
+/// the SAME session-repository instance the REST path holds. A second instance
+/// would carry a second validation cache, and a cache the REST invalidation
+/// hooks never reach is exactly the stale allow strict mode exists to prevent.
+/// `None` keeps the shipped posture: gRPC trusts JWT lifetime, so revocation
+/// takes effect at token expiry (up to 15 min) rather than immediately. See
+/// [`crate::middleware::strict_revocation`] for the full posture table.
 pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     addr: SocketAddr,
     engine: AuthorizationEngine<R, P, Res, S, G>,
@@ -95,6 +107,7 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     grpc_config: &GrpcConfig,
     db: impl Into<DbHandle<C>>,
     batch_max_concurrency: usize,
+    strict_revocation_checker: Option<Arc<dyn SessionRevocationCheck>>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -136,6 +149,19 @@ where
     let shared_rate_limit_layer =
         GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
     let governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
+
+    // A4/J10: built before the interceptors take ownership of `auth_config`.
+    // The layer needs it to decode (not verify — see the module docs) the
+    // bearer token far enough to learn which session a request names.
+    let strict_revocation_layer = strict_revocation_checker.map(|checker| {
+        tracing::warn!(
+            "gRPC STRICT REVOCATION enabled — every gRPC request now re-checks \
+             session validity, matching REST. Expect the gRPC check profile to \
+             approach REST's revocation-checked one; with the session-validation \
+             cache disabled this is one datastore read per request."
+        );
+        GrpcStrictRevocationLayer::new(checker, auth_config.clone())
+    });
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
         AuthorizationServiceImpl::new(engine, batch_max_concurrency),
@@ -203,12 +229,18 @@ where
     // also what parses `client_id` out of the form body for the client-aware
     // key modes, so it must stay outermost there. It solves the same problem
     // with `SharedRateLimitCounter::refund` instead; see that method's docs.
+    // A4/J10: strict revocation, when enabled, sits INSIDE the rate limiters
+    // (so a flood of revoked-session calls is throttled before it can touch
+    // the session cache) and OUTSIDE the services (so it applies uniformly to
+    // every RPC, including any added later). `option_layer` makes the disabled
+    // case a genuine no-op rather than a branch in the request path.
     let mut builder = Server::builder()
         .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
         .layer(governor_layer)
-        .layer(shared_rate_limit_layer);
+        .layer(shared_rate_limit_layer)
+        .layer(tower::util::option_layer(strict_revocation_layer));
 
     // REQ-15 AC-1 / CQ-B20: Env-gated TLS.
     // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.

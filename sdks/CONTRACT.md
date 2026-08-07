@@ -796,6 +796,36 @@ client session is unusable passes vacuously and does not satisfy this clause.
 > start rejecting what it used to accept. That is the intent, and it MUST be
 > called out as a breaking change in each SDK's CHANGELOG.
 
+### §10.2 Revocation posture differs per transport (informative, MUST be documented)
+
+Local verification (§10.1) proves a token was *issued* and has not *expired*. It
+cannot prove the session behind it still exists. What closes that gap depends on
+which AXIAM transport the request reaches, and the two do not agree:
+
+| Transport | Session revocation re-checked per request? | A revoked session stops working after |
+|---|---|---|
+| REST | yes | immediately (or the server's session-cache TTL) |
+| gRPC, default | **no** | **token expiry — up to 15 minutes** |
+| gRPC, `AXIAM__GRPC__STRICT_REVOCATION=true` | yes | immediately (or the server's session-cache TTL) |
+
+The gRPC default is a deliberate latency trade — it is the service-mesh check
+surface — not an oversight, and it is measured: the server-side session cache
+enforces an event-path revocation in **262 ms** (run 5), with out-of-band
+revocation bounded by the cache TTL plus slack.
+
+**SDKs MUST document this in their middleware/route-guard documentation**, in
+the integrator's terms rather than AXIAM's: a guard built on `§10` local
+verification alone, in front of a gRPC data plane running the default posture,
+admits a logged-out user for the remainder of their access token's lifetime. An
+integrator who needs sign-out to take effect immediately must either route the
+authorization decision through REST or ask their operator to enable strict
+revocation.
+
+SDKs MUST NOT try to close this gap client-side (for example by polling session
+state before each call). Doing so would put an unbounded per-request cost on
+the hot path to work around a decision that is the deployment's to make, and it
+would be a *different* staleness window rather than none.
+
 ---
 
 ## §11 Declarative Authorization Helpers

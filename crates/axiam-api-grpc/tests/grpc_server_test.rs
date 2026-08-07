@@ -156,6 +156,8 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -216,6 +218,8 @@ async fn start_grpc_server_boots_in_tls_mode() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -300,6 +304,8 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     )
     .await;
 }
@@ -347,6 +353,8 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     )
     .await;
 }

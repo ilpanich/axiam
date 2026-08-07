@@ -916,6 +916,25 @@ mod tests {
         req
     }
 
+    /// [`WINDOW_SECS`] and the shared counter's configured window are one
+    /// contract split across two crates — `call` hands the counter a raw
+    /// `now` and lets it derive the window, so a disagreement here would
+    /// silently size the gRPC buckets against a window nobody enforces.
+    #[test]
+    fn window_secs_matches_the_shared_counters_window() {
+        let counter_window = axiam_db::SharedRateLimitConfig::default().window;
+        assert_eq!(counter_window.as_secs() as i64, WINDOW_SECS);
+    }
+
+    #[test]
+    fn window_start_truncates_to_the_window_boundary() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_045, 0).expect("valid epoch");
+        let start = window_start(now);
+
+        assert_eq!(start.timestamp() % WINDOW_SECS, 0);
+        assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
+    }
+
     #[test]
     fn uses_rightmost_trusted_xff_hop_when_enough_hops_present() {
         // trusted_hops=1, 3 hops present -> index = 3 - 1 - 1 = 1

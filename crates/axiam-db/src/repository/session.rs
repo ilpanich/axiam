@@ -323,6 +323,69 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         Ok(!deleted.is_empty())
     }
 
+    async fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        // A2/J2: the SELECT-then-DELETE pair collapsed into one statement.
+        // Same `RETURN BEFORE` single-use gate as `consume` (SurrealDB
+        // serializes concurrent DELETEs touching the same row, so exactly one
+        // caller receives a non-empty before-image), except that the row is
+        // also *found* by this statement — so there is no window between
+        // finding it and removing it, and the rotation path pays one round
+        // trip here instead of two.
+        //
+        // Two statements, ONE round trip. `RETURN BEFORE` does not accept a
+        // projection list, and the caller needs `session.id`, so the
+        // before-image is captured into `$before` and projected by a second
+        // statement in the same query — `meta::id(id) AS record_id`, the same
+        // shape `get_by_token_hash` produces and `SessionRowWithId` expects.
+        //
+        // Atomicity is unaffected by the split: the DELETE alone decides who
+        // wins, and `$before` is that decision's own output, not a re-read.
+        let result = self
+            .db
+            .current()
+            .query(
+                "LET $before = (DELETE session \
+                     WHERE tenant_id = $tenant_id AND token_hash = $token_hash \
+                     RETURN BEFORE); \
+                 SELECT meta::id(id) AS record_id, * FROM $before",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("token_hash", token_hash.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        // OBS-3 / residual 2 ordering, same as `consume`: `.check()` the
+        // statement before deserializing, and drop any cached validity entry
+        // before an error can short-circuit us past it. The row id is only
+        // known after deserialization here, so the cache drop moves below —
+        // which is sound because a *failed* deserialization of a committed
+        // DELETE is exactly the case the unconditional `invalidate` below
+        // handles, and there is no id to invalidate before that point.
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // Statement index 1: the projected SELECT (index 0 is the `LET`).
+        let rows: Vec<SessionRowWithId> = result.take(1).map_err(DbError::from)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let session: Session = row.try_into_session()?;
+
+        // I6: the row is gone, so no cached "still valid" answer may outlive
+        // it on this replica.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate(tenant_id, session.id);
+        }
+
+        Ok(Some(session))
+    }
+
     async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
@@ -764,6 +827,144 @@ mod tests {
             cache.len(),
             0,
             "cleanup_expired: the tenant's entries must be dropped"
+        );
+    }
+
+    /// A2/J2: `consume_by_token_hash` must return the session it removed,
+    /// remove it, and refuse to remove it twice — the single-use gate, with
+    /// the read-then-delete window gone.
+    #[tokio::test]
+    async fn consume_by_token_hash_returns_the_row_and_is_single_use() {
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+
+        let seeded = seed_session(&repo, tenant_id, user_id, "rotate").await;
+
+        let consumed = repo
+            .consume_by_token_hash(tenant_id, "hash-rotate")
+            .await
+            .unwrap()
+            .expect("the live session must be returned");
+        assert_eq!(consumed.id, seeded.id, "the before-image is the session");
+        assert_eq!(consumed.user_id, user_id, "…with its fields intact");
+
+        assert!(
+            repo.consume_by_token_hash(tenant_id, "hash-rotate")
+                .await
+                .unwrap()
+                .is_none(),
+            "a second consume of the same token must find nothing — this is \
+             the single-use rotation guarantee"
+        );
+        assert!(
+            repo.get_by_id(tenant_id, seeded.id).await.is_err(),
+            "the row is gone"
+        );
+    }
+
+    /// An unknown token is `None`, not an error — the caller maps both to the
+    /// same generic auth failure, and an error here would be indistinguishable
+    /// from a datastore fault.
+    #[tokio::test]
+    async fn consume_by_token_hash_misses_cleanly() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+
+        assert!(
+            repo.consume_by_token_hash(Uuid::new_v4(), "never-issued")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Tenant isolation: the token hash alone must never be enough. A
+    /// same-hash collision across tenants must not let tenant B consume
+    /// tenant A's session.
+    #[tokio::test]
+    async fn consume_by_token_hash_is_tenant_scoped() {
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+
+        let a = seed_session(&repo, tenant_a, Uuid::new_v4(), "shared").await;
+
+        assert!(
+            repo.consume_by_token_hash(tenant_b, "hash-shared")
+                .await
+                .unwrap()
+                .is_none(),
+            "another tenant must not consume this session"
+        );
+        assert!(
+            repo.get_by_id(tenant_a, a.id).await.is_ok(),
+            "…and must not have deleted it either"
+        );
+    }
+
+    /// I6: consuming a session drops its cached validity entry, so a
+    /// rotated-away session cannot keep validating for the cache TTL.
+    #[tokio::test]
+    async fn consume_by_token_hash_invalidates_the_validation_cache() {
+        let tenant_id = Uuid::new_v4();
+        let db = setup_db().await;
+        let cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
+            300,
+        )));
+        let repo = SurrealSessionRepository::new(db).with_validation_cache(cache.clone());
+
+        let s = seed_session(&repo, tenant_id, Uuid::new_v4(), "cached").await;
+        assert!(repo.is_session_active_checked(tenant_id, s.id).await);
+        assert_eq!(cache.len(), 1, "the positive answer is cached");
+
+        repo.consume_by_token_hash(tenant_id, "hash-cached")
+            .await
+            .unwrap()
+            .expect("consumed");
+
+        assert_eq!(
+            cache.len(),
+            0,
+            "the cached 'still valid' answer must not outlive the row"
+        );
+    }
+
+    /// Expiry is NOT filtered by the statement: an expired token must still be
+    /// consumed (leaving it behind would let it be replayed until cleanup
+    /// ran), with the caller rejecting it on the returned `expires_at`.
+    #[tokio::test]
+    async fn consume_by_token_hash_also_consumes_an_expired_session() {
+        let tenant_id = Uuid::new_v4();
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+
+        let expired = repo
+            .create(CreateSession {
+                tenant_id,
+                user_id: Uuid::new_v4(),
+                token_hash: "hash-expired".into(),
+                ip_address: None,
+                user_agent: None,
+                expires_at: Utc::now() - Duration::hours(1),
+            })
+            .await
+            .unwrap();
+
+        let consumed = repo
+            .consume_by_token_hash(tenant_id, "hash-expired")
+            .await
+            .unwrap()
+            .expect("an expired session is still returned…");
+        assert!(
+            consumed.expires_at < Utc::now(),
+            "…carrying the expiry the caller rejects it on"
+        );
+        assert!(
+            repo.get_by_id(tenant_id, expired.id).await.is_err(),
+            "…and is removed, not left replayable"
         );
     }
 

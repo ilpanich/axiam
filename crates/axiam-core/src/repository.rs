@@ -569,6 +569,39 @@ pub trait SessionRepository: Send + Sync {
     /// must abort before minting a new session, preserving single-use rotation
     /// and stolen-token reuse detection.
     fn consume(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
+    /// Atomically look up **and** consume a session by its refresh-token hash,
+    /// returning the row as it was immediately before deletion (`None` when no
+    /// live session matched).
+    ///
+    /// This is [`Self::get_by_token_hash`] followed by [`Self::consume`],
+    /// collapsed into one statement — and it is the shape refresh rotation
+    /// should use, for two independent reasons.
+    ///
+    /// **Correctness.** The read-then-delete pair has a window between the
+    /// SELECT and the DELETE. `consume`'s `RETURN BEFORE` already closes the
+    /// *outcome* (only one racer sees a non-empty before-image), so the pair is
+    /// safe — but it is safe by a second mechanism layered on top of a race,
+    /// rather than by not having the race. One `DELETE ... WHERE token_hash =
+    /// $h RETURN BEFORE` has no window at all: the row is selected and removed
+    /// by the same statement, and the before-image *is* the session.
+    ///
+    /// **Cost.** It halves the rotation path's datastore round trips. Refresh
+    /// is the one hot endpoint that is round-trip-bound rather than CPU-bound
+    /// (run 5: p50 88.8 ms at 545/s, a whole distribution shifted right, i.e.
+    /// added serialized work — `claude_dev/improvement-after-run5-benchmark.md`
+    /// A2/J2), so a round trip removed from it is worth more than anywhere else
+    /// in the codebase.
+    ///
+    /// Expiry is deliberately NOT filtered here. An expired token must be
+    /// consumed too — leaving the row behind would let it be replayed until
+    /// cleanup ran — so the caller receives the expired session and rejects it,
+    /// which is what the read-then-delete path did (it invalidated on the
+    /// expiry branch) with one fewer statement.
+    fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<Session>>> + Send;
     /// Invalidate all sessions for a user (e.g., on password change).
     fn invalidate_user_sessions(
         &self,

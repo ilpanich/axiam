@@ -393,3 +393,35 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod window_contract_tests {
+    use super::*;
+
+    /// [`WINDOW_SECS`] and the shared counter's configured window are one
+    /// contract split across two crates: this middleware hands
+    /// `SharedRateLimitCounter::check_at` a raw `now` and lets the counter
+    /// derive the window, so if the two ever disagreed the `Retry-After` this
+    /// middleware advertises would be a lie about a window nobody uses.
+    #[test]
+    fn window_secs_matches_the_shared_counters_window() {
+        let counter_window = axiam_db::SharedRateLimitConfig::default().window;
+        assert_eq!(
+            counter_window.as_secs() as i64,
+            WINDOW_SECS,
+            "REST WINDOW_SECS must equal the shared counter's window"
+        );
+    }
+
+    /// The local truncation helper must agree with the counter's, so a
+    /// `Retry-After` computed here points at the same boundary the counter
+    /// will roll over on.
+    #[test]
+    fn window_start_truncates_to_the_window_boundary() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_045, 0).expect("valid epoch");
+        let start = window_start(now);
+
+        assert_eq!(start.timestamp() % WINDOW_SECS, 0, "aligned to the window");
+        assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
+    }
+}

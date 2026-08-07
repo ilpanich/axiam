@@ -1418,6 +1418,10 @@ async fn main() -> std::io::Result<()> {
         audit_repo: audit_repo.clone(),
         org_repo: org_repo.clone(),
         tenant_repo: tenant_repo.clone(),
+        // A2/J2: refresh rotation reads the tenant only for `organization_id`,
+        // an immutable field — cache it rather than pay a round trip per
+        // refresh (see axiam_api_rest::tenant_org_cache).
+        tenant_org_cache: Arc::new(Default::default()),
         user_repo: user_repo.clone(),
         group_repo: group_repo.clone(),
         role_repo: role_repo.clone(),

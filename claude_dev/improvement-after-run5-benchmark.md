@@ -244,6 +244,100 @@ outlasts the window.
 
 **Model: Sonnet 5.**
 
+## A6 — AMQP transport encryption (`amqps://` TLS support) — **P1**
+
+**Evidence / current state.** Broker traffic is **plaintext everywhere**:
+`AmqpConfig` (`crates/axiam-amqp/src/config.rs`) has no TLS options and
+defaults to `amqp://localhost:5672`; `docker/docker-compose.prod.yml`
+and `k8s/server/configmap.yml` both wire `amqp://…:5672`; the RabbitMQ
+statefulset/service and the network policies expose only 5672 — no TLS
+listener (5671) exists in any deployment artifact. The AMQP layer's
+HMAC-SHA256 signing + replay protection (contract §8) provides
+**authenticity/integrity only, not confidentiality** — authz requests,
+audit events, and outbound mail payloads cross the wire in cleartext.
+This contradicts the project standard "TLS 1.3 minimum for all external
+communication": six SDKs (Rust, TypeScript, Go, Python, Java, PHP)
+consume AMQP directly, so broker traffic crosses service boundaries.
+Mitigating fact: lapin 4.10 already compiles in a rustls backend
+(`tcp-stream` → `rustls-connector` + `p12-keystore` in `Cargo.lock`), so
+`amqps://` capability is in the shipped binary — the missing pieces are
+the config surface, deployment wiring, tests, docs, and the SDK
+contract clause.
+
+**Instructions.**
+
+1. **Config surface** (`crates/axiam-amqp/src/config.rs`): accept
+   `amqps://` URLs (port 5671) and add an optional `tls` block —
+   `ca_cert_path` (custom CA bundle; system roots when unset),
+   `client_cert_path`/`client_key_path` (optional mutual TLS toward the
+   broker, PEM; PKCS#12 acceptable via the already-present
+   `p12-keystore`), and nothing else. **No `verify_peer: false` /
+   insecure-skip option in release builds** — dev convenience, if
+   wanted, is debug-build-only, mirroring the existing
+   `DEV_DEFAULT_SIGNING_KEY` pattern in the same file. Enforce TLS 1.3
+   minimum in the rustls client config per the project standard.
+2. **Connection path** (`crates/axiam-amqp/src/connection.rs`): build a
+   lapin `OwnedTLSConfig` from the config block and connect via
+   `Connection::connect_with_config` when the scheme is `amqps`;
+   plaintext `amqp://` keeps working (dev/e2e). Fail closed with a
+   clear, actionable error on CA/cert misconfiguration (bad path,
+   expired cert, hostname mismatch) — no silent plaintext fallback.
+   Reconnect logic must preserve the TLS config across retries.
+3. **Release-build posture flag:** add
+   `AXIAM__AMQP__ALLOW_PLAINTEXT` (default `false` in release builds):
+   a release binary refuses an `amqp://` URL unless the operator
+   explicitly sets the flag — same fail-closed philosophy as the
+   signing key. Log a prominent warning when plaintext is explicitly
+   allowed.
+4. **Deployment wiring:**
+   - `docker/docker-compose.prod.yml`: RabbitMQ TLS listener
+     (`listeners.ssl.default = 5671`, cert/key/CA mounts,
+     `ssl_options.versions.1 = tlsv1.3`), server URL switched to
+     `amqps://…:5671`; a documented cert-provisioning helper script
+     (or reuse `axiam-pki`'s CA tooling — an AXIAM org CA signing its
+     own broker cert is good dogfooding; document both this and
+     bring-your-own-cert).
+   - `k8s/`: statefulset + service gain 5671; network policies
+     (`allow-ingress-to-rabbitmq.yml`, `server-egress.yml`) updated to
+     5671; configmap URL → `amqps`; document cert-manager as the
+     recommended issuer path, with secret mounts.
+   - Dev compose stays plaintext (documented as dev-only).
+5. **SDK contract**: add a transport-security clause to §8 (or a new
+   §8b): SDKs that consume AMQP MUST support `amqps://`, custom CA
+   bundles, and SHOULD support client certificates; MUST NOT offer
+   verification-skip in production builds; HMAC signing remains
+   mandatory regardless of transport (defense in depth — TLS is
+   confidentiality, HMAC is end-to-end authenticity across broker hops).
+   Fan out via D6.
+6. **Perf sanity cell (optional, with E4):** one labeled bench cell for
+   the AMQP async-authz path over TLS vs plaintext — expected ~nil
+   steady-state cost (long-lived connections amortize the handshake),
+   but measure rather than assert, per project culture.
+
+**Tests.** Unit tests for config parsing/validation (scheme/tls-block
+combinations, release-build plaintext refusal via the flag, missing-CA
+error text); integration test in the e2e compose variant with a
+TLS-enabled RabbitMQ (self-signed CA generated in setup): connect,
+publish/consume round-trip, wrong-CA rejection, plaintext-URL-refused
+assertion. Reconnect-with-TLS test (restart broker container
+mid-consume).
+
+**Docs.** Deployment guide "Securing the broker" section (compose + k8s
+walkthroughs, cert rotation note); security posture page updated to
+state the layering explicitly (TLS = confidentiality in transit, HMAC =
+authenticity + replay protection, both required in production);
+CHANGELOG; threat-model update (closes the cleartext-broker-traffic
+exposure).
+
+**Acceptance.** Prod compose and k8s templates run `amqps` end to end;
+release binary refuses unflagged plaintext; e2e TLS suite green; no
+measurable regression on the AMQP authz bench cell.
+
+**Model: Sonnet 5** (the TLS backend is already compiled in; semantics
+are pinned above — config plumbing, deployment wiring, tests). Include
+the diff in the **F4 Opus 5 security review** alongside the other
+security surfaces.
+
 ---
 
 # Track B — Competitor feature-gap closure
@@ -806,7 +900,8 @@ run (compile/run against a compose stack) so they can't rot.
 One consolidated Opus 5 review of: deny-override engine diff (B1),
 device-flow brute-force surface (B2), token-exchange scope narrowing
 (B3), SCIM tenant isolation (B4), logout-token validation (B5), strict
-revocation interceptor (A4). Follow the existing
+revocation interceptor (A4), AMQP TLS config + fail-closed plaintext
+posture (A6). Follow the existing
 `claude_dev/security-review*.md` format; findings block merge.
 
 **Model: Opus 5.**
@@ -818,7 +913,7 @@ revocation interceptor (A4). Follow the existing
 | Wave | Tasks (parallelizable within wave) | Gate to next wave |
 |---|---|---|
 | 1 | A1 (limiter), A2 (refresh regression), E1, E2, C1, C2 | limiter assertions PASS locally; refresh cause identified |
-| 2 | B1 design+engine, A3 design + CP-3 pass, C3, D1, D2, D3, A5 | B1 engine tests green + perf gate |
+| 2 | B1 design+engine, A3 design + CP-3 pass, A6 (AMQP TLS), C3, D1, D2, D3, A5 | B1 engine tests green + perf gate |
 | 3 | B1 plumbing/docs, B2, B3, A4, C4 (audit + deny UI), E3 | F4 security review of B1–B3/A4 |
 | 4 | D4 (contract), B5, B4, E4 | contract merged in axiam repo |
 | 5 | D6 fan-out (11 SDK repos), D5, C4 remaining pages, F2/F3 umbrella | conformance suites green per SDK |
@@ -838,6 +933,7 @@ B1's API. F4 blocks all B-track merges.
 | A3 replica design | **Opus 5** / Sonnet 5 impl | Staleness contract is a security semantic |
 | A4 strict-revocation gRPC | Sonnet 5 (+F4 review) | Ports existing REST mechanism with pinned semantics |
 | A5 harness re-login budget | Sonnet 5 | Bounded harness fix |
+| A6 AMQP TLS (`amqps`) | Sonnet 5 (+F4 review) | rustls backend already compiled in; semantics pinned in-task |
 | B1 deny-override design+engine | **Opus 5** | Authorization semantics; silent failure = privilege escalation |
 | B1 DTO/docs/examples | Sonnet 5 | Plumbing after pinned design |
 | B2 device flow | Sonnet 5 (+F4 review) | Tight RFC with invariants pinned in-task |

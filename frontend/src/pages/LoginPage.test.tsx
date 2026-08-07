@@ -5,6 +5,27 @@ import { apiMock, res } from "@/test/apiMock";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
+// C2: the ceremony is browser API surface jsdom does not implement; the
+// service wrapper is mocked and the page's own logic — feature gating, which
+// challenge token it uses, conditional mediation, MFA-step offering — is what
+// is tested here. The wrapper's contract with the server lives in
+// services/webauthn.test.ts.
+const authenticateMock = vi.fn();
+let webauthnSupported = true;
+let conditionalAvailable = false;
+vi.mock("@/services/webauthn", async () => {
+  const actual = await vi.importActual<typeof import("@/services/webauthn")>(
+    "@/services/webauthn",
+  );
+  return {
+    ...actual,
+    isWebauthnSupported: () => webauthnSupported,
+    isConditionalMediationAvailable: () => Promise.resolve(conditionalAvailable),
+    webauthnService: { authenticate: (...a: unknown[]) => authenticateMock(...a) },
+  };
+});
+
+
 const navigate = vi.fn();
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
@@ -387,5 +408,171 @@ describe("LoginPage — MFA step", () => {
     expect(await screen.findByText("Verifying...")).toBeInTheDocument();
     resolveVerify(res({}));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/login"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2 — passkey sign-in
+// ---------------------------------------------------------------------------
+
+describe("LoginPage — passkeys (C2)", () => {
+  beforeEach(() => {
+    webauthnSupported = true;
+    conditionalAvailable = false;
+    authenticateMock.mockReset();
+    Object.defineProperty(window, "PublicKeyCredential", {
+      value: function PublicKeyCredential() {},
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  it("offers passkey sign-in on the credentials step", async () => {
+    await goToCredentials();
+    expect(
+      screen.getByRole("button", { name: /sign in with a passkey/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides passkey sign-in where the browser cannot do it", async () => {
+    webauthnSupported = false;
+    await goToCredentials();
+    expect(
+      screen.queryByRole("button", { name: /sign in with a passkey/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks the username field for passkey autofill", async () => {
+    await goToCredentials();
+    // The `webauthn` autocomplete token is what makes conditional mediation
+    // surface saved passkeys in this field.
+    expect(screen.getByLabelText("Username or email")).toHaveAttribute(
+      "autocomplete",
+      "username webauthn",
+    );
+  });
+
+  it("omits the webauthn autocomplete token where unsupported", async () => {
+    webauthnSupported = false;
+    await goToCredentials();
+    expect(screen.getByLabelText("Username or email")).toHaveAttribute(
+      "autocomplete",
+      "username",
+    );
+  });
+
+  it("uses an empty challenge token for discoverable sign-in", async () => {
+    authenticateMock.mockResolvedValue({ session_id: "s", expires_in: 900 });
+    // A passkey assertion sets the session cookie server-side; the page then
+    // hydrates the store through /auth/me exactly as the password path does.
+    apiMock.get.mockResolvedValue(res({ user: loginUser, permissions: [] }));
+    await goToCredentials();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /sign in with a passkey/i }),
+    );
+
+    // An empty token is what asks the server for a challenge with an empty
+    // allowCredentials — i.e. "let the authenticator tell us who this is".
+    await waitFor(() => expect(authenticateMock).toHaveBeenCalledWith("", { conditional: false }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+  });
+
+  it("reports a cancelled ceremony without blaming the user", async () => {
+    const err = new Error("no");
+    err.name = "NotAllowedError";
+    authenticateMock.mockRejectedValue(err);
+    await goToCredentials();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /sign in with a passkey/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /cancelled or timed out/i,
+    );
+  });
+
+  it("starts conditional mediation when the browser supports it", async () => {
+    conditionalAvailable = true;
+    // Never resolves: autofill legitimately stays pending until the user picks
+    // a passkey, which is exactly the shape that must not block the page.
+    authenticateMock.mockReturnValue(new Promise(() => {}));
+
+    await goToCredentials();
+
+    await waitFor(() =>
+      expect(authenticateMock).toHaveBeenCalledWith("", { conditional: true }),
+    );
+    // ...and the password form is still fully usable underneath it.
+    expect(screen.getByLabelText("Password")).toBeEnabled();
+  });
+
+  it("does not start conditional mediation where it is unavailable", async () => {
+    conditionalAvailable = false;
+    await goToCredentials();
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeEnabled());
+    expect(authenticateMock).not.toHaveBeenCalled();
+  });
+
+  it("offers a passkey as a second factor when the account has one", async () => {
+    apiMock.post.mockResolvedValue(
+      res({
+        mfa_required: true,
+        challenge_token: "chal-1",
+        available_methods: ["totp", "passkey"],
+      }),
+    );
+    await goToCredentials();
+    await submitCredentials();
+
+    const button = await screen.findByRole("button", {
+      name: /use a passkey or security key instead/i,
+    });
+    authenticateMock.mockResolvedValue({ session_id: "s", expires_in: 900 });
+    await userEvent.click(button);
+
+    // The MFA challenge token, not an empty one: this user is already
+    // identified, so the assertion must be bound to their challenge.
+    await waitFor(() =>
+      expect(authenticateMock).toHaveBeenCalledWith("chal-1", { conditional: false }),
+    );
+  });
+
+  it("does not offer a passkey second factor to a TOTP-only account", async () => {
+    apiMock.post.mockResolvedValue(
+      res({
+        mfa_required: true,
+        challenge_token: "chal-1",
+        available_methods: ["totp"],
+      }),
+    );
+    await goToCredentials();
+    await submitCredentials();
+
+    await screen.findByLabelText("Authentication code");
+    // Offering it would start a ceremony that can only fail.
+    expect(
+      screen.queryByRole("button", { name: /use a passkey or security key instead/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps TOTP available alongside the passkey option", async () => {
+    apiMock.post.mockResolvedValue(
+      res({
+        mfa_required: true,
+        challenge_token: "chal-1",
+        available_methods: ["totp", "passkey"],
+      }),
+    );
+    await goToCredentials();
+    await submitCredentials();
+
+    // Fallback ordering is passkey -> TOTP -> recovery: the passkey option is
+    // an addition, never a replacement.
+    expect(await screen.findByLabelText("Authentication code")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /use a passkey or security key instead/i }),
+    ).toBeInTheDocument();
   });
 });

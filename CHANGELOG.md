@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Passkeys and security keys in the admin UI.** The server had shipped the
+  full WebAuthn registration and authentication ceremonies for releases, but
+  the frontend had zero WebAuthn references — the MFA page advertised passkeys
+  as "Coming soon" and the login page could not exercise them. Both are now
+  wired: enrol a platform passkey or a cross-platform security key from
+  Profile → MFA methods, and sign in with a passkey via browser autofill
+  (conditional mediation), an explicit button, or as a second factor. The MFA
+  list distinguishes `Passkey` from `Security key` rather than labelling both
+  "WebAuthn". All ceremony policy stays server-side.
 - **RBAC deny-override (explicit deny).** A role→permission grant now carries
   `effect: "allow" | "deny"`, defaulting to `"allow"`. A deny grant overrides
   **every** allow, at any depth of the resource hierarchy and at equal

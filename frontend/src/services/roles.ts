@@ -1,6 +1,6 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
-import type { PermissionGrant } from "@/services/permissions";
+import type { PermissionEffect, PermissionGrant } from "@/services/permissions";
 import type { User } from "@/services/users";
 import type { Group } from "@/services/users";
 
@@ -52,10 +52,22 @@ export const roleService = {
       )
       .then((r) => unwrapList(r.data)),
 
-  grantPermission: (roleId: string, permissionId: string): Promise<void> =>
+  /**
+   * Grant a permission to a role.
+   *
+   * `effect` defaults to `"allow"` server-side, so omitting it is exactly the
+   * pre-deny-override behaviour. Passing `"deny"` writes a rule that overrides
+   * every allow -- see `PermissionEffect`.
+   */
+  grantPermission: (
+    roleId: string,
+    permissionId: string,
+    effect: PermissionEffect = "allow",
+  ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/permissions`, {
         permission_id: permissionId,
+        effect,
       })
       .then(() => undefined),
 

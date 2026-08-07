@@ -623,7 +623,18 @@ describe("roleService", () => {
     expect(await roleService.listPermissions("r1")).toHaveLength(1);
     apiMock.post.mockResolvedValue(res(undefined));
     await roleService.grantPermission("r1", "p1");
-    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", { permission_id: "p1" });
+    // B1: `effect` is always sent, and defaults to allow -- which is exactly
+    // what an unqualified grant has always meant.
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
+      permission_id: "p1",
+      effect: "allow",
+    });
+    apiMock.post.mockClear();
+    await roleService.grantPermission("r1", "p1", "deny");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
+      permission_id: "p1",
+      effect: "deny",
+    });
     apiMock.delete.mockResolvedValue(res(undefined));
     await roleService.revokePermission("r1", "p1");
     expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/permissions/p1");

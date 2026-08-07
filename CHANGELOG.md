@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (conditional mediation), an explicit button, or as a second factor. The MFA
   list distinguishes `Passkey` from `Security key` rather than labelling both
   "WebAuthn". All ceremony policy stays server-side.
+- **Deny-effect selector in the role editor**, with a distinct `DENY` badge on
+  granted permissions. Deny rules were creatable over the API from the moment
+  B1 landed and invisible in the console — the worst of both worlds.
+- **Frontend coverage matrix** (`claude_dev/frontend-coverage-matrix.md`) plus
+  a CI check that fails when a REST handler module has no row, so a new server
+  surface cannot ship without someone recording whether it needs a UI.
+- **axe-core accessibility smoke suite** over the main pages and the
+  design-system components the audit fixed, wired into the fast frontend CI job.
 - **RBAC deny-override (explicit deny).** A role→permission grant now carries
   `effect: "allow" | "deny"`, defaulting to `"allow"`. A deny grant overrides
   **every** allow, at any depth of the resource hierarchy and at equal

@@ -235,7 +235,68 @@ describe("RoleDetailPage", () => {
     expect(await within(dialog).findByText("Granted")).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "Grant" }));
     await waitFor(() =>
-      expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, { permission_id: "p2" })
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, {
+        permission_id: "p2",
+        effect: "allow",
+      })
+    );
+  });
+
+  // ─── B1/C4 — deny-override in the editor ─────────────────────────────────
+
+  it("writes a deny rule when the deny effect is selected", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Grant Permission/ }));
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Granted");
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Deny" }));
+    // The action verb follows the effect: "Grant" for a rule that denies would
+    // be actively misleading.
+    await userEvent.click(within(dialog).getByRole("button", { name: "Deny" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, {
+        permission_id: "p2",
+        effect: "deny",
+      })
+    );
+  });
+
+  it("warns that a deny cannot be undone by adding an allow", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Grant Permission/ }));
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Granted");
+
+    // Nothing is said while the (default) allow effect is selected...
+    expect(within(dialog).queryByRole("note")).not.toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Deny" }));
+
+    // ...but deny changes what every other rule means, so it says so.
+    const note = await within(dialog).findByRole("note");
+    expect(note).toHaveTextContent(/overrides/i);
+    expect(note).toHaveTextContent(/lower in the resource tree/i);
+  });
+
+  it("defaults the effect to allow", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Grant Permission/ }));
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Granted");
+
+    expect(within(dialog).getByRole("radio", { name: "Allow" })).toHaveAttribute(
+      "aria-checked",
+      "true"
+    );
+    expect(within(dialog).getByRole("radio", { name: "Deny" })).toHaveAttribute(
+      "aria-checked",
+      "false"
     );
   });
 

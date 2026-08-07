@@ -8,6 +8,7 @@ import {
 import {
   permissionService,
   type Permission,
+  type PermissionEffect,
 } from "@/services/permissions";
 import { groupService, type Group, type User } from "@/services/users";
 import { useToast } from "@/hooks/useToast";
@@ -26,6 +27,7 @@ import {
   Search,
   Pencil,
   Trash2,
+  Ban,
 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
@@ -50,6 +52,9 @@ function GrantPermissionDialog({
 }: GrantPermissionDialogProps) {
   const [search, setSearch] = useState("");
   const [grantingId, setGrantingId] = useState<string | null>(null);
+  // B1/C4: which kind of rule the next grant writes. Defaults to allow, which
+  // is what every grant meant before deny-override existed.
+  const [effect, setEffect] = useState<PermissionEffect>("allow");
 
   const { data: allPermissions = [], isLoading } = useQuery({
     queryKey: ["permissions"],
@@ -66,7 +71,7 @@ function GrantPermissionDialog({
   async function handleGrant(permission: Permission) {
     setGrantingId(permission.id);
     try {
-      await roleService.grantPermission(roleId, permission.id);
+      await roleService.grantPermission(roleId, permission.id, effect);
       onGranted();
     } catch {
       // parent will refetch
@@ -135,6 +140,42 @@ function GrantPermissionDialog({
           </div>
 
           <div className="overflow-y-auto flex-1 min-h-[120px] max-h-60 rounded-md border border-white/5">
+            {/* B1: effect selector. Deny is NOT styled as "a red allow" -- it
+                is the rule that beats every allow, at any depth, so the
+                control states that outright rather than leaving an admin to
+                infer precedence from a colour. */}
+            <fieldset className="px-3 py-3 border-b border-white/5">
+              <legend className="sr-only">Grant effect</legend>
+              <div className="flex gap-2" role="radiogroup" aria-label="Grant effect">
+                {(["allow", "deny"] as const).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={effect === value}
+                    onClick={() => setEffect(value)}
+                    className={
+                      effect === value
+                        ? value === "deny"
+                          ? "focus-ring px-3 py-1.5 text-xs font-semibold rounded border bg-destructive/20 text-destructive border-destructive/40"
+                          : "focus-ring px-3 py-1.5 text-xs font-semibold rounded border bg-primary/20 text-primary border-primary/40"
+                        : "focus-ring px-3 py-1.5 text-xs rounded border border-white/10 text-muted-foreground hover:bg-white/5"
+                    }
+                  >
+                    {value === "deny" ? "Deny" : "Allow"}
+                  </button>
+                ))}
+              </div>
+              {effect === "deny" && (
+                <p role="note" className="mt-2 text-xs text-destructive/90">
+                  A deny rule overrides <strong>every</strong> allow for this
+                  action — including allows granted lower in the resource tree.
+                  It cannot be undone by adding another allow; remove the deny
+                  instead.
+                </p>
+              )}
+            </fieldset>
+
             {isLoading ? (
               <div className="flex items-center justify-center py-6">
                 <Loader2 size={20} className="animate-spin text-primary/60" />
@@ -177,7 +218,7 @@ function GrantPermissionDialog({
                           ) : (
                             <Plus size={12} />
                           )}
-                          Grant
+                          {effect === "deny" ? "Deny" : "Grant"}
                         </button>
                       )}
                     </li>
@@ -383,6 +424,12 @@ export function RoleDetailPage() {
     grantedPermissions.map((g) => g.permission.id)
   );
 
+  // B1: permission id -> effect, so the table can mark deny rules. Grants
+  // written before deny-override carry no `effect` and mean allow.
+  const grantEffects = new Map<string, PermissionEffect>(
+    grantedPermissions.map((g) => [g.permission.id, g.effect ?? "allow"])
+  );
+
   // Flatten grants to the underlying permissions for the table.
   const grantedPermissionList: Permission[] = grantedPermissions.map(
     (g) => g.permission
@@ -509,7 +556,20 @@ export function RoleDetailPage() {
     {
       key: "action",
       header: "Permission",
-      render: (row) => <ActionBadge action={row.action} />,
+      render: (row) => (
+        <div className="flex items-center gap-2">
+          <ActionBadge action={row.action} />
+          {/* B1: a deny rule that looked like every other row would be the
+              worst outcome of shipping deny-override -- it is the one rule
+              that changes what all the others mean. */}
+          {grantEffects.get(row.id) === "deny" && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-destructive/20 text-destructive border border-destructive/40">
+              <Ban size={9} aria-hidden="true" />
+              Deny
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       key: "description",

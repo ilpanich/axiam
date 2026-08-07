@@ -13,6 +13,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:a11y": "vitest run src/test/a11y.test.tsx",
     "test:e2e": "playwright test",
     "test:ui": "playwright test --ui"
   },
@@ -45,6 +46,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
     "@vitest/coverage-v8": "^4.1.8",
+    "axe-core": "^4.13.0",
     "jsdom": "^30.0.1",
     "oxlint": "^1.76.0",
     "postcss": "^8.5.25",

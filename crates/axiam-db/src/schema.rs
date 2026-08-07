@@ -167,6 +167,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "grant_effect_deny_override",
         sql: SCHEMA_V25,
     },
+    Migration {
+        version: 26,
+        name: "device_grant_rfc8628",
+        sql: SCHEMA_V26,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1279,6 +1284,51 @@ DEFINE FIELD IF NOT EXISTS description ON TABLE service_account TYPE option<stri
 const SCHEMA_V25: &str = "\
 DEFINE FIELD IF NOT EXISTS effect ON TABLE grants TYPE option<string>
     ASSERT $value = NONE OR $value IN ['allow', 'deny'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v26 — device_grant (B2, RFC 8628 Device Authorization Grant)
+// -----------------------------------------------------------------------
+//
+// SCHEMAFULL like every other table, so the shape is enforced rather than
+// conventional.
+//
+// Two indexes, and both are load-bearing rather than merely helpful:
+//
+// - `idx_device_grant_user_code` is UNIQUE per tenant. The user code is the
+//   short string a human types on a second device, so it is *guessable* by
+//   construction — 8 characters from a 20-letter alphabet. A collision would
+//   mean one user's approval landing on another user's device, which is the
+//   worst failure this feature can have, so uniqueness is a datastore
+//   invariant rather than a retry loop's good intentions.
+// - `idx_device_grant_code_hash` is UNIQUE globally. The device code is a
+//   256-bit CSPRNG value stored as a SHA-256 hash; the index exists so the
+//   poll path — which runs every few seconds per device, forever, by design —
+//   is an index lookup rather than a scan over every pending grant in the
+//   deployment.
+//
+// `status` is ASSERTed to the four states rather than left free-form. The read
+// path refuses to deserialize an unrecognised status (guessing which state a
+// row is in is the one unacceptable answer when the states differ by whether
+// they grant access), so the ASSERT is what stops such a row existing.
+const SCHEMA_V26: &str = "\
+DEFINE TABLE IF NOT EXISTS device_grant SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE device_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE device_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS device_code_hash ON TABLE device_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS user_code ON TABLE device_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS scopes ON TABLE device_grant TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS status ON TABLE device_grant TYPE string
+    ASSERT $value IN ['pending', 'approved', 'denied', 'redeemed'] DEFAULT 'pending';
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE device_grant TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE device_grant TYPE datetime;
+DEFINE FIELD IF NOT EXISTS interval_secs ON TABLE device_grant TYPE int DEFAULT 5;
+DEFINE FIELD IF NOT EXISTS last_polled_at ON TABLE device_grant TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE device_grant TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_device_grant_user_code
+    ON TABLE device_grant FIELDS tenant_id, user_code UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_device_grant_code_hash
+    ON TABLE device_grant FIELDS device_code_hash UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

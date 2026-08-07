@@ -25,6 +25,25 @@ pub enum OAuth2Error {
     UnsupportedGrantType,
     #[error("server_error: {0}")]
     ServerError(String),
+
+    // --- RFC 8628 device-flow polling errors (B2) --------------------------
+    //
+    // These are NOT failures in the usual sense: `authorization_pending` is
+    // the *expected* answer to almost every poll, and `slow_down` is
+    // corrective rather than terminal. They are modelled as errors because
+    // that is what RFC 8628 §3.5 puts on the wire — a 400 with an `error`
+    // field — and because keeping them in one type is what stops the token
+    // endpoint growing a second, parallel response path.
+    /// The user has not yet approved or denied. The device keeps polling.
+    #[error("authorization_pending: the user has not yet completed authorization")]
+    AuthorizationPending,
+    /// The device is polling faster than the interval it was given. The
+    /// interval has been raised; the device must honour the new one.
+    #[error("slow_down: polling faster than the permitted interval")]
+    SlowDown,
+    /// The device code expired before the user acted.
+    #[error("expired_token: the device code has expired; restart the flow")]
+    ExpiredToken,
 }
 
 impl OAuth2Error {
@@ -41,6 +60,9 @@ impl OAuth2Error {
             Self::InvalidRedirectUri(_) => "invalid_request",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::ServerError(_) => "server_error",
+            Self::AuthorizationPending => "authorization_pending",
+            Self::SlowDown => "slow_down",
+            Self::ExpiredToken => "expired_token",
         }
     }
 

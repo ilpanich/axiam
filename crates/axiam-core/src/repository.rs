@@ -27,8 +27,8 @@ use crate::models::{
     group::{CreateGroup, Group, UpdateGroup},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
-        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
-        OAuth2Client, RefreshToken, UpdateOAuth2Client,
+        AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
+        CreateRefreshToken, DeviceGrant, OAuth2Client, RefreshToken, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
@@ -822,6 +822,78 @@ pub trait OAuth2ClientRepository: Send + Sync {
         expected_hash: &str,
         new_hash: &str,
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
+}
+
+/// Storage for RFC 8628 device-authorization grants (B2).
+///
+/// Every method is tenant-scoped, and the state transitions are enforced in
+/// the datastore's own WHERE clauses rather than by a read-then-write in the
+/// service. That is what makes them atomic: two concurrent polls of the same
+/// approved grant must not both redeem it.
+pub trait DeviceGrantRepository: Send + Sync {
+    /// Store a newly issued grant.
+    fn create(
+        &self,
+        input: CreateDeviceGrant,
+    ) -> impl Future<Output = AxiamResult<DeviceGrant>> + Send;
+
+    /// Look up a grant by the **user code** the human typed.
+    ///
+    /// `user_code` must already be normalised by the caller — the stored form
+    /// is normalised, so a raw `WXYZ-1234` would simply miss.
+    fn get_by_user_code(
+        &self,
+        tenant_id: Uuid,
+        user_code: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Look up a grant by the hash of the device code the device polls with.
+    fn get_by_device_code_hash(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Record the user's decision.
+    ///
+    /// Only a `pending` grant may transition, which is checked in the same
+    /// statement: approving an already-denied (or already-redeemed) grant must
+    /// not succeed, and a lost race must be visible to the caller as `false`
+    /// rather than silently overwriting the earlier decision.
+    fn decide(
+        &self,
+        tenant_id: Uuid,
+        user_code: &str,
+        approved: bool,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Atomically redeem an **approved** grant, returning it exactly once.
+    ///
+    /// `None` means it was not approved, or another poll already redeemed it.
+    /// The single-use guarantee lives here, in one statement, for the same
+    /// reason refresh-token rotation does: a read-then-write would let two
+    /// concurrent polls both mint a token set from one approval.
+    fn redeem(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Record a poll and return the interval the device must now honour.
+    ///
+    /// Polling faster than `interval_secs` raises the interval (RFC 8628 §3.5
+    /// `slow_down`), which is what makes the enforcement self-correcting: a
+    /// device that ignores the interval is progressively slowed rather than
+    /// cut off. Returns `(interval_secs, too_fast)`.
+    fn record_poll(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<(u64, bool)>> + Send;
+
+    /// Remove expired grants. Returns the number deleted.
+    fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {

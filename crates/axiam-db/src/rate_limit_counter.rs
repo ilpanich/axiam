@@ -612,6 +612,35 @@ impl Bucket {
 /// first rolling window and converges to `1.0x` after it.
 const COLD_ENTRY_BURST_FRACTION: f64 = 0.1;
 
+/// Smallest limit for which the pro-rata cold-entry seed is applied at all.
+///
+/// # Why small limits are exempt
+///
+/// The seed is a **rate-smoothing** device: it stops a flood arriving at
+/// second 50 from being handed a whole window's budget for the last ten
+/// seconds. That matters enormously at `authz_check` (1 800/min) and
+/// `introspect` (600/min), which is where run 5 measured the +48–50 %
+/// over-admission this whole mechanism exists to close.
+///
+/// It is meaningless at `mfa` (5/min) or `password_reset` (3/min), and worse
+/// than meaningless: at limit 5, a seed of "two thirds of the window has
+/// elapsed" costs a legitimate first-time user **three of their five
+/// requests**, because the arithmetic rounds against them at that scale. A
+/// user enrolling in MFA at second 40 of a wall-clock minute would find their
+/// third call rejected — for no security benefit, since the control at those
+/// endpoints is the small absolute number, not the smoothness of its delivery.
+///
+/// So: below this threshold a newly seen key still gets its whole (tiny)
+/// budget. Note what is **not** exempted — the sliding-window carry still
+/// applies at every limit, so the boundary-doubling artifact stays closed
+/// everywhere. Only the cold-entry seed is skipped.
+///
+/// 20 sits above every human endpoint (login 10, register 5, password_reset 3,
+/// mfa 5) and far below every machine one (revoke 60, token 120, introspect
+/// 600, authz 1 800, gRPC families 6 000+), so the split lands exactly on the
+/// distinction that already exists in the posture tables.
+const COLD_ENTRY_MIN_LIMIT: u32 = 20;
+
 // ---------------------------------------------------------------------------
 // Counter
 // ---------------------------------------------------------------------------
@@ -854,8 +883,10 @@ impl SharedRateLimitCounter {
 
         let sliding = self.inner.config.window_mode == WindowMode::Sliding;
         // Pro-rata backfill for a key first seen partway through a window —
-        // only meaningful in sliding mode, where windows are continuous.
-        let cold_seed = if sliding {
+        // only meaningful in sliding mode (where windows are continuous), and
+        // only at limits large enough for smoothing to mean anything
+        // ([`COLD_ENTRY_MIN_LIMIT`]).
+        let cold_seed = if sliding && limit >= COLD_ENTRY_MIN_LIMIT {
             (elapsed_frac * f64::from(limit) * (1.0 - COLD_ENTRY_BURST_FRACTION)) as u64
         } else {
             0
@@ -2263,6 +2294,65 @@ mod window_mode_tests {
             delta: u64,
         ) -> StoreIncrementFuture<'a> {
             Box::pin(async move { Ok(self.total.fetch_add(delta, Ordering::SeqCst) + delta) })
+        }
+    }
+
+    /// A human-scale limit must hand a first-time caller its whole budget.
+    ///
+    /// Enrolling in MFA takes three calls against a 5/min ceiling; a pro-rata
+    /// seed at that scale would reject the third for no security benefit,
+    /// because the control there is the small absolute number rather than the
+    /// smoothness of its delivery.
+    #[test]
+    fn small_limits_are_exempt_from_the_cold_entry_seed() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        // Deep into a window — the worst case for a pro-rata seed.
+        let late = aligned_start() + chrono::Duration::seconds(50);
+
+        let admitted = (0..20)
+            .filter(|_| counter.check_at("mfa:203.0.113.7", late, 5))
+            .count();
+
+        assert_eq!(
+            admitted, 5,
+            "a 5/min endpoint must give a first-time caller all five, whenever \
+             in the window they arrive"
+        );
+    }
+
+    /// ...while a machine-scale limit still gets the smoothing, because that
+    /// is where the run-5 over-admission actually was.
+    #[test]
+    fn machine_scale_limits_still_get_the_cold_entry_seed() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let late = aligned_start() + chrono::Duration::seconds(45);
+
+        let admitted = (0..2_000)
+            .filter(|_| counter.check_at("authz_check:203.0.113.7", late, 600))
+            .count();
+
+        assert!(
+            admitted < 600,
+            "a 600/min endpoint arriving 3/4 through a window must NOT get the \
+             whole budget (admitted {admitted}) — that is the +48% run 5 measured"
+        );
+    }
+
+    /// The threshold must sit between the human and machine posture families,
+    /// so the exemption lands on the distinction that already exists.
+    #[test]
+    fn the_threshold_splits_human_from_machine_endpoints() {
+        for human in [3u32, 5, 10] {
+            assert!(
+                human < COLD_ENTRY_MIN_LIMIT,
+                "{human}/min is a human endpoint"
+            );
+        }
+        for machine in [60u32, 120, 600, 1_800, 6_000] {
+            assert!(
+                machine >= COLD_ENTRY_MIN_LIMIT,
+                "{machine}/min is a machine endpoint and must keep the smoothing"
+            );
         }
     }
 

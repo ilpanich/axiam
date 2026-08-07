@@ -271,6 +271,23 @@ So the shipped, measurable contract for a sustained single-source flood is:
 - **first rolling minute:** at most `1.1 × configured` (the burst allowance),
 - **every minute after:** converges to `1.0 × configured`.
 
+**Small limits are exempt from the pro-rata part.** Below 20/min — which is
+every human endpoint (`login` 10, `register` 5, `password_reset` 3, `mfa` 5)
+and no machine one — a first-time caller still gets its whole budget whenever
+in the window it arrives.
+
+That exemption is not a loosening, it is a correction. Pro-rata seeding is a
+*rate-smoothing* device, and smoothing a budget of five requests is meaningless:
+at `mfa 5/min`, "two thirds of the window has elapsed" rounds to three
+requests charged, so a user enrolling in MFA at second 40 would find their
+third call rejected. There is no security benefit to pay for that, because the
+control at those endpoints is the small absolute number, not the evenness of
+its delivery.
+
+The sliding-window carry still applies at **every** limit, so the
+boundary-doubling artifact stays closed everywhere. Only the cold-entry seed
+is skipped.
+
 `benchmarks/runner/rl_prod_check.py` asserts ±10 %, so the shipped burst and
 the assertion agree by construction — the 10 % allowance *is* the assertion's
 tolerance, chosen so that the posture and the check can never drift apart.

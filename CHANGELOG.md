@@ -71,7 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counter now uses a sliding window, counts admitted capacity rather than
   arrivals, and refunds downstream rejections; a newly seen key gets its
   pro-rata share of the window plus an explicit, documented 10% burst
-  allowance. Rollback: `AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed`.
+  allowance — except below 20/min (every human endpoint, no machine one),
+  where smoothing a five-request budget would cost a legitimate first-time
+  user a whole request for no security benefit. Rollback:
+  `AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed`.
 - **Refresh rotation is three datastore round trips instead of five**, via an
   atomic `consume_by_token_hash` (which also removes the read-then-delete
   window rather than tolerating it) and a TTL cache for the per-refresh tenant

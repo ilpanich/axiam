@@ -182,7 +182,15 @@ fi
 # identity read — the counterpart of Zitadel's zitadel_userinfo_grpc.js; it dials
 # AXIAM's proto and has no equivalent on Keycloak, so it is AXIAM-only too. The
 # two vendors' gRPC-userinfo scenarios pair up cross-vendor in report.py.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js"
+#
+# Run-5 J1c added three more AXIAM-only entries. grpc_admin_validate.js and
+# grpc_infra.js dial AXIAM's own gRPC surface (and, for the latter, a path
+# AXIAM deliberately does not route — see that scenario's header). oauth2_revoke.js
+# is REST but AXIAM-only for the same reason the authz REST scenarios are:
+# it exists to exercise a specific AXIAM limiter family, not to compare
+# vendors, and publishing its throughput against Keycloak/Zitadel would be
+# comparing a deliberately throttled cell to an unthrottled one.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -197,7 +205,7 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # or the axiam client wasn't seeded (empty BENCH_CLIENT_SECRET). `just bench-up`
 # now configures OAuth2 and seed.sh provisions the client, so by default none are
 # skipped. jwks_fetch is intentionally excluded — it needs no client.
-OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js"
+OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0

@@ -595,6 +595,12 @@ pub const fn per_sec_to_window_limit(per_sec: u32) -> u32 {
 
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
+///
+/// No longer on the request path — [`GrpcSharedRateLimitService::call`] hands
+/// the raw `now` to [`axiam_db::SharedRateLimitCounter::check_at`] instead
+/// (run-5 J1). Kept, and asserted by a test, because [`WINDOW_SECS`] must
+/// keep agreeing with the counter's configured window.
+#[cfg_attr(not(test), allow(dead_code))]
 fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     let epoch = now.timestamp();
     let start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
@@ -865,7 +871,12 @@ where
                 // in-flight upgrade keeps counting against the same
                 // `rate_limit_bucket` records.
                 let key = format!("{endpoint}:{ip}");
-                counter.check(&key, window_start(Utc::now()), limit)
+                // `check_at` (not `check`): the counter derives the window
+                // itself AND sees the offset into it, which is what its
+                // sliding-window mode needs to bound every rolling minute
+                // rather than only the aligned ones (run-5 J1,
+                // `axiam_db::rate_limit_counter::WindowMode`).
+                counter.check_at(&key, Utc::now(), limit)
             }
             // No client-IP key available — fail open; the in-memory governor
             // still makes the real decision. (A counter built with

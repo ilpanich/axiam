@@ -194,6 +194,71 @@ Notes:
   not, which made the effective gRPC ceiling 1/60th of the configured one
   (fixed; `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100` now really means 100/s).
 
+### 3.2 The two layers, and which one decides
+
+Every rate-limited surface runs **two** cooperating limiters. Knowing which
+one decides is not trivia — run 5 found both a starvation bug and an
+over-admission bug that were purely consequences of how the two compose.
+
+| Layer | Scope | Algorithm | Job |
+|---|---|---|---|
+| in-memory `governor` | one replica | GCRA token bucket, per-second quota + burst | the admission decision |
+| shared counter (`rate_limit_bucket`) | all replicas | write-behind sliding window, 60 s | stop `replicas × limit` |
+
+**The governor decides; the shared counter stops multiplication.** On a
+single replica the governor's quota is the binding constraint and the shared
+counter never trips, so the effective ceiling equals the configured one. With
+N replicas, each admits its own quota, their sum reaches the shared window
+budget, and the shared counter cuts in — which is the whole reason it exists.
+
+Two consequences worth internalising before you tune anything:
+
+- **Order matters, and the two listeners achieve it differently.** On gRPC
+  the governor is the outer layer, so the shared counter only ever sees
+  admitted traffic. On REST the shared middleware *must* be outermost (it is
+  also what parses `client_id` out of the form body for the
+  `client_id`/`ip_client_id` key modes), so it charges first and **refunds**
+  when the governor rejects. Same invariant, reached two ways: the
+  cross-replica counter counts *served* traffic, never attempts.
+
+  Before run 5 the gRPC order was inverted and nothing refunded, so a flood
+  burned an entire 60-second window budget on requests the per-second
+  governor never let through. Effective admission collapsed to roughly
+  `burst + rate × t_exhaust` per window — measured at **181/min against a
+  configured 6 000/min**, i.e. 1/33 of the ceiling. If you are reading an
+  older results tree, that is what those gRPC rows mean.
+
+- **The shared window slides; it does not reset.** A fixed window hands out
+  its whole budget again the instant it rolls over, so any rolling
+  measurement that straddles a boundary sees up to twice the configured rate.
+  Run 5 measured exactly that on the REST machine endpoints (+48 % introspect,
+  +50 % authz check, +12 % token, against a ±10 % bar). The counter now
+  charges a decayed share of the previous window against the current
+  decision, which bounds *every* rolling minute rather than only the aligned
+  ones.
+
+#### The burst allowance, stated exactly
+
+A key the limiter has never seen before is given its **pro-rata share of the
+window it arrives in, plus 10 % of the limit**. It is not given the whole
+remaining window — arriving at second 59 and arriving at second 0 buy the
+same amount of capacity, which is the property that makes the admitted rate
+independent of when a flood starts.
+
+So the shipped, measurable contract for a sustained single-source flood is:
+
+- **first rolling minute:** at most `1.1 × configured` (the burst allowance),
+- **every minute after:** converges to `1.0 × configured`.
+
+`benchmarks/runner/rl_prod_check.py` asserts ±10 %, so the shipped burst and
+the assertion agree by construction — the 10 % allowance *is* the assertion's
+tolerance, chosen so that the posture and the check can never drift apart.
+
+Rollback knob: `AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed` restores the
+pre-run-5 fixed-window behaviour. Only the exact string `fixed` does; a typo
+leaves the stricter default in place, so a misspelled rollback cannot
+silently loosen enforcement.
+
 ### Where the preset numbers come from
 
 Anchored to the measured envelope above, deliberately as a **small

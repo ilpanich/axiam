@@ -167,18 +167,48 @@ where
     // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
     // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
     // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
-    // SECHRD-03 (D-01a/b/c): the shared-store pre-check is `.layer()`'d
-    // FIRST so it is OUTERMOST (tower's ServiceBuilder/Server::builder()
-    // convention — first `.layer()` call = outermost = runs first, the
-    // opposite of actix's last-`.wrap()`-is-outermost rule). It fails OPEN
-    // to `governor_layer` on any SurrealDB error or missing key, so a DB
-    // blip degrades to the in-memory limiter rather than hard-blocking.
+    // SECHRD-03 (D-01a/b/c) + run-5 J1: layer ORDER is load-bearing here.
+    // Tower's `Server::builder()` runs the FIRST-added layer with the request
+    // FIRST (the opposite of actix's last-`.wrap()`-is-outermost rule), so
+    // the layer named first below is the OUTERMOST one.
+    //
+    // Until run 5 the shared-store pre-check was outermost. That inverted the
+    // two layers' natural roles and starved every gRPC family: the pre-check
+    // charges its whole 60-second window budget the moment it admits a
+    // request, but the per-second `governor` behind it then rejected almost
+    // all of those requests. A flood therefore burned all 6 000 authz
+    // admissions of a window on traffic that was never served, in well under
+    // a second, and the window stayed exhausted for its remaining ~59 —
+    // measured at 181 admissions/min against a configured 6 000/min, i.e.
+    // 1/33 of the ceiling (`claude_dev/improvement-after-run5-benchmark.md`
+    // A1/J1).
+    //
+    // The governor is therefore now OUTERMOST and owns the admission
+    // decision, and the shared cross-replica counter sits behind it, counting
+    // only traffic that was actually admitted. Both roles are preserved:
+    //
+    // - single replica — the governor's per-second quota is the binding
+    //   constraint and the shared counter (sized `per_sec × 60`) never trips,
+    //   so the effective ceiling equals the configured one;
+    // - N replicas — each admits its own per-second quota, their sum reaches
+    //   the shared window budget, and the shared counter cuts in. That is
+    //   exactly the `replicas × limit` multiplication SECHRD-03 exists to
+    //   stop, and it is still stopped.
+    //
+    // Fail-open is unchanged: on a missing key, a disabled shared layer, or a
+    // SurrealDB blip the inner layer forwards the request and the governor's
+    // decision (already taken, outside it) stands.
+    //
+    // The REST listener cannot use this ordering — its shared middleware is
+    // also what parses `client_id` out of the form body for the client-aware
+    // key modes, so it must stay outermost there. It solves the same problem
+    // with `SharedRateLimitCounter::refund` instead; see that method's docs.
     let mut builder = Server::builder()
         .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
-        .layer(shared_rate_limit_layer)
-        .layer(governor_layer);
+        .layer(governor_layer)
+        .layer(shared_rate_limit_layer);
 
     // REQ-15 AC-1 / CQ-B20: Env-gated TLS.
     // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.

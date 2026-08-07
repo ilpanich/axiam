@@ -32,6 +32,7 @@ pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use pool::{DbCheckout, DbPool};
 pub use rate_limit_counter::{
     SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreIncrementFuture,
+    WindowMode,
 };
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,

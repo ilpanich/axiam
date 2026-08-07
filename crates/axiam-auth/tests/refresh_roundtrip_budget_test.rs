@@ -184,12 +184,19 @@ async fn refresh_rotation_stays_within_its_datastore_round_trip_budget() {
         .await
         .expect("tenant");
 
+    // Generated per run rather than a literal: this test authenticates, so the
+    // same value has to reach both `create` and `login` — binding it once keeps
+    // them in step and keeps a credential-shaped literal out of the source,
+    // which static scanners flag as a critical secret. Same reasoning as
+    // `fixture_password` in mfa_methods_test.rs.
+    let password = format!("Fx1!{}", Uuid::new_v4().simple());
+
     let user = user_repo
         .create(CreateUser {
             tenant_id: tenant.id,
             username: "budget".into(),
             email: "budget@example.com".into(),
-            password: "correct-horse-battery".into(),
+            password: password.clone(),
             metadata: None,
         })
         .await
@@ -221,7 +228,7 @@ async fn refresh_rotation_stays_within_its_datastore_round_trip_budget() {
             tenant_id: tenant.id,
             org_id: org.id,
             username_or_email: "budget".into(),
-            password: "correct-horse-battery".into(),
+            password: password.clone(),
             ip_address: None,
             user_agent: None,
             mfa_policy: None,

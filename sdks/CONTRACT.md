@@ -583,6 +583,62 @@ See `crates/axiam-amqp/src/messages.rs`:
 
 ---
 
+## §8b AMQP Transport Security (A6)
+
+**Requirement level: MUST**, for every SDK that speaks AMQP directly (Rust,
+TypeScript, Go, Python, Java, PHP).
+
+### The layering, stated once
+
+HMAC signing (§8) gives **authenticity and replay protection**. It does not
+give **confidentiality**. A signed `AuthzRequest` still names a subject, a
+resource and an action in cleartext on the wire; a signed `AuditEventMessage`
+still carries the audit record; a signed mail payload still carries the mail.
+
+TLS gives confidentiality. HMAC gives end-to-end authenticity *across broker
+hops* — a property TLS cannot provide, because TLS terminates at the broker and
+the broker then re-sends. **Both are required in production. Neither
+substitutes for the other**, and an SDK that offers one as an alternative to
+the other is not conformant.
+
+### Requirements
+
+| # | Rule |
+|---|---|
+| 1 | An SDK that connects to AMQP **MUST** support `amqps://` URLs (broker TLS port 5671). |
+| 2 | It **MUST** support supplying a custom CA bundle, for a privately-issued broker certificate. This is the common case — an in-cluster broker's certificate is not issued by a public CA. |
+| 3 | It **SHOULD** support client certificates (mutual TLS toward the broker), and where it does, the certificate and its key **MUST** be required together: half a client identity MUST fail closed rather than connect without the mutual half. |
+| 4 | It **MUST NOT** offer a certificate-verification-skip option in a production build, under any name. |
+| 5 | It **MUST NOT** fall back to plaintext when a TLS connection fails. A failed `amqps://` connection is an error to surface, not a condition to work around. |
+| 6 | HMAC signing (§8) remains mandatory on every message regardless of transport. |
+
+### On rule 4, specifically
+
+A verification-skip switch is the most reliably misused option in TLS. It
+appears in a dev compose file, it works, and it travels unchanged into
+production, where it turns TLS into an expensive no-op against precisely the
+attacker TLS exists to stop. Rule 2 exists so that nobody has a legitimate
+reason to want rule 4 relaxed: a custom CA bundle covers the real case (a
+self-signed or private-CA broker certificate) without covering the rest.
+
+Where an SDK's underlying AMQP library exposes such a switch, the SDK MUST NOT
+surface it. Where a debug-build-only escape hatch is genuinely wanted, it MUST
+follow the server's own `DEV_DEFAULT_SIGNING_KEY` pattern — present only in a
+debug build, absent from the shipped artifact, and loud when used.
+
+### Required tests, per SDK
+
+- connect over `amqps://` against a broker with a privately-issued certificate,
+  using a supplied CA bundle: publish/consume round trip succeeds;
+- connect with the **wrong** CA bundle: rejected, with an error naming the
+  verification failure;
+- a client certificate without its key (and the mirror case): rejected before
+  dialling;
+- an HMAC-invalid message over TLS is still rejected — rule 6, i.e. TLS does
+  not become an excuse to trust the payload.
+
+---
+
 ## §9 Single-Flight Refresh Guard
 
 All SDKs that manage token state (access + refresh tokens) MUST implement a single-flight refresh guard to prevent thundering-herd token refresh calls:

@@ -1,12 +1,58 @@
 //! RabbitMQ connection management.
 
 use lapin::options::{BasicQosOptions, ConfirmSelectOptions, QueueDeclareOptions};
+use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties};
 use tracing::{info, warn};
 
 use crate::config::AmqpConfig;
 use crate::error::AmqpError;
+
+/// Read the configured TLS material off disk into lapin's owned TLS config
+/// (A6).
+///
+/// Every read failure is reported with the path and the reason. A broker
+/// connection that fails because a mount is missing looks identical to one
+/// that fails because the broker is down, unless the error says which — and an
+/// operator debugging a cert mount at 3am is exactly who this message is for.
+fn build_tls_config(config: &AmqpConfig) -> Result<OwnedTLSConfig, AmqpError> {
+    let cert_chain = match &config.tls.ca_cert_path {
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {
+            AmqpError::Config(format!(
+                "AMQP TLS: cannot read CA bundle at {path:?}: {e}. The broker certificate \
+                 cannot be verified without it; connecting insecurely is not an option."
+            ))
+        })?),
+        // System roots. Correct for a publicly-issued broker certificate, and
+        // the reason a CA bundle is optional rather than required.
+        None => None,
+    };
+
+    let identity = match (&config.tls.client_cert_path, &config.tls.client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let pem = std::fs::read(cert_path).map_err(|e| {
+                AmqpError::Config(format!(
+                    "AMQP TLS: cannot read client certificate at {cert_path:?}: {e}"
+                ))
+            })?;
+            let key = std::fs::read(key_path).map_err(|e| {
+                AmqpError::Config(format!(
+                    "AMQP TLS: cannot read client key at {key_path:?}: {e}"
+                ))
+            })?;
+            Some(OwnedIdentity::PKCS8 { pem, key })
+        }
+        // The mismatched cases are rejected by `AmqpTlsConfig::validate`,
+        // which `validate_transport_security` runs before we get here.
+        _ => None,
+    };
+
+    Ok(OwnedTLSConfig {
+        identity,
+        cert_chain,
+    })
+}
 
 /// Well-known queue names used by AXIAM.
 pub mod queues {
@@ -82,12 +128,49 @@ pub struct AmqpManager {
 
 impl AmqpManager {
     /// Establish a connection to RabbitMQ and create a channel.
+    ///
+    /// # Transport security (A6)
+    ///
+    /// The URL scheme selects the transport, and the posture is enforced
+    /// **before** any socket is opened
+    /// ([`AmqpConfig::validate_transport_security`]): an unrecognised scheme,
+    /// half a client identity, or a plaintext URL in a release build without
+    /// `AXIAM__AMQP__ALLOW_PLAINTEXT` all fail here rather than at connect
+    /// time with a lapin error nobody can act on.
+    ///
+    /// There is **no silent plaintext fallback**. An `amqps://` URL whose CA
+    /// bundle is missing, whose certificate is expired, or whose hostname does
+    /// not match returns an error; it does not retry without TLS. That is the
+    /// entire point — a fallback would make the failure invisible exactly when
+    /// it matters.
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
-        info!("Connecting to RabbitMQ");
+        config
+            .validate_transport_security()
+            .map_err(|e| AmqpError::Config(e.to_string()))?;
 
-        let connection = Connection::connect(&config.url, ConnectionProperties::default())
+        let tls = config.is_tls();
+        info!(tls, "Connecting to RabbitMQ");
+
+        let connection = if tls {
+            let tls_config = build_tls_config(config)?;
+            // `connect_with_config` is the only entry point that takes TLS
+            // material, and it also requires an explicit runtime — so resolve
+            // the same default runtime `Connection::connect` would have picked
+            // rather than introducing a second runtime story for the TLS path.
+            let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
+            Connection::connect_with_config(
+                &config.url,
+                ConnectionProperties::default(),
+                tls_config,
+                runtime,
+            )
             .await
-            .map_err(AmqpError::Connection)?;
+            .map_err(AmqpError::Connection)?
+        } else {
+            Connection::connect(&config.url, ConnectionProperties::default())
+                .await
+                .map_err(AmqpError::Connection)?
+        };
 
         let channel = connection
             .create_channel()
@@ -117,6 +200,15 @@ impl AmqpManager {
         for attempt in 1..=total_attempts {
             match Self::connect(config).await {
                 Ok(manager) => return Ok(manager),
+                // A6: a configuration fault is not a transient one. Retrying a
+                // missing CA mount or an unset AXIAM__AMQP__ALLOW_PLAINTEXT
+                // `max_retries` times only delays the same error by
+                // `max_retries × reconnect_delay_ms` and buries the actionable
+                // message under identical warnings.
+                Err(e @ AmqpError::Config(_)) => {
+                    tracing::error!(error = %e, "RabbitMQ connection refused before dialling");
+                    return Err(e);
+                }
                 Err(e) => {
                     if attempt == total_attempts {
                         let lapin_err = e.into_lapin_error();

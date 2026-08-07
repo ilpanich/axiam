@@ -13,7 +13,14 @@ data:
   AXIAM__DB__URL: "surrealdb:8000"
   AXIAM__DB__NAMESPACE: "axiam"
   AXIAM__DB__DATABASE: "axiam"
-  AXIAM__AMQP__URL: "amqp://rabbitmq:5672"
+  # A6: TLS to the broker. HMAC signing stays mandatory regardless -- TLS gives
+  # confidentiality in transit, HMAC gives end-to-end authenticity and replay
+  # protection across broker hops. They are layers, not alternatives.
+  AXIAM__AMQP__URL: "amqps://rabbitmq:5671"
+  # The broker certificate is issued by an in-cluster CA (cert-manager), which
+  # the system root store does not know about, so the bundle must be supplied.
+  # There is deliberately no verification-skip option in the AMQP client.
+  AXIAM__AMQP__TLS__CA_CERT_PATH: "/etc/axiam/broker-tls/ca.crt"
   AXIAM__SERVER__HOST: "0.0.0.0"
   AXIAM__GRPC__HOST: "0.0.0.0"
   # SEC-052: Narrow RUST_LOG — no internal module exposure in production

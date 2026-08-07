@@ -61,6 +61,13 @@ spec:
                 name: axiam-config
             - secretRef:
                 name: axiam-secrets
+          volumeMounts:
+            # A6: the CA bundle that verifies the broker certificate. Only the
+            # `ca.crt` key is projected -- the server verifies the broker, it
+            # does not need (and must not hold) the broker's private key.
+            - name: broker-tls-ca
+              mountPath: /etc/axiam/broker-tls
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532          # distroless/cc-debian12:nonroot UID (D-08)
@@ -72,3 +79,11 @@ spec:
                 - ALL                 # D-13: restricted profile
             seccompProfile:
               type: RuntimeDefault    # D-13: restricted profile
+      volumes:
+        - name: broker-tls-ca
+          secret:
+            secretName: rabbitmq-broker-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 0444

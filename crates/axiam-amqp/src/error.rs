@@ -18,6 +18,17 @@ pub enum AmqpError {
 
     #[error("AMQP connection failed after exhausting all retries: {0}")]
     MaxRetriesExhausted(#[source] lapin::Error),
+
+    /// A6: the connection was refused before a socket was opened, because the
+    /// configuration itself is unusable — an unrecognised URL scheme, half a
+    /// client identity, an unreadable CA bundle, or plaintext in a release
+    /// build without an explicit opt-in.
+    ///
+    /// Distinct from [`Self::Connection`] on purpose: this one is never
+    /// retryable, and the retry loop must not spend `max_retries` attempts on
+    /// a typo in a mount path.
+    #[error("AMQP configuration is unusable: {0}")]
+    Config(String),
 }
 
 impl AmqpError {

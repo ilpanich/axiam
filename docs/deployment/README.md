@@ -655,3 +655,88 @@ above — this is intentional fail-closed network isolation, not an
 oversight. When adding a new integration (e.g. a different SMTP relay or an
 external IdP on a new IP range), extend `server-egress.yml` narrowly rather
 than relaxing the default-deny baseline.
+
+## Securing the broker (AMQP over TLS)
+
+AXIAM's async plane — authorization requests, audit events, outbound mail,
+webhook dispatch, cross-replica cache invalidation — all crosses RabbitMQ. Six
+SDKs consume AMQP directly, so that traffic crosses service boundaries by
+design.
+
+### What HMAC does and does not do
+
+The AMQP layer signs messages with HMAC-SHA256 and rejects replays. That gives
+**authenticity and replay protection** — a forged `AuthzRequest` is rejected,
+a captured one cannot be re-sent. It gives **no confidentiality**: a signed
+message still names its subject, resource and action in cleartext on the wire,
+and a signed audit event still carries the audit record.
+
+TLS supplies the confidentiality. It does not supply HMAC's property, because
+TLS terminates at the broker and the broker then re-sends — only an end-to-end
+signature survives that hop. **Run both.**
+
+### Compose
+
+`just prod-up` handles it. It calls `just prod-broker-certs`, which generates a
+private CA and a broker certificate into `docker/.secrets/broker-tls/` (already
+gitignored), and the stack comes up on `amqps://…:5671` with the plaintext
+listener disabled and TLS 1.3 pinned.
+
+Bring your own certificate instead by dropping `ca.pem`, `server.pem` and
+`server.key` into that directory before the first `prod-up`; the generator
+leaves existing material alone. Certificates from `axiam-pki`'s own
+organization CA work identically and are good dogfooding — one trust root to
+rotate rather than two.
+
+To rotate: delete `docker/.secrets/broker-tls/`, re-run
+`just prod-broker-certs`, restart both containers. The generated certificates
+are valid for 825 days.
+
+### Kubernetes
+
+The manifests ship the TLS shape already: the broker listens on 5671 only, the
+Service publishes only 5671, both NetworkPolicies allow only 5671, and the
+server mounts the CA bundle read-only.
+
+What you supply is the `rabbitmq-broker-tls` Secret, with keys `tls.crt`,
+`tls.key` and `ca.crt`.
+
+**cert-manager is the recommended issuer.** A `Certificate` resource with
+`dnsNames: [rabbitmq, rabbitmq.axiam.svc.cluster.local]` writing into that
+Secret gives you automatic renewal — which matters more here than it looks: a
+broker certificate that silently expires takes the entire async plane down at
+once, and does it at renewal time rather than at deploy time, when nobody is
+watching. Bring-your-own works too; just remember that you now own the renewal.
+
+The server pod mounts **only** `ca.crt` from that Secret. It verifies the
+broker; it has no business holding the broker's private key.
+
+### There is no way to skip verification
+
+`AmqpTlsConfig` has no `verify_peer: false`, and this is not an omission to be
+filled in later. A verification-skip switch appears in a dev compose file,
+works, and travels unchanged into production, where it turns TLS into an
+expensive no-op against exactly the attacker TLS exists to stop.
+`AXIAM__AMQP__TLS__CA_CERT_PATH` covers the legitimate reason people reach for
+it — a self-signed or private-CA broker certificate — without covering the
+rest.
+
+An `amqps://` connection that fails verification is an error. It does not
+retry in the clear.
+
+### Dev stays plaintext, deliberately
+
+`docker/docker-compose.dev.yml` and the e2e stack still use `amqp://`. That is
+a debug-build convenience and nothing else: **a release binary refuses a
+plaintext broker URL** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true` is set, which
+logs a prominent warning naming exactly what is now readable on the wire.
+
+### Configuration reference
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AXIAM__AMQP__URL` | `amqp://localhost:5672` | `amqps://` selects TLS (port 5671). |
+| `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA. Unset = system roots. |
+| `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
+| `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
+| `AXIAM__AMQP__ALLOW_PLAINTEXT` | `false` | Permit `amqp://` in a release build. |

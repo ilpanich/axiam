@@ -25,8 +25,11 @@ spec:
             matchLabels:
               component: rabbitmq
       ports:
+        # A6: AMQPS only. The broker no longer listens on plaintext 5672, so
+        # allowing it would permit a path that cannot be established -- and,
+        # worse, would leave the policy reading as if plaintext were expected.
         - protocol: TCP
-          port: 5672
+          port: 5671
 
     # Allow server → external HTTPS (OIDC JWKS, SAML IdP, email APIs) (D-12)
     # Excludes private ranges to deny lateral movement on 443.

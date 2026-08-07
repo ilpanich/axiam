@@ -43,6 +43,21 @@ spec:
                 secretKeyRef:
                   name: rabbitmq-credentials
                   key: password
+            # A6: AMQPS listener on 5671, TLS 1.3 only (the project standard is
+            # "TLS 1.3 minimum for all external communication"). The plaintext
+            # 5672 listener is switched OFF -- leaving it up would make the
+            # amqps:// URL a preference rather than a guarantee, since anything
+            # failing TLS could quietly reconnect in the clear.
+            - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
+              value: >-
+                -rabbit listeners.tcp []
+                -rabbit listeners.ssl.default 5671
+                -rabbit ssl_options.cacertfile "/etc/rabbitmq/tls/ca.crt"
+                -rabbit ssl_options.certfile   "/etc/rabbitmq/tls/tls.crt"
+                -rabbit ssl_options.keyfile    "/etc/rabbitmq/tls/tls.key"
+                -rabbit ssl_options.verify verify_none
+                -rabbit ssl_options.fail_if_no_peer_cert false
+                -rabbit ssl_options.versions ['tlsv1.3']
           securityContext:
             runAsNonRoot: true
             # D-13 best-effort: RabbitMQ default UID is 999 (rabbitmq user in official image)
@@ -56,8 +71,11 @@ spec:
             seccompProfile:
               type: RuntimeDefault    # D-13: restricted profile
           ports:
-            - containerPort: 5672
-              name: amqp
+            # A6: 5671 is the only AMQP port the broker listens on now; 5672 is
+            # kept out of the manifest entirely rather than declared-and-unused,
+            # so a NetworkPolicy reviewer cannot mistake it for a live path.
+            - containerPort: 5671
+              name: amqps
               protocol: TCP
             - containerPort: 15672
               name: management
@@ -74,6 +92,16 @@ spec:
               mountPath: /var/log/rabbitmq
             - name: tmp
               mountPath: /tmp
+            # A6: broker certificate + key + issuing CA. cert-manager is the
+            # recommended issuer -- a Certificate resource with
+            # `dnsNames: [rabbitmq, rabbitmq.axiam.svc.cluster.local]` writing
+            # into this Secret gives automatic renewal, which matters because a
+            # broker certificate that silently expires takes the whole async
+            # plane down. Bring-your-own works identically: create the Secret
+            # with tls.crt / tls.key / ca.crt keys.
+            - name: broker-tls
+              mountPath: /etc/rabbitmq/tls
+              readOnly: true
           resources:
             requests:
               cpu: 250m
@@ -101,6 +129,12 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        - name: broker-tls
+          secret:
+            secretName: rabbitmq-broker-tls
+            # 0440: readable by the broker's group, never world-readable -- this
+            # Secret holds the broker's private key.
+            defaultMode: 0440
   volumeClaimTemplates:
     - metadata:
         name: rabbitmq-data

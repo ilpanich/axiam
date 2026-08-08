@@ -229,6 +229,11 @@ pub struct AppState<C: Connection + Clone> {
     pub audit_repo: SurrealAuditLogRepository<C>,
     pub org_repo: SurrealOrganizationRepository<C>,
     pub tenant_repo: SurrealTenantRepository<C>,
+    /// A2/J2: `tenant_id -> organization_id`, so the refresh rotation path
+    /// stops paying a datastore round trip per request for one immutable
+    /// field. See [`crate::tenant_org_cache`] for why caching this — and only
+    /// this — is safe.
+    pub tenant_org_cache: Arc<crate::tenant_org_cache::TenantOrgCache>,
     pub user_repo: SurrealUserRepository<C>,
     pub group_repo: SurrealGroupRepository<C>,
     pub role_repo: SurrealRoleRepository<C>,
@@ -462,6 +467,7 @@ impl<C: Connection + Clone> AppState<C> {
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
+            tenant_org_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),
             role_repo: SurrealRoleRepository::new(db.clone()),

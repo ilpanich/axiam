@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router";
 import { useAuthStore } from "@/stores/auth";
+import {
+  webauthnService,
+  isWebauthnSupported,
+  isConditionalMediationAvailable,
+  classifyWebauthnError,
+  webauthnErrorMessage,
+} from "@/services/webauthn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,7 +15,7 @@ import { PublicLayout } from "@/components/layout/PublicLayout";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
-import { KeyRound, ChevronRight, Loader2, AlertCircle } from "lucide-react";
+import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import type { AxiosError } from "axios";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
@@ -85,6 +92,102 @@ export function LoginPage() {
   const [mfaChallengeToken, setMfaChallengeToken] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // C2: passkey sign-in. `passkeySupported` gates the button entirely --
+  // offering a control that can only fail is worse than not offering it.
+  const [passkeySupported] = useState(() => isWebauthnSupported());
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  // Whether the server's MFA challenge says this user actually has a WebAuthn
+  // credential. Without it the second-factor step must not offer passkey.
+  const [mfaMethods, setMfaMethods] = useState<string[]>([]);
+  // Guards the conditional-mediation ceremony so it is started at most once
+  // per mount; a second concurrent request aborts the first in every browser.
+  const conditionalStarted = useRef(false);
+
+  /**
+   * Shared tail of every successful sign-in, whatever proved the identity.
+   *
+   * Password, TOTP and passkey all converge here on purpose: the session
+   * cookie and CSRF rotation are set by the server response, so the only
+   * client-side work left is hydrating the store. Duplicating it per method is
+   * how one of them ends up skipping `/auth/me` and running with an empty
+   * permissions array.
+   */
+  const completeSignIn = async () => {
+    const hydrated = await fetchCurrentUser();
+    if (!hydrated) {
+      setError("Authentication error. Please sign in again.");
+      navigate("/login");
+      return;
+    }
+    setUser(hydrated);
+    setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
+    navigate("/dashboard");
+  };
+
+  /**
+   * Run a WebAuthn assertion against an MFA challenge token.
+   *
+   * `conditional` selects passkey autofill (the browser surfaces saved
+   * passkeys from the username field). In that mode the promise may never
+   * settle -- the user simply may not pick one -- so failures are swallowed
+   * rather than shown: an error banner for a prompt the user never engaged
+   * with would be noise on a page they are still typing into.
+   */
+  const runPasskey = async (challengeToken: string, conditional = false) => {
+    if (!conditional) {
+      setPasskeyBusy(true);
+      setError(null);
+    }
+    try {
+      await webauthnService.authenticate(challengeToken, { conditional });
+      await completeSignIn();
+    } catch (err) {
+      if (!conditional) {
+        setError(webauthnErrorMessage(classifyWebauthnError(err)));
+      }
+    } finally {
+      if (!conditional) setPasskeyBusy(false);
+    }
+  };
+
+  /**
+   * Sign in with a passkey without typing a username first.
+   *
+   * The server issues a challenge with an empty `allowCredentials`, so the
+   * authenticator offers whichever discoverable credential it holds for this
+   * relying party and the assertion itself identifies the user. An empty
+   * challenge token is what asks for that shape.
+   */
+  const handleDiscoverablePasskey = () => runPasskey("");
+
+  /**
+   * C2: conditional mediation ("passkey autofill") -- the browser offers saved
+   * passkeys inside the username field rather than behind a button.
+   *
+   * Started once per mount, on the credentials step only, and only where the
+   * browser actually advertises support. Everything about it degrades quietly:
+   * a browser without conditional mediation simply keeps the explicit button,
+   * and a user who ignores the autofill entry never sees an error, because the
+   * ceremony they never engaged with is not a failure worth reporting.
+   */
+  useEffect(() => {
+    if (step !== "credentials" || !passkeySupported || conditionalStarted.current) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      if (!(await isConditionalMediationAvailable()) || cancelled) return;
+      conditionalStarted.current = true;
+      await runPasskey("", true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `runPasskey` closes over navigation state that does not change within a
+    // step, and re-running this effect would start a second ceremony that
+    // aborts the first.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, passkeySupported]);
 
   const handleOrgTenantSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,6 +220,10 @@ export function LoginPage() {
 
       if (data.mfa_required) {
         setMfaChallengeToken(data.challenge_token ?? "");
+        // C2: the server tells us which factors this user actually has. A
+        // passkey button on an account with no registered credential would
+        // start a ceremony that can only fail.
+        setMfaMethods(data.available_methods ?? []);
         setStep("mfa");
         return;
       }
@@ -134,9 +241,7 @@ export function LoginPage() {
 
       if (data.user) {
         // Re-fetch via /auth/me so the store is populated with the
-        // permissions array — login response does not include it.
-        // Fallback to login payload with empty permissions if /me
-        // fails (e.g., cookies still propagating).
+        // permissions array — the login response does not include it.
         const hydrated = await fetchCurrentUser();
         setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
@@ -181,9 +286,7 @@ export function LoginPage() {
       const data = response.data;
       if (data.user) {
         // Re-fetch via /auth/me so the store is populated with the
-        // permissions array — login response does not include it.
-        // Fallback to login payload with empty permissions if /me
-        // fails (e.g., cookies still propagating).
+        // permissions array — the login response does not include it.
         const hydrated = await fetchCurrentUser();
         setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
@@ -343,7 +446,11 @@ export function LoginPage() {
                   placeholder="username or email"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  autoComplete="username"
+                  // C2: the `webauthn` token is what makes conditional
+                  // mediation surface saved passkeys in this field's autofill
+                  // list. Harmless where unsupported -- browsers ignore
+                  // autocomplete tokens they do not know.
+                  autoComplete={passkeySupported ? "username webauthn" : "username"}
                   autoFocus
                   required
                 />
@@ -407,6 +514,41 @@ export function LoginPage() {
                 )}
               </Button>
             </div>
+          
+            {passkeySupported && (
+              <>
+                <div className="flex items-center gap-3 my-5" aria-hidden="true">
+                  <span className="h-px flex-1 bg-border" />
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    or
+                  </span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                {/* Fallback ordering (C2): passkey first where the browser can
+                    do it, then password, then TOTP at the second-factor step.
+                    `type="button"` matters -- inside the credentials <form>,
+                    a default-type button would submit the password flow. */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  onClick={handleDiscoverablePasskey}
+                  disabled={passkeyBusy || isLoading}
+                >
+                  {passkeyBusy ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+                      Waiting for your device…
+                    </>
+                  ) : (
+                    <>
+                      <Fingerprint size={16} aria-hidden="true" />
+                      Sign in with a passkey
+                    </>
+                  )}
+                </Button>
+              </>
+            )}
           </form>
         )}
 
@@ -444,6 +586,40 @@ export function LoginPage() {
                 required
               />
             </div>
+
+            {/* C2: WebAuthn as a second factor. Shown only when the server's
+                challenge says this account actually has a passkey or security
+                key registered -- otherwise the button starts a ceremony that
+                can only fail. TOTP stays the default (it is focused above), so
+                this is an addition to the fallback chain, not a reordering of
+                it: passkey -> TOTP -> recovery. */}
+            {passkeySupported &&
+              mfaMethods.some((m) => {
+                const k = m.toLowerCase();
+                return k.includes("passkey") || k.includes("security") || k.includes("webauthn");
+              }) && (
+                <div className="mt-5">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => runPasskey(mfaChallengeToken)}
+                    disabled={passkeyBusy || isLoading}
+                  >
+                    {passkeyBusy ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+                        Waiting for your device…
+                      </>
+                    ) : (
+                      <>
+                        <Fingerprint size={16} aria-hidden="true" />
+                        Use a passkey or security key instead
+                      </>
+                    )}
+                  </Button>
+                </div>
+              )}
 
             <div className="flex gap-3 mt-6">
               <Button

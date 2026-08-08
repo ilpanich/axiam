@@ -128,11 +128,7 @@ fn interceptor_rejects_header_without_bearer_prefix() {
 // TokenServiceImpl::validate_token
 // ---------------------------------------------------------------------------
 
-/// Test password built at runtime (never a hard-coded literal) so credential
-/// scanners don't flag test fixtures as leaked secrets.
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["correct", "horse"].join("-"))
-}
+use axiam_test_support::test_password;
 
 #[tokio::test]
 async fn validate_token_valid_same_tenant() {

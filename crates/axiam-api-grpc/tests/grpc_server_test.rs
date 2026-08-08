@@ -68,11 +68,7 @@ async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     env_lock().lock().await
 }
 
-/// Test-only user password, built at runtime so credential scanners don't
-/// flag a hard-coded literal (mirrors grpc_units.rs). NOT a real credential.
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["pass", "123456789"].concat())
-}
+use axiam_test_support::test_password;
 
 fn test_auth_config() -> AuthConfig {
     AuthConfig {
@@ -156,6 +152,8 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -216,6 +214,8 @@ async fn start_grpc_server_boots_in_tls_mode() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -300,6 +300,8 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     )
     .await;
 }
@@ -347,6 +349,8 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         &grpc_config,
         db,
         16,
+        // A4/J10: strict revocation off — the shipped default posture.
+        None,
     )
     .await;
 }

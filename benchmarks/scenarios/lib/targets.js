@@ -67,6 +67,23 @@ const axiam = {
       expect: 200,
     };
   },
+  // RFC 7009 revocation — driven by oauth2_revoke.js to give the
+  // `revoke_per_min` limiter family a scenario (run-5 J1c). RFC 7009 §2.2
+  // mandates 200 for an unknown or already-revoked token, so re-revoking the
+  // same token every iteration is a valid 200 flood rather than an error one.
+  revoke(token) {
+    return {
+      method: 'POST',
+      url: `${baseUrl()}/oauth2/revoke?tenant_id=${cfg.tenantId}`,
+      body: formBody({
+        token,
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+      }),
+      params: FORM,
+      expect: 200,
+    };
+  },
   refresh(refreshToken) {
     return {
       method: 'POST',

@@ -125,6 +125,50 @@ fn build_login_like_app(
         )
 }
 
+/// Drive a bucket until it rejects, evaluating to how many requests were
+/// admitted.
+///
+/// # Why every test below uses this instead of `for _ in 0..LIMIT { assert 200 }`
+///
+/// Since run-5 J1 the shared counter seeds a **newly seen** key with its
+/// pro-rata share of the window it arrives in (plus an explicit burst
+/// allowance), so a key first seen at second 50 gets roughly a sixth of the
+/// budget rather than all of it. That is the property that makes admission
+/// independent of *when* a flood starts — and it makes "the first N requests
+/// all succeed" a wall-clock-dependent assertion.
+///
+/// None of these tests is actually about the count. Every one of them is about
+/// **bucket separation**: which requests share a budget and which do not. So
+/// they drive a bucket to exhaustion and then assert that a *different* bucket
+/// is (or is not) affected, which is the real invariant and is arrival-time
+/// independent.
+///
+/// A macro rather than a function because `test::call_service`'s bounds are
+/// impractical to name generically over an `App`'s opaque service type.
+macro_rules! drive_until_rejected {
+    ($app:expr, $peer:expr, $client:expr) => {{
+        let mut admitted = 0usize;
+        let mut rejected = false;
+        // Generous ceiling: enough to exhaust any bucket in these tests even
+        // when the window has just rolled over, low enough to fail fast if the
+        // limiter never rejects at all — which is the bug worth catching here.
+        for _ in 0..(LIMIT * 20) {
+            let resp = test::call_service(&$app, post_form("/t", $peer, $client)).await;
+            if resp.status() == 429 {
+                rejected = true;
+                break;
+            }
+            admitted += 1;
+        }
+        assert!(
+            rejected,
+            "bucket never rejected after {} requests — the limiter is not enforcing",
+            LIMIT * 20
+        );
+        admitted
+    }};
+}
+
 async fn fresh_db() -> Surreal<TestDb> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -144,30 +188,25 @@ async fn client_id_mode_gives_independent_buckets_per_client_under_one_ip() {
 
     let peer: std::net::SocketAddr = "203.0.113.50:1".parse().unwrap();
 
-    // Exhaust client "alice"'s bucket (LIMIT requests all succeed).
-    for i in 0..LIMIT {
-        let resp = test::call_service(&app, post_form("/t", peer, "alice")).await;
-        assert_eq!(resp.status(), 200, "alice request {i} should succeed");
-    }
-    let resp = test::call_service(&app, post_form("/t", peer, "alice")).await;
-    assert_eq!(resp.status(), 429, "alice must now be rate-limited");
+    // Exhaust client "alice"'s bucket.
+    let admitted = drive_until_rejected!(app, peer, "alice");
+    assert!(admitted >= 1, "alice must be admitted at least once");
 
     // Client "bob", SAME source IP, is COMPLETELY unaffected — this is the
     // NAT'd-fleet collision fix: before D8 (or in `ip` mode) this request
     // would already be 429 because it shares alice's IP-only bucket.
-    for i in 0..LIMIT {
-        let resp = test::call_service(&app, post_form("/t", peer, "bob")).await;
-        assert_eq!(
-            resp.status(),
-            200,
-            "bob request {i} must succeed independently of alice's exhausted bucket"
-        );
-        let body = test::read_body(resp).await;
-        assert_eq!(
-            body, "bob",
-            "handler must still see the correct client_id after body restore"
-        );
-    }
+    let resp = test::call_service(&app, post_form("/t", peer, "bob")).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "bob must be unaffected by alice's exhausted bucket — that is the whole \
+         point of client_id keying"
+    );
+    let body = test::read_body(resp).await;
+    assert_eq!(
+        body, "bob",
+        "handler must still see the correct client_id after body restore"
+    );
 }
 
 #[actix_rt::test]
@@ -183,18 +222,16 @@ async fn client_id_mode_shares_one_bucket_for_same_client_across_ips() {
     let peer_a: std::net::SocketAddr = "203.0.113.60:1".parse().unwrap();
     let peer_b: std::net::SocketAddr = "203.0.113.61:1".parse().unwrap();
 
-    // Split the SAME client_id's LIMIT requests across two different IPs —
-    // the bucket must still be shared (client_id mode ignores IP entirely).
-    for i in 0..LIMIT {
-        let peer = if i % 2 == 0 { peer_a } else { peer_b };
-        let resp = test::call_service(&app, post_form("/t", peer, "carol")).await;
-        assert_eq!(resp.status(), 200);
-    }
-    let resp = test::call_service(&app, post_form("/t", peer_a, "carol")).await;
+    // Exhaust the SAME client_id from one IP...
+    drive_until_rejected!(app, peer_a, "carol");
+
+    // ...and it must already be exhausted from a DIFFERENT IP, because
+    // client_id mode ignores IP entirely.
+    let resp = test::call_service(&app, post_form("/t", peer_b, "carol")).await;
     assert_eq!(
         resp.status(),
         429,
-        "same client_id from a third IP must still hit the shared per-client bucket"
+        "same client_id from another IP must hit the SAME per-client bucket"
     );
 }
 
@@ -212,12 +249,7 @@ async fn ip_client_id_mode_distinguishes_both_dimensions() {
     let peer_b: std::net::SocketAddr = "203.0.113.71:1".parse().unwrap();
 
     // Exhaust (peer_a, "dave").
-    for _ in 0..LIMIT {
-        let resp = test::call_service(&app, post_form("/t", peer_a, "dave")).await;
-        assert_eq!(resp.status(), 200);
-    }
-    let resp = test::call_service(&app, post_form("/t", peer_a, "dave")).await;
-    assert_eq!(resp.status(), 429, "(peer_a, dave) must be exhausted");
+    drive_until_rejected!(app, peer_a, "dave");
 
     // Same client_id "dave" from a DIFFERENT IP: independent bucket.
     let resp = test::call_service(&app, post_form("/t", peer_b, "dave")).await;
@@ -251,12 +283,10 @@ async fn ip_mode_is_unchanged_two_client_ids_share_one_ip_bucket() {
 
     let peer: std::net::SocketAddr = "203.0.113.80:1".parse().unwrap();
 
-    for i in 0..LIMIT {
-        let client_id = if i % 2 == 0 { "frank" } else { "grace" };
-        let resp = test::call_service(&app, post_form("/t", peer, client_id)).await;
-        assert_eq!(resp.status(), 200);
-    }
-    // Third request, yet ANOTHER client_id, same IP: must already be 429 —
+    // Exhaust the per-IP bucket using one client_id...
+    drive_until_rejected!(app, peer, "frank");
+
+    // ...and yet ANOTHER client_id from the same IP must already be 429:
     // `ip` mode never distinguishes clients.
     let resp = test::call_service(&app, post_form("/t", peer, "henry")).await;
     assert_eq!(
@@ -279,11 +309,10 @@ async fn login_like_endpoint_stays_per_ip_and_never_reads_client_id_from_body() 
 
     let peer: std::net::SocketAddr = "203.0.113.90:1".parse().unwrap();
 
-    for i in 0..LIMIT {
-        let client_id = if i % 2 == 0 { "alice" } else { "bob" };
-        let resp = test::call_service(&app, post_form("/t", peer, client_id)).await;
-        assert_eq!(resp.status(), 200, "login-like request {i} should succeed");
-    }
+    drive_until_rejected!(app, peer, "alice");
+
+    // A DIFFERENT client_id-shaped body field from the same IP must already be
+    // 429: a login-style resource never reads the body for keying.
     let resp = test::call_service(&app, post_form("/t", peer, "someone-else")).await;
     assert_eq!(
         resp.status(),

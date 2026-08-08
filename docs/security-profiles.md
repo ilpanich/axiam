@@ -217,3 +217,62 @@ that must terminate legacy TLS 1.2 for old clients do so at an edge proxy, which
 is that proxy's policy surface — AXIAM itself never negotiates below TLS 1.3.
 The p1-tls12 benchmark profile therefore stays nginx-fronted; there is no native
 overlay for it by design.
+
+## Session-revocation posture: REST vs gRPC (A4/J10)
+
+Local token verification proves a token was issued and has not expired. It
+cannot prove the session behind it still exists — that requires re-checking
+server state per request, and the two AXIAM transports make different choices
+about whether to pay for it.
+
+| | REST | gRPC (default) | gRPC (`strict`) |
+|---|---|---|---|
+| Token signature + expiry | ✅ | ✅ | ✅ |
+| Session revoked since issue? | ✅ per request | ❌ **not checked** | ✅ per request |
+| Revocation takes effect after | immediately (or session-cache TTL) | **token expiry — up to 15 min** | immediately (or session-cache TTL) |
+
+### The default, stated plainly
+
+**By default, a user who logs out keeps passing gRPC authorization until their
+access token expires — up to 15 minutes.** That is a deliberate trade: gRPC is
+the low-latency service-mesh check surface, and not paying a session read per
+request is a meaningful part of why it measures where it does.
+
+It is written here because a trade nobody wrote down is indistinguishable from
+a bug. This is not a property an operator should discover from a benchmark
+analysis.
+
+### Enabling strict mode
+
+```bash
+AXIAM__GRPC__STRICT_REVOCATION=true
+```
+
+Every gRPC request then re-checks session validity, matching REST.
+
+**Enable the session-validation cache alongside it**, or you are choosing one
+datastore read per gRPC request:
+
+```bash
+AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5
+```
+
+With the cache on, the hot path costs a hash lookup and only a miss costs a
+read. The cache instance is shared with REST, so every REST-side invalidation
+hook — logout, password change, MFA reset, refresh rotation — already serves
+gRPC: **event-path revocation is immediate in strict mode**, and the TTL bounds
+only revocations that happened out of band (on another replica, or directly in
+the datastore). Run 5 measured the event path at 262 ms.
+
+Expect the gRPC check profile to approach REST's revocation-checked one. The
+labelled bench cell for strict-mode overhead is a run-6 deliverable; until it
+exists, treat "approaches REST's profile" as a prediction rather than a
+measurement.
+
+### Which one you want
+
+- **Service mesh, short-lived tokens, revocation handled by token lifetime** →
+  default. Shorten `AXIAM__AUTH__ACCESS_TOKEN_LIFETIME_SECS` if 15 minutes is
+  too long a window; that is the knob that bounds the default posture.
+- **gRPC reachable by end-user sessions, or a compliance requirement that
+  sign-out is immediate** → strict, with the session cache on.

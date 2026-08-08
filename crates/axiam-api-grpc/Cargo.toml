@@ -34,6 +34,7 @@ futures = { version = "0.3.32", default-features = false, features = ["std"] }
 client = []
 
 [dev-dependencies]
+axiam-test-support = { workspace = true }
 axiam-auth = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-stream = { version = "0.1", features = ["net"] }

@@ -61,7 +61,7 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
     await page.getByRole("button", { name: "Continue" }).click();
     await page.getByLabel("Username or email").fill("mfa-setup-user@example.com");
     await page.getByLabel("Password").fill("SomePassword123!");
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
     // No dead end: bookmark/refresh-safe query-param carrier, not router
     // state — reaches /auth/mfa-setup, never stranded back on /login.

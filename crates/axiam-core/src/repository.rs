@@ -27,13 +27,15 @@ use crate::models::{
     group::{CreateGroup, Group, UpdateGroup},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
-        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
-        OAuth2Client, RefreshToken, UpdateOAuth2Client,
+        AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
+        CreateRefreshToken, DeviceGrant, OAuth2Client, RefreshToken, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
     password_reset::{CreatePasswordResetToken, PasswordResetToken},
-    permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
+    permission::{
+        CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
+    },
     pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
@@ -378,6 +380,21 @@ pub trait PermissionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Get all permission grants for a role, including scope constraints.
+    /// Grant a permission to a role with an explicit [`PermissionEffect`]
+    /// (B1, deny-override).
+    ///
+    /// `PermissionEffect::Allow` is exactly what `grant_to_role_with_scopes`
+    /// does, so that method delegates here. `PermissionEffect::Deny` writes a
+    /// deny rule, which the engine treats as overriding **every** allow —
+    /// see `claude_dev/deny-override-design.md`.
+    fn grant_to_role_with_effect(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+        effect: PermissionEffect,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
     fn get_role_permission_grants(
         &self,
         tenant_id: Uuid,
@@ -569,6 +586,39 @@ pub trait SessionRepository: Send + Sync {
     /// must abort before minting a new session, preserving single-use rotation
     /// and stolen-token reuse detection.
     fn consume(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
+    /// Atomically look up **and** consume a session by its refresh-token hash,
+    /// returning the row as it was immediately before deletion (`None` when no
+    /// live session matched).
+    ///
+    /// This is [`Self::get_by_token_hash`] followed by [`Self::consume`],
+    /// collapsed into one statement — and it is the shape refresh rotation
+    /// should use, for two independent reasons.
+    ///
+    /// **Correctness.** The read-then-delete pair has a window between the
+    /// SELECT and the DELETE. `consume`'s `RETURN BEFORE` already closes the
+    /// *outcome* (only one racer sees a non-empty before-image), so the pair is
+    /// safe — but it is safe by a second mechanism layered on top of a race,
+    /// rather than by not having the race. One `DELETE ... WHERE token_hash =
+    /// $h RETURN BEFORE` has no window at all: the row is selected and removed
+    /// by the same statement, and the before-image *is* the session.
+    ///
+    /// **Cost.** It halves the rotation path's datastore round trips. Refresh
+    /// is the one hot endpoint that is round-trip-bound rather than CPU-bound
+    /// (run 5: p50 88.8 ms at 545/s, a whole distribution shifted right, i.e.
+    /// added serialized work — `claude_dev/improvement-after-run5-benchmark.md`
+    /// A2/J2), so a round trip removed from it is worth more than anywhere else
+    /// in the codebase.
+    ///
+    /// Expiry is deliberately NOT filtered here. An expired token must be
+    /// consumed too — leaving the row behind would let it be replayed until
+    /// cleanup ran — so the caller receives the expired session and rejects it,
+    /// which is what the read-then-delete path did (it invalidated on the
+    /// expiry branch) with one fewer statement.
+    fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<Session>>> + Send;
     /// Invalidate all sessions for a user (e.g., on password change).
     fn invalidate_user_sessions(
         &self,
@@ -772,6 +822,78 @@ pub trait OAuth2ClientRepository: Send + Sync {
         expected_hash: &str,
         new_hash: &str,
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
+}
+
+/// Storage for RFC 8628 device-authorization grants (B2).
+///
+/// Every method is tenant-scoped, and the state transitions are enforced in
+/// the datastore's own WHERE clauses rather than by a read-then-write in the
+/// service. That is what makes them atomic: two concurrent polls of the same
+/// approved grant must not both redeem it.
+pub trait DeviceGrantRepository: Send + Sync {
+    /// Store a newly issued grant.
+    fn create(
+        &self,
+        input: CreateDeviceGrant,
+    ) -> impl Future<Output = AxiamResult<DeviceGrant>> + Send;
+
+    /// Look up a grant by the **user code** the human typed.
+    ///
+    /// `user_code` must already be normalised by the caller — the stored form
+    /// is normalised, so a raw `WXYZ-1234` would simply miss.
+    fn get_by_user_code(
+        &self,
+        tenant_id: Uuid,
+        user_code: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Look up a grant by the hash of the device code the device polls with.
+    fn get_by_device_code_hash(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Record the user's decision.
+    ///
+    /// Only a `pending` grant may transition, which is checked in the same
+    /// statement: approving an already-denied (or already-redeemed) grant must
+    /// not succeed, and a lost race must be visible to the caller as `false`
+    /// rather than silently overwriting the earlier decision.
+    fn decide(
+        &self,
+        tenant_id: Uuid,
+        user_code: &str,
+        approved: bool,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Atomically redeem an **approved** grant, returning it exactly once.
+    ///
+    /// `None` means it was not approved, or another poll already redeemed it.
+    /// The single-use guarantee lives here, in one statement, for the same
+    /// reason refresh-token rotation does: a read-then-write would let two
+    /// concurrent polls both mint a token set from one approval.
+    fn redeem(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<DeviceGrant>>> + Send;
+
+    /// Record a poll and return the interval the device must now honour.
+    ///
+    /// Polling faster than `interval_secs` raises the interval (RFC 8628 §3.5
+    /// `slow_down`), which is what makes the enforcement self-correcting: a
+    /// device that ignores the interval is progressively slowed rather than
+    /// cut off. Returns `(interval_secs, too_fast)`.
+    fn record_poll(
+        &self,
+        tenant_id: Uuid,
+        device_code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<(u64, bool)>> + Send;
+
+    /// Remove expired grants. Returns the number deleted.
+    fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {

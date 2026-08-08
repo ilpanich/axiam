@@ -448,17 +448,36 @@ pub async fn refresh<C: Connection + Clone>(
     // was previously stamped straight from the request body — a valid refresh
     // could mint a token scoped to a foreign org. Derive it authoritatively from
     // the tenant record; a bogus tenant_id maps to the same generic auth failure.
-    let tenant = state
-        .tenant_repo
-        .get_by_id(b.tenant_id)
-        .await
-        .map_err(|_| AxiamError::AuthenticationFailed {
-            reason: "invalid refresh token".into(),
-        })?;
+    //
+    // A2/J2: served from `tenant_org_cache` when warm. The security property is
+    // unchanged — org_id still comes from the server's own view of the tenant,
+    // never from `b` — but a tenant's owning organization is immutable (there
+    // is no re-parenting API; moving a tenant would silently re-scope every
+    // token, grant and certificate under it), so re-reading it on every single
+    // refresh bought nothing and cost a serialized round trip on the hottest
+    // rotation path. See `crate::tenant_org_cache` for the full argument,
+    // including why the TTL is about *deleted* tenants rather than about
+    // staleness.
+    let org_id = match state.tenant_org_cache.get(b.tenant_id) {
+        Some(org_id) => org_id,
+        None => {
+            let tenant = state
+                .tenant_repo
+                .get_by_id(b.tenant_id)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid refresh token".into(),
+                })?;
+            state
+                .tenant_org_cache
+                .insert(b.tenant_id, tenant.organization_id);
+            tenant.organization_id
+        }
+    };
 
     let input = RefreshInput {
         tenant_id: b.tenant_id,
-        org_id: tenant.organization_id,
+        org_id,
         raw_refresh_token,
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),

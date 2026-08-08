@@ -380,3 +380,55 @@ Documented for operators in `docs/admin/README.md` and
   The security-critical half — immediate revocation enforcement via
   invalidation — **is** proven here by the integration tests above. Enable with
   `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` for the before/after cells.
+
+---
+
+## 9. Run-5 section — CP-3 knob sweep (A3/J11)
+
+**Status: NOT RUN.** The table below is a skeleton, not results. Every cell is
+deliberately empty rather than estimated.
+
+### 9.1 Why the sweep is now the cheap half of the work
+
+Run 5's cache-off authorization cells capped at 1 010–1 032 checks/s against a
+2-core datastore and gained **+75–79 %** when the datastore was given 4 cores,
+with no code change. The remaining authorization ceiling is datastore
+*concurrency*, not per-query cost — the hot queries are already index-backed
+and CI-guarded against table scans, so making each one cheaper cannot move a
+number that is set by how many can be in flight.
+
+That makes two things true at once, and the order matters:
+
+1. Read replicas are worth designing (done — `claude_dev/read-replica-design.md`).
+2. **A mis-tuned primary presents exactly the same headroom as replicas would,
+   at none of the staleness cost.** So the knob sweep comes first. Shipping
+   replicas to work around an under-configured primary would buy a staleness
+   contract nobody needed to accept.
+
+### 9.2 The sweep
+
+Scenarios: `authz_check_rest`, `authz_batch_rest`, decision cache **off** (so
+the datastore is actually exercised), at 2c and 4c datastore.
+
+| Knob | Values to sweep | Source of the current value |
+|---|---|---|
+| SurrealDB worker threads | default, cores, 2× cores | container runtime |
+| Client connection-pool size | current, ×2, ×4 | `claude_dev/db-pool-design.md` |
+| Datastore memory limit | current, ×2 | compose / k8s limits |
+| Datastore cores | 2, 4 | the run-5 A/B that produced the +75–79 % |
+
+| Knob | Value | DB cores | authz_check ops/s | authz_batch ops/s | Notes |
+|---|---|---|---|---|---|
+| *(baseline — run 5)* | shipped | 2 | 1 010 | 1 032 | cache off |
+| *(baseline — run 5)* | shipped | 4 | +75 % | +79 % | cache off, uncapped DB |
+| worker threads | | | | | |
+| pool size | | | | | |
+| memory limit | | | | | |
+
+### 9.3 Why it is not filled in here
+
+The sweep needs the G-box harness — a two-node matrix with pinned datastore
+cores and the resource sampler running. A development sandbox cannot produce a
+representative knob→throughput table, and a table produced on unrepresentative
+hardware is worse than no table, because it gets quoted. The runbook entry
+exists so the next real pass has somewhere to write.

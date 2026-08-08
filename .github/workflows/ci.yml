@@ -191,6 +191,19 @@ jobs:
           output: trivy-config.sarif
           exit-code: '0'
 
+      # --- A6: AMQP transport posture is stated, not inherited ---
+      # Deliberately placed after every SARIF *producer* above. A failing step
+      # under `bash -e` skips the rest of the job, and the SARIF uploads below
+      # already report a missing file as an error — putting this check earlier
+      # would turn one real finding into five confusing ones.
+      #
+      # This does not require TLS. It requires that a stack using plaintext
+      # amqp:// says so via AXIAM__AMQP__ALLOW_PLAINTEXT, because a release
+      # image otherwise refuses to boot and the only symptom is a container
+      # that never starts — which is how it last took the E2E job down.
+      - name: AMQP transport posture
+        run: python3 scripts/check-amqp-transport.py
+
       # --- Upload all SARIF results to GitHub Security tab (D-07) ---
       - name: Upload hadolint server SARIF
         uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38  # v4
@@ -295,6 +308,19 @@ jobs:
       - name: Frontend lint and type-check
         working-directory: frontend
         run: npm run lint && npx tsc -b
+      # C3: axe-core smoke run over the main pages and the design-system
+      # components the accessibility audit fixed. It lives HERE rather than
+      # only inside the e2e job's `npm test` (which also runs it) because this
+      # job needs no backend and no served build -- an accessibility regression
+      # should fail in a couple of minutes, not behind a whole compose stack.
+      #
+      # What a green run means is bounded, and the suite's own header says so:
+      # automated checking catches roughly a third of real WCAG failures, so
+      # this is a regression guard on the audit's fixes, not a claim of
+      # accessibility.
+      - name: Frontend accessibility smoke (axe-core)
+        working-directory: frontend
+        run: npm run test:a11y
 
   e2e:
     name: E2E Tests

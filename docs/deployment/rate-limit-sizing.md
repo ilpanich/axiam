@@ -194,6 +194,109 @@ Notes:
   not, which made the effective gRPC ceiling 1/60th of the configured one
   (fixed; `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100` now really means 100/s).
 
+### 3.1a Sizing login also sizes refresh capacity
+
+`login_per_min` is usually reasoned about as "how many password guesses will I
+let one source make per minute". It is also, less obviously, a **ceiling on
+session churn**: every session that expires costs one login to replace, so a
+deployment with short sessions has its sustainable refresh rate bounded by its
+login limit rather than by the refresh endpoint's capacity.
+
+This matters in exactly one shape of deployment — short sessions behind a
+shared egress IP (a NAT'd fleet, a mobile app behind a carrier gateway, a CI
+farm). There, `login_per_min` is doing two jobs at once, and sizing it for the
+brute-force job alone will silently cap the other.
+
+If that is you: lengthen the session rather than raising the login limit. A
+longer session reduces logins without widening the password-guessing surface,
+whereas raising `login_per_min` widens both.
+
+(Run 5's benchmark harness rediscovered this the hard way — its refresh cell
+reported a 4.4 % error rate that was login throttling, not refresh failures.
+See `benchmarks/docs/methodology.md`.)
+
+### 3.2 The two layers, and which one decides
+
+Every rate-limited surface runs **two** cooperating limiters. Knowing which
+one decides is not trivia — run 5 found both a starvation bug and an
+over-admission bug that were purely consequences of how the two compose.
+
+| Layer | Scope | Algorithm | Job |
+|---|---|---|---|
+| in-memory `governor` | one replica | GCRA token bucket, per-second quota + burst | the admission decision |
+| shared counter (`rate_limit_bucket`) | all replicas | write-behind sliding window, 60 s | stop `replicas × limit` |
+
+**The governor decides; the shared counter stops multiplication.** On a
+single replica the governor's quota is the binding constraint and the shared
+counter never trips, so the effective ceiling equals the configured one. With
+N replicas, each admits its own quota, their sum reaches the shared window
+budget, and the shared counter cuts in — which is the whole reason it exists.
+
+Two consequences worth internalising before you tune anything:
+
+- **Order matters, and the two listeners achieve it differently.** On gRPC
+  the governor is the outer layer, so the shared counter only ever sees
+  admitted traffic. On REST the shared middleware *must* be outermost (it is
+  also what parses `client_id` out of the form body for the
+  `client_id`/`ip_client_id` key modes), so it charges first and **refunds**
+  when the governor rejects. Same invariant, reached two ways: the
+  cross-replica counter counts *served* traffic, never attempts.
+
+  Before run 5 the gRPC order was inverted and nothing refunded, so a flood
+  burned an entire 60-second window budget on requests the per-second
+  governor never let through. Effective admission collapsed to roughly
+  `burst + rate × t_exhaust` per window — measured at **181/min against a
+  configured 6 000/min**, i.e. 1/33 of the ceiling. If you are reading an
+  older results tree, that is what those gRPC rows mean.
+
+- **The shared window slides; it does not reset.** A fixed window hands out
+  its whole budget again the instant it rolls over, so any rolling
+  measurement that straddles a boundary sees up to twice the configured rate.
+  Run 5 measured exactly that on the REST machine endpoints (+48 % introspect,
+  +50 % authz check, +12 % token, against a ±10 % bar). The counter now
+  charges a decayed share of the previous window against the current
+  decision, which bounds *every* rolling minute rather than only the aligned
+  ones.
+
+#### The burst allowance, stated exactly
+
+A key the limiter has never seen before is given its **pro-rata share of the
+window it arrives in, plus 10 % of the limit**. It is not given the whole
+remaining window — arriving at second 59 and arriving at second 0 buy the
+same amount of capacity, which is the property that makes the admitted rate
+independent of when a flood starts.
+
+So the shipped, measurable contract for a sustained single-source flood is:
+
+- **first rolling minute:** at most `1.1 × configured` (the burst allowance),
+- **every minute after:** converges to `1.0 × configured`.
+
+**Small limits are exempt from the pro-rata part.** Below 20/min — which is
+every human endpoint (`login` 10, `register` 5, `password_reset` 3, `mfa` 5)
+and no machine one — a first-time caller still gets its whole budget whenever
+in the window it arrives.
+
+That exemption is not a loosening, it is a correction. Pro-rata seeding is a
+*rate-smoothing* device, and smoothing a budget of five requests is meaningless:
+at `mfa 5/min`, "two thirds of the window has elapsed" rounds to three
+requests charged, so a user enrolling in MFA at second 40 would find their
+third call rejected. There is no security benefit to pay for that, because the
+control at those endpoints is the small absolute number, not the evenness of
+its delivery.
+
+The sliding-window carry still applies at **every** limit, so the
+boundary-doubling artifact stays closed everywhere. Only the cold-entry seed
+is skipped.
+
+`benchmarks/runner/rl_prod_check.py` asserts ±10 %, so the shipped burst and
+the assertion agree by construction — the 10 % allowance *is* the assertion's
+tolerance, chosen so that the posture and the check can never drift apart.
+
+Rollback knob: `AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed` restores the
+pre-run-5 fixed-window behaviour. Only the exact string `fixed` does; a typo
+leaves the stricter default in place, so a misspelled rollback cannot
+silently loosen enforcement.
+
 ### Where the preset numbers come from
 
 Anchored to the measured envelope above, deliberately as a **small

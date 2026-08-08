@@ -17,5 +17,8 @@ spec:
             matchLabels:
               component: server
       ports:
+        # A6: AMQPS only. The broker no longer listens on plaintext 5672, so
+        # allowing it would permit a path that cannot be established -- and,
+        # worse, would leave the policy reading as if plaintext were expected.
         - protocol: TCP
-          port: 5672
+          port: 5671

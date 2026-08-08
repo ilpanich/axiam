@@ -27,9 +27,7 @@ use uuid::Uuid;
 
 type Db = Surreal<surrealdb::engine::local::Db>;
 
-fn test_password() -> String {
-    format!("Fx1!{}", Uuid::new_v4().simple())
-}
+use axiam_test_support::test_password;
 
 async fn setup() -> (Db, Uuid, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();

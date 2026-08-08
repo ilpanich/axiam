@@ -12,9 +12,11 @@ spec:
     app: axiam
     component: rabbitmq
   ports:
-    - name: amqp
-      port: 5672
-      targetPort: 5672
+    # A6: TLS only. The plaintext 5672 listener is disabled on the broker, so
+    # publishing a 5672 Service port would advertise a path that does not exist.
+    - name: amqps
+      port: 5671
+      targetPort: 5671
     - name: management
       port: 15672
       targetPort: 15672

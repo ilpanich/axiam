@@ -88,6 +88,22 @@ pub struct GrpcConfig {
     /// client-identity-aware rate limiter. Configure via `AXIAM__GRPC__KEY`.
     #[serde(default)]
     pub key: GrpcRateLimitKeyMode,
+    /// A4/J10 — enforce session revocation on every gRPC request.
+    ///
+    /// **Default `false`, which is a documented trade rather than an
+    /// oversight.** By default the gRPC data plane validates a token's
+    /// signature and expiry and stops there, so a session revoked (logout,
+    /// password change, admin sign-out) keeps passing gRPC authorization until
+    /// its access token expires — up to 15 minutes. REST re-checks revocation
+    /// on every request; gRPC trades that for the latency, because it is the
+    /// service-mesh check surface.
+    ///
+    /// Setting this to `true` gives gRPC REST's semantics. With the session-
+    /// validation cache enabled the cost is one cache hit on the hot path and
+    /// a datastore read only on a miss; without it, one datastore read per
+    /// request. Configure via `AXIAM__GRPC__STRICT_REVOCATION`.
+    #[serde(default)]
+    pub strict_revocation: bool,
 }
 
 impl Default for GrpcConfig {
@@ -99,6 +115,7 @@ impl Default for GrpcConfig {
             grpc_identity_per_sec: None,
             grpc_admin_per_sec: None,
             key: GrpcRateLimitKeyMode::Ip,
+            strict_revocation: false,
         }
     }
 }
@@ -110,6 +127,8 @@ pub const ENV_GRPC_AUTHZ_PER_SEC: &str = "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC";
 pub const ENV_GRPC_IDENTITY_PER_SEC: &str = "AXIAM__GRPC__GRPC_IDENTITY_PER_SEC";
 /// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` — I2 administrative ceiling.
 pub const ENV_GRPC_ADMIN_PER_SEC: &str = "AXIAM__GRPC__GRPC_ADMIN_PER_SEC";
+/// `AXIAM__GRPC__STRICT_REVOCATION` — A4/J10 per-request revocation on gRPC.
+pub const ENV_GRPC_STRICT_REVOCATION: &str = "AXIAM__GRPC__STRICT_REVOCATION";
 
 impl GrpcConfig {
     /// G7: applies the deployment rate-limit posture preset's gRPC authz

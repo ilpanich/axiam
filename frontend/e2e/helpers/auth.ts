@@ -63,7 +63,12 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   // Step 2: Enter credentials
   await page.getByLabel("Username or email").fill(adminEmail);
   await page.getByLabel("Password").fill(adminPassword);
-  await page.getByRole("button", { name: "Sign in" }).click();
+  // `exact` is load-bearing, not decoration: the page also carries a "Sign in
+  // with a passkey" button (C2), whose accessible name contains this one. A
+  // substring match resolves to both and Playwright fails the whole run on the
+  // strict-mode violation — and because this helper backs the auth setup
+  // project, that failure takes every other spec down with it.
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
   // Wait for successful redirect off /login (httpOnly cookie is now set).
   // 45s (not 15s): every login runs an Argon2id verification on the backend,

@@ -822,3 +822,60 @@ the whole subtree) exclude them.
 `BENCH_SETTLE` and `BENCH_CELL_PAUSE` default to `0` in a dry run but are still
 honoured if set, so `BENCH_SETTLE=1 ... bench-dry-run` can rehearse the gate
 itself.
+
+## Refresh capacity is coupled to the login limit (A5/J4, run 5)
+
+`token_refresh.js` pre-mints one session per VU in `setup()`, paced inside
+`BENCH_LOGIN_PER_MIN`, and each VU then chains rotations off its own session
+for the rest of the run. On a rotation failure the VU **backs off rather than
+re-logging in**.
+
+That last part is the fix, and it is worth being precise about why. Before it,
+a VU that lost its refresh token immediately tried to log in again. Under
+`rl=prod` the login ceiling is 10/min *per IP* and the whole k6 fleet is one
+IP, so the re-login was throttled, the VU retried, and the cell's error rate
+filled up with login rejections. Run 5 reported the rl-prod refresh cell at
+516/s with **4.4 % errors** (run 4: 2.4 %) — a number that described the login
+limiter, not the refresh endpoint.
+
+`setup()` refuses to start rather than produce that shape again:
+
+- if the pool cannot be filled, the run **fails** with a message saying the
+  pre-mint was itself throttled — a half-filled pool would measure the same
+  confusion more quietly;
+- if pacing the pre-mint would take longer than `BENCH_MAX_SETUP_SECS`
+  (default 300 s), the run **fails** rather than spending ten minutes in setup
+  and reporting a cell that was mostly warm-up.
+
+`BENCH_LOGIN_PER_MIN` is read from the ceiling the **running container**
+actually has (same approach as `detect_rl_posture`), not from a second copy of
+the number in the runner. Neutralized cells get `0`, which means no pacing, so
+nothing outside `rl=prod` changes.
+
+### The coupling itself is real and must not be hidden
+
+Pre-minting removes a *harness artifact*. It does not remove the underlying
+product property, which is this: **in a deployment with short sessions,
+refresh capacity is gated by the login limit**, because every session that
+expires costs a login to replace. An operator sizing `login_per_min` is also,
+implicitly, sizing how many concurrent sessions their fleet can sustain.
+
+That belongs in `docs/deployment/rate-limit-sizing.md` as a sizing note, not in
+a harness workaround. What the harness must never do is *misattribute* it —
+reporting login throttling as a refresh-endpoint error rate is how a real
+coupling becomes an imaginary bug.
+
+## J3 — the Keycloak login story is frozen
+
+Keycloak's login figure stands at **51/s, profile p2, 2 GiB, 2 of 3 runs
+valid** and is not being re-litigated. The 4 GiB rescue attempt made things
+worse rather than better (`PRIVATE_BENCH_ANALYSIS.md` §1.3), so raising the
+container memory cap is not the knob.
+
+One thing would change this, and only one: a sweep of Keycloak's **own**
+`JAVA_OPTS_KC_HEAP` (the JVM heap Keycloak sizes itself with — not the
+container memory limit, which is what the 4 GiB attempt raised). If that sweep
+can ride along with a matrix pass at negligible cost, run it. If it needs its
+own pass, do not: publishing "51/s, 2 of 3 valid" with the failed rescue
+attempt described honestly is a better competitive claim than an unbounded
+hunt for a better number on a competitor's behalf.

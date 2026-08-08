@@ -163,6 +163,7 @@ fi
 
 export BENCH_TARGET="$TARGET"
 export BENCH_HOST="${BENCH_HOST:-localhost}"
+
 # BENCH_PORT is set by the profile env (8090 plaintext, 8443 TLS).
 
 # G2: base URL for the post-seed settle gate's canary probes (same
@@ -182,7 +183,15 @@ fi
 # identity read — the counterpart of Zitadel's zitadel_userinfo_grpc.js; it dials
 # AXIAM's proto and has no equivalent on Keycloak, so it is AXIAM-only too. The
 # two vendors' gRPC-userinfo scenarios pair up cross-vendor in report.py.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js"
+#
+# Run-5 J1c added three more AXIAM-only entries. grpc_admin_validate.js and
+# grpc_infra.js dial AXIAM's own gRPC surface (and, for the latter, a path
+# AXIAM deliberately does not route — see that scenario's header). oauth2_revoke.js
+# is REST but AXIAM-only for the same reason the authz REST scenarios are:
+# it exists to exercise a specific AXIAM limiter family, not to compare
+# vendors, and publishing its throughput against Keycloak/Zitadel would be
+# comparing a deliberately throttled cell to an unthrottled one.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -197,7 +206,7 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # or the axiam client wasn't seeded (empty BENCH_CLIENT_SECRET). `just bench-up`
 # now configures OAuth2 and seed.sh provisions the client, so by default none are
 # skipped. jwks_fetch is intentionally excluded — it needs no client.
-OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js"
+OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0
@@ -312,6 +321,31 @@ detect_rl_posture() {
 }
 RL_POSTURE="$(detect_rl_posture)"
 echo "[run] rate-limit posture: $RL_POSTURE"
+
+# A5/J4: the login-bucket budget `token_refresh.js` paces its session-pool
+# pre-mint inside.
+#
+# Under `rl=prod` the whole k6 fleet is ONE IP against a 10/min login ceiling.
+# Run 5's rl-prod refresh cell burned that budget on re-logins and reported
+# 4.4% errors (run 4: 2.4%) that were login throttling wearing a refresh
+# cell's clothes. Pre-minting one session per VU, paced inside the bucket,
+# means the cell measures the refresh path and any error it does report is the
+# refresh path's.
+#
+# Read from the ceiling the RUNNING container actually has, not from a second
+# copy of the number in this script -- the same reason `detect_rl_posture`
+# above reads the container rather than trusting intent. 0 (the neutralized
+# default) means no pacing, so every non-prod cell is untouched.
+detect_login_per_min() {
+  [ "$RL_POSTURE" = "prod" ] || { echo 0; return; }
+  local limit
+  limit="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null \
+    | sed -n 's/^AXIAM__RATE_LIMIT__LOGIN_PER_MIN=//p' | head -1)"
+  # Shipped `internet` default when the container leaves it unset.
+  echo "${limit:-10}"
+}
+export BENCH_LOGIN_PER_MIN="${BENCH_LOGIN_PER_MIN:-$(detect_login_per_min)}"
+echo "[run] refresh session-pool login budget: ${BENCH_LOGIN_PER_MIN}/min (0 = unpaced)"
 
 # --- Reproducibility metadata (methodology.md §7 / A4) ----------------------
 # A9: git commit of the working tree this run executed from. Recorded

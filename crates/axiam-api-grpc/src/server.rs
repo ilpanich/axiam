@@ -30,6 +30,7 @@
 //! 1.3-*exclusive*.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_auth::config::AuthConfig;
@@ -47,6 +48,7 @@ use crate::middleware::auth::AuthInterceptor;
 use crate::middleware::rate_limit::{
     GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
 };
+use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
 use crate::proto::user_info_service_server::UserInfoServiceServer;
@@ -87,6 +89,16 @@ use crate::services::{
 /// TLS (REQ-15 AC-1): env-gated via `AXIAM__GRPC_TLS_CERT_PATH` /
 /// `AXIAM__GRPC_TLS_KEY_PATH`. When absent, TLS is disabled and a warning
 /// is logged (acceptable for in-mesh/loopback deployments).
+///
+/// # `strict_revocation_checker` (A4/J10)
+///
+/// `Some(..)` only when `AXIAM__GRPC__STRICT_REVOCATION=true`, and it MUST be
+/// the SAME session-repository instance the REST path holds. A second instance
+/// would carry a second validation cache, and a cache the REST invalidation
+/// hooks never reach is exactly the stale allow strict mode exists to prevent.
+/// `None` keeps the shipped posture: gRPC trusts JWT lifetime, so revocation
+/// takes effect at token expiry (up to 15 min) rather than immediately. See
+/// [`crate::middleware::strict_revocation`] for the full posture table.
 pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     addr: SocketAddr,
     engine: AuthorizationEngine<R, P, Res, S, G>,
@@ -95,6 +107,7 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     grpc_config: &GrpcConfig,
     db: impl Into<DbHandle<C>>,
     batch_max_concurrency: usize,
+    strict_revocation_checker: Option<Arc<dyn SessionRevocationCheck>>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -137,6 +150,19 @@ where
         GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
     let governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
 
+    // A4/J10: built before the interceptors take ownership of `auth_config`.
+    // The layer needs it to decode (not verify — see the module docs) the
+    // bearer token far enough to learn which session a request names.
+    let strict_revocation_layer = strict_revocation_checker.map(|checker| {
+        tracing::warn!(
+            "gRPC STRICT REVOCATION enabled — every gRPC request now re-checks \
+             session validity, matching REST. Expect the gRPC check profile to \
+             approach REST's revocation-checked one; with the session-validation \
+             cache disabled this is one datastore read per request."
+        );
+        GrpcStrictRevocationLayer::new(checker, auth_config.clone())
+    });
+
     let authz_svc = AuthorizationServiceServer::with_interceptor(
         AuthorizationServiceImpl::new(engine, batch_max_concurrency),
         AuthInterceptor::new(auth_config.clone()),
@@ -167,18 +193,54 @@ where
     // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
     // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
     // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
-    // SECHRD-03 (D-01a/b/c): the shared-store pre-check is `.layer()`'d
-    // FIRST so it is OUTERMOST (tower's ServiceBuilder/Server::builder()
-    // convention — first `.layer()` call = outermost = runs first, the
-    // opposite of actix's last-`.wrap()`-is-outermost rule). It fails OPEN
-    // to `governor_layer` on any SurrealDB error or missing key, so a DB
-    // blip degrades to the in-memory limiter rather than hard-blocking.
+    // SECHRD-03 (D-01a/b/c) + run-5 J1: layer ORDER is load-bearing here.
+    // Tower's `Server::builder()` runs the FIRST-added layer with the request
+    // FIRST (the opposite of actix's last-`.wrap()`-is-outermost rule), so
+    // the layer named first below is the OUTERMOST one.
+    //
+    // Until run 5 the shared-store pre-check was outermost. That inverted the
+    // two layers' natural roles and starved every gRPC family: the pre-check
+    // charges its whole 60-second window budget the moment it admits a
+    // request, but the per-second `governor` behind it then rejected almost
+    // all of those requests. A flood therefore burned all 6 000 authz
+    // admissions of a window on traffic that was never served, in well under
+    // a second, and the window stayed exhausted for its remaining ~59 —
+    // measured at 181 admissions/min against a configured 6 000/min, i.e.
+    // 1/33 of the ceiling (`claude_dev/improvement-after-run5-benchmark.md`
+    // A1/J1).
+    //
+    // The governor is therefore now OUTERMOST and owns the admission
+    // decision, and the shared cross-replica counter sits behind it, counting
+    // only traffic that was actually admitted. Both roles are preserved:
+    //
+    // - single replica — the governor's per-second quota is the binding
+    //   constraint and the shared counter (sized `per_sec × 60`) never trips,
+    //   so the effective ceiling equals the configured one;
+    // - N replicas — each admits its own per-second quota, their sum reaches
+    //   the shared window budget, and the shared counter cuts in. That is
+    //   exactly the `replicas × limit` multiplication SECHRD-03 exists to
+    //   stop, and it is still stopped.
+    //
+    // Fail-open is unchanged: on a missing key, a disabled shared layer, or a
+    // SurrealDB blip the inner layer forwards the request and the governor's
+    // decision (already taken, outside it) stands.
+    //
+    // The REST listener cannot use this ordering — its shared middleware is
+    // also what parses `client_id` out of the form body for the client-aware
+    // key modes, so it must stay outermost there. It solves the same problem
+    // with `SharedRateLimitCounter::refund` instead; see that method's docs.
+    // A4/J10: strict revocation, when enabled, sits INSIDE the rate limiters
+    // (so a flood of revoked-session calls is throttled before it can touch
+    // the session cache) and OUTSIDE the services (so it applies uniformly to
+    // every RPC, including any added later). `option_layer` makes the disabled
+    // case a genuine no-op rather than a branch in the request path.
     let mut builder = Server::builder()
         .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
+        .layer(governor_layer)
         .layer(shared_rate_limit_layer)
-        .layer(governor_layer);
+        .layer(tower::util::option_layer(strict_revocation_layer));
 
     // REQ-15 AC-1 / CQ-B20: Env-gated TLS.
     // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.

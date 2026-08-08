@@ -583,6 +583,62 @@ See `crates/axiam-amqp/src/messages.rs`:
 
 ---
 
+## §8b AMQP Transport Security (A6)
+
+**Requirement level: MUST**, for every SDK that speaks AMQP directly (Rust,
+TypeScript, Go, Python, Java, PHP).
+
+### The layering, stated once
+
+HMAC signing (§8) gives **authenticity and replay protection**. It does not
+give **confidentiality**. A signed `AuthzRequest` still names a subject, a
+resource and an action in cleartext on the wire; a signed `AuditEventMessage`
+still carries the audit record; a signed mail payload still carries the mail.
+
+TLS gives confidentiality. HMAC gives end-to-end authenticity *across broker
+hops* — a property TLS cannot provide, because TLS terminates at the broker and
+the broker then re-sends. **Both are required in production. Neither
+substitutes for the other**, and an SDK that offers one as an alternative to
+the other is not conformant.
+
+### Requirements
+
+| # | Rule |
+|---|---|
+| 1 | An SDK that connects to AMQP **MUST** support `amqps://` URLs (broker TLS port 5671). |
+| 2 | It **MUST** support supplying a custom CA bundle, for a privately-issued broker certificate. This is the common case — an in-cluster broker's certificate is not issued by a public CA. |
+| 3 | It **SHOULD** support client certificates (mutual TLS toward the broker), and where it does, the certificate and its key **MUST** be required together: half a client identity MUST fail closed rather than connect without the mutual half. |
+| 4 | It **MUST NOT** offer a certificate-verification-skip option in a production build, under any name. |
+| 5 | It **MUST NOT** fall back to plaintext when a TLS connection fails. A failed `amqps://` connection is an error to surface, not a condition to work around. |
+| 6 | HMAC signing (§8) remains mandatory on every message regardless of transport. |
+
+### On rule 4, specifically
+
+A verification-skip switch is the most reliably misused option in TLS. It
+appears in a dev compose file, it works, and it travels unchanged into
+production, where it turns TLS into an expensive no-op against precisely the
+attacker TLS exists to stop. Rule 2 exists so that nobody has a legitimate
+reason to want rule 4 relaxed: a custom CA bundle covers the real case (a
+self-signed or private-CA broker certificate) without covering the rest.
+
+Where an SDK's underlying AMQP library exposes such a switch, the SDK MUST NOT
+surface it. Where a debug-build-only escape hatch is genuinely wanted, it MUST
+follow the server's own `DEV_DEFAULT_SIGNING_KEY` pattern — present only in a
+debug build, absent from the shipped artifact, and loud when used.
+
+### Required tests, per SDK
+
+- connect over `amqps://` against a broker with a privately-issued certificate,
+  using a supplied CA bundle: publish/consume round trip succeeds;
+- connect with the **wrong** CA bundle: rejected, with an error naming the
+  verification failure;
+- a client certificate without its key (and the mirror case): rejected before
+  dialling;
+- an HMAC-invalid message over TLS is still rejected — rule 6, i.e. TLS does
+  not become an excuse to trust the payload.
+
+---
+
 ## §9 Single-Flight Refresh Guard
 
 All SDKs that manage token state (access + refresh tokens) MUST implement a single-flight refresh guard to prevent thundering-herd token refresh calls:
@@ -796,6 +852,36 @@ client session is unusable passes vacuously and does not satisfy this clause.
 > start rejecting what it used to accept. That is the intent, and it MUST be
 > called out as a breaking change in each SDK's CHANGELOG.
 
+### §10.2 Revocation posture differs per transport (informative, MUST be documented)
+
+Local verification (§10.1) proves a token was *issued* and has not *expired*. It
+cannot prove the session behind it still exists. What closes that gap depends on
+which AXIAM transport the request reaches, and the two do not agree:
+
+| Transport | Session revocation re-checked per request? | A revoked session stops working after |
+|---|---|---|
+| REST | yes | immediately (or the server's session-cache TTL) |
+| gRPC, default | **no** | **token expiry — up to 15 minutes** |
+| gRPC, `AXIAM__GRPC__STRICT_REVOCATION=true` | yes | immediately (or the server's session-cache TTL) |
+
+The gRPC default is a deliberate latency trade — it is the service-mesh check
+surface — not an oversight, and it is measured: the server-side session cache
+enforces an event-path revocation in **262 ms** (run 5), with out-of-band
+revocation bounded by the cache TTL plus slack.
+
+**SDKs MUST document this in their middleware/route-guard documentation**, in
+the integrator's terms rather than AXIAM's: a guard built on `§10` local
+verification alone, in front of a gRPC data plane running the default posture,
+admits a logged-out user for the remainder of their access token's lifetime. An
+integrator who needs sign-out to take effect immediately must either route the
+authorization decision through REST or ask their operator to enable strict
+revocation.
+
+SDKs MUST NOT try to close this gap client-side (for example by polling session
+state before each call). Doing so would put an unbounded per-request cost on
+the hot path to work around a decision that is the deployment's to make, and it
+would be a *different* staleness window rather than none.
+
 ---
 
 ## §11 Declarative Authorization Helpers
@@ -872,6 +958,35 @@ macro over an `axiam_require_access(...)` guard function. All compose strictly o
    gRPC where the SDK's dispatcher already prefers it, e.g. PHP). No new transport code.
 8. **Redaction.** Deny/error paths MUST NOT log or echo the token, and SHOULD log the
    denied `action` + `resource_id` at debug level only (consistent with §2 rules).
+9. **Decision reason (B1 — deny-override).** `check_access` and `batch_check`
+   responses carry a `reason_code` alongside `allowed`:
+
+   | `reason_code` | Meaning |
+   |---|---|
+   | `allowed` | an allow grant matched and no deny did |
+   | `no_grant` | nothing matched — default deny |
+   | `denied_by_rule` | an explicit deny rule matched and overrode any allow |
+
+   **SDKs MUST surface `reason_code` on the result type**, and MUST NOT collapse
+   the two refusals into a bare `false`. They mean opposite things to the person
+   on the other end: `no_grant` says *ask an admin for access*, `denied_by_rule`
+   says *an admin has already decided*. An application that cannot tell them
+   apart sends users to raise tickets that will be refused.
+
+   **Middleware behaviour is unchanged.** Both refusals are still 403
+   `authorization_denied` — the route guard's job is to stop the request, and it
+   stops it identically either way. This clause is about *reporting*, not
+   enforcement, and an SDK MUST NOT vary its guard behaviour on `reason_code`.
+
+   A `reason_code` an SDK does not recognise MUST be surfaced verbatim and MUST
+   NOT change the allow/deny outcome, which is carried by `allowed` alone. An
+   older SDK against a newer server therefore degrades to today's behaviour, and
+   a newer SDK against an older server (which omits the field) MUST treat it as
+   absent rather than as an error.
+
+   Required tests: an allow, a `no_grant` deny and a `denied_by_rule` deny each
+   surface their own reason code; the guard returns 403 for both refusals; an
+   unknown reason code does not alter the outcome.
 9. **`require_role` is local.** It reads the verified claims already in the request
    context; it never calls the server. Docs in every SDK must state that role names are
    tenant-defined and that `require_access` is the authoritative check.

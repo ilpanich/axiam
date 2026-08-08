@@ -71,6 +71,17 @@ services:
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
       AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      # A6: this stack pulls the published server image, which is a release
+      # build — so the plaintext guard fails closed here even though this is
+      # local dev. Accepted deliberately: the broker is local, on the compose
+      # network, with throwaway data. Requiring `just dev-up` to mint broker
+      # certificates first would be a poor trade for that.
+      # This is NOT the pattern the A6 design refuses. The refused pattern is a
+      # switch that disables verification while the URL still reads amqps://,
+      # so the connection looks encrypted and is not. Here the amqp:// URL on
+      # the line above already states the posture plainly, and the flag only
+      # permits what the URL already says; it cannot weaken an amqps:// one.
+      AXIAM__AMQP__ALLOW_PLAINTEXT: "true"
       RUST_LOG: "${RUST_LOG:-axiam=debug}"
       # D-18: cookies work over HTTP in local dev (http://localhost).
       # Default in code is true (prod-safe). NEVER set false in production.

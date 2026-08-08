@@ -3,7 +3,7 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::permission::{
-    CreatePermission, Permission, PermissionGrant, UpdatePermission,
+    CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
 };
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
@@ -61,6 +61,9 @@ struct PermissionGrantRow {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     scope_ids: Option<Vec<String>>,
+    /// B1: `NONE` on every pre-deny-override edge, which reads back as
+    /// `Allow` — that is the whole migration.
+    effect: Option<String>,
 }
 
 /// Row for the batched grant lookup — carries the owning role id so callers can
@@ -75,6 +78,7 @@ struct RolePermissionGrantRow {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     scope_ids: Option<Vec<String>>,
+    effect: Option<String>,
 }
 
 impl RolePermissionGrantRow {
@@ -89,6 +93,7 @@ impl RolePermissionGrantRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             scope_ids: self.scope_ids,
+            effect: self.effect,
         }
         .try_into_grant()?;
         Ok((role_id, grant))
@@ -112,6 +117,32 @@ impl PermissionGrantRow {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // B1: an absent or unrecognised `effect` reads back as Allow.
+        //
+        // Absent is the backward-compatibility case and is simply correct:
+        // every edge written before deny-override existed means "allow".
+        //
+        // *Unrecognised* is the interesting one. Defaulting a garbage value to
+        // Allow looks like the wrong direction for a security decision — but
+        // the write path validates `effect` before it ever reaches the
+        // database (`PermissionEffect::from_wire` rejects anything that is not
+        // exactly "allow" or "deny"), so a value that is neither can only come
+        // from someone editing rows by hand. Failing the read would take the
+        // whole authorization path down for that tenant; defaulting to Allow
+        // reproduces exactly the pre-B1 behaviour of a row that has no effect
+        // at all. It is logged so it is not silent.
+        let effect = match self.effect.as_deref() {
+            None => PermissionEffect::Allow,
+            Some(raw) => PermissionEffect::from_wire(raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    effect = %raw,
+                    "grant edge carries an unrecognised effect; treating it as \
+                     'allow' (the pre-deny-override meaning of an absent effect)"
+                );
+                PermissionEffect::Allow
+            }),
+        };
+
         Ok(PermissionGrant {
             permission: Permission {
                 id,
@@ -122,6 +153,7 @@ impl PermissionGrantRow {
                 updated_at: self.updated_at,
             },
             scope_ids,
+            effect,
         })
     }
 }
@@ -136,6 +168,92 @@ impl<C: Connection> SurrealPermissionRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
         Self { db }
+    }
+
+    /// The single `RELATE` behind every grant entry point (B1).
+    ///
+    /// `effect` is written as a plain string on the SAME `grants` edge the
+    /// allow path already used. That is what keeps the authorization hot path
+    /// at one batched query: denies arrive in the fetch that was already
+    /// happening, so there is no deny-specific round trip and no per-tenant
+    /// "has denies" flag that could go stale.
+    ///
+    /// It is also what keeps the `EXPLAIN` guard holding. `effect` appears
+    /// only in the SELECT *projection*, never in a predicate, so it cannot
+    /// make the query opaque to the planner — the I7(a) failure mode, where
+    /// wrapping an indexed field in a function call turned an `IndexScan` into
+    /// a full `TableScan` over every tenant's grants.
+    async fn relate_grant(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+        effect: PermissionEffect,
+    ) -> AxiamResult<()> {
+        let role_id_str = role_id.to_string();
+        let perm_id_str = permission_id.to_string();
+
+        // SEC-058/SECFIX-02: mirror grant_to_role's tenant guard on BOTH branches —
+        // this method is the REST-reachable path (POST /api/v1/roles/{id}/permissions).
+        let result = if scope_ids.is_empty() {
+            // Wildcard — same as grant_to_role
+            let query = format!(
+                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+                 IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
+                     THROW 'cross-tenant edge denied';\
+                 }};\
+                 RELATE role:`{role_id_str}` -> grants -> \
+                 permission:`{perm_id_str}` SET scope_ids = NONE, effect = $effect;"
+            );
+            self.db
+                .current()
+                .query(query)
+                .bind(("tid", tenant_id.to_string()))
+                .bind(("effect", effect.as_str().to_string()))
+                .await
+                .map_err(DbError::from)?
+        } else {
+            let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
+            // Also verify every scope_id belongs to the caller's tenant before RELATE.
+            let query = format!(
+                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+                 LET $sc = (SELECT id FROM scope WHERE tenant_id = $tid AND meta::id(id) IN $scope_ids);\
+                 IF array::len($ro) = 0 OR array::len($pe) = 0 \
+                    OR array::len($sc) != array::len($scope_ids) {{\
+                     THROW 'cross-tenant edge denied';\
+                 }};\
+                 RELATE role:`{role_id_str}` -> grants -> \
+                 permission:`{perm_id_str}` SET scope_ids = $scope_ids, effect = $effect;"
+            );
+            self.db
+                .current()
+                .query(query)
+                .bind(("tid", tenant_id.to_string()))
+                .bind(("scope_ids", scope_strs))
+                .bind(("effect", effect.as_str().to_string()))
+                .await
+                .map_err(DbError::from)?
+        };
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant permission grant denied".into(),
+                    action: None,
+                    resource_id: None,
+                });
+            }
+            // This is the REST-reachable path
+            // (POST /api/v1/roles/{id}/permissions) — mirror grant_to_role's
+            // classify_write_error so a duplicate grant surfaces as 409, not 500.
+            return Err(classify_write_error(msg, "permission_grant").into());
+        }
+
+        Ok(())
     }
 }
 
@@ -465,6 +583,18 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         Ok(permissions)
     }
 
+    async fn grant_to_role_with_effect(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+        effect: PermissionEffect,
+    ) -> AxiamResult<()> {
+        self.relate_grant(tenant_id, role_id, permission_id, scope_ids, effect)
+            .await
+    }
+
     async fn grant_to_role_with_scopes(
         &self,
         tenant_id: Uuid,
@@ -472,67 +602,16 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         permission_id: Uuid,
         scope_ids: Vec<Uuid>,
     ) -> AxiamResult<()> {
-        let role_id_str = role_id.to_string();
-        let perm_id_str = permission_id.to_string();
-
-        // SEC-058/SECFIX-02: mirror grant_to_role's tenant guard on BOTH branches —
-        // this method is the REST-reachable path (POST /api/v1/roles/{id}/permissions).
-        let result = if scope_ids.is_empty() {
-            // Wildcard — same as grant_to_role
-            let query = format!(
-                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-                 IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
-                     THROW 'cross-tenant edge denied';\
-                 }};\
-                 RELATE role:`{role_id_str}` -> grants -> \
-                 permission:`{perm_id_str}` SET scope_ids = NONE;"
-            );
-            self.db
-                .current()
-                .query(query)
-                .bind(("tid", tenant_id.to_string()))
-                .await
-                .map_err(DbError::from)?
-        } else {
-            let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
-            // Also verify every scope_id belongs to the caller's tenant before RELATE.
-            let query = format!(
-                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-                 LET $sc = (SELECT id FROM scope WHERE tenant_id = $tid AND meta::id(id) IN $scope_ids);\
-                 IF array::len($ro) = 0 OR array::len($pe) = 0 \
-                    OR array::len($sc) != array::len($scope_ids) {{\
-                     THROW 'cross-tenant edge denied';\
-                 }};\
-                 RELATE role:`{role_id_str}` -> grants -> \
-                 permission:`{perm_id_str}` SET scope_ids = $scope_ids;"
-            );
-            self.db
-                .current()
-                .query(query)
-                .bind(("tid", tenant_id.to_string()))
-                .bind(("scope_ids", scope_strs))
-                .await
-                .map_err(DbError::from)?
-        };
-
-        if let Err(e) = result.check() {
-            let msg = e.to_string();
-            if msg.contains("cross-tenant edge denied") {
-                return Err(AxiamError::AuthorizationDenied {
-                    reason: "cross-tenant permission grant denied".into(),
-                    action: None,
-                    resource_id: None,
-                });
-            }
-            // grant_to_role_with_scopes is the REST-reachable path
-            // (POST /api/v1/roles/{id}/permissions) — mirror grant_to_role's
-            // classify_write_error so a duplicate grant surfaces as 409, not 500.
-            return Err(classify_write_error(msg, "permission_grant").into());
-        }
-
-        Ok(())
+        // Pre-B1 entry point: an unqualified grant means allow, which is what
+        // it has always meant.
+        self.relate_grant(
+            tenant_id,
+            role_id,
+            permission_id,
+            scope_ids,
+            PermissionEffect::Allow,
+        )
+        .await
     }
 
     async fn get_role_permission_grants(
@@ -554,7 +633,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                      out.description AS description, \
                      out.created_at AS created_at, \
                      out.updated_at AS updated_at, \
-                     scope_ids \
+                     scope_ids, \
+                     effect \
                  FROM grants \
                  WHERE in = type::record('role', $role_id) \
                  AND out.tenant_id = $tenant_id",
@@ -618,7 +698,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                      out.description AS description, \
                      out.created_at AS created_at, \
                      out.updated_at AS updated_at, \
-                     scope_ids \
+                     scope_ids, \
+                     effect \
                  FROM grants \
                  WHERE in IN $role_records \
                  AND out.tenant_id = $tenant_id",

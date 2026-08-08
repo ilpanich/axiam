@@ -43,6 +43,14 @@ services:
       # Aligned with docker/docker-compose.prod.yml (was "main").
       AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-axiam}"
       AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5672"
+      # A6: same release-image guard as AXIAM__AMQP__SIGNING_KEY below — plaintext
+      # amqp:// fails closed. Kept plaintext deliberately: the broker is on the
+      # bench compose network with synthetic load-test data, and putting TLS on
+      # this hop would tax the very numbers the harness exists to measure, so a
+      # run would no longer be comparable to run 5 or to the Keycloak target.
+      # If a future run measures the cost of broker TLS, that is a deliberate
+      # change of this line, not a default.
+      AXIAM__AMQP__ALLOW_PLAINTEXT: "true"
       # AMQP master signing key (SECHRD-08 / D-05c): the release image mandates it
       # at startup (no unsigned code path), so this fails closed if unset. `just
       # bench-up` generates a stable hex key under docker/.secrets/ automatically.

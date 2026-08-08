@@ -144,16 +144,38 @@ async fn rate_limit_shared_store_cross_instance() {
 
     let peer: SocketAddr = "203.0.113.42:5000".parse().unwrap();
 
-    // LIMIT requests split alternately across BOTH "replicas" must all
-    // succeed (the combined count climbing to exactly LIMIT).
-    for i in 0..LIMIT {
+    // Requests split alternately across BOTH "replicas", driving the combined
+    // count to the shared limit.
+    //
+    // Not asserted per-request: since run-5 J1 a newly seen key is seeded with
+    // its pro-rata share of the window it arrives in, so exactly how many of
+    // the first N are admitted depends on when in the window the test runs.
+    // What this test is actually about is the NEXT assertion — that both
+    // replicas converge on one combined count instead of each granting its own
+    // LIMIT — and that is unaffected.
+    let mut admitted = 0usize;
+    for i in 0..(LIMIT * 4) {
         let resp = if i % 2 == 0 {
             call(&mut svc1, request_with_peer(peer)).await
         } else {
             call(&mut svc2, request_with_peer(peer)).await
         };
-        assert!(!is_rejected(&resp), "request {i} should succeed");
+        if !is_rejected(&resp) {
+            admitted += 1;
+        }
     }
+    // Before any flush, each replica is still deciding from its OWN local
+    // count — that is the documented write-behind overshoot bound, not a bug:
+    // `(replicas - 1) x arrival_rate_per_replica x sync_interval` extra
+    // admissions before the counts converge. So the pre-flush bound here is
+    // `replicas x LIMIT`, and the real subject of this test is the
+    // post-flush convergence asserted below.
+    assert!(
+        admitted >= 1 && admitted <= (LIMIT as usize) * 2,
+        "{admitted} admitted before convergence, above the documented \
+         two-replica overshoot bound of {}",
+        (LIMIT as usize) * 2
+    );
 
     // One write-behind flush cycle per replica: each writes its coalesced
     // delta and reads back the authoritative combined count.
@@ -235,20 +257,41 @@ async fn rate_limit_shared_store_peer_parity_rotating_xff() {
 
     let peer: SocketAddr = "198.51.100.7:9000".parse().unwrap();
 
-    // LIMIT requests, each with a DIFFERENT (attacker-rotated) spoofed XFF
-    // value but the SAME real peer, must all count against ONE shared
-    // bucket — an XFF-trusting extractor would instead mint a fresh bucket
-    // per rotation and never reject.
-    for i in 0..LIMIT {
+    // Requests with a DIFFERENT (attacker-rotated) spoofed XFF value but the
+    // SAME real peer must all count against ONE shared bucket.
+    //
+    // The assertion is on the INVARIANT — "rotating XFF is throttled like any
+    // other single source" — rather than on an exact admission count. Since
+    // run-5 J1 the shared counter seeds a newly seen key with its pro-rata
+    // share of the window it arrives in, so how many of the first N requests
+    // are admitted legitimately depends on *when in the window the test runs*.
+    // An exact-count assertion here would be a clock-dependent test that
+    // happened to pass under the old fixed-window behaviour, which granted the
+    // whole budget regardless of arrival time.
+    //
+    // What must never happen is unbounded admission, which is exactly what an
+    // XFF-trusting extractor would produce: a fresh bucket per rotation, and
+    // therefore no rejection ever.
+    let attempts = (LIMIT * 4) as usize;
+    let mut admitted = 0usize;
+    for i in 0..attempts {
         let xff = format!("10.0.0.{i}");
         let resp = call(&mut svc, request_with_peer_and_xff(peer, &xff)).await;
-        assert!(!is_rejected(&resp), "request {i} should succeed");
+        if !is_rejected(&resp) {
+            admitted += 1;
+        }
     }
 
-    let resp = call(&mut svc, request_with_peer_and_xff(peer, "10.0.0.99")).await;
     assert!(
-        is_rejected(&resp),
-        "rotating XFF must not yield a fresh bucket — the peer-keyed shared count must reject"
+        admitted >= 1,
+        "the limiter must admit *something* — a bucket that rejects from the \
+         first request would be a different bug"
+    );
+    assert!(
+        admitted <= LIMIT as usize,
+        "rotating XFF must not yield a fresh bucket: {admitted} of {attempts} \
+         requests were admitted against a limit of {LIMIT}, so the spoofed \
+         header is being trusted as the bucket key"
     );
 }
 
@@ -266,16 +309,32 @@ async fn rate_limit_shared_store_fails_open_on_db_error() {
 
     let peer: SocketAddr = "198.51.100.9:1111".parse().unwrap();
 
-    // With the store unreachable, traffic within the configured limit still
-    // flows: the decision no longer depends on a datastore round trip at all
-    // (H2 fix), so there is no store error on the request path to fail open
-    // *from*.
-    for i in 0..LIMIT {
+    // With the store unreachable, traffic still flows: the decision no longer
+    // depends on a datastore round trip at all (H2 fix), so there is no store
+    // error on the request path to fail open *from*.
+    //
+    // Asserted as "at least one request is served", not "exactly LIMIT are":
+    // since run-5 J1 a newly seen key is seeded with its pro-rata share of the
+    // window it arrives in, so the exact number depends on when in the window
+    // the test runs. The property under test is that an unreachable store does
+    // not stop traffic, and that is what this asserts.
+    let mut admitted = 0usize;
+    for _ in 0..LIMIT {
         let resp = call(&mut svc, request_with_peer(peer)).await;
-        assert!(
-            !is_rejected(&resp),
-            "request {i} must proceed despite the unreachable shared store"
-        );
+        if !is_rejected(&resp) {
+            admitted += 1;
+        }
+    }
+    assert!(
+        admitted >= 1,
+        "an unreachable shared store must not stop traffic — the request path \
+         does not touch the store at all"
+    );
+
+    // Drive the bucket to its limit so the assertion below is about the local
+    // count enforcing, not about where in the window we happened to start.
+    for _ in 0..(LIMIT * 4) {
+        let _ = call(&mut svc, request_with_peer(peer)).await;
     }
 
     // The flusher discovers the outage. It must not panic, must not poison

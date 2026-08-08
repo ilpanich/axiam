@@ -1,6 +1,21 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Shield, Trash2, Loader2, AlertCircle, KeyRound, Fingerprint } from "lucide-react";
+import {
+  Shield,
+  Trash2,
+  Loader2,
+  AlertCircle,
+  KeyRound,
+  Fingerprint,
+  Usb,
+} from "lucide-react";
+import {
+  webauthnService,
+  isWebauthnSupported,
+  classifyWebauthnError,
+  webauthnErrorMessage,
+  type AuthenticatorKind,
+} from "@/services/webauthn";
 import { authService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
@@ -34,18 +49,44 @@ interface ErrorResponse {
 // Method type badge
 // ---------------------------------------------------------------------------
 
+/**
+ * C1: the server's unified `MfaMethod` view already distinguishes
+ * `Totp | Passkey | SecurityKey`, so the badge does too. A user with a phone
+ * passkey and a YubiKey needs to tell which row is which before deciding what
+ * to remove — "WEBAUTHN" on both rows would make that guesswork.
+ */
+const METHOD_LABELS: Record<string, { label: string; icon: typeof KeyRound; tone: string }> = {
+  totp: {
+    label: "TOTP",
+    icon: KeyRound,
+    tone: "bg-primary/10 text-primary border-primary/20",
+  },
+  passkey: {
+    label: "Passkey",
+    icon: Fingerprint,
+    tone: "bg-accent/10 text-accent border-accent/20",
+  },
+  securitykey: {
+    label: "Security key",
+    icon: Usb,
+    tone: "bg-accent/10 text-accent border-accent/20",
+  },
+};
+
 function MethodTypeBadge({ type }: { type: string }) {
-  const isTotp = type.toLowerCase() === "totp";
+  const key = type.toLowerCase().replace(/[^a-z]/g, "");
+  const meta = METHOD_LABELS[key] ?? {
+    label: type,
+    icon: Fingerprint,
+    tone: "bg-muted text-muted-foreground border-border",
+  };
+  const Icon = meta.icon;
   return (
     <span
-      className={
-        isTotp
-          ? "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20"
-          : "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-accent/10 text-accent border border-accent/20"
-      }
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${meta.tone}`}
     >
-      {isTotp ? <KeyRound size={10} aria-hidden="true" /> : <Fingerprint size={10} aria-hidden="true" />}
-      {type.toUpperCase()}
+      <Icon size={10} aria-hidden="true" />
+      {meta.label}
     </span>
   );
 }
@@ -141,6 +182,11 @@ export function MfaManagementPage() {
   const [totpDialogOpen, setTotpDialogOpen] = useState(false);
   const [totpSetupData, setTotpSetupData] = useState<TotpSetupResponse | null>(null);
   const [totpConfirmError, setTotpConfirmError] = useState<string | null>(null);
+  // C1: WebAuthn enrolment state. `pendingKind` exists only so the two buttons
+  // can show their own spinner — one shared `isPending` would spin both.
+  const [webauthnError, setWebauthnError] = useState<string | null>(null);
+  const [pendingKind, setPendingKind] = useState<AuthenticatorKind | null>(null);
+  const webauthnSupported = isWebauthnSupported();
 
   const { data: methods = [], isLoading } = useQuery({
     queryKey: ["mfaMethods", userId],
@@ -181,6 +227,39 @@ export function MfaManagementPage() {
       setTotpConfirmError(msg);
     },
   });
+
+  const enrolMutation = useMutation({
+    mutationFn: ({ name, kind }: { name: string; kind: AuthenticatorKind }) =>
+      webauthnService.register(name, kind),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mfaMethods"] });
+      setWebauthnError(null);
+      setPendingKind(null);
+    },
+    onError: (err) => {
+      // Every ceremony failure arrives as a DOMException whose `name` is the
+      // only machine-readable part; the service classifies it so this page
+      // does not have to know that "NotAllowedError" means "cancelled or
+      // timed out, and the spec will not tell you which".
+      setWebauthnError(webauthnErrorMessage(classifyWebauthnError(err)));
+      setPendingKind(null);
+    },
+  });
+
+  const startEnrolment = (kind: AuthenticatorKind) => {
+    setWebauthnError(null);
+    setPendingKind(kind);
+    // A default name the user can recognise later. Both kinds land in the same
+    // credential list, so the name is what tells "my laptop" from "my YubiKey".
+    const existing = methods.filter(
+      (m) => m.method_type.toLowerCase() !== "totp",
+    ).length;
+    const label = kind === "platform" ? "Passkey" : "Security key";
+    enrolMutation.mutate({
+      name: existing > 0 ? `${label} ${existing + 1}` : label,
+      kind,
+    });
+  };
 
   const handleConfirmTotp = async (code: string) => {
     setTotpConfirmError(null);
@@ -288,24 +367,83 @@ export function MfaManagementPage() {
       </section>
 
       {/* ------------------------------------------------------------------ */}
-      {/* Passkeys — Coming soon                                              */}
+      {/* Passkeys & security keys (C1)                                       */}
       {/* ------------------------------------------------------------------ */}
-      <section className="glass-card p-5 opacity-70" aria-label="Passkeys coming soon">
+      <section className="glass-card p-5" aria-label="Passkeys and security keys">
         <div className="flex items-center gap-3 mb-3">
           <Fingerprint size={16} className="text-accent" aria-hidden="true" />
-          <h2 className="text-sm font-semibold text-foreground">WebAuthn / Passkeys</h2>
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent/10 text-accent border border-accent/20">
-            Coming soon
-          </span>
+          <h2 className="text-sm font-semibold text-foreground">Passkeys &amp; security keys</h2>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Use a hardware security key, Touch ID, Face ID, or Windows Hello as a second factor.
-          WebAuthn/Passkey support is planned for a future release.
+          Sign in with Touch&nbsp;ID, Face&nbsp;ID, Windows&nbsp;Hello, or a hardware
+          security key instead of typing a code. Both are phishing-resistant: they
+          only work on this site, so a lookalike page cannot use them.
         </p>
-        <Button size="sm" disabled>
-          <Fingerprint size={14} aria-hidden="true" />
-          Add Passkey
-        </Button>
+
+        {!webauthnSupported ? (
+          // Feature detection rather than letting a click fail: a browser
+          // without WebAuthn cannot be talked into having it, so offering the
+          // button would only produce an error the user cannot act on.
+          <p
+            role="note"
+            className="flex items-start gap-2 p-3 rounded-md bg-muted/40 border border-border text-sm text-muted-foreground"
+          >
+            <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+            <span>
+              This browser does not support passkeys. Try a recent version of Chrome,
+              Safari, Edge or Firefox — your other sign-in methods still work here.
+            </span>
+          </p>
+        ) : (
+          <>
+            {webauthnError && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 mb-3 p-3 rounded-md bg-destructive/10 border border-destructive/30 text-destructive text-sm"
+              >
+                <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+                <span>{webauthnError}</span>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => startEnrolment("platform")}
+                disabled={enrolMutation.isPending}
+                size="sm"
+              >
+                {enrolMutation.isPending && pendingKind === "platform" ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                    Waiting for your device…
+                  </>
+                ) : (
+                  <>
+                    <Fingerprint size={14} aria-hidden="true" />
+                    Add a passkey
+                  </>
+                )}
+              </Button>
+              <Button
+                onClick={() => startEnrolment("cross-platform")}
+                disabled={enrolMutation.isPending}
+                size="sm"
+                variant="outline"
+              >
+                {enrolMutation.isPending && pendingKind === "cross-platform" ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                    Waiting for your key…
+                  </>
+                ) : (
+                  <>
+                    <Usb size={14} aria-hidden="true" />
+                    Add a security key
+                  </>
+                )}
+              </Button>
+            </div>
+          </>
+        )}
       </section>
 
       {/* Confirm delete dialog */}

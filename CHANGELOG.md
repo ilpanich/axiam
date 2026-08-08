@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Passkeys and security keys in the admin UI.** The server had shipped the
+  full WebAuthn registration and authentication ceremonies for releases, but
+  the frontend had zero WebAuthn references — the MFA page advertised passkeys
+  as "Coming soon" and the login page could not exercise them. Both are now
+  wired: enrol a platform passkey or a cross-platform security key from
+  Profile → MFA methods, and sign in with a passkey via browser autofill
+  (conditional mediation), an explicit button, or as a second factor. The MFA
+  list distinguishes `Passkey` from `Security key` rather than labelling both
+  "WebAuthn". All ceremony policy stays server-side.
+- **Deny-effect selector in the role editor**, with a distinct `DENY` badge on
+  granted permissions. Deny rules were creatable over the API from the moment
+  B1 landed and invisible in the console — the worst of both worlds.
+- **Frontend coverage matrix** (`claude_dev/frontend-coverage-matrix.md`) plus
+  a CI check that fails when a REST handler module has no row, so a new server
+  surface cannot ship without someone recording whether it needs a UI.
+- **axe-core accessibility smoke suite** over the main pages and the
+  design-system components the audit fixed, wired into the fast frontend CI job.
+- **RBAC deny-override (explicit deny).** A role→permission grant now carries
+  `effect: "allow" | "deny"`, defaulting to `"allow"`. A deny grant overrides
+  **every** allow, at any depth of the resource hierarchy and at equal
+  specificity — deny-override, not most-specific-wins. Closes SEC-040 and the
+  "no explicit deny" entry in the comparison page's cons list. Check responses
+  gain `reason_code` (`allowed` | `no_grant` | `denied_by_rule`) so a caller
+  can tell "ask an admin for access" apart from "an admin has already
+  decided". Fully backward compatible: existing grants and `effect`-less
+  requests both mean allow, and no migration is required beyond the additive
+  schema field.
+
+- **AMQP transport encryption (`amqps://`).** Broker traffic was plaintext in
+  every deployment artifact. `AmqpConfig` now accepts `amqps://` URLs with an
+  optional TLS block (custom CA bundle, optional client certificate for mutual
+  TLS toward the broker), and the prod compose stack and k8s manifests speak
+  TLS 1.3 on port 5671 with the plaintext listener switched off. There is
+  deliberately no verification-skip option: `ca_cert_path` covers the
+  legitimate reason to want one. HMAC signing stays mandatory — TLS is
+  confidentiality in transit, HMAC is end-to-end authenticity across broker
+  hops, and neither substitutes for the other. SDK contract §8b.
+- **gRPC strict session-revocation mode** (`AXIAM__GRPC__STRICT_REVOCATION`).
+  Opt-in per-request revocation enforcement on the gRPC data plane, matching
+  REST. See "Changed" for the default this makes explicit.
+- **Read-replica routing primitive** (`AXIAM__DB__READ_REPLICAS`, off by
+  default) with a documented staleness contract; authorization, identity and
+  JWKS reads are replica-eligible, session revocation and write-path reads are
+  pinned to the primary and cannot be configured otherwise.
+- Rate-limit scenarios for the three limiter families that had none (`revoke`,
+  gRPC admin, gRPC infra), so all eight families appear in the enforcement
+  verdict table.
+
+### Changed
+
+- **BREAKING (release builds): a plaintext `amqp://` broker URL is now
+  refused** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true`. Mirrors the existing
+  fail-closed posture for the AMQP signing key. Debug builds are unaffected,
+  so `cargo test` and `cargo run` keep working untouched — but note that the
+  dev, e2e and benchmark compose stacks all run the *published release image*
+  and so are subject to the guard like any deployment. All three now set
+  `AXIAM__AMQP__ALLOW_PLAINTEXT=true` explicitly, each with a comment stating
+  why plaintext is acceptable for that stack. Any other release-image stack
+  with an `amqp://` URL must do the same or move to `amqps://`; it will
+  otherwise refuse to start, by design.
+- **Rate limiting: enforcement now matches configuration in both directions.**
+  gRPC families were admitting 1/20–1/33 of their configured ceiling under a
+  single-IP flood (the shared 60-second pre-check was charging requests the
+  per-second governor then rejected), while REST machine endpoints
+  over-admitted by up to +50% (fixed-window boundary doubling). The shared
+  counter now uses a sliding window, counts admitted capacity rather than
+  arrivals, and refunds downstream rejections; a newly seen key gets its
+  pro-rata share of the window plus an explicit, documented 10% burst
+  allowance — except below 20/min (every human endpoint, no machine one),
+  where smoothing a five-request budget would cost a legitimate first-time
+  user a whole request for no security benefit. Rollback:
+  `AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed`.
+- **Refresh rotation is three datastore round trips instead of five**, via an
+  atomic `consume_by_token_hash` (which also removes the read-then-delete
+  window rather than tolerating it) and a TTL cache for the per-refresh tenant
+  lookup. Single-use rotation, the user-status check, and consuming expired
+  tokens are all unchanged.
+- **Documented: gRPC does not check session revocation by default.** A user
+  who logs out keeps passing gRPC authorization until their access token
+  expires (up to 15 minutes). This was always true; it is now written down,
+  and `AXIAM__GRPC__STRICT_REVOCATION=true` changes it.
+
 ## [1.0.0-alpha24] - 2026-08-04
 
 ### Added

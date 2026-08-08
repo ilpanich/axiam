@@ -129,6 +129,10 @@ prod-up:
     SECRETS_DIR="docker/.secrets"
     PRIV="$SECRETS_DIR/jwt_ed25519.pem"
     PUB="$SECRETS_DIR/jwt_ed25519.pub.pem"
+    # A6: the prod stack speaks amqps:// to the broker, so it needs a broker
+    # certificate. Idempotent — existing material is left alone, and bring-your-
+    # own certs dropped into docker/.secrets/broker-tls/ are picked up unchanged.
+    bash scripts/gen-broker-tls.sh
     if [[ ! -f "$PRIV" || ! -f "$PUB" ]]; then
         echo "→ Generating Ed25519 JWT keypair in $SECRETS_DIR/ (first-run only)"
         mkdir -p "$SECRETS_DIR"
@@ -145,6 +149,12 @@ prod-up:
     echo ""
     echo "For HTTPS cookie tests, in another terminal run:"
     echo "  sudo caddy reverse-proxy --from https://localhost --to :8081"
+
+# A6: (re)generate the private CA + broker certificate for the AMQPS listener.
+# `prod-up` calls this automatically; run it directly to rotate (delete
+# docker/.secrets/broker-tls first) or to inspect what would be generated.
+prod-broker-certs:
+    bash scripts/gen-broker-tls.sh
 
 # Stop production-like stack
 prod-down:

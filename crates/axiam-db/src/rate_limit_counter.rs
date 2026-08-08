@@ -358,6 +358,56 @@ impl<C: Connection> SharedRateLimitStore for SurrealRateLimitBucketRepository<C>
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// How [`SharedRateLimitCounter::check_at`] converts accumulated counts into
+/// an admit/deny decision (run-5 J1).
+///
+/// # Why this knob exists — the fixed-window boundary artifact
+///
+/// A fixed window grants the whole per-window budget the instant the window
+/// rolls over. Under a sustained flood the budget is consumed in the first
+/// instants of every window, so an observer measuring *any* rolling
+/// `T`-second interval sees up to `⌈T / window⌉ + 1` full budgets rather than
+/// `T / window` of them. Benchmark run 5 measured exactly this shape on the
+/// REST machine endpoints — `+48 %` (introspect) and `+50 %` (authz check)
+/// against a `±10 %` enforcement bar — with `token` showing the same effect
+/// more mildly (`+12 %`)
+/// (`benchmarks/results/**/rl-prod-summary.md`, J1).
+///
+/// [`WindowMode::Sliding`] removes the artifact by charging a decayed share
+/// of the previous window against the current decision, which bounds *every*
+/// rolling `window`-long interval by the configured limit instead of only the
+/// aligned ones. It is the shipped default.
+///
+/// **Replica-local approximation.** Only the *current* window's count is
+/// flushed to and read back from the store; the previous window's total is
+/// remembered per replica ([`Bucket::prev_count`]) and never shared. So the
+/// sliding correction is exact for the traffic a replica has seen itself and
+/// converges to the fixed-window behaviour for traffic it learned about from
+/// other replicas. That is the same eventual-consistency trade the whole
+/// write-behind design already makes (module docs), and it is strictly
+/// stricter than [`WindowMode::Fixed`], never looser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowMode {
+    /// Bound every rolling `window`-long interval by the limit (default).
+    #[default]
+    Sliding,
+    /// Pre-run-5 behaviour: bound each *aligned* window by the limit, which
+    /// admits up to `2×limit` across a window boundary. Retained as a
+    /// one-env-var rollback (`AXIAM__RATE_LIMIT__SHARED_WINDOW=fixed`).
+    Fixed,
+}
+
+impl WindowMode {
+    /// Stable, log-safe name — identical to the
+    /// `AXIAM__RATE_LIMIT__SHARED_WINDOW` value that selects this mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sliding => "sliding",
+            Self::Fixed => "fixed",
+        }
+    }
+}
+
 /// Configuration for [`SharedRateLimitCounter`], read once via
 /// [`SharedRateLimitConfig::from_env`] so the REST and gRPC layers always
 /// behave identically.
@@ -374,9 +424,13 @@ pub struct SharedRateLimitConfig {
     /// clamped to [`MIN_SYNC_INTERVAL_MS`]..=[`MAX_SYNC_INTERVAL_MS`].
     /// Directly scales the cross-replica overshoot bound (module docs).
     pub sync_interval: Duration,
-    /// Fixed-window length used only for staleness pruning; must match the
-    /// callers' `window_start()` truncation (60 s in both).
+    /// Fixed-window length used for staleness pruning and, in
+    /// [`WindowMode::Sliding`], for the decay of the previous window; must
+    /// match the callers' `window_start()` truncation (60 s in both).
     pub window: Duration,
+    /// `AXIAM__RATE_LIMIT__SHARED_WINDOW` — `sliding` (default) or `fixed`.
+    /// See [`WindowMode`].
+    pub window_mode: WindowMode,
 }
 
 impl Default for SharedRateLimitConfig {
@@ -385,6 +439,7 @@ impl Default for SharedRateLimitConfig {
             enabled: true,
             sync_interval: Duration::from_millis(DEFAULT_SYNC_INTERVAL_MS),
             window: Duration::from_secs(DEFAULT_WINDOW_SECS),
+            window_mode: WindowMode::default(),
         }
     }
 }
@@ -415,10 +470,20 @@ impl SharedRateLimitConfig {
             .unwrap_or(DEFAULT_SYNC_INTERVAL_MS)
             .clamp(MIN_SYNC_INTERVAL_MS, MAX_SYNC_INTERVAL_MS);
 
+        // Only the explicit opt-out string selects the pre-run-5 behaviour;
+        // anything else (including unset or a typo) keeps the stricter
+        // sliding default, so a misspelled rollback cannot silently loosen
+        // enforcement.
+        let window_mode = match std::env::var("AXIAM__RATE_LIMIT__SHARED_WINDOW") {
+            Ok(raw) if raw.trim().eq_ignore_ascii_case("fixed") => WindowMode::Fixed,
+            _ => WindowMode::Sliding,
+        };
+
         Self {
             enabled,
             sync_interval: Duration::from_millis(sync_interval_ms),
             window: Duration::from_secs(DEFAULT_WINDOW_SECS),
+            window_mode,
         }
     }
 }
@@ -432,11 +497,32 @@ impl SharedRateLimitConfig {
 /// The effective count a decision is made on is `shared_count + pending`:
 /// the authoritative cross-replica count as of the last successful flush,
 /// plus this replica's own not-yet-flushed increments.
+///
+/// In [`WindowMode::Sliding`] the decision additionally carries a decayed
+/// share of [`Bucket::prev_count`] — see [`SharedRateLimitCounter::check_at`].
 #[derive(Debug, Clone)]
 struct Bucket {
     /// Start of the fixed window this bucket's counts belong to. A `check`
     /// for a different window rolls the bucket over (both counts reset).
     window_start: DateTime<Utc>,
+    /// Total effective count (`shared_count + pending`) of the window that
+    /// *immediately* preceded [`Bucket::window_start`], or `0` when the
+    /// preceding window was not contiguous with this one (an idle gap means
+    /// there is nothing to carry).
+    ///
+    /// Only read in [`WindowMode::Sliding`]; never flushed to the store (the
+    /// sliding correction is deliberately replica-local — see
+    /// [`WindowMode::Sliding`]'s docs).
+    prev_count: u64,
+    /// Fictional pro-rata backfill applied when this bucket was created
+    /// *cold* partway through a window (see [`COLD_ENTRY_BURST_FRACTION`]).
+    ///
+    /// Decision-only: it is never flushed to the store, because it represents
+    /// traffic that did not happen. Without it, a key first seen at second 59
+    /// of a window would be handed that window's entire budget for its last
+    /// second, and then the next window's on top — which is the other half of
+    /// the run-5 J1 over-admission.
+    seed: u64,
     /// Authoritative store count as of the last successful flush of this
     /// bucket in this window (already includes this replica's flushed
     /// increments).
@@ -457,12 +543,103 @@ impl Bucket {
     fn new(window_start: DateTime<Utc>) -> Self {
         Self {
             window_start,
+            prev_count: 0,
+            seed: 0,
             shared_count: 0,
             pending: 0,
             last_flush: None,
         }
     }
+
+    /// Rolls this bucket over into the window starting at `window_start`,
+    /// carrying the closing total forward as [`Bucket::prev_count`] when — and
+    /// only when — the two windows are contiguous.
+    fn roll_over(&mut self, window_start: DateTime<Utc>, window: Duration) {
+        let contiguous = window_start
+            .signed_duration_since(self.window_start)
+            .to_std()
+            .is_ok_and(|gap| gap == window);
+        let carried = if contiguous { self.current_total() } else { 0 };
+        *self = Self::new(window_start);
+        self.prev_count = carried;
+    }
+
+    /// This window's total, including the cold-entry [`Bucket::seed`].
+    fn current_total(&self) -> u64 {
+        self.shared_count
+            .saturating_add(self.pending)
+            .saturating_add(self.seed)
+    }
+
+    /// The count a [`WindowMode::Sliding`] decision is taken on: this
+    /// window's total plus the not-yet-expired share of the previous
+    /// window's, where `elapsed_frac` is how far `now` has advanced through
+    /// the current window (0.0..=1.0).
+    fn sliding_count(&self, elapsed_frac: f64) -> u64 {
+        // `1.0 - elapsed_frac` of the previous window still falls inside the
+        // trailing `window`-long interval ending at `now`.
+        let carried = (self.prev_count as f64 * (1.0 - elapsed_frac)).round();
+        self.current_total().saturating_add(carried.max(0.0) as u64)
+    }
 }
+
+/// The share of a bucket's limit a *newly seen* key may spend immediately,
+/// on top of its pro-rata share of the window it arrives in
+/// ([`Bucket::seed`]).
+///
+/// # Why a cold bucket is not simply empty
+///
+/// A fixed-window counter hands a key that has never been seen the window's
+/// whole remaining budget, no matter how little of the window is left. Under
+/// the rl-prod flood that is worth up to one extra full budget on top of the
+/// steady-state rate — the second half of the run-5 J1 over-admission (the
+/// first half being the boundary artifact [`WindowMode::Sliding`] closes).
+///
+/// Seeding a cold bucket with the share of the window that has already
+/// elapsed makes arrival time stop mattering: a key that first appears at
+/// second 50 gets the same `1/6`-of-a-window budget for the remaining 10 s
+/// that a key present since second 0 would have left, plus this explicit
+/// burst allowance.
+///
+/// # Why 10 %
+///
+/// It is the enforcement bar. `benchmarks/runner/rl_prod_check.py` asserts
+/// admitted-vs-configured within ±10 %, so the shipped burst allowance is set
+/// to exactly the tolerance the assertion already grants — the alternative
+/// (a burst the assertion does not model) is what run 5 flagged as
+/// "the shipped posture and the assertion script must agree". A sustained
+/// flood from cold therefore admits at most `1.1x` the configured rate in its
+/// first rolling window and converges to `1.0x` after it.
+const COLD_ENTRY_BURST_FRACTION: f64 = 0.1;
+
+/// Smallest limit for which the pro-rata cold-entry seed is applied at all.
+///
+/// # Why small limits are exempt
+///
+/// The seed is a **rate-smoothing** device: it stops a flood arriving at
+/// second 50 from being handed a whole window's budget for the last ten
+/// seconds. That matters enormously at `authz_check` (1 800/min) and
+/// `introspect` (600/min), which is where run 5 measured the +48–50 %
+/// over-admission this whole mechanism exists to close.
+///
+/// It is meaningless at `mfa` (5/min) or `password_reset` (3/min), and worse
+/// than meaningless: at limit 5, a seed of "two thirds of the window has
+/// elapsed" costs a legitimate first-time user **three of their five
+/// requests**, because the arithmetic rounds against them at that scale. A
+/// user enrolling in MFA at second 40 of a wall-clock minute would find their
+/// third call rejected — for no security benefit, since the control at those
+/// endpoints is the small absolute number, not the smoothness of its delivery.
+///
+/// So: below this threshold a newly seen key still gets its whole (tiny)
+/// budget. Note what is **not** exempted — the sliding-window carry still
+/// applies at every limit, so the boundary-doubling artifact stays closed
+/// everywhere. Only the cold-entry seed is skipped.
+///
+/// 20 sits above every human endpoint (login 10, register 5, password_reset 3,
+/// mfa 5) and far below every machine one (revoke 60, token 120, introspect
+/// 600, authz 1 800, gRPC families 6 000+), so the split lands exactly on the
+/// distinction that already exists in the posture tables.
+const COLD_ENTRY_MIN_LIMIT: u32 = 20;
 
 // ---------------------------------------------------------------------------
 // Counter
@@ -654,6 +831,150 @@ impl SharedRateLimitCounter {
         self.inner.advisory.record(key, allow);
         self.notify_flusher();
         allow
+    }
+
+    /// **The production decision entry point (run-5 J1).** Same contract as
+    /// [`Self::check`] — `true` = allow — but it derives the window from
+    /// `now` itself and applies [`SharedRateLimitConfig::window_mode`].
+    ///
+    /// Prefer this over [`Self::check`] in new call sites: passing `now`
+    /// rather than a pre-truncated `window_start` is what lets the counter
+    /// see *where inside* the window the request landed, which is the
+    /// information [`WindowMode::Sliding`] needs. [`Self::check`] is retained
+    /// with its exact pre-run-5 fixed-window semantics for callers (and
+    /// tests) that want to pin a window explicitly.
+    ///
+    /// # What is counted: admitted capacity, not arrivals
+    ///
+    /// This is the one semantic difference from [`Self::check`], and it is
+    /// deliberate. `check` increments for *every* call including denied ones;
+    /// `check_at` increments only when it admits.
+    ///
+    /// Counting arrivals is self-consistent for a fixed window — once a
+    /// window is over budget it stays over, which is the intended shape — but
+    /// it cannot be carried across a boundary, because the quantity a sliding
+    /// window carries forward has to be *capacity consumed*. Carrying
+    /// arrivals would mean a flood of a million denied requests suppressed the
+    /// next window entirely, and the window after that, for as long as the
+    /// flood lasted: a limiter that stops admitting the configured rate is as
+    /// broken as one that admits too much (it is the same J1 starvation,
+    /// arrived at from the other direction).
+    ///
+    /// Nothing is lost by not counting denials. Denied requests consume no
+    /// capacity on any replica, so there is nothing for the other replicas to
+    /// learn from them, and the abuse signal they carry is still recorded —
+    /// the I3 machine-traffic advisory below tallies allow/deny ratios
+    /// independently of what gets flushed.
+    pub fn check_at(&self, key: &str, now: DateTime<Utc>, limit: u32) -> bool {
+        if !self.inner.config.enabled {
+            return true;
+        }
+
+        let window = self.inner.config.window;
+        let window_secs = window.as_secs().max(1) as i64;
+        let epoch = now.timestamp();
+        let start_epoch = epoch - epoch.rem_euclid(window_secs);
+        let window_start = DateTime::<Utc>::from_timestamp(start_epoch, 0).unwrap_or(now);
+        // Sub-second precision matters: at 100 req/s a whole-second
+        // granularity would step the decay in visible jumps.
+        let elapsed_frac = ((now - window_start).num_milliseconds() as f64
+            / (window_secs as f64 * 1000.0))
+            .clamp(0.0, 1.0);
+
+        let sliding = self.inner.config.window_mode == WindowMode::Sliding;
+        // Pro-rata backfill for a key first seen partway through a window —
+        // only meaningful in sliding mode (where windows are continuous), and
+        // only at limits large enough for smoothing to mean anything
+        // ([`COLD_ENTRY_MIN_LIMIT`]).
+        let cold_seed = if sliding && limit >= COLD_ENTRY_MIN_LIMIT {
+            (elapsed_frac * f64::from(limit) * (1.0 - COLD_ENTRY_BURST_FRACTION)) as u64
+        } else {
+            0
+        };
+
+        let allow = {
+            let shard = self.inner.shard_for(key);
+            let mut guard = lock_shard(shard);
+            let bucket = guard.entry(key.to_string()).or_insert_with(|| {
+                let mut fresh = Bucket::new(window_start);
+                fresh.seed = cold_seed;
+                fresh
+            });
+
+            if bucket.window_start != window_start {
+                bucket.roll_over(window_start, window);
+            }
+
+            // Tested BEFORE incrementing (see the "admitted capacity" note
+            // above): `effective` is the capacity already consumed, so the
+            // request is admitted while there is still room for it, and the
+            // increment records that it took that room.
+            let effective = match self.inner.config.window_mode {
+                WindowMode::Sliding => bucket.sliding_count(elapsed_frac),
+                WindowMode::Fixed => bucket.shared_count.saturating_add(bucket.pending),
+            };
+            let allow = effective < u64::from(limit);
+            if allow {
+                bucket.pending = bucket.pending.saturating_add(1);
+            }
+            allow
+        };
+
+        self.inner.advisory.record(key, allow);
+        self.notify_flusher();
+        allow
+    }
+
+    /// Gives back one increment previously taken by [`Self::check_at`] /
+    /// [`Self::check`] for `key`, because the request it accounted for was
+    /// rejected *downstream* and therefore never consumed any capacity
+    /// (run-5 J1).
+    ///
+    /// # Why this exists — the two-layer starvation bug
+    ///
+    /// Both listeners stack this cross-replica pre-check in front of an
+    /// in-memory `governor`. The pre-check counts a request the moment it
+    /// admits it, but the governor may then reject it. When the governor's
+    /// burst is much smaller than the pre-check's whole-window budget — which
+    /// is exactly the gRPC shape, where a per-second quota sits behind a
+    /// 60-second window — a flood front-loads the *entire* window budget onto
+    /// requests the governor never let through. The window is then exhausted
+    /// for its remaining ~59 seconds and effective admission collapses to
+    /// roughly `burst + rate × t_exhaust` per window. Run 5 measured
+    /// `181/min` admitted against a configured `6 000/min` on gRPC authz —
+    /// `1/33` of the ceiling (J1).
+    ///
+    /// Refunding downstream rejections makes the shared counter count *served*
+    /// traffic, which is the quantity the cross-replica ceiling is actually
+    /// about, and it does so without constraining layer order (the REST
+    /// pre-check must stay outermost because it is also what parses
+    /// `client_id` out of the form body for the client-aware key modes).
+    ///
+    /// **Bounded loss:** a refund can only cancel an increment that has not
+    /// been flushed yet. Once the write-behind flusher has folded an
+    /// increment into the authoritative `shared_count`, there is nothing
+    /// local left to cancel and the refund is dropped rather than corrupting
+    /// the store count. The unrefundable residue is therefore at most one
+    /// `sync_interval` of rejected traffic, and it errs *strict*.
+    pub fn refund(&self, key: &str, now: DateTime<Utc>) {
+        if !self.inner.config.enabled {
+            return;
+        }
+
+        let window_secs = self.inner.config.window.as_secs().max(1) as i64;
+        let epoch = now.timestamp();
+        let start_epoch = epoch - epoch.rem_euclid(window_secs);
+        let window_start = DateTime::<Utc>::from_timestamp(start_epoch, 0).unwrap_or(now);
+
+        let shard = self.inner.shard_for(key);
+        let mut guard = lock_shard(shard);
+        // Never *create* a bucket on a refund: a refund for a key we have no
+        // bucket for is a no-op, not a negative count.
+        if let Some(bucket) = guard.get_mut(key)
+            && bucket.window_start == window_start
+        {
+            bucket.pending = bucket.pending.saturating_sub(1);
+        }
     }
 
     /// Arms the I3 machine-traffic throttling advisory (see
@@ -1646,5 +1967,400 @@ mod tests {
         ] {
             assert!(!is_machine_key(key), "{key} must not be counted");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run-5 J1 — sliding window + refund
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod window_mode_tests {
+    use super::*;
+
+    /// Two-window boundary walk driven at a fixed rate, returning how many of
+    /// `total` requests were admitted.
+    ///
+    /// `t0` is deliberately placed at an *offset* into a window so the walk
+    /// crosses a boundary — that crossing is the whole subject of J1.
+    fn admitted_over(
+        counter: &SharedRateLimitCounter,
+        limit: u32,
+        start: DateTime<Utc>,
+        span: chrono::Duration,
+        requests: u32,
+    ) -> u32 {
+        let step = span.num_milliseconds() / i64::from(requests.max(1));
+        (0..requests)
+            .filter(|i| {
+                let now = start + chrono::Duration::milliseconds(step * i64::from(*i));
+                counter.check_at("authz_check:203.0.113.5", now, limit)
+            })
+            .count() as u32
+    }
+
+    fn counter_with_mode(mode: WindowMode) -> SharedRateLimitCounter {
+        SharedRateLimitCounter::without_flusher(
+            SharedRateLimitConfig {
+                window_mode: mode,
+                ..SharedRateLimitConfig::default()
+            },
+            Arc::new(NoopStore),
+        )
+    }
+
+    struct NoopStore;
+
+    impl SharedRateLimitStore for NoopStore {
+        fn increment_by<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+            _delta: u64,
+        ) -> StoreIncrementFuture<'a> {
+            Box::pin(async move { Ok(0) })
+        }
+    }
+
+    /// A window boundary lands 30 s into the measurement — the alignment
+    /// that exposes the boundary artifact.
+    fn boundary_straddling_start() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_800_000_030, 0).expect("valid epoch")
+    }
+
+    /// Exactly on a window boundary, so `COLD_ENTRY_BURST_FRACTION`'s
+    /// pro-rata seed is zero and a test can reason about whole budgets.
+    /// Used by the tests whose subject is carry-over or refunding rather
+    /// than cold entry.
+    fn aligned_start() -> DateTime<Utc> {
+        let t = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).expect("valid epoch");
+        assert_eq!(t.timestamp() % 60, 0, "fixture must be window-aligned");
+        t
+    }
+
+    /// **The J1 REST over-admission reproduction.** A fixed window hands out
+    /// its whole budget again the instant it rolls over, so a rolling 60 s
+    /// measurement that straddles a boundary admits ~2x the configured limit.
+    /// Run 5 measured this as +48 % (introspect) and +50 % (authz check)
+    /// against a ±10 % bar. This test FAILS on the fixed mode by design — it
+    /// pins the old shape so the fix cannot silently regress.
+    #[test]
+    fn fixed_window_over_admits_across_a_boundary() {
+        let counter = counter_with_mode(WindowMode::Fixed);
+        let admitted = admitted_over(
+            &counter,
+            600,
+            boundary_straddling_start(),
+            chrono::Duration::seconds(60),
+            6_000,
+        );
+
+        assert!(
+            admitted > 660,
+            "fixed window must exhibit the J1 boundary artifact (admitted {admitted} \
+             should exceed the 1.1x bar of 660) — if this now passes the bar, the \
+             sliding fix has been applied to the wrong mode"
+        );
+    }
+
+    /// The fix: every rolling 60 s interval is bounded by the configured
+    /// limit, boundary or not, so the rl-prod ±10 % assertion holds.
+    #[test]
+    fn sliding_window_holds_the_bar_across_a_boundary() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let admitted = admitted_over(
+            &counter,
+            600,
+            boundary_straddling_start(),
+            chrono::Duration::seconds(60),
+            6_000,
+        );
+
+        assert!(
+            admitted <= 660,
+            "a rolling 60 s flood must admit at most 1.1x the configured 600 \
+             (admitted {admitted})"
+        );
+        assert!(
+            admitted >= 540,
+            "...and at least 0.9x, i.e. the limiter must not under-admit either \
+             (admitted {admitted})"
+        );
+    }
+
+    /// Sustained multi-window flood: the *rate* converges to the configured
+    /// limit rather than to a multiple of it.
+    #[test]
+    fn sliding_window_converges_over_several_windows() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let admitted = admitted_over(
+            &counter,
+            600,
+            boundary_straddling_start(),
+            chrono::Duration::seconds(300),
+            30_000,
+        );
+
+        // 5 minutes at 600/min = 3 000, plus at most one window's worth of
+        // start-up slack.
+        assert!(
+            (2_700..=3_600).contains(&admitted),
+            "5 minutes of flood at limit=600/min should admit ~3 000 (admitted {admitted})"
+        );
+    }
+
+    /// An idle gap must NOT carry a stale previous window forward — a bucket
+    /// that has been quiet for minutes starts clean.
+    #[test]
+    fn non_contiguous_window_does_not_carry_previous_count() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let t0 = aligned_start();
+
+        for _ in 0..10 {
+            assert!(counter.check_at("k", t0, 10));
+        }
+        assert!(!counter.check_at("k", t0, 10), "limit reached");
+
+        // Five windows later: nothing may be carried across the gap.
+        let later = t0 + chrono::Duration::seconds(300);
+        for i in 1..=10 {
+            assert!(
+                counter.check_at("k", later, 10),
+                "request {i} after an idle gap must start from a clean bucket"
+            );
+        }
+    }
+
+    /// **The J1 gRPC starvation reproduction, at the counter level.** A
+    /// downstream layer that rejects most of what this counter admits used to
+    /// burn the whole window budget on requests that were never served.
+    /// Refunding those rejections keeps the budget available for traffic that
+    /// actually gets through.
+    #[test]
+    fn refund_returns_budget_taken_by_downstream_rejections() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let now = aligned_start();
+
+        // 100 arrivals, of which a downstream governor serves only every
+        // 10th — the shape that starved gRPC authz to 1/33 of its ceiling.
+        let mut served = 0;
+        for i in 0..100 {
+            if !counter.check_at("grpc_authz:203.0.113.5", now, 10) {
+                continue;
+            }
+            if i % 10 == 0 {
+                served += 1;
+            } else {
+                counter.refund("grpc_authz:203.0.113.5", now);
+            }
+        }
+
+        assert_eq!(
+            served, 10,
+            "all 10 requests the downstream layer would serve must be admitted; \
+             without refunds the first 10 arrivals exhaust the window and only 1 \
+             is served"
+        );
+    }
+
+    /// Without refunds the same walk starves — this is the control that makes
+    /// the test above meaningful.
+    #[test]
+    fn without_refund_downstream_rejections_starve_the_window() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let now = aligned_start();
+
+        let mut served = 0;
+        for i in 0..100 {
+            if counter.check_at("grpc_authz:203.0.113.5", now, 10) && i % 10 == 0 {
+                served += 1;
+            }
+        }
+
+        assert_eq!(
+            served, 1,
+            "the un-refunded shape must starve (only the i=0 request is both \
+             admitted and served)"
+        );
+    }
+
+    /// A refund can never mint capacity for a key that was never charged, and
+    /// never drives a count negative.
+    #[test]
+    fn refund_is_a_noop_for_unknown_keys_and_saturates_at_zero() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let now = aligned_start();
+
+        counter.refund("never-seen", now);
+        assert_eq!(counter.bucket_count(), 0, "refund must not create a bucket");
+
+        assert!(counter.check_at("k", now, 1));
+        counter.refund("k", now);
+        counter.refund("k", now);
+        counter.refund("k", now);
+
+        // Exactly one unit of capacity was returned, not three.
+        assert!(counter.check_at("k", now, 1));
+        assert!(!counter.check_at("k", now, 1));
+    }
+
+    /// A refund aimed at a window that has already rolled over is dropped
+    /// rather than crediting the new window.
+    #[test]
+    fn refund_for_a_stale_window_is_dropped() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let now = aligned_start();
+        let next_window = now + chrono::Duration::seconds(60);
+
+        assert!(counter.check_at("k", next_window, 1));
+        counter.refund("k", now);
+        assert!(
+            !counter.check_at("k", next_window, 1),
+            "a refund for the previous window must not credit this one"
+        );
+    }
+
+    /// A key first seen with most of a window already gone must NOT be
+    /// handed that whole window's budget — it gets its pro-rata remainder
+    /// plus `COLD_ENTRY_BURST_FRACTION`.
+    #[test]
+    fn cold_entry_partway_through_a_window_gets_only_its_pro_rata_share() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        // 45 s into a 60 s window: 1/4 of the window is left.
+        let late = aligned_start() + chrono::Duration::seconds(45);
+
+        let admitted = (0..1_000)
+            .filter(|_| counter.check_at("authz_check:198.51.100.9", late, 600))
+            .count();
+
+        // 1/4 of 600 = 150, plus the 10 % burst allowance = 60.
+        assert!(
+            (150..=210).contains(&admitted),
+            "a cold key arriving 3/4 of the way through a window may spend its \
+             remaining quarter (150) plus the burst allowance (60), not the whole \
+             600 (admitted {admitted})"
+        );
+    }
+
+    /// The same key arriving at the *start* of a window gets the full budget
+    /// — the seed must scale with arrival time, not penalise everyone.
+    #[test]
+    fn cold_entry_at_a_window_start_gets_the_full_budget() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let admitted = (0..1_000)
+            .filter(|_| counter.check_at("authz_check:198.51.100.9", aligned_start(), 600))
+            .count();
+
+        assert_eq!(admitted, 600, "no elapsed window means no pro-rata seed");
+    }
+
+    /// The seed is decision-only: it must never be flushed to the store as
+    /// if it were real traffic another replica should count.
+    #[tokio::test]
+    async fn cold_entry_seed_is_never_flushed_to_the_store() {
+        let store = Arc::new(CountingStore::default());
+        let counter = SharedRateLimitCounter::without_flusher(
+            SharedRateLimitConfig::default(),
+            Arc::clone(&store) as Arc<dyn SharedRateLimitStore>,
+        );
+        let late = aligned_start() + chrono::Duration::seconds(45);
+
+        assert!(counter.check_at("k", late, 600));
+        counter.flush_once().await;
+
+        assert_eq!(
+            store.total_delta(),
+            1,
+            "exactly the one real request may be flushed, never the seed"
+        );
+    }
+
+    #[derive(Default)]
+    struct CountingStore {
+        total: std::sync::atomic::AtomicU64,
+    }
+
+    impl CountingStore {
+        fn total_delta(&self) -> u64 {
+            self.total.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SharedRateLimitStore for CountingStore {
+        fn increment_by<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+            delta: u64,
+        ) -> StoreIncrementFuture<'a> {
+            Box::pin(async move { Ok(self.total.fetch_add(delta, Ordering::SeqCst) + delta) })
+        }
+    }
+
+    /// A human-scale limit must hand a first-time caller its whole budget.
+    ///
+    /// Enrolling in MFA takes three calls against a 5/min ceiling; a pro-rata
+    /// seed at that scale would reject the third for no security benefit,
+    /// because the control there is the small absolute number rather than the
+    /// smoothness of its delivery.
+    #[test]
+    fn small_limits_are_exempt_from_the_cold_entry_seed() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        // Deep into a window — the worst case for a pro-rata seed.
+        let late = aligned_start() + chrono::Duration::seconds(50);
+
+        let admitted = (0..20)
+            .filter(|_| counter.check_at("mfa:203.0.113.7", late, 5))
+            .count();
+
+        assert_eq!(
+            admitted, 5,
+            "a 5/min endpoint must give a first-time caller all five, whenever \
+             in the window they arrive"
+        );
+    }
+
+    /// ...while a machine-scale limit still gets the smoothing, because that
+    /// is where the run-5 over-admission actually was.
+    #[test]
+    fn machine_scale_limits_still_get_the_cold_entry_seed() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let late = aligned_start() + chrono::Duration::seconds(45);
+
+        let admitted = (0..2_000)
+            .filter(|_| counter.check_at("authz_check:203.0.113.7", late, 600))
+            .count();
+
+        assert!(
+            admitted < 600,
+            "a 600/min endpoint arriving 3/4 through a window must NOT get the \
+             whole budget (admitted {admitted}) — that is the +48% run 5 measured"
+        );
+    }
+
+    /// The threshold must sit between the human and machine posture families,
+    /// so the exemption lands on the distinction that already exists.
+    #[test]
+    fn the_threshold_splits_human_from_machine_endpoints() {
+        for human in [3u32, 5, 10] {
+            assert!(
+                human < COLD_ENTRY_MIN_LIMIT,
+                "{human}/min is a human endpoint"
+            );
+        }
+        for machine in [60u32, 120, 600, 1_800, 6_000] {
+            assert!(
+                machine >= COLD_ENTRY_MIN_LIMIT,
+                "{machine}/min is a machine endpoint and must keep the smoothing"
+            );
+        }
+    }
+
+    /// The env parser: only the exact opt-out string loosens enforcement.
+    #[test]
+    fn window_mode_names_round_trip() {
+        assert_eq!(WindowMode::Sliding.as_str(), "sliding");
+        assert_eq!(WindowMode::Fixed.as_str(), "fixed");
+        assert_eq!(WindowMode::default(), WindowMode::Sliding);
     }
 }

@@ -5,6 +5,24 @@ import { apiMock, res } from "@/test/apiMock";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
+// C1: the WebAuthn ceremony itself is browser API surface jsdom does not
+// implement, so the thin helper around it is mocked and the page's own
+// behaviour (feature gating, naming, error copy, cache invalidation) is what
+// gets tested. The ceremony's *contract* with the server is covered by
+// services/webauthn.test.ts.
+const registerMock = vi.fn();
+let webauthnSupported = true;
+vi.mock("@/services/webauthn", async () => {
+  const actual = await vi.importActual<typeof import("@/services/webauthn")>(
+    "@/services/webauthn",
+  );
+  return {
+    ...actual,
+    isWebauthnSupported: () => webauthnSupported,
+    webauthnService: { register: (...a: unknown[]) => registerMock(...a) },
+  };
+});
+
 import { MfaManagementPage } from "./MfaManagementPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { useAuthStore, type AuthUser } from "@/stores/auth";
@@ -25,6 +43,17 @@ const methods = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  webauthnSupported = true;
+  // `classifyWebauthnError` consults the REAL feature detection (it is
+  // deliberately not mocked — its whole job is to say "unsupported" when the
+  // browser cannot do WebAuthn at all). jsdom has no PublicKeyCredential, so
+  // the error-classification tests need one present or every failure would
+  // classify as "unsupported" regardless of its DOMException name.
+  Object.defineProperty(window, "PublicKeyCredential", {
+    value: function PublicKeyCredential() {},
+    configurable: true,
+    writable: true,
+  });
   useAuthStore.setState({
     user,
     tenantSlug: "acme",
@@ -170,10 +199,138 @@ describe("MfaManagementPage", () => {
     expect(apiMock.delete).not.toHaveBeenCalled();
   });
 
-  it("shows the disabled 'Coming soon' passkeys section", async () => {
+  it("no longer advertises passkeys as unavailable (C1)", async () => {
     apiMock.get.mockResolvedValue(res([]));
     renderWithProviders(<MfaManagementPage />);
-    expect(await screen.findByText("Coming soon")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Add Passkey/ })).toBeDisabled();
+
+    await screen.findByText("Passkeys & security keys");
+    // The panel used to be a disabled "Coming soon" teaser while the server
+    // had shipped the full ceremonies for releases. Asserting its absence is
+    // what stops it coming back.
+    expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C1 — passkeys & security keys
+// ---------------------------------------------------------------------------
+
+describe("MfaManagementPage — passkeys (C1)", () => {
+  it("offers both enrolment flows when the browser supports WebAuthn", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    renderWithProviders(<MfaManagementPage />);
+
+    expect(
+      await screen.findByRole("button", { name: /add a passkey/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /add a security key/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the buttons and explains why on an unsupported browser", async () => {
+    webauthnSupported = false;
+    apiMock.get.mockResolvedValue(res([]));
+    renderWithProviders(<MfaManagementPage />);
+
+    expect(
+      await screen.findByText(/does not support passkeys/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /add a passkey/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("registers a platform authenticator when 'Add a passkey' is used", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    registerMock.mockResolvedValue(undefined);
+    renderWithProviders(<MfaManagementPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add a passkey/i }),
+    );
+
+    await waitFor(() =>
+      expect(registerMock).toHaveBeenCalledWith("Passkey", "platform"),
+    );
+  });
+
+  it("registers a cross-platform authenticator for a security key", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    registerMock.mockResolvedValue(undefined);
+    renderWithProviders(<MfaManagementPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add a security key/i }),
+    );
+
+    await waitFor(() =>
+      expect(registerMock).toHaveBeenCalledWith("Security key", "cross-platform"),
+    );
+  });
+
+  it("numbers additional credentials so they can be told apart later", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        { id: "m1", method_type: "totp", name: "Phone", created_at: "2026-01-01T00:00:00Z" },
+        { id: "m2", method_type: "passkey", name: "Passkey", created_at: "2026-01-01T00:00:00Z" },
+      ]),
+    );
+    registerMock.mockResolvedValue(undefined);
+    renderWithProviders(<MfaManagementPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add a passkey/i }),
+    );
+
+    // One existing WebAuthn credential (the TOTP row does not count), so the
+    // next one is #2 — "Passkey" twice in the list would be useless.
+    await waitFor(() =>
+      expect(registerMock).toHaveBeenCalledWith("Passkey 2", "platform"),
+    );
+  });
+
+  it("shows actionable copy when the user cancels the ceremony", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    const err = new Error("nope");
+    err.name = "NotAllowedError";
+    registerMock.mockRejectedValue(err);
+    renderWithProviders(<MfaManagementPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add a passkey/i }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/cancelled or timed out/i);
+  });
+
+  it("explains a duplicate credential rather than showing a generic error", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    const err = new Error("dup");
+    err.name = "InvalidStateError";
+    registerMock.mockRejectedValue(err);
+    renderWithProviders(<MfaManagementPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add a security key/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/already registered/i);
+  });
+
+  it("distinguishes passkeys from security keys in the list", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        { id: "m1", method_type: "Passkey", name: "MacBook", created_at: "2026-01-01T00:00:00Z" },
+        { id: "m2", method_type: "SecurityKey", name: "YubiKey", created_at: "2026-01-01T00:00:00Z" },
+      ]),
+    );
+    renderWithProviders(<MfaManagementPage />);
+
+    // A user deciding what to remove needs to tell the rows apart; one
+    // "WEBAUTHN" badge on both would make that guesswork.
+    expect(await screen.findByText("Passkey")).toBeInTheDocument();
+    expect(screen.getByText("Security key")).toBeInTheDocument();
   });
 });

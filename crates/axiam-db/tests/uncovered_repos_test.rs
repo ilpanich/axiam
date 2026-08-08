@@ -30,10 +30,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
-/// Runtime-built test password (avoids a hard-coded credential literal).
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["Super", "Secret123!"].concat())
-}
+use axiam_test_support::test_password;
 
 type Db = Surreal<surrealdb::engine::local::Db>;
 

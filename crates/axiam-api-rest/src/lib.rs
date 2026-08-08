@@ -12,6 +12,7 @@ pub mod openapi;
 pub mod permissions;
 pub mod server;
 pub mod state;
+pub mod tenant_org_cache;
 pub mod webhook;
 pub mod webhook_consumer;
 

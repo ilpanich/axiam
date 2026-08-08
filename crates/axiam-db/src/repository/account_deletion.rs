@@ -348,6 +348,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiam_test_support::test_password;
     use chrono::Duration;
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
@@ -357,13 +358,6 @@ mod tests {
         db.use_ns("test").use_db("test").await.unwrap();
         crate::schema::run_migrations(&db).await.unwrap();
         db
-    }
-
-    /// Runtime-generated throwaway fixture password (never authenticated
-    /// against in this module's tests) — avoids a hard-coded credential
-    /// literal that static scanners flag as a critical secret.
-    fn fixture_password() -> String {
-        format!("Fx1!{}", Uuid::new_v4().simple())
     }
 
     #[tokio::test]
@@ -551,7 +545,7 @@ mod tests {
                 tenant_id: tenant.id,
                 username: "delete-me".into(),
                 email: "delete-me@example.com".into(),
-                password: fixture_password(),
+                password: test_password(),
                 metadata: None,
             })
             .await

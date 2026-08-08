@@ -1,0 +1,30 @@
+// Minimal vendored copy of the standard gRPC Health Checking Protocol
+// definition (grpc/grpc-proto, Apache-2.0), trimmed to the `Check` unary RPC.
+//
+// Why it lives HERE and not in the repo's shipped `proto/` tree: AXIAM does
+// not *serve* grpc.health.v1.Health. This copy exists purely so a k6 scenario
+// can name the method, because the gRPC rate limiter classifies by request
+// path and runs BEFORE tonic routes the call — which is exactly what makes
+// the `grpc_infra` ceiling measurable without the service being mounted (see
+// benchmarks/scenarios/grpc_infra.js).
+syntax = "proto3";
+
+package grpc.health.v1;
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+}
+
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}

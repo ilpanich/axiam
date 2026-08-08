@@ -20,6 +20,7 @@ pub mod helpers;
 pub mod metrics;
 mod pool;
 pub mod rate_limit_counter;
+pub mod read_preference;
 pub mod repository;
 mod schema;
 pub mod seeder;
@@ -32,7 +33,9 @@ pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use pool::{DbCheckout, DbPool};
 pub use rate_limit_counter::{
     SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreIncrementFuture,
+    WindowMode,
 };
+pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, ReadReplicaConfig};
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,

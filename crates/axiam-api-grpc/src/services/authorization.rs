@@ -55,15 +55,13 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
 }
 
 fn to_check_response(decision: AccessDecision) -> CheckAccessResponse {
-    match decision {
-        AccessDecision::Allow => CheckAccessResponse {
-            allowed: true,
-            deny_reason: String::new(),
-        },
-        AccessDecision::Deny(reason) => CheckAccessResponse {
-            allowed: false,
-            deny_reason: reason,
-        },
+    CheckAccessResponse {
+        allowed: decision.is_allowed(),
+        deny_reason: decision.reason().to_string(),
+        // B1: `allowed` | `no_grant` | `denied_by_rule` (SDK contract §11).
+        // A client reading only `allowed` is unaffected; one that reads this
+        // can tell "ask an admin" apart from "an admin already decided".
+        reason_code: decision.reason_code().to_string(),
     }
 }
 

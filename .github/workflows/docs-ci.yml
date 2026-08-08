@@ -92,3 +92,11 @@ jobs:
           GITHUB_ORG: ${{ github.repository_owner }}
           REMEDIATION_BASE_REF: origin/main
         run: python3 scripts/check-remediation-evidence.py
+
+      # C4: every REST handler module must have a row in the frontend coverage
+      # matrix. Shallow on purpose -- it checks that somebody decided whether a
+      # surface needs a UI, not that the decision was right, because "is this
+      # UI adequate" is not a thing a grep can answer. What it prevents is a
+      # handler module shipping with nobody having asked.
+      - name: Frontend coverage matrix is current
+        run: python3 scripts/check-frontend-coverage.py

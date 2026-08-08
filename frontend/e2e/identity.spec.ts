@@ -208,14 +208,32 @@ test("MFA Management page shows Set up TOTP Authenticator button", async ({ page
 });
 
 // ---------------------------------------------------------------------------
-// Test 14: MFA Management page shows passkeys "Coming soon" section
+// Test 14: MFA Management page offers real passkey enrolment (C1)
 // ---------------------------------------------------------------------------
 
-test("MFA Management page shows passkeys Coming soon section", async ({ page }) => {
+test("MFA Management page offers passkey enrolment", async ({ page }) => {
   await loginAsAdmin(page);
   await page.goto("/profile/mfa");
   await expect(page).not.toHaveURL(/\/login/);
-  await expect(page.getByText(/WebAuthn \/ Passkeys/i)).toBeVisible();
-  await expect(page.getByText("Coming soon")).toBeVisible();
-  await expect(page.getByRole("button", { name: /Add Passkey/i })).toBeDisabled();
+  await expect(page.getByText(/Passkeys & security keys/i)).toBeVisible();
+
+  // The panel was a disabled "Coming soon" teaser while the server had already
+  // shipped both WebAuthn ceremonies. Asserting the teaser's absence is what
+  // stops it coming back.
+  await expect(page.getByText(/coming soon/i)).toHaveCount(0);
+
+  // Either state is correct here, and the assertion accepts both on purpose.
+  // Playwright runs this project on the headless shell, which does not define
+  // window.PublicKeyCredential, so the panel renders its unsupported notice
+  // rather than the enrolment buttons. Pinning the notice alone would then
+  // break the day the browser gains the API — pinning the buttons alone fails
+  // today. What is actually true in both worlds is that the panel is live and
+  // says something real. The supported branch, including both enrolment flows
+  // and the error copy, is covered by MfaManagementPage.test.tsx, which runs
+  // in jsdom where PublicKeyCredential can be mocked.
+  await expect(
+    page
+      .getByRole("button", { name: /Add a passkey/i })
+      .or(page.getByText(/does not support passkeys/i)),
+  ).toBeVisible();
 });

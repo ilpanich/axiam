@@ -58,6 +58,7 @@ use std::rc::Rc;
 use actix_governor::KeyExtractor;
 use actix_web::body::EitherBody;
 use actix_web::dev::{Payload, Service, ServiceRequest, ServiceResponse, Transform};
+use actix_web::http::StatusCode;
 use actix_web::http::header::{ContentType, RETRY_AFTER};
 use actix_web::{Error, HttpMessage, HttpResponse, web};
 use chrono::{DateTime, Utc};
@@ -89,6 +90,14 @@ fn trusted_hops() -> usize {
 
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
+///
+/// The request path no longer calls this — it hands the raw `now` to
+/// [`axiam_db::SharedRateLimitCounter::check_at`], which derives the window
+/// itself so it can also see the *offset* into it (run-5 J1, the
+/// sliding-window bound). Kept, and asserted by a test, because
+/// [`WINDOW_SECS`] must keep agreeing with the counter's configured window:
+/// the two are one contract split across two crates.
+#[cfg_attr(not(test), allow(dead_code))]
 fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     let epoch = now.timestamp();
     let start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
@@ -331,34 +340,88 @@ where
                 }
             };
 
-            let allow = match (key_part, counter) {
+            let now = Utc::now();
+            // Carried past the decision so a downstream rejection can be
+            // refunded against the SAME key and window (run-5 J1).
+            let charged = match (key_part, counter) {
                 (Some(key_part), Some(counter)) => {
                     // Same bucket key as before — `{endpoint}:{key_part}` —
                     // so an in-flight upgrade keeps counting against the same
                     // `rate_limit_bucket` records.
                     let key = format!("{endpoint}:{key_part}");
-                    let window = window_start(Utc::now());
                     // Fully synchronous: no datastore round trip on the
                     // request path (H2 fix). Store outages are reported by
                     // the counter's background flusher, which keeps serving
                     // decisions from local counts (fail open, D-01b).
-                    counter.check(&key, window, limit)
+                    //
+                    // `check_at` (not `check`) so the counter sees where
+                    // inside the window the request landed and can apply the
+                    // sliding-window bound that closes the run-5 J1
+                    // over-admission (`axiam_db::rate_limit_counter::WindowMode`).
+                    let allow = counter.check_at(&key, now, limit);
+                    Some((counter, key, allow))
                 }
                 // No key part (IP unavailable) or no counter registered —
                 // fail open; the in-memory governor still makes the real
                 // decision. (A counter built with
                 // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from
-                // inside `check`.)
-                _ => true,
+                // inside `check_at`.)
+                _ => None,
             };
+
+            let allow = charged.as_ref().is_none_or(|(_, _, allow)| *allow);
 
             if allow {
                 let res = inner.call(req).await?;
+                // Run-5 J1: the in-memory governor sits INSIDE this
+                // middleware and may reject with 429 a request this layer
+                // already charged. Charging capacity to a request that was
+                // never served is what starved the gRPC families down to
+                // 1/33 of their ceiling; refund it so the cross-replica
+                // counter tracks *served* traffic. See
+                // `SharedRateLimitCounter::refund`.
+                if res.status() == StatusCode::TOO_MANY_REQUESTS
+                    && let Some((counter, key, true)) = &charged
+                {
+                    counter.refund(key, now);
+                }
                 Ok(res.map_into_left_body())
             } else {
                 let res = req.into_response(too_many_requests_response());
                 Ok(res.map_into_right_body())
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod window_contract_tests {
+    use super::*;
+
+    /// [`WINDOW_SECS`] and the shared counter's configured window are one
+    /// contract split across two crates: this middleware hands
+    /// `SharedRateLimitCounter::check_at` a raw `now` and lets the counter
+    /// derive the window, so if the two ever disagreed the `Retry-After` this
+    /// middleware advertises would be a lie about a window nobody uses.
+    #[test]
+    fn window_secs_matches_the_shared_counters_window() {
+        let counter_window = axiam_db::SharedRateLimitConfig::default().window;
+        assert_eq!(
+            counter_window.as_secs() as i64,
+            WINDOW_SECS,
+            "REST WINDOW_SECS must equal the shared counter's window"
+        );
+    }
+
+    /// The local truncation helper must agree with the counter's, so a
+    /// `Retry-After` computed here points at the same boundary the counter
+    /// will roll over on.
+    #[test]
+    fn window_start_truncates_to_the_window_boundary() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_045, 0).expect("valid epoch");
+        let start = window_start(now);
+
+        assert_eq!(start.timestamp() % WINDOW_SECS, 0, "aligned to the window");
+        assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
     }
 }

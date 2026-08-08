@@ -2,7 +2,7 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::permission::{
-    CreatePermission, Permission, PermissionGrant, UpdatePermission,
+    CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
 };
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use serde::Deserialize;
@@ -35,6 +35,17 @@ pub struct GrantPermissionRequest {
     pub permission_id: Uuid,
     #[serde(default)]
     pub scope_ids: Vec<Uuid>,
+    /// B1: `"allow"` (the default) or `"deny"`.
+    ///
+    /// A deny grant **overrides every allow**, at any depth of the resource
+    /// hierarchy and at equal specificity — it is not most-specific-wins. See
+    /// `claude_dev/deny-override-design.md` for the precedence table and for
+    /// why that trade was made.
+    ///
+    /// Omitting the field means `"allow"`, so every existing client keeps
+    /// working unchanged and no migration is required.
+    #[serde(default)]
+    pub effect: PermissionEffect,
 }
 
 // -----------------------------------------------------------------------
@@ -243,16 +254,22 @@ pub async fn grant_to_role<C: Connection + Clone>(
     let req = body.into_inner();
     state
         .permission_repo
-        .grant_to_role_with_scopes(
+        .grant_to_role_with_effect(
             user.tenant_id,
             path.into_inner(),
             req.permission_id,
             req.scope_ids,
+            req.effect,
         )
         .await?;
-    // D7: granting widens access (safe direction) for every subject holding
-    // the role (set unknown here) — flush the tenant so the new grant is
-    // visible immediately.
+    // D7: an ALLOW grant widens access (safe direction) for every subject
+    // holding the role (set unknown here) — flush the tenant so the new grant
+    // is visible immediately.
+    //
+    // B1: a DENY grant *narrows* access, which is the direction where a stale
+    // cache is a security problem rather than an inconvenience. The same
+    // tenant flush covers it, on the same event path and with the same
+    // measured 262 ms contract — a deny rule is a grant, not a special case.
     authz
         .get_ref()
         .as_ref()

@@ -595,6 +595,12 @@ pub const fn per_sec_to_window_limit(per_sec: u32) -> u32 {
 
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
+///
+/// No longer on the request path — [`GrpcSharedRateLimitService::call`] hands
+/// the raw `now` to [`axiam_db::SharedRateLimitCounter::check_at`] instead
+/// (run-5 J1). Kept, and asserted by a test, because [`WINDOW_SECS`] must
+/// keep agreeing with the counter's configured window.
+#[cfg_attr(not(test), allow(dead_code))]
 fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     let epoch = now.timestamp();
     let start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
@@ -865,7 +871,12 @@ where
                 // in-flight upgrade keeps counting against the same
                 // `rate_limit_bucket` records.
                 let key = format!("{endpoint}:{ip}");
-                counter.check(&key, window_start(Utc::now()), limit)
+                // `check_at` (not `check`): the counter derives the window
+                // itself AND sees the offset into it, which is what its
+                // sliding-window mode needs to bound every rolling minute
+                // rather than only the aligned ones (run-5 J1,
+                // `axiam_db::rate_limit_counter::WindowMode`).
+                counter.check_at(&key, Utc::now(), limit)
             }
             // No client-IP key available — fail open; the in-memory governor
             // still makes the real decision. (A counter built with
@@ -903,6 +914,25 @@ mod tests {
             remote_addr: Some(peer),
         });
         req
+    }
+
+    /// [`WINDOW_SECS`] and the shared counter's configured window are one
+    /// contract split across two crates — `call` hands the counter a raw
+    /// `now` and lets it derive the window, so a disagreement here would
+    /// silently size the gRPC buckets against a window nobody enforces.
+    #[test]
+    fn window_secs_matches_the_shared_counters_window() {
+        let counter_window = axiam_db::SharedRateLimitConfig::default().window;
+        assert_eq!(counter_window.as_secs() as i64, WINDOW_SECS);
+    }
+
+    #[test]
+    fn window_start_truncates_to_the_window_boundary() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_045, 0).expect("valid epoch");
+        let start = window_start(now);
+
+        assert_eq!(start.timestamp() % WINDOW_SECS, 0);
+        assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
     }
 
     #[test]

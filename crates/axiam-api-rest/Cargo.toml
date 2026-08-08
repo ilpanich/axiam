@@ -62,6 +62,7 @@ default = ["saml"]
 saml = ["axiam-federation/saml"]
 
 [dev-dependencies]
+axiam-test-support = { workspace = true }
 actix-rt = { workspace = true }
 actix-http = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }

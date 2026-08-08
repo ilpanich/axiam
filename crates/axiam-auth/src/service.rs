@@ -551,45 +551,82 @@ impl<
 
     /// Rotate a refresh token: consume the old one, verify the user
     /// is still active, and issue a new token pair.
+    ///
+    /// # Per-stage timing (A2/J2)
+    ///
+    /// Run 5 measured this endpoint at 545/s and p50 88.8 ms, down from 839/s
+    /// and 47.5 ms in run 4 — the whole distribution shifted right with tight
+    /// medians in both runs, which is the signature of *added serialized work*
+    /// rather than of contention or of a slow tail. Refresh is the one hot
+    /// endpoint that is round-trip-bound rather than CPU-bound, so it carries
+    /// a stage breakdown (`consume_us`, `user_lookup_us`, `session_create_us`,
+    /// `token_mint_us`, `handler_total_us`) on the `auth.refresh` span and as
+    /// one DEBUG event on `target: "axiam::perf"` — the same shape
+    /// `oauth2.client_credentials` uses, and for the same reason: the next
+    /// time this number moves, the stage that moved should be readable off a
+    /// log line instead of bisected for.
+    ///
+    /// Cost is four `Instant::now()` reads and four `Span::record` calls that
+    /// are no-ops when nothing is subscribed — immaterial against a path whose
+    /// cheapest stage is a datastore round trip.
+    ///
+    /// # Datastore round trips: three, not five
+    ///
+    /// The rotation used to issue five sequential statements (session read,
+    /// expiry check, consume, user read, session create) plus a tenant read in
+    /// the REST handler above it. Two are now gone:
+    ///
+    /// - the session read and the consume are one atomic
+    ///   `consume_by_token_hash` (see that method's docs — it also removes the
+    ///   read-then-delete window rather than tolerating it);
+    /// - the handler's per-refresh tenant read is served from a TTL cache.
+    ///
+    /// **No security semantics were weakened to get there.** Single-use
+    /// rotation is still enforced by `RETURN BEFORE` (and now with no window
+    /// at all), the user-status check still happens before a new session is
+    /// minted, and an expired token is still consumed rather than left
+    /// replayable.
+    #[tracing::instrument(
+        name = "auth.refresh",
+        skip(self, input),
+        fields(
+            consume_us = tracing::field::Empty,
+            user_lookup_us = tracing::field::Empty,
+            session_create_us = tracing::field::Empty,
+            token_mint_us = tracing::field::Empty,
+            handler_total_us = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh(&self, input: RefreshInput) -> AxiamResult<RefreshOutput> {
-        // 1. Look up session by token hash.
+        let started = std::time::Instant::now();
+
+        // 1. Atomically find AND consume the session named by this token
+        //    (single-use guarantee, NEW-3). A `None` means no live session
+        //    matched — either the token was never valid, or a concurrent
+        //    refresh already consumed it. Both are the same answer to the
+        //    caller, and both abort BEFORE any new session is minted, so one
+        //    refresh token can never yield two live session lineages.
+        let t_consume = std::time::Instant::now();
         let token_hash = token::hash_refresh_token(&input.raw_refresh_token);
         let session = self
             .session_repo
-            .get_by_token_hash(input.tenant_id, &token_hash)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => {
-                    AuthError::TokenInvalid("refresh token not found or already used".into()).into()
-                }
-                other => other,
+            .consume_by_token_hash(input.tenant_id, &token_hash)
+            .await?
+            .ok_or_else(|| -> AxiamError {
+                AuthError::TokenInvalid("refresh token not found or already used".into()).into()
             })?;
+        let consume_us = t_consume.elapsed().as_micros() as u64;
 
-        // 2. Check session expiry.
+        // 2. Reject an expired session. It has already been consumed by the
+        //    statement above, which is deliberate: an expired refresh token
+        //    must not be left behind to be replayed until the cleanup job
+        //    happens to run.
         if session.expires_at <= Utc::now() {
-            let _ = self
-                .session_repo
-                .invalidate(input.tenant_id, session.id)
-                .await;
             return Err(AuthError::TokenExpired.into());
         }
 
-        // 3. Atomically consume the old session (single-use guarantee, NEW-3).
-        //    `consume` returns false if another concurrent refresh already
-        //    deleted this session — treat that as an invalid/replayed token and
-        //    abort BEFORE minting a new session, so one refresh token can never
-        //    yield two live session lineages (defeats stolen-token reuse).
-        let won = self
-            .session_repo
-            .consume(input.tenant_id, session.id)
-            .await?;
-        if !won {
-            return Err(
-                AuthError::TokenInvalid("refresh token not found or already used".into()).into(),
-            );
-        }
-
-        // 4. Verify user is still active.
+        // 3. Verify user is still active.
+        let t_user = std::time::Instant::now();
         let user = self
             .user_repo
             .get_by_id(input.tenant_id, session.user_id)
@@ -599,8 +636,10 @@ impl<
             user.created_at,
             self.config.email_verification_grace_period_hours,
         )?;
+        let user_lookup_us = t_user.elapsed().as_micros() as u64;
 
-        // 5. Create new session with rotated refresh token.
+        // 4. Create new session with rotated refresh token.
+        let t_create = std::time::Instant::now();
         let raw_refresh = token::generate_refresh_token();
         let new_hash = token::hash_refresh_token(&raw_refresh);
         let expires_at =
@@ -617,8 +656,10 @@ impl<
                 expires_at,
             })
             .await?;
+        let session_create_us = t_create.elapsed().as_micros() as u64;
 
-        // 6. Issue new access token (jti = new session.id per D-15).
+        // 5. Issue new access token (jti = new session.id per D-15).
+        let t_mint = std::time::Instant::now();
         let access_token = token::issue_access_token(
             user.id,
             input.tenant_id,
@@ -628,6 +669,25 @@ impl<
             new_session.id.to_string(),
             AUD_USER,
         )?;
+        let token_mint_us = t_mint.elapsed().as_micros() as u64;
+
+        let handler_total_us = started.elapsed().as_micros() as u64;
+        let span = tracing::Span::current();
+        span.record("consume_us", consume_us);
+        span.record("user_lookup_us", user_lookup_us);
+        span.record("session_create_us", session_create_us);
+        span.record("token_mint_us", token_mint_us);
+        span.record("handler_total_us", handler_total_us);
+        tracing::debug!(
+            target: "axiam::perf",
+            stage = "auth.refresh",
+            consume_us,
+            user_lookup_us,
+            session_create_us,
+            token_mint_us,
+            handler_total_us,
+            "refresh stage timings (A2/J2)"
+        );
 
         Ok(RefreshOutput {
             access_token,

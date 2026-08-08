@@ -65,22 +65,30 @@ GRPC_RATE_LIMIT_RS = os.path.join(
 # reused uniformly here for every endpoint, REST and gRPC alike.
 TOLERANCE = 0.10
 
-# endpoint key -> (k6 scenario filename, human label). Endpoints with no k6
-# scenario in this harness (revoke_per_min: no dedicated scenario;
-# grpc_admin: no ValidateCredentials scenario; grpc_infra: no reflection/health
-# scenario) are listed with scenario=None and reported as "no scenario — not
-# checked" rather than silently omitted.
+# endpoint key -> (k6 scenario filename, human label).
+#
+# Run-5 J1c closed the last three holes: `revoke`, `grpc_admin` and
+# `grpc_infra` had no scenario at all, so a third of the limiter families
+# reported "no scenario — not checked" and the public §7 verdict table could
+# not speak to them. All eight families now have one, which is the point —
+# an unmeasured limiter is an unverified limiter, and the two gRPC ones it
+# left unmeasured were the CPU guard (Argon2id) and the unauthenticated
+# surface (reflection/health).
+#
+# The scenario=None path is kept (not deleted) so that adding a ninth family
+# without a scenario degrades to an honest "not checked" row rather than
+# silently vanishing from the table.
 ENDPOINTS = {
     "login_per_min": ("oauth2_password_login.js", "POST /api/v1/auth/login"),
     "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
     "introspect_per_min": ("token_introspection.js", "POST /oauth2/introspect"),
-    "revoke_per_min": (None, "POST /oauth2/revoke"),
+    "revoke_per_min": ("oauth2_revoke.js", "POST /oauth2/revoke"),
     "authz_check_per_min": ("authz_check_rest.js", "POST /api/v1/authz/check"),
     "authz_batch_per_min": ("authz_batch_rest.js", "POST /api/v1/authz/check/batch (shares authz_check_per_min)"),
     "grpc_authz_per_min": ("authz_check_grpc.js", "gRPC AuthzService/Check (grpc_authz family)"),
     "grpc_identity_per_min": ("userinfo_grpc.js", "gRPC UserInfoService/GetUserInfo (grpc_identity family)"),
-    "grpc_admin_per_min": (None, "gRPC UserService/ValidateCredentials (grpc_admin family, SEC-079 absolute)"),
-    "grpc_infra_per_min": (None, "gRPC reflection + health (grpc_infra family, fixed ceiling)"),
+    "grpc_admin_per_min": ("grpc_admin_validate.js", "gRPC UserService/ValidateCredentials (grpc_admin family, SEC-079 absolute)"),
+    "grpc_infra_per_min": ("grpc_infra.js", "gRPC reflection + health (grpc_infra family, fixed ceiling)"),
 }
 
 

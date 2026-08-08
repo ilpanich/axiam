@@ -40,6 +40,7 @@ webauthn-rs = { workspace = true }
 # webauthn-rs-proto: removed — only webauthn-rs is used directly in axiam-auth; types come through webauthn-rs re-exports
 
 [dev-dependencies]
+axiam-test-support = { workspace = true }
 axiam-db = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }

@@ -738,6 +738,12 @@ applies to production; being "only dev" earns no exemption from it. The
 `cfg!(debug_assertions)` pass-through covers `cargo test` and `cargo run`, which
 is why the CI test and coverage jobs need no flag.
 
+`scripts/check-amqp-transport.py` enforces this at PR time, and CI runs it in
+the Security Scan job. It does not require TLS — plaintext on an ephemeral CI
+broker is a reasonable trade — only that a stack using `amqp://` says so
+explicitly. Without it the sole symptom of a missed stack is a container that
+refuses to boot, which is easy to misread as an unrelated infrastructure fault.
+
 ### Configuration reference
 
 | Variable | Default | Meaning |

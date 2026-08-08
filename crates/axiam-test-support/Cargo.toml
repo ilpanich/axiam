@@ -1,0 +1,13 @@
+[package]
+name = "axiam-test-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared fixtures for AXIAM's test suites. Not published; dev-dependency only."
+publish = false
+
+[dependencies]
+uuid.workspace = true

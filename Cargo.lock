@@ -818,6 +818,7 @@ dependencies = [
  "axiam-core",
  "axiam-db",
  "axiam-email",
+ "axiam-test-support",
  "chrono",
  "futures-lite",
  "hex",
@@ -844,6 +845,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-test-support",
  "bytes",
  "chrono",
  "futures",
@@ -888,6 +890,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
+ "axiam-test-support",
  "base64 0.23.0",
  "chrono",
  "futures",
@@ -947,6 +950,7 @@ dependencies = [
  "argon2",
  "axiam-core",
  "axiam-db",
+ "axiam-test-support",
  "base64 0.23.0",
  "chrono",
  "criterion",
@@ -1014,6 +1018,7 @@ dependencies = [
  "argon2",
  "axiam-auth",
  "axiam-core",
+ "axiam-test-support",
  "base64 0.23.0",
  "chrono",
  "hex",
@@ -1147,6 +1152,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
+ "axiam-test-support",
  "base64 0.23.0",
  "chrono",
  "config",
@@ -1173,6 +1179,13 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "axiam-test-support"
+version = "1.0.0-alpha24"
+dependencies = [
+ "uuid",
 ]
 
 [[package]]

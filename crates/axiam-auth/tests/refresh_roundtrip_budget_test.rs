@@ -37,6 +37,7 @@ use axiam_db::{
     SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealRefreshTokenRepository,
     SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_test_support::test_password;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -184,12 +185,10 @@ async fn refresh_rotation_stays_within_its_datastore_round_trip_budget() {
         .await
         .expect("tenant");
 
-    // Generated per run rather than a literal: this test authenticates, so the
-    // same value has to reach both `create` and `login` — binding it once keeps
-    // them in step and keeps a credential-shaped literal out of the source,
-    // which static scanners flag as a critical secret. Same reasoning as
-    // `fixture_password` in mfa_methods_test.rs.
-    let password = format!("Fx1!{}", Uuid::new_v4().simple());
+    // This test authenticates, so the same value has to reach both `create`
+    // and `login`. The shared helper is memoised per process precisely so that
+    // holds without every caller having to bind it.
+    let password = test_password();
 
     let user = user_repo
         .create(CreateUser {

@@ -41,9 +41,7 @@ async fn setup() -> (Surreal<surrealdb::engine::local::Db>, Uuid) {
     (db, tenant.id)
 }
 
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["Super", "Secret123!"].concat())
-}
+use axiam_test_support::test_password;
 
 // ---------------------------------------------------------------------------
 // Not-found branches

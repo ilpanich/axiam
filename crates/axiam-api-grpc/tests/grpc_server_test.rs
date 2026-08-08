@@ -68,11 +68,7 @@ async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     env_lock().lock().await
 }
 
-/// Test-only user password, built at runtime so credential scanners don't
-/// flag a hard-coded literal (mirrors grpc_units.rs). NOT a real credential.
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["pass", "123456789"].concat())
-}
+use axiam_test_support::test_password;
 
 fn test_auth_config() -> AuthConfig {
     AuthConfig {

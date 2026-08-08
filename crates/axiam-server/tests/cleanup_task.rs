@@ -8,6 +8,7 @@
 //! `cleanup_expired` methods that `CleanupTask` calls, and the watch-shutdown
 //! logic is verified via a standalone tokio task that mimics CleanupTask behaviour.
 
+use axiam_test_support::test_password;
 use std::time::Duration;
 
 use axiam_core::error::{AxiamError, AxiamResult};
@@ -29,15 +30,6 @@ use surrealdb::engine::local::Mem;
 use surrealdb_types::SurrealValue;
 use tokio::sync::watch;
 use uuid::Uuid;
-
-/// Convenience: connect an in-memory DB and run migrations.
-/// Runtime-generated throwaway password for fixture users that are never
-/// authenticated (these tests exercise cleanup/erasure logic, not login).
-/// Deriving it at runtime avoids a hard-coded credential flowing into the
-/// `password` field, which static scanners flag as a critical secret.
-fn fixture_password() -> String {
-    format!("Fx1!{}", Uuid::new_v4().simple())
-}
 
 async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     let db = Surreal::new::<Mem>(()).await.expect("in-memory DB");
@@ -246,7 +238,7 @@ async fn erasure_pipeline_fatal_on_pseudonymize_failure() {
             tenant_id,
             username: "fatal_pseudonymize_user".into(),
             email: "fatal_pseudonymize@example.com".into(),
-            password: fixture_password(),
+            password: test_password(),
             metadata: None,
         })
         .await
@@ -366,7 +358,7 @@ async fn run_erasure_pipeline_success_path_scrubs_audit_anonymizes_user_and_writ
             tenant_id,
             username: "erasure_success_user".into(),
             email: "erasure_success@example.com".into(),
-            password: fixture_password(),
+            password: test_password(),
             metadata: None,
         })
         .await
@@ -637,7 +629,7 @@ async fn run_erasure_pipeline_returns_err_when_erasure_proof_create_fails_after_
             tenant_id,
             username: "proof_fail_user".into(),
             email: "proof_fail@example.com".into(),
-            password: fixture_password(),
+            password: test_password(),
             metadata: None,
         })
         .await
@@ -702,7 +694,7 @@ async fn run_erasure_pipeline_retry_after_success_is_rejected_idempotently() {
             tenant_id,
             username: "retry_user".into(),
             email: "retry@example.com".into(),
-            password: fixture_password(),
+            password: test_password(),
             metadata: None,
         })
         .await

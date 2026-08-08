@@ -13,6 +13,7 @@ members = [
     "crates/axiam-pki",
     "crates/axiam-email",
     "crates/axiam-server",
+    "crates/axiam-test-support",
 ]
 resolver = "3"
 
@@ -95,6 +96,9 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 webauthn-rs-proto = "0.5"
 aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+
+# Shared test fixtures (dev-dependency only; see crates/axiam-test-support)
+axiam-test-support = { path = "crates/axiam-test-support" }
 zeroize = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 

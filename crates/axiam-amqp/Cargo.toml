@@ -27,6 +27,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+axiam-test-support = { workspace = true }
 axiam-db = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }

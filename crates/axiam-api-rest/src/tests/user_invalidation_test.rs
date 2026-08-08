@@ -105,14 +105,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
     }
 }
 
-/// Runtime-built test password. Split so no credential literal appears in the
-/// source (the convention every other suite in this workspace already uses —
-/// e.g. `axiam-db`'s `uncovered_repos_test.rs`), which also keeps CodeQL's
-/// hard-coded-credential rule from flagging a value that is only ever hashed
-/// into a throwaway in-memory database.
-fn test_password() -> String {
-    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["Super", "Secret123!"].concat())
-}
+use axiam_test_support::test_password;
 
 /// Create a target user to mutate, returning its id.
 async fn seed_target(state: &AppState<TestDb>, tenant_id: Uuid) -> Uuid {

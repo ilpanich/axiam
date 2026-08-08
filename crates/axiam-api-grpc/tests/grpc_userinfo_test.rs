@@ -85,14 +85,7 @@ fn test_auth_config() -> AuthConfig {
     }
 }
 
-/// A non-hard-coded test password. UserInfoService never verifies passwords
-/// (identity comes from the bearer token), so the seeded user's password is
-/// irrelevant to these tests — generate a fresh random value each run so there
-/// is no hard-coded credential for CodeQL's `rust/hardcoded-credentials` to
-/// flag. Comfortably exceeds the 12-char minimum.
-fn test_password() -> String {
-    format!("pw-{}", Uuid::new_v4())
-}
+use axiam_test_support::test_password;
 
 /// Mint a short-lived test access token for `(tenant_id, org_id, user_id)`
 /// carrying the given space-delimited scopes.

@@ -81,6 +81,7 @@ saml = ["axiam-api-rest/saml", "axiam-federation/saml"]
 jemalloc = ["dep:tikv-jemallocator"]
 
 [dev-dependencies]
+axiam-test-support = { workspace = true }
 axiam-core = { workspace = true }
 axiam-db = { workspace = true }
 axiam-auth = { workspace = true }

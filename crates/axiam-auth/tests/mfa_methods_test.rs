@@ -24,12 +24,7 @@ use uuid::Uuid;
 
 type Db = surrealdb::engine::local::Db;
 
-/// Runtime-generated throwaway fixture password for users that are only
-/// created (never authenticated) in these tests — avoids a hard-coded
-/// credential literal that static scanners flag as a critical secret.
-fn fixture_password() -> String {
-    format!("Fx1!{}", Uuid::new_v4().simple())
-}
+use axiam_test_support::test_password;
 
 /// Shared setup: in-memory SurrealDB, migrations, org, tenant, active user.
 async fn setup() -> (
@@ -69,7 +64,7 @@ async fn setup() -> (
             tenant_id: tenant.id,
             username: "alice".into(),
             email: "alice@example.com".into(),
-            password: "correct-horse-battery".into(),
+            password: test_password(),
             metadata: None,
         })
         .await
@@ -381,7 +376,7 @@ async fn delete_method_wrong_user_credential_returns_not_found() {
             tenant_id,
             username: "bob".into(),
             email: "bob@example.com".into(),
-            password: fixture_password(),
+            password: test_password(),
             metadata: None,
         })
         .await

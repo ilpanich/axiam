@@ -52,6 +52,11 @@ pub const MAY_IMPERSONATE_GRANT: &str = "urn:axiam:params:oauth:grant-type:may-i
 pub struct TokenExchangeRequest {
     pub subject_token: String,
     pub subject_token_type: String,
+    /// RFC 8693 §2.1. Optional, and the AS picks the default — but a client
+    /// that *names* a type it does not get must be told, not handed an
+    /// access token and left to discover the difference. v1 issues access
+    /// tokens only, so any other explicit value is refused.
+    pub requested_token_type: Option<String>,
     /// Presence of an actor token selects **delegation**; absence selects
     /// **impersonation**, which is off unless the client is granted it.
     pub actor_token: Option<String>,
@@ -155,7 +160,10 @@ pub fn narrow_scopes(
 
 /// Whether a client may impersonate.
 pub fn client_may_impersonate(client: &OAuth2Client) -> bool {
-    client.grant_types.iter().any(|g| g == MAY_IMPERSONATE_GRANT)
+    client
+        .grant_types
+        .iter()
+        .any(|g| g == MAY_IMPERSONATE_GRANT)
 }
 
 /// AXIAM's own two audiences are always addressable — they are not
@@ -210,6 +218,19 @@ where
             return Err(OAuth2Error::UnauthorizedClient(
                 "client is not registered for the token-exchange grant".into(),
             ));
+        }
+
+        // Checked before anything is decoded: a client asking for a refresh
+        // token wants a different thing entirely, and answering it with an
+        // access token would satisfy the request shape while defeating the
+        // lifetime cap the whole grant is built around.
+        if let Some(want) = req.requested_token_type.as_deref()
+            && want != TOKEN_TYPE_ACCESS_TOKEN
+        {
+            return Err(OAuth2Error::InvalidRequest(format!(
+                "unsupported requested_token_type '{want}'; \
+                 v1 issues only {TOKEN_TYPE_ACCESS_TOKEN}"
+            )));
         }
 
         if req.subject_token_type != TOKEN_TYPE_ACCESS_TOKEN {
@@ -286,7 +307,8 @@ where
             .as_deref()
             .map(|s| s.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default();
-        let requested = parse_scopes(req.scope.as_deref()).unwrap_or_else(|| subject_scopes.clone());
+        let requested =
+            parse_scopes(req.scope.as_deref()).unwrap_or_else(|| subject_scopes.clone());
         let granted = narrow_scopes(&requested, &subject_scopes, &client.scopes)?;
 
         // --- audience ---------------------------------------------------------
@@ -322,7 +344,9 @@ where
         let now = Utc::now().timestamp();
         let subject_remaining = subject.exp - now;
         if subject_remaining <= 0 {
-            return Err(OAuth2Error::InvalidGrant("subject token has expired".into()));
+            return Err(OAuth2Error::InvalidGrant(
+                "subject token has expired".into(),
+            ));
         }
         // Never outlives its subject. Without this an exchange launders
         // lifetime: hold a token for thirty seconds, exchange it, hold the
@@ -403,8 +427,12 @@ mod tests {
 
     #[test]
     fn a_scope_the_subject_lacks_is_refused_not_dropped() {
-        let err =
-            narrow_scopes(&v(&["read", "admin"]), &v(&["read"]), &v(&["read", "admin"])).unwrap_err();
+        let err = narrow_scopes(
+            &v(&["read", "admin"]),
+            &v(&["read"]),
+            &v(&["read", "admin"]),
+        )
+        .unwrap_err();
         assert_eq!(err.error_code(), "invalid_scope");
         assert!(
             err.error_description().contains("admin"),

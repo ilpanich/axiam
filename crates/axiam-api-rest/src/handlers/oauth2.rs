@@ -15,9 +15,7 @@ use axiam_oauth2::oidc::{
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
 };
-use axiam_oauth2::token_exchange::{
-    TOKEN_EXCHANGE_GRANT_TYPE, TokenExchangeRequest, TokenExchangeResponse,
-};
+use axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE;
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;

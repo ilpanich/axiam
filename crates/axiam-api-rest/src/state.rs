@@ -71,11 +71,11 @@ use axiam_federation::oidc::OidcFederationService;
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::device_service::DeviceAuthorizationService;
-use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
 };
 use axiam_oauth2::token::TokenService;
+use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
 use surrealdb::Connection;
 use tokio::sync::Semaphore;

@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OAuth2 Token Exchange (RFC 8693, B3).** A service holding a user's access
+  token can exchange it for a *narrower* one —
+  `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` on
+  `POST /oauth2/token`, advertised in OIDC discovery. Previously a mesh caller
+  had two options, both wrong: forward the user's token verbatim
+  (over-privileged, and the second hop cannot tell the caller from the user)
+  or use its own service credentials (right privileges, no user context).
+
+  One rule governs the feature: **an exchange may only ever narrow.** No
+  parameter, configuration or client grant makes the issued token permit
+  something the subject token did not already permit. Concretely:
+
+  - `granted = requested ∩ subject_scopes ∩ client_allowed_scopes`. A
+    requested scope the subject does not hold is **refused** (`invalid_scope`),
+    not silently dropped — silent narrowing produces a token that works for
+    some calls and not others, and the caller finds out at the *next* service.
+    The client's own registration bounds the result even when the subject token
+    is broader, which is what stops a compromised low-privilege service holding
+    an admin's token from minting an admin token.
+  - `exp = now + min(subject_remaining, max_exchange_lifetime)`. The exchanged
+    token never outlives its subject, so an exchange cannot launder lifetime.
+    For the same reason **no refresh token is issued** — one would defeat the
+    cap outright — and naming `requested_token_type=…:refresh_token` is
+    refused rather than answered with an access token.
+  - `audience`/`resource` must be registered to the exchanging client; an
+    unconstrained `aud` is the mesh equivalent of an open redirect.
+
+  **Delegation vs impersonation** is selected by the presence of `actor_token`,
+  and the two are not equally available. Delegation adds an `act` claim naming
+  the actor (nested on re-exchange, capped at depth 3 so a signed token cannot
+  grow an unbounded field). Impersonation issues a token indistinguishable from
+  one the user obtained directly, so it is **off by default** — a client needs
+  the explicit `urn:axiam:params:oauth:grant-type:may-impersonate` grant, and
+  one without it is refused (`unauthorized_client`) rather than quietly
+  downgraded to delegation. Every exchange is audited with client, subject,
+  actor, kind, requested and granted scopes, audience and outcome; for
+  impersonation that record is the *only* evidence the acting party was not the
+  subject.
+
+  v1 accepts AXIAM-issued subject tokens only — accepting another IdP's token
+  means accepting whatever it asserts about the subject, and the trust
+  configuration that makes that safe is its own feature (X4). A cross-tenant
+  subject token answers `invalid_grant` rather than a distinct error, because
+  learning a token is valid *somewhere else* is a tenant-enumeration signal.
+
+  New rate-limit bucket `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` (120): an
+  exchange verifies an inbound JWT, reads the client registration and writes an
+  audit record, and it is what an attacker holding one stolen token would
+  hammer looking for a widening path. See
+  [`docs/api/token-exchange.md`](docs/api/token-exchange.md).
+
 - **OAuth2 Device Authorization Grant is reachable (RFC 8628, B2).** The
   grant's core, storage and state machine landed earlier; nothing was mounted,
   so no device could use it. Now: `POST /oauth2/device_authorization` issues

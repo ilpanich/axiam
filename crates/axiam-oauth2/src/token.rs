@@ -76,6 +76,7 @@ pub struct TokenRequest {
     // service takes, so the grant's own module never sees these Options.
     pub subject_token: Option<String>,
     pub subject_token_type: Option<String>,
+    pub requested_token_type: Option<String>,
     pub actor_token: Option<String>,
     pub actor_token_type: Option<String>,
     pub audience: Option<String>,
@@ -96,6 +97,7 @@ impl TokenRequest {
         Some(crate::token_exchange::TokenExchangeRequest {
             subject_token,
             subject_token_type,
+            requested_token_type: self.requested_token_type.clone().filter(|t| !t.is_empty()),
             actor_token: self.actor_token.clone().filter(|t| !t.is_empty()),
             actor_token_type: self.actor_token_type.clone().filter(|t| !t.is_empty()),
             scope: self.scope.clone(),

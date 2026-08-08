@@ -53,10 +53,10 @@ use axiam_db::{
     DbConfig, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
-    SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
-    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealCertificateRepository, SurrealDeviceGrantRepository, SurrealEmailConfigRepository,
+    SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
@@ -70,8 +70,10 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::JwksCache as Oauth2JwksCache;
 use axiam_oauth2::token::TokenService;
+use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
@@ -687,6 +689,43 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+    );
+
+    // B2 — device authorization grant (RFC 8628).
+    //
+    // `verification_uri` is derived from the OIDC issuer rather than
+    // configured separately: a verification URI on a different origin from
+    // the issuer is a phishing shape, and deriving it means the two cannot
+    // drift. The device is told this URI and a user types it from memory, so
+    // it is the one string in the flow that no client can validate.
+    let device_grant_repo = SurrealDeviceGrantRepository::new(pool.handle_for_repo());
+    let device_verification_uri = format!(
+        "{}/device",
+        config.auth.oauth2_issuer_url.trim_end_matches('/')
+    );
+    let device_authorization_service = DeviceAuthorizationService::new(
+        device_grant_repo.clone(),
+        oauth2_client_repo.clone(),
+        tenant_repo.clone(),
+        SurrealRefreshTokenRepository::new(pool.handle_for_repo()),
+        user_repo.clone(),
+        config.auth.clone(),
+        i64::try_from(config.auth.refresh_token_lifetime_secs)
+            .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+        device_verification_uri,
+    );
+
+    // B3 — token exchange (RFC 8693).
+    //
+    // The ordinary access-token lifetime is the exchanged-token ceiling: an
+    // exchange is a narrowing, so it has no business producing something
+    // longer-lived than a normal token. It is applied on top of "never
+    // outlives its subject", not instead of it.
+    let token_exchange_service = TokenExchangeService::new(
+        tenant_repo.clone(),
+        config.auth.clone(),
+        i64::try_from(config.auth.access_token_lifetime_secs)
+            .expect("access_token_lifetime_secs exceeds i64::MAX"),
     );
 
     // QUAL-07: hoist the 13 per-request service constructions
@@ -1472,6 +1511,13 @@ async fn main() -> std::io::Result<()> {
         oauth2_client_repo: oauth2_client_repo.clone(),
         authorize_service: authorize_service.clone(),
         token_service: token_service.clone(),
+        device_authorization_service: device_authorization_service.clone(),
+        token_exchange_service: token_exchange_service.clone(),
+        device_grant_repo: device_grant_repo.clone(),
+        // The device endpoints size their own governors from this (see
+        // `server.rs`), so the handlers need the same numbers the middleware
+        // was built from — not a second default that could disagree.
+        rate_limit_cfg: config.rate_limit.clone(),
         settings_repo: settings_repo.clone(),
         federation_config_repo: federation_config_repo.clone(),
         federation_link_repo: federation_link_repo.clone(),

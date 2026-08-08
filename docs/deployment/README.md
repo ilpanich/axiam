@@ -724,12 +724,19 @@ rest.
 An `amqps://` connection that fails verification is an error. It does not
 retry in the clear.
 
-### Dev stays plaintext, deliberately
+### Dev, e2e and bench stay plaintext, deliberately
 
-`docker/docker-compose.dev.yml` and the e2e stack still use `amqp://`. That is
-a debug-build convenience and nothing else: **a release binary refuses a
-plaintext broker URL** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true` is set, which
-logs a prominent warning naming exactly what is now readable on the wire.
+`docker/docker-compose.dev.yml`, the e2e stack and the benchmark target still
+use `amqp://`. **A release binary refuses a plaintext broker URL** unless
+`AXIAM__AMQP__ALLOW_PLAINTEXT=true` is set, which logs a prominent warning
+naming exactly what is now readable on the wire — so all three set that flag
+explicitly, each with a comment giving its own reason.
+
+Note that the flag is genuinely required there. These stacks run the *published
+release image*, not a debug build, so the guard applies to them exactly as it
+applies to production; being "only dev" earns no exemption from it. The
+`cfg!(debug_assertions)` pass-through covers `cargo test` and `cargo run`, which
+is why the CI test and coverage jobs need no flag.
 
 ### Configuration reference
 

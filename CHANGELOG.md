@@ -60,9 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING (release builds): a plaintext `amqp://` broker URL is now
-  refused** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true`. Debug builds are
-  unaffected, so `just dev-up` keeps working. Mirrors the existing
-  fail-closed posture for the AMQP signing key.
+  refused** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true`. Mirrors the existing
+  fail-closed posture for the AMQP signing key. Debug builds are unaffected,
+  so `cargo test` and `cargo run` keep working untouched — but note that the
+  dev, e2e and benchmark compose stacks all run the *published release image*
+  and so are subject to the guard like any deployment. All three now set
+  `AXIAM__AMQP__ALLOW_PLAINTEXT=true` explicitly, each with a comment stating
+  why plaintext is acceptable for that stack. Any other release-image stack
+  with an `amqp://` URL must do the same or move to `amqps://`; it will
+  otherwise refuse to start, by design.
 - **Rate limiting: enforcement now matches configuration in both directions.**
   gRPC families were admitting 1/20–1/33 of their configured ceiling under a
   single-IP flood (the shared 60-second pre-check was charging requests the

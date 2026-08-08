@@ -604,6 +604,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             aud: None, // no audience
             scope: None,
             sub_kind: SubjectKind::User,
+            act: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
         let header = Header::new(Algorithm::EdDSA);

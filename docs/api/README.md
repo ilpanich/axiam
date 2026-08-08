@@ -50,6 +50,20 @@ API. The `.proto` files themselves live in
 [`proto/axiam/v1/`](../../proto/axiam/v1/) and are the source of truth —
 `grpc.md` references them by path rather than duplicating their contents.
 
+## OAuth2 device flow
+
+Input-constrained clients (televisions, CLIs, headless commissioning) use the
+Device Authorization Grant. Endpoints, the polling answer table, the
+verification page's API, and the rate-limit reasoning are in
+[`device-flow.md`](device-flow.md).
+
+## OAuth2 token exchange
+
+Services that hold a user's token and need a narrower one to call a second
+service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
+the scope-narrowing rule, the lifetime cap and the error table are in
+[`token-exchange.md`](token-exchange.md).
+
 ## AMQP — AsyncAPI
 
 [`asyncapi.yml`](./asyncapi.yml) is an AsyncAPI 2.6 document describing

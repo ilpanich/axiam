@@ -384,6 +384,9 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             aud: None,
             scope: None,
+            // B3: this fixture is a directly-issued token, not one obtained
+            // through a token exchange, so it carries no actor chain.
+            act: None,
         });
 
         let svc = AuthorizationServiceImpl::new(make_engine(&db), 2);

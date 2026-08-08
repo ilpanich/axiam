@@ -4,6 +4,9 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::repository::UserRepository;
 use axiam_oauth2::authorize::AuthorizeRequest;
+use axiam_oauth2::device_service::{
+    DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
+};
 use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::jwks_cache::JwksCacheResponse;
 use axiam_oauth2::oidc::{
@@ -12,6 +15,7 @@ use axiam_oauth2::oidc::{
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
 };
+use axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE;
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -56,14 +60,19 @@ fn truncate_bytes_on_char_boundary(s: &str) -> String {
 /// Query parameters for the authorization endpoint.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AuthorizeQuery {
-    pub response_type: String,
+    /// Required unless `request_uri` is present (B5 / RFC 9126 §4).
+    pub response_type: Option<String>,
     pub client_id: String,
-    pub redirect_uri: String,
+    /// Required unless `request_uri` is present.
+    pub redirect_uri: Option<String>,
     pub scope: Option<String>,
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    /// B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from
+    /// `/oauth2/par`. Mutually exclusive with the inline parameters above.
+    pub request_uri: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -105,18 +114,82 @@ pub async fn authorize<C: Connection + Clone>(
 ) -> HttpResponse {
     let q = query.into_inner();
 
-    let req = AuthorizeRequest {
-        tenant_id: user.tenant_id,
-        user_id: user.user_id,
-        response_type: q.response_type,
-        client_id: q.client_id,
-        redirect_uri: q.redirect_uri.clone(),
-        scope: q.scope,
-        state: q.state.clone(),
-        code_challenge: q.code_challenge,
-        code_challenge_method: q.code_challenge_method,
-        nonce: q.nonce,
+    // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
+    // `request_uri` and inline parameters is refused rather than merged.
+    // Merging is exactly where parameter confusion lives — an attacker
+    // supplies the inline value they want and lets the pushed copy satisfy
+    // whatever check reads the other one.
+    let req = match q.request_uri {
+        Some(request_uri) => {
+            if axiam_oauth2::par::has_inline_params(
+                q.response_type.as_deref(),
+                q.redirect_uri.as_deref(),
+                q.scope.as_deref(),
+                q.code_challenge.as_deref(),
+            ) {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "request_uri must not be combined with inline \
+                     authorization parameters"
+                        .into(),
+                ));
+            }
+
+            let params = match state
+                .par_service
+                .consume(user.tenant_id, &q.client_id, &request_uri)
+                .await
+            {
+                Ok(params) => params,
+                Err(e) => return build_oauth2_error_response(&e),
+            };
+
+            AuthorizeRequest {
+                tenant_id: user.tenant_id,
+                user_id: user.user_id,
+                response_type: params.response_type,
+                client_id: q.client_id,
+                redirect_uri: params.redirect_uri,
+                scope: params.scope,
+                // `state` and `nonce` come from the pushed request too: they
+                // were the client's to choose at push time, and honouring a
+                // query-string copy would let the browser substitute its own.
+                state: params.state,
+                code_challenge: params.code_challenge,
+                code_challenge_method: params.code_challenge_method,
+                nonce: params.nonce,
+                via_par: true,
+            }
+        }
+        None => {
+            let (Some(response_type), Some(redirect_uri)) = (q.response_type, q.redirect_uri)
+            else {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "response_type and redirect_uri are required unless \
+                     request_uri is used"
+                        .into(),
+                ));
+            };
+            AuthorizeRequest {
+                tenant_id: user.tenant_id,
+                user_id: user.user_id,
+                response_type,
+                client_id: q.client_id,
+                redirect_uri,
+                scope: q.scope,
+                state: q.state,
+                code_challenge: q.code_challenge,
+                code_challenge_method: q.code_challenge_method,
+                nonce: q.nonce,
+                via_par: false,
+            }
+        }
     };
+
+    // Captured before `req` moves: the error path needs the *resolved*
+    // redirect_uri and state, which for a PAR request came from the pushed
+    // parameters rather than the query string.
+    let resolved_redirect_uri = req.redirect_uri.clone();
+    let resolved_state = req.state.clone();
 
     match state.authorize_service.authorize(req).await {
         Ok(resp) => {
@@ -147,13 +220,17 @@ pub async fn authorize<C: Connection + Clone>(
             // been validated. For InvalidClient / redirect_uri
             // errors, return a direct HTTP error instead.
             match &e {
-                OAuth2Error::InvalidClient(_) | OAuth2Error::InvalidRedirectUri(_) => {
-                    build_oauth2_error_response(&e)
-                }
+                // B5: `ParRequired` joins these two because it is raised
+                // BEFORE redirect_uri validation — redirecting would bounce
+                // the user agent to an unvalidated URI that arrived by the
+                // very channel the setting forbids.
+                OAuth2Error::InvalidClient(_)
+                | OAuth2Error::InvalidRedirectUri(_)
+                | OAuth2Error::ParRequired(_) => build_oauth2_error_response(&e),
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
-                    build_error_redirect(&q.redirect_uri, &e, q.state.as_deref())
+                    build_error_redirect(&resolved_redirect_uri, &e, resolved_state.as_deref())
                 }
             }
         }
@@ -199,6 +276,50 @@ pub async fn token<C: Connection + Clone>(
     // input and is what an operator needs to correlate an attack.
     let attempted_client_id = form.client_id.clone();
     let started = std::time::Instant::now();
+
+    // B2 / RFC 8628 §3.4: the device-code grant is served by its own service.
+    // Dispatching here, before `TokenService::exchange`, is the single `match`
+    // arm the device flow costs the rest of the codebase — `TokenService`
+    // never learns that this grant exists.
+    //
+    // Note what is deliberately NOT done: no client authentication. RFC 8628
+    // targets public clients (a television cannot keep a secret), so the
+    // device presents only its `device_code`, which is a 256-bit CSPRNG value
+    // stored as a hash. The device code IS the credential.
+    if grant_type == DEVICE_CODE_GRANT_TYPE {
+        let device_code = match form.device_code.as_deref() {
+            Some(code) if !code.is_empty() => code.to_owned(),
+            _ => {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "device_code is required for the device_code grant".into(),
+                ));
+            }
+        };
+        return match state
+            .device_authorization_service
+            .poll(tenant_id, &device_code)
+            .await
+        {
+            Ok(resp) => HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(resp),
+            // `authorization_pending` and `slow_down` are the NORMAL answers
+            // here — a device polls for as long as the user takes to walk to
+            // another screen — so they are not logged as failures. Treating
+            // the expected path as an error condition would bury the real
+            // ones under it.
+            Err(e) => build_oauth2_error_response(&e),
+        };
+    }
+
+    // B3 / RFC 8693. Like the device grant, its own service behind one match
+    // arm. Unlike the device grant, the exchanging client DOES authenticate —
+    // it is a confidential service, not a television, and an exchange is
+    // precisely the operation that should be attributable.
+    if grant_type == TOKEN_EXCHANGE_GRANT_TYPE {
+        return handle_token_exchange(tenant_id, form, &state).await;
+    }
 
     match state.token_service.exchange(tenant_id, form).await {
         Ok(resp) => {
@@ -693,6 +814,166 @@ fn build_error_redirect(
 
 /// Build an OAuth2 JSON error response with the appropriate HTTP status.
 ///
+/// `POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).
+///
+/// Issues a `device_code` (the secret the device polls with), a short
+/// `user_code` (the string a human reads off a screen and types elsewhere),
+/// and the `verification_uri` to send them to.
+///
+/// **Unauthenticated by design.** RFC 8628 exists for input-constrained public
+/// clients — a television, a CLI, an IoT sensor — none of which can keep a
+/// client secret, so there is no secret to present. What is still verified is
+/// that `client_id` names a real client in this tenant that is registered for
+/// this grant; without that check any string could mint pending grants and
+/// exhaust the user-code space, which is a denial of service against every
+/// legitimate device at once.
+///
+/// The endpoint carries its own rate-limit bucket (see `server.rs`) rather
+/// than sharing the generic token bucket: it is unauthenticated and it
+/// allocates state, which is a different abuse profile from the token
+/// endpoint's.
+#[utoipa::path(
+    post,
+    path = "/oauth2/device_authorization",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = DeviceAuthorizationRequest,
+    ),
+    responses(
+        (status = 200, description = "Device and user codes",
+         body = DeviceAuthorizationResponse),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn device_authorization<C: Connection + Clone>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<DeviceAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+    match state
+        .device_authorization_service
+        .authorize(tenant_id, form.into_inner())
+        .await
+    {
+        Ok(resp) => HttpResponse::Ok()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(resp),
+        Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
+/// The `urn:ietf:params:oauth:grant-type:token-exchange` arm of the token
+/// endpoint (B3).
+///
+/// The form is re-read rather than typed at the route because RFC 8693's
+/// parameters are disjoint from RFC 6749's and actix deserializes one body
+/// once — so `TokenRequest` carries the shared fields and the
+/// exchange-specific ones are pulled from the raw form here.
+async fn handle_token_exchange<C: Connection + Clone>(
+    tenant_id: Uuid,
+    form: TokenRequest,
+    state: &web::Data<AppState<C>>,
+) -> HttpResponse {
+    let (Some(client_id), Some(client_secret)) =
+        (form.client_id.as_deref(), form.client_secret.as_deref())
+    else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidClient(
+            "the token-exchange grant requires client authentication".into(),
+        ));
+    };
+
+    let client = match state
+        .token_service
+        .authenticate_client(tenant_id, client_id, client_secret)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // B3: the exchange's own bucket, applied here rather than as route
+    // middleware because `/oauth2/token` serves every grant and actix
+    // deserializes the body once — the grant is not knowable until the form
+    // has been read, which is after the middleware chain has run.
+    //
+    // Keyed by the authenticated client, deliberately: an exchange always
+    // carries client credentials, so unlike the device endpoints there is a
+    // real identity to key on, and per-IP would collapse a whole mesh behind
+    // one NAT into a single bucket. Counted AFTER authentication so an
+    // unauthenticated caller cannot consume a real client's allowance.
+    //
+    // `check_at` rather than `check`: it derives the window itself so it can
+    // also see the OFFSET into it, which is the sliding-window bound the J1
+    // fix added after run 5 measured boundary over-admission. Re-deriving a
+    // truncated window here would quietly opt this endpoint out of that fix.
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_token_exchange:{}:{}", tenant_id, client.client_id),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.token_exchange_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .json(OAuth2ErrorResponse {
+                error: "slow_down".into(),
+                error_description: "token-exchange rate limit exceeded for this client".into(),
+            });
+    }
+
+    let Some(exchange_req) = form.exchange_request() else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "subject_token and subject_token_type are required for the \
+             token-exchange grant"
+                .into(),
+        ));
+    };
+
+    match state
+        .token_exchange_service
+        .exchange(tenant_id, &client, exchange_req)
+        .await
+    {
+        Ok(outcome) => {
+            // Audited BEFORE the token is returned, not after. For an
+            // impersonation this record is the only surviving evidence that
+            // the acting party was not the subject — the token deliberately
+            // carries no `act` claim — so it must not be lost to a crash
+            // between issuing and logging.
+            tracing::info!(
+                target: "axiam::audit",
+                event = "oauth2.token_exchange",
+                tenant_id = %tenant_id,
+                client_id = %client.client_id,
+                kind = outcome.kind.as_str(),
+                subject = %outcome.subject,
+                actor = outcome.actor.as_deref().unwrap_or("-"),
+                granted_scopes = %outcome.granted_scopes.join(" "),
+                audience = %outcome.audience,
+                "token exchange"
+            );
+            HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(outcome.response)
+        }
+        Err(e) => {
+            tracing::info!(
+                target: "axiam::audit",
+                event = "oauth2.token_exchange",
+                tenant_id = %tenant_id,
+                client_id = %client.client_id,
+                outcome = "refused",
+                error = e.error_code(),
+                "token exchange refused"
+            );
+            build_oauth2_error_response(&e)
+        }
+    }
+}
+
 /// `invalid_client` returns 401 with a `WWW-Authenticate` header per
 /// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
 /// RFC 6749 §5.2 still requires the 401 response to include
@@ -813,5 +1094,131 @@ mod jwks_handler_tests {
         let resp = jwks(req, state).await;
 
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B5 — Pushed Authorization Requests (RFC 9126)
+// ---------------------------------------------------------------------------
+
+/// Form body accepted by `POST /oauth2/par`.
+///
+/// These are the ordinary authorization-request parameters, plus the client
+/// credentials that make the push attributable. `request_uri` is deliberately
+/// absent: RFC 9126 §2.1 forbids pushing one, because a chained push would let
+/// the second request inherit the first's authentication.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PushedAuthorizationRequest {
+    pub client_id: String,
+    pub client_secret: String,
+    pub response_type: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+}
+
+/// `POST /oauth2/par` success body (RFC 9126 §2.2).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PushedAuthorizationResponse {
+    /// Opaque, single-use, `urn:ietf:params:oauth:request_uri:`-prefixed.
+    pub request_uri: String,
+    /// Seconds until the `request_uri` expires.
+    pub expires_in: i64,
+}
+
+/// `POST /oauth2/par` — RFC 9126 (B5).
+///
+/// Accepts an authorization request over a direct, client-authenticated POST
+/// and returns an opaque `request_uri` to put in the browser redirect instead
+/// of the parameters. What travels through the user agent is then a random
+/// string that cannot be edited into meaning something else.
+///
+/// **Authenticated, unlike `/oauth2/device_authorization`.** That is the whole
+/// point: the parameters stop travelling through the browser, and the ones
+/// that arrive are attributable to a client that proved it holds the secret.
+///
+/// Answers `201`, not `200` — RFC 9126 §2.2 specifies Created, and the
+/// response names a resource that did not exist before the call.
+#[utoipa::path(
+    post,
+    path = "/oauth2/par",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = PushedAuthorizationRequest,
+    ),
+    responses(
+        (status = 201, description = "Pushed authorization request stored",
+         body = PushedAuthorizationResponse),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 401, description = "Client authentication failed",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn pushed_authorization_request<C: Connection + Clone>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<PushedAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+    let req = form.into_inner();
+
+    // One secret-verification path in the codebase, shared with the token
+    // endpoint, rather than a second one to keep correct.
+    let client = match state
+        .token_service
+        .authenticate_client(tenant_id, &req.client_id, &req.client_secret)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // Keyed by the authenticated client and counted AFTER authentication, for
+    // the same reasons as the token exchange: PAR always carries credentials
+    // so there is a real identity to key on, per-IP would collapse a whole
+    // deployment behind one NAT into a single bucket, and counting before
+    // authentication would let an unauthenticated caller burn a real client's
+    // allowance.
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_par:{}:{}", tenant_id, client.client_id),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.par_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .json(OAuth2ErrorResponse {
+                error: "slow_down".into(),
+                error_description: "PAR rate limit exceeded for this client".into(),
+            });
+    }
+
+    match state
+        .par_service
+        .push(axiam_oauth2::par::PushedRequest {
+            tenant_id,
+            client_id: client.client_id,
+            response_type: req.response_type,
+            redirect_uri: req.redirect_uri,
+            scope: req.scope,
+            state: req.state,
+            code_challenge: req.code_challenge,
+            code_challenge_method: req.code_challenge_method,
+            nonce: req.nonce,
+        })
+        .await
+    {
+        Ok(resp) => HttpResponse::Created()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(PushedAuthorizationResponse {
+                request_uri: resp.request_uri,
+                expires_in: resp.expires_in,
+            }),
+        Err(e) => build_oauth2_error_response(&e),
     }
 }

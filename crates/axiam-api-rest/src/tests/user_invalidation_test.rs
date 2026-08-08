@@ -101,6 +101,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
             aud: Some("axiam:user".into()),
             scope: None,
             sub_kind: SubjectKind::User,
+            act: None,
         }),
     }
 }

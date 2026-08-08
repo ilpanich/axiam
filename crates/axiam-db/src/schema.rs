@@ -172,6 +172,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "device_grant_rfc8628",
         sql: SCHEMA_V26,
     },
+    Migration {
+        version: 27,
+        name: "oidc_logout_and_par",
+        sql: SCHEMA_V27,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1329,6 +1334,52 @@ DEFINE INDEX IF NOT EXISTS idx_device_grant_user_code
     ON TABLE device_grant FIELDS tenant_id, user_code UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_device_grant_code_hash
     ON TABLE device_grant FIELDS device_code_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v27 — RP-initiated logout, back-channel logout, PAR (B5)
+// -----------------------------------------------------------------------
+//
+// Three additive client-registration fields and one new table. Every
+// existing client keeps working: the two arrays default empty, the URI is
+// optional, and `require_par` defaults false, so a registration that
+// predates this migration behaves exactly as it did.
+//
+// `post_logout_redirect_uris` is deliberately a SEPARATE list from
+// `redirect_uris` rather than a reuse of it. They are allow-lists for
+// different things — one receives an authorization code, the other receives
+// a browser after a session ended — and deployments routinely want the
+// second to be a marketing page that must never be a code destination.
+// Reusing one list would silently widen the code allow-list the first time
+// an operator added a post-logout landing page.
+//
+// `pushed_auth_request` mirrors `device_grant`'s shape for the same reasons:
+// the lookup key is a hash of a 256-bit CSPRNG value (the `request_uri` is a
+// bearer credential for the 60 s it lives, so the plaintext is never
+// stored), and the index on it is UNIQUE globally because the authorize
+// path resolves it on every PAR-initiated login.
+//
+// `consumed` exists rather than deleting the row on use: RFC 9126 requires
+// single-use, and the difference between "never existed" and "already used"
+// is worth having in an audit trail even though both answer
+// `invalid_request` on the wire.
+const SCHEMA_V27: &str = "\
+DEFINE FIELD IF NOT EXISTS post_logout_redirect_uris ON TABLE oauth2_client
+    TYPE array DEFAULT [];
+DEFINE FIELD IF NOT EXISTS post_logout_redirect_uris.* ON TABLE oauth2_client TYPE string;
+DEFINE FIELD IF NOT EXISTS backchannel_logout_uri ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS require_par ON TABLE oauth2_client TYPE bool DEFAULT false;
+
+DEFINE TABLE IF NOT EXISTS pushed_auth_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS request_uri_hash ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS params ON TABLE pushed_auth_request TYPE object FLEXIBLE DEFAULT {};
+DEFINE FIELD IF NOT EXISTS consumed ON TABLE pushed_auth_request TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE pushed_auth_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE pushed_auth_request TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_pushed_auth_request_uri_hash
+    ON TABLE pushed_auth_request FIELDS request_uri_hash UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

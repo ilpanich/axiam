@@ -56,6 +56,15 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // in ROUTE_PERMISSION_MAP (see PATTERNS.md Pitfall 4).
     "/api/v1/authz/check",
     "/api/v1/authz/check/batch",
+    // Device Authorization Grant verification page (B2, RFC 8628 §3.3).
+    // JWT-authenticated and deliberately *not* permission-gated: the endpoint
+    // exists so a user can approve a device for themselves, and approval
+    // records the authenticated caller as the subject the token is minted for.
+    // A named permission would be the wrong gate — it would let an operator
+    // grant "may approve devices" as a capability, when the only thing being
+    // authorised here is the caller acting on their own behalf.
+    "/api/v1/device/verify",
+    "/api/v1/device/decide",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

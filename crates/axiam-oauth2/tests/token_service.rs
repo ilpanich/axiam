@@ -89,7 +89,11 @@ fn test_config() -> AuthConfig {
 
 #[derive(Clone)]
 enum ClientOutcome {
-    Found(OAuth2Client),
+    // Boxed to keep the variants balanced: `OAuth2Client` grew past clippy's
+    // `large_enum_variant` threshold when B5 added its three registration
+    // fields, and `NotFound`/`Db` are unit variants. Same shape as `SaOutcome`
+    // below, which boxes `ServiceAccount` for the same reason.
+    Found(Box<OAuth2Client>),
     NotFound,
     Db,
 }
@@ -170,7 +174,7 @@ impl OAuth2ClientRepository for MockClientRepo {
     }
     async fn get_by_client_id(&self, _t: Uuid, _c: &str) -> AxiamResult<OAuth2Client> {
         match &self.0 {
-            ClientOutcome::Found(c) => Ok(c.clone()),
+            ClientOutcome::Found(c) => Ok((**c).clone()),
             ClientOutcome::NotFound => Err(not_found()),
             ClientOutcome::Db => Err(AxiamError::Database("outage".into())),
         }
@@ -481,19 +485,35 @@ fn legacy_client_secret_hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
-fn make_client(grants: &[&str], scopes: &[&str]) -> OAuth2Client {
-    OAuth2Client {
+/// The tenant every `make_client` row belongs to.
+///
+/// Fixed rather than random because `authenticate_client` re-checks
+/// `client.tenant_id == tenant_id` as defence in depth (the repository lookup
+/// is tenant-scoped in SQL, so the assertion only fires if that predicate is
+/// ever dropped). A per-call random tenant made the fixture assert a property
+/// no real deployment has — a client row belonging to nobody's tenant — and
+/// every revoke/introspect test that passed `Uuid::new_v4()` was silently
+/// exercising a cross-tenant request while claiming to test something else.
+fn client_tenant() -> Uuid {
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001)
+}
+
+fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
+    Box::new(OAuth2Client {
         id: Uuid::new_v4(),
-        tenant_id: Uuid::new_v4(),
+        tenant_id: client_tenant(),
         client_id: "client-1".into(),
         client_secret_hash: hash_client_secret(SECRET),
         name: "Client".into(),
         redirect_uris: vec!["https://app.example.com/cb".into()],
         grant_types: grants.iter().map(|s| s.to_string()).collect(),
         scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
-    }
+    })
 }
 
 fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode {
@@ -579,6 +599,14 @@ fn base_req(grant: &str) -> TokenRequest {
         code_verifier: None,
         refresh_token: None,
         scope: None,
+        device_code: None,
+        subject_token: None,
+        subject_token_type: None,
+        requested_token_type: None,
+        actor_token: None,
+        actor_token_type: None,
+        audience: None,
+        resource: None,
     }
 }
 
@@ -1369,7 +1397,7 @@ async fn revoke_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(Uuid::new_v4(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"))
             .await
             .is_err()
     );
@@ -1384,7 +1412,7 @@ async fn revoke_unknown_token_is_ok() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(Uuid::new_v4(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"))
             .await
             .is_ok()
     );
@@ -1400,7 +1428,7 @@ async fn revoke_owned_token_succeeds() {
         refresh,
     );
     assert!(
-        svc.revoke_token(Uuid::new_v4(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"))
             .await
             .is_ok()
     );
@@ -1416,7 +1444,7 @@ async fn revoke_other_client_token_is_noop_ok() {
         refresh,
     );
     assert!(
-        svc.revoke_token(Uuid::new_v4(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"))
             .await
             .is_ok()
     );
@@ -1444,7 +1472,7 @@ async fn introspect_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.introspect_token(Uuid::new_v4(), introspect_req("t"))
+        svc.introspect_token(client_tenant(), introspect_req("t"))
             .await
             .is_err()
     );
@@ -1452,7 +1480,10 @@ async fn introspect_client_auth_fails() {
 
 #[tokio::test]
 async fn introspect_valid_access_token_same_tenant_active() {
-    let tenant_id = Uuid::new_v4();
+    // The *introspecting client's* tenant, so "same tenant" means the token,
+    // the request and the client all agree — which is the only combination a
+    // real deployment can produce.
+    let tenant_id = client_tenant();
     let cfg = test_config();
     let token = issue_access_token(
         Uuid::new_v4(),
@@ -1501,7 +1532,7 @@ async fn introspect_access_token_other_tenant_inactive() {
     );
     // Introspect under a *different* tenant.
     let resp = svc
-        .introspect_token(Uuid::new_v4(), introspect_req(&token))
+        .introspect_token(client_tenant(), introspect_req(&token))
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1523,7 +1554,7 @@ async fn introspect_refresh_token_active() {
     // Use a non-JWT token so JWT decode fails and refresh lookup runs.
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(Uuid::new_v4(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw))
         .await
         .unwrap();
     assert!(resp.active);
@@ -1546,7 +1577,7 @@ async fn introspect_refresh_token_other_client_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(Uuid::new_v4(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw))
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1562,7 +1593,7 @@ async fn introspect_unknown_token_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(Uuid::new_v4(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw))
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1725,7 +1756,7 @@ async fn introspect_refresh_token_empty_scope_yields_none() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(Uuid::new_v4(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw))
         .await
         .unwrap();
     assert!(resp.active);
@@ -1741,7 +1772,7 @@ async fn introspect_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     let err = svc
-        .introspect_token(Uuid::new_v4(), introspect_req("t"))
+        .introspect_token(client_tenant(), introspect_req("t"))
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), "server_error");
@@ -1757,7 +1788,7 @@ async fn revoke_wrong_secret_is_invalid_client() {
     );
     let mut req = revoke_req("t");
     req.client_secret = "wrong".into();
-    let err = svc.revoke_token(Uuid::new_v4(), req).await.unwrap_err();
+    let err = svc.revoke_token(client_tenant(), req).await.unwrap_err();
     assert_eq!(err.error_code(), "invalid_client");
 }
 

@@ -193,6 +193,15 @@ pub const ENV_INTROSPECT_PER_MIN: &str = "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN"
 pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN`.
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
+/// `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` — B3.
+pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
+pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
+/// `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` — B2, never preset.
+pub const ENV_DEVICE_AUTHORIZATION_PER_MIN: &str =
+    "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN";
+/// `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` — B2, never preset.
+pub const ENV_DEVICE_VERIFY_PER_MIN: &str = "AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN";
 /// `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` — human endpoint, never preset.
 pub const ENV_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__LOGIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` — human endpoint, never preset.
@@ -314,6 +323,51 @@ pub struct RateLimitConfig {
     /// Authz checks are read-only and high-frequency — used by UI permission gating.
     /// Kept in a dedicated bucket so heavy UI use does not consume the login/token limit (D-07).
     pub authz_check_per_min: u32,
+    /// Max `/oauth2/device_authorization` requests per minute per IP
+    /// (default: 12 — B2). Deliberately NOT part of [`MachineLimitPreset`]:
+    /// like the human endpoints above, this one is not sized from capacity.
+    /// It is unauthenticated (RFC 8628 targets public clients that cannot
+    /// hold a secret) and every accepted request ALLOCATES STATE — a pending
+    /// grant plus a user code drawn from a small space. The thing being
+    /// limited is therefore exhaustion of that space, not throughput, and
+    /// raising it to match a benchmark would be sizing the wrong quantity.
+    pub device_authorization_per_min: u32,
+    /// Max `/api/v1/device/verify` + `/api/v1/device/decide` requests per
+    /// minute per IP (default: 10 — B2). This is the brute-force surface for
+    /// user codes, which are 8 characters from a 20-letter alphabet because a
+    /// human has to read them off a screen and type them.
+    ///
+    /// `axiam_oauth2::device::brute_force_attempts_required` is the arithmetic
+    /// this number answers to: at the shipped 10-minute grant lifetime the
+    /// OWASP bar (`charset^len / (rate × lifetime) > 10^6`) permits roughly
+    /// 2 500 attempts per minute, so 10 leaves better than two orders of
+    /// magnitude of margin — and the endpoint is one a human drives by hand,
+    /// so a tight limit costs legitimate users nothing.
+    pub device_verify_per_min: u32,
+    /// Max token-exchange requests per minute per bucket (default: 120 — B3).
+    ///
+    /// Sized alongside `token_per_min` because an exchange IS a token
+    /// request, but kept separate because it is strictly more expensive —
+    /// it verifies an inbound JWT, consults the client registration and
+    /// writes an audit record — and because it is the endpoint an attacker
+    /// holding one stolen token would hammer looking for a widening path.
+    /// A shared bucket would let ordinary token traffic hide that.
+    pub token_exchange_per_min: u32,
+    /// Max `/oauth2/par` requests per minute per authenticated client
+    /// (default: 120 — B5).
+    ///
+    /// Sized like `token_per_min` because the traffic shape is the same: one
+    /// PAR precedes one authorize, which precedes one token request, so a
+    /// deployment that can serve N logins per minute pushes about N. Kept in
+    /// its own bucket because the endpoint ALLOCATES STATE — a stored request
+    /// per call — and sharing the token bucket would let ordinary token
+    /// traffic mask an attempt to fill that store.
+    ///
+    /// Keyed by the authenticated client rather than per-IP: PAR always
+    /// carries client credentials (that is the point of the endpoint), so
+    /// there is a real identity to key on, and per-IP would collapse a whole
+    /// deployment behind one NAT into a single bucket.
+    pub par_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -363,6 +417,12 @@ impl Default for RateLimitConfig {
             introspect_per_min: 600,
             revoke_per_min: 60,
             authz_check_per_min: 1_800,
+            // --- B2 device flow: state-allocating and human-driven --------
+            // Neither is sized from capacity, for the reasons on each field.
+            device_authorization_per_min: 12,
+            device_verify_per_min: 10,
+            token_exchange_per_min: 120,
+            par_per_min: 120,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -525,6 +585,39 @@ impl RateLimitConfig {
         assert!(
             self.authz_check_per_min >= 1,
             "authz_check_per_min must be >= 1"
+        );
+        assert!(
+            self.device_authorization_per_min >= 1,
+            "device_authorization_per_min must be >= 1"
+        );
+        assert!(
+            self.device_verify_per_min >= 1,
+            "device_verify_per_min must be >= 1"
+        );
+        assert!(
+            self.token_exchange_per_min >= 1,
+            "token_exchange_per_min must be >= 1"
+        );
+        assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
+        // B2: the user-code brute-force bound is arithmetic, not judgement, so
+        // it is asserted rather than commented. `device_verify_per_min` gates
+        // guessing against a code space of 20^8 over the grant's 10-minute
+        // lifetime; OWASP wants better than 10^6 expected attempts. An
+        // operator who raises this knob past that point has silently turned a
+        // typed 8-character code into a guessable one, which is exactly the
+        // kind of change that should fail at startup rather than in an
+        // incident review.
+        let expected_attempts = axiam_oauth2::device::brute_force_attempts_required(
+            self.device_verify_per_min as u64,
+            axiam_oauth2::device::DEFAULT_EXPIRES_IN_SECS,
+        );
+        assert!(
+            expected_attempts > 1e6,
+            "device_verify_per_min={} leaves only {expected_attempts:.0} expected guesses \
+             against a live user code over its {}s lifetime — below the 10^6 bar. \
+             Lower the limit (shipped default: 10).",
+            self.device_verify_per_min,
+            axiam_oauth2::device::DEFAULT_EXPIRES_IN_SECS,
         );
     }
 }

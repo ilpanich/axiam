@@ -39,17 +39,19 @@ pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, Rea
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealConsentRepository, SurrealEmailConfigRepository,
-    SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
-    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealCertificateRepository, SurrealConsentRepository, SurrealDeviceGrantRepository,
+    SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
+    SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 
 /// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because

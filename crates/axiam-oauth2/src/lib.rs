@@ -6,5 +6,7 @@ pub mod device_service;
 pub mod error;
 pub mod jwks_cache;
 pub mod oidc;
+pub mod par;
 pub mod pkce;
 pub mod token;
+pub mod token_exchange;

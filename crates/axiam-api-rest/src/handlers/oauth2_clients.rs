@@ -27,6 +27,19 @@ pub struct CreateOAuth2ClientRequest {
     pub grant_types: Vec<String>,
     /// Scopes the client may request.
     pub scopes: Vec<String>,
+    /// B5 — allow-list for RP-initiated logout's `post_logout_redirect_uri`.
+    /// Separate from `redirect_uris` on purpose: that list receives
+    /// authorization codes, this one receives a browser after logout.
+    #[serde(default)]
+    pub post_logout_redirect_uris: Vec<String>,
+    /// B5 — where OIDC back-channel logout tokens are delivered. Omit for a
+    /// client that does not participate.
+    #[serde(default)]
+    pub backchannel_logout_uri: Option<String>,
+    /// B5 — require this client to push its authorization parameters to
+    /// `/oauth2/par` (RFC 9126) rather than sending them through the browser.
+    #[serde(default)]
+    pub require_par: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -35,6 +48,11 @@ pub struct UpdateOAuth2ClientRequest {
     pub redirect_uris: Option<Vec<String>>,
     pub grant_types: Option<Vec<String>>,
     pub scopes: Option<Vec<String>>,
+    pub post_logout_redirect_uris: Option<Vec<String>>,
+    /// Pass an empty string to clear a previously registered URI — the one
+    /// edit an operator makes when an RP is decommissioned.
+    pub backchannel_logout_uri: Option<String>,
+    pub require_par: Option<bool>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -188,6 +206,9 @@ pub async fn create<C: Connection + Clone>(
             redirect_uris: req.redirect_uris,
             grant_types: req.grant_types,
             scopes: req.scopes,
+            post_logout_redirect_uris: req.post_logout_redirect_uris,
+            backchannel_logout_uri: req.backchannel_logout_uri,
+            require_par: req.require_par,
         })
         .await?;
 
@@ -350,6 +371,9 @@ pub async fn update<C: Connection + Clone>(
                 redirect_uris: req.redirect_uris,
                 grant_types: req.grant_types,
                 scopes: req.scopes,
+                post_logout_redirect_uris: req.post_logout_redirect_uris,
+                backchannel_logout_uri: req.backchannel_logout_uri,
+                require_par: req.require_par,
             },
         )
         .await?;

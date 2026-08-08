@@ -330,6 +330,37 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )
+            // B2 / RFC 8628 §3.1. Its own bucket rather than the token
+            // endpoint's: this one is unauthenticated AND every accepted
+            // request allocates state (a pending grant plus a user code drawn
+            // from a deliberately small, human-typable space). Sharing the
+            // token bucket would let ordinary token traffic pay for — or mask
+            // — an attempt to exhaust that space. Per-IP, never client-keyed:
+            // RFC 8628 clients are public, so `client_id` is caller-supplied
+            // and worthless as a bucket key here.
+            .service(
+                web::resource("/device_authorization")
+                    .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_device_authorization",
+                        rate_limit_cfg.device_authorization_per_min,
+                    ))
+                    .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
+            )
+            // B5 / RFC 9126. Its own bucket, and unlike
+            // `/device_authorization` this one is client-keyed: PAR always
+            // carries client credentials, so there is a real identity to key
+            // on, and the per-client check happens inside the handler after
+            // authentication so an unauthenticated caller cannot burn a real
+            // client's allowance. The governor here is the per-IP floor that
+            // keeps unauthenticated flooding off the authentication path.
+            .service(
+                web::resource("/par")
+                    .wrap(build_governor(rate_limit_cfg.par_per_min))
+                    .route(
+                        web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
+                    ),
+            )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );
@@ -337,6 +368,40 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware) // SEC-046: CSRF protection on all /api/v1 CRUD routes
             .app_data(web::JsonConfig::default().limit(65_536)) // CQ-B21: body size limit
+            // B2 — the human half of RFC 8628, deliberately inside /api/v1
+            // rather than under /oauth2. Two properties come from that
+            // placement and both are load-bearing:
+            //
+            //   * AuthzMiddleware: approving a device grant records the
+            //     approver as the subject the eventual token is minted for,
+            //     so the caller must be an authenticated human.
+            //   * CsrfMiddleware: a user code is short and typed, so another
+            //     origin can plausibly know one. Double-submit is what stops
+            //     an attacker's page silently POSTing an approval on a
+            //     victim's session — the device-code phishing shape RFC 8628
+            //     §5.4 warns about, from the other direction.
+            //
+            // Their shared bucket is the user-code brute-force bound; see
+            // `RateLimitConfig::device_verify_per_min`, whose `validate()`
+            // asserts the OWASP arithmetic rather than trusting the comment.
+            .service(
+                web::resource("/device/verify")
+                    .wrap(build_governor(rate_limit_cfg.device_verify_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "device_verify",
+                        rate_limit_cfg.device_verify_per_min,
+                    ))
+                    .route(web::get().to(handlers::device::verify::<C>)),
+            )
+            .service(
+                web::resource("/device/decide")
+                    .wrap(build_governor(rate_limit_cfg.device_verify_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "device_decide",
+                        rate_limit_cfg.device_verify_per_min,
+                    ))
+                    .route(web::post().to(handlers::device::decide::<C>)),
+            )
             .service(
                 web::resource("/organizations")
                     .route(web::post().to(handlers::organizations::create::<C>))

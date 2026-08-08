@@ -72,6 +72,12 @@ pub struct DeviceAuthorizationResponse {
 }
 
 /// Device-flow service.
+///
+/// `Clone` for the same reason `TokenService` is: the REST layer holds it in
+/// `AppState`, which actix clones per worker thread. Every field is either a
+/// cheap repository handle or configuration, so a clone is a handful of
+/// `Arc` bumps rather than a copy of anything.
+#[derive(Clone)]
 pub struct DeviceAuthorizationService<DG, OC, TR, RT, UR> {
     device_repo: DG,
     client_repo: OC,

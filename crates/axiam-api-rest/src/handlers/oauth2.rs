@@ -4,13 +4,13 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::repository::UserRepository;
 use axiam_oauth2::authorize::AuthorizeRequest;
+use axiam_oauth2::device_service::{
+    DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
+};
 use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::jwks_cache::JwksCacheResponse;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document,
-};
-use axiam_oauth2::device_service::{
-    DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
 };
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,

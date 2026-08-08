@@ -243,7 +243,7 @@ async fn seed_grant_with_interval(
 macro_rules! post_token {
     ($app:expr, $tenant_id:expr, $body:expr) => {{
         let req = test::TestRequest::post()
-        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
             .insert_header(("content-type", "application/x-www-form-urlencoded"))
             .set_payload($body.to_string())
@@ -297,7 +297,10 @@ async fn device_authorization_issues_both_codes_and_a_verification_uri() {
             .unwrap()
             .contains(body["user_code"].as_str().unwrap())
     );
-    assert_eq!(body["expires_in"].as_u64().unwrap(), DEFAULT_EXPIRES_IN_SECS);
+    assert_eq!(
+        body["expires_in"].as_u64().unwrap(),
+        DEFAULT_EXPIRES_IN_SECS
+    );
     assert!(body["interval"].as_u64().unwrap() >= 1);
 }
 
@@ -318,7 +321,10 @@ async fn device_authorization_rejects_an_unknown_client() {
     let resp = test::call_service(&app, req).await;
     // Without this check any string could mint pending grants and exhaust the
     // user-code space — a denial of service against every real device at once.
-    assert!(resp.status().is_client_error(), "unknown client was accepted");
+    assert!(
+        resp.status().is_client_error(),
+        "unknown client was accepted"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +335,11 @@ async fn device_authorization_rejects_an_unknown_client() {
 async fn polling_without_a_device_code_is_invalid_request() {
     let f = setup().await;
     let app = test_app!(f);
-    let (status, body) = post_token!(app, f.tenant_id, format!("grant_type={}", urlencoding(DEVICE_CODE_GRANT_TYPE)));
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!("grant_type={}", urlencoding(DEVICE_CODE_GRANT_TYPE))
+    );
     assert_eq!(status, 400);
     assert_eq!(body["error"], "invalid_request");
 }
@@ -340,10 +350,14 @@ async fn polling_a_pending_grant_answers_authorization_pending() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
 
-    let (status, body) = post_token!(app, f.tenant_id, format!(
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
             "grant_type={}&device_code={device_code}",
             urlencoding(DEVICE_CODE_GRANT_TYPE)
-        ));
+        )
+    );
     // This is the NORMAL answer for most of a device flow's life, and it is
     // still an HTTP 400 with an OAuth2 error body per the RFC.
     assert_eq!(status, 400);
@@ -356,10 +370,14 @@ async fn polling_a_denied_grant_answers_access_denied_so_the_device_can_stop() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Denied, 600).await;
 
-    let (status, body) = post_token!(app, f.tenant_id, format!(
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
             "grant_type={}&device_code={device_code}",
             urlencoding(DEVICE_CODE_GRANT_TYPE)
-        ));
+        )
+    );
     assert_eq!(status, 400);
     // Distinct from `authorization_pending` on purpose: a device that has
     // been refused should stop immediately rather than poll out the full
@@ -373,10 +391,14 @@ async fn polling_an_expired_grant_answers_expired_token() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, -1).await;
 
-    let (status, body) = post_token!(app, f.tenant_id, format!(
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
             "grant_type={}&device_code={device_code}",
             urlencoding(DEVICE_CODE_GRANT_TYPE)
-        ));
+        )
+    );
     assert_eq!(status, 400);
     assert_eq!(body["error"], "expired_token");
 }
@@ -385,10 +407,14 @@ async fn polling_an_expired_grant_answers_expired_token() {
 async fn an_unknown_device_code_is_invalid_grant() {
     let f = setup().await;
     let app = test_app!(f);
-    let (status, body) = post_token!(app, f.tenant_id, format!(
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
             "grant_type={}&device_code=nothing-like-a-real-code",
             urlencoding(DEVICE_CODE_GRANT_TYPE)
-        ));
+        )
+    );
     assert_eq!(status, 400);
     assert_eq!(body["error"], "invalid_grant");
 }
@@ -491,7 +517,7 @@ async fn verify_answers_identically_for_unknown_expired_and_decided_codes() {
     // attacker is guessing are live.
     for code in [expired.as_str(), denied.as_str(), "ZZZZ9999"] {
         let req = test::TestRequest::get()
-        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri(&format!("/api/v1/device/verify?user_code={code}"))
             .insert_header(("Authorization", format!("Bearer {token}")))
             .to_request();
@@ -499,7 +525,10 @@ async fn verify_answers_identically_for_unknown_expired_and_decided_codes() {
         assert_eq!(resp.status().as_u16(), 200, "code {code}");
         let body: Value = test::read_body_json(resp).await;
         assert_eq!(body["found"], false, "code {code} leaked its state");
-        assert!(body.get("client_id").is_none(), "code {code} leaked a client");
+        assert!(
+            body.get("client_id").is_none(),
+            "code {code} leaked a client"
+        );
     }
 }
 
@@ -525,10 +554,14 @@ async fn approving_lets_the_device_collect_its_tokens() {
 
     // End to end: the poll that was answering `authorization_pending` a moment
     // ago now returns tokens.
-    let (status, tokens) = post_token!(app, f.tenant_id, format!(
+    let (status, tokens) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
             "grant_type={}&device_code={device_code}",
             urlencoding(DEVICE_CODE_GRANT_TYPE)
-        ));
+        )
+    );
     assert_eq!(status, 200, "post-approval poll returned {tokens:?}");
     assert!(!tokens["access_token"].as_str().unwrap().is_empty());
 }
@@ -544,7 +577,7 @@ async fn deciding_twice_reports_failure_rather_than_overwriting() {
         let token = token.clone();
         let user_code = user_code.clone();
         test::TestRequest::post()
-        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri("/api/v1/device/decide")
             .insert_header(("Authorization", format!("Bearer {token}")))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -583,7 +616,8 @@ async fn discovery_advertises_the_device_endpoint_and_grant() {
         body["device_authorization_endpoint"],
         "https://id.test.example/oauth2/device_authorization"
     );
-    let grants: Vec<String> = serde_json::from_value(body["grant_types_supported"].clone()).unwrap();
+    let grants: Vec<String> =
+        serde_json::from_value(body["grant_types_supported"].clone()).unwrap();
     assert!(
         grants.iter().any(|g| g == DEVICE_CODE_GRANT_TYPE),
         "discovery advertises {grants:?}, missing {DEVICE_CODE_GRANT_TYPE}"

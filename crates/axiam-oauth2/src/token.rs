@@ -229,54 +229,6 @@ where
     /// — strictly less than the `String` the previous `hash_client_secret`
     /// allocated per request. The DB write happens at most once per legacy
     /// client, on its first authentication after the upgrade.
-    /// Authenticate a confidential client and return its registration row
-    /// (B3).
-    ///
-    /// Every grant this service implements authenticates its client inline and
-    /// keeps the row private, which is right for them — they need nothing else
-    /// from it. Token exchange does: the client's registered scopes bound what
-    /// an exchange may grant, and its registered URIs bound what audiences it
-    /// may address. Rather than give the exchange service its own copy of the
-    /// client repository and its own secret-verification path — two places to
-    /// keep the OBS-1 hash-upgrade behaviour correct — it borrows this one.
-    ///
-    /// The error taxonomy is deliberately the same as the client-credentials
-    /// branch's: an unknown client and a wrong secret are both
-    /// `invalid_client` with the identical `CLIENT_AUTH_FAILED` description,
-    /// so an unauthenticated caller cannot use this endpoint to learn which
-    /// client ids exist (SEC-086), and a datastore outage is `server_error`
-    /// rather than masquerading as bad credentials (QUAL-03/D-11).
-    pub async fn authenticate_client(
-        &self,
-        tenant_id: Uuid,
-        client_id: &str,
-        client_secret: &str,
-    ) -> Result<OAuth2Client, OAuth2Error> {
-        let client = self
-            .client_repo
-            .get_by_client_id(tenant_id, client_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
-                }
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-
-        // Defence in depth: the lookup above is tenant-scoped in SQL, so this
-        // can only fire if that predicate is dropped or a repository ignores
-        // `tenant_id` — which is exactly the regression worth catching, since
-        // otherwise the cross-tenant property lives entirely in a WHERE clause
-        // two crates away.
-        if client.tenant_id != tenant_id {
-            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
-        }
-
-        self.verify_client_secret(tenant_id, &client, client_secret)
-            .await?;
-        Ok(client)
-    }
-
     async fn verify_client_secret(
         &self,
         tenant_id: Uuid,
@@ -1242,13 +1194,24 @@ where
         })
     }
 
-    /// Verify client credentials. Shared by revoke and introspect.
-    async fn authenticate_client(
+    /// Verify client credentials and return the authenticated registration.
+    ///
+    /// Shared by revoke, introspect, and — since B3 — the token-exchange
+    /// grant. The first two discard the returned row; the exchange needs it,
+    /// because the client's registered scopes bound what an exchange may
+    /// grant and its registered URIs bound which audiences it may address.
+    ///
+    /// Returning the row rather than `()` is what keeps ONE
+    /// secret-verification path in this crate. The alternative — a second
+    /// method for the one caller that needs the row — would mean two places
+    /// to keep the OBS-1 transparent-hash-upgrade behaviour correct, and the
+    /// one that drifted would be the one nobody was looking at.
+    pub async fn authenticate_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<(), OAuth2Error> {
+    ) -> Result<OAuth2Client, OAuth2Error> {
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
@@ -1267,9 +1230,18 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
+        // Defence in depth. The lookup above is tenant-scoped in SQL, so this
+        // can only fire if that predicate is dropped or a repository
+        // implementation ignores `tenant_id` — which is exactly the
+        // regression worth catching, since otherwise the cross-tenant
+        // property lives entirely in a WHERE clause two crates away.
+        if client.tenant_id != tenant_id {
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        }
+
         self.verify_client_secret(tenant_id, &client, client_secret)
             .await?;
 
-        Ok(())
+        Ok(client)
     }
 }

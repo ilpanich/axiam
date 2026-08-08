@@ -834,14 +834,16 @@ async fn handle_token_exchange<C: Connection + Clone>(
     // real identity to key on, and per-IP would collapse a whole mesh behind
     // one NAT into a single bucket. Counted AFTER authentication so an
     // unauthenticated caller cannot consume a real client's allowance.
-    let window_start = chrono::Utc::now().duration_trunc(chrono::TimeDelta::minutes(1));
-    if let Ok(window_start) = window_start
-        && !state.shared_rate_limit.check(
-            &format!("oauth2_token_exchange:{}:{}", tenant_id, client.client_id),
-            window_start,
-            state.rate_limit_cfg.token_exchange_per_min,
-        )
-    {
+    //
+    // `check_at` rather than `check`: it derives the window itself so it can
+    // also see the OFFSET into it, which is the sliding-window bound the J1
+    // fix added after run 5 measured boundary over-admission. Re-deriving a
+    // truncated window here would quietly opt this endpoint out of that fix.
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_token_exchange:{}:{}", tenant_id, client.client_id),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.token_exchange_per_min,
+    ) {
         return HttpResponse::TooManyRequests()
             .append_header(("Cache-Control", "no-store"))
             .json(OAuth2ErrorResponse {

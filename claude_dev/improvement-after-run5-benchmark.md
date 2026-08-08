@@ -548,11 +548,15 @@ PAR expiry/one-time-use tests.
 **Model: Sonnet 5** (specs are precise; reuses existing OIDC/webhook
 infrastructure). Opus 5 review in F4.
 
-## B6 — Explicitly deferred (recorded so the comparison table is honest)
+## B6 — Formerly deferred items — now scheduled as X1–X5
 
-Zitadel Actions-style scripting, UMA 2.0 permission tickets, WebAuthn
-attestation policy enforcement (metadata service), external-IdP token
-exchange, FAPI certification run. Revisit post-v1.0. **No task spawned.**
+Zitadel Actions-style scripting (→ **Reactors**, AMQP-native external
+actors), UMA 2.0 permission tickets, WebAuthn attestation policy
+enforcement (FIDO MDS3), external-IdP token exchange, FAPI 2.0
+certification run (incl. the OIDF fee-waiver letter). Activated per
+operator decision of 2026-08-07 — detailed instructions, sequencing and
+model recommendations in
+[`extra-B-track-features.md`](extra-B-track-features.md).
 
 ---
 

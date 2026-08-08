@@ -60,10 +60,10 @@ use axiam_db::{
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealPushedAuthRequestRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -72,6 +72,7 @@ use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::JwksCache as Oauth2JwksCache;
+use axiam_oauth2::par::ParService;
 use axiam_oauth2::token::TokenService;
 use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
@@ -726,6 +727,14 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         i64::try_from(config.auth.access_token_lifetime_secs)
             .expect("access_token_lifetime_secs exceeds i64::MAX"),
+    );
+
+    // B5 / RFC 9126. Composed here at the root, not lazily: an AppState field
+    // that only the test builder populates is exactly the gap that left B2's
+    // grant unreachable in a real deployment.
+    let par_service = ParService::new(
+        oauth2_client_repo.clone(),
+        SurrealPushedAuthRequestRepository::new(pool.handle_for_repo()),
     );
 
     // QUAL-07: hoist the 13 per-request service constructions
@@ -1513,6 +1522,7 @@ async fn main() -> std::io::Result<()> {
         token_service: token_service.clone(),
         device_authorization_service: device_authorization_service.clone(),
         token_exchange_service: token_exchange_service.clone(),
+        par_service: par_service.clone(),
         device_grant_repo: device_grant_repo.clone(),
         // The device endpoints size their own governors from this (see
         // `server.rs`), so the handlers need the same numbers the middleware

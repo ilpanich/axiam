@@ -60,10 +60,11 @@ use axiam_db::{
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebhookRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -74,6 +75,7 @@ use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
 };
+use axiam_oauth2::par::ParService;
 use axiam_oauth2::token::TokenService;
 use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
@@ -192,6 +194,12 @@ pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
 /// codebase rather than two to keep correct.
 pub type TokenExchangeServiceT<C> = TokenExchangeService<SurrealTenantRepository<C>>;
 
+/// B5 — RFC 9126 pushed authorization requests. Two repositories: the client
+/// registry (to validate `redirect_uri` at push time, while the client is
+/// authenticated) and the pushed-request store.
+pub type ParServiceT<C> =
+    ParService<SurrealOAuth2ClientRepository<C>, SurrealPushedAuthRequestRepository<C>>;
+
 pub type PasswordResetServiceT<C> = PasswordResetService<
     SurrealUserRepository<C>,
     axiam_db::SurrealPasswordResetTokenRepository<C>,
@@ -298,6 +306,8 @@ pub struct AppState<C: Connection + Clone> {
     pub device_authorization_service: DeviceAuthorizationServiceT<C>,
     /// B3 — token exchange (RFC 8693).
     pub token_exchange_service: TokenExchangeServiceT<C>,
+    /// B5 — pushed authorization requests (RFC 9126).
+    pub par_service: ParServiceT<C>,
     pub device_grant_repo: SurrealDeviceGrantRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
@@ -483,6 +493,10 @@ impl<C: Connection + Clone> AppState<C> {
             "{}/device",
             auth_config.oauth2_issuer_url.trim_end_matches('/')
         );
+        let par_service = ParService::new(
+            oauth2_client_repo.clone(),
+            SurrealPushedAuthRequestRepository::new(db.clone()),
+        );
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
             oauth2_client_repo.clone(),
@@ -561,6 +575,7 @@ impl<C: Connection + Clone> AppState<C> {
             authorize_service,
             token_service,
             device_authorization_service,
+            par_service,
             token_exchange_service,
             device_grant_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),

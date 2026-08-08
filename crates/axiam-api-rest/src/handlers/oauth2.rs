@@ -60,14 +60,19 @@ fn truncate_bytes_on_char_boundary(s: &str) -> String {
 /// Query parameters for the authorization endpoint.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AuthorizeQuery {
-    pub response_type: String,
+    /// Required unless `request_uri` is present (B5 / RFC 9126 §4).
+    pub response_type: Option<String>,
     pub client_id: String,
-    pub redirect_uri: String,
+    /// Required unless `request_uri` is present.
+    pub redirect_uri: Option<String>,
     pub scope: Option<String>,
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    /// B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from
+    /// `/oauth2/par`. Mutually exclusive with the inline parameters above.
+    pub request_uri: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -109,18 +114,82 @@ pub async fn authorize<C: Connection + Clone>(
 ) -> HttpResponse {
     let q = query.into_inner();
 
-    let req = AuthorizeRequest {
-        tenant_id: user.tenant_id,
-        user_id: user.user_id,
-        response_type: q.response_type,
-        client_id: q.client_id,
-        redirect_uri: q.redirect_uri.clone(),
-        scope: q.scope,
-        state: q.state.clone(),
-        code_challenge: q.code_challenge,
-        code_challenge_method: q.code_challenge_method,
-        nonce: q.nonce,
+    // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
+    // `request_uri` and inline parameters is refused rather than merged.
+    // Merging is exactly where parameter confusion lives — an attacker
+    // supplies the inline value they want and lets the pushed copy satisfy
+    // whatever check reads the other one.
+    let req = match q.request_uri {
+        Some(request_uri) => {
+            if axiam_oauth2::par::has_inline_params(
+                q.response_type.as_deref(),
+                q.redirect_uri.as_deref(),
+                q.scope.as_deref(),
+                q.code_challenge.as_deref(),
+            ) {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "request_uri must not be combined with inline \
+                     authorization parameters"
+                        .into(),
+                ));
+            }
+
+            let params = match state
+                .par_service
+                .consume(user.tenant_id, &q.client_id, &request_uri)
+                .await
+            {
+                Ok(params) => params,
+                Err(e) => return build_oauth2_error_response(&e),
+            };
+
+            AuthorizeRequest {
+                tenant_id: user.tenant_id,
+                user_id: user.user_id,
+                response_type: params.response_type,
+                client_id: q.client_id,
+                redirect_uri: params.redirect_uri,
+                scope: params.scope,
+                // `state` and `nonce` come from the pushed request too: they
+                // were the client's to choose at push time, and honouring a
+                // query-string copy would let the browser substitute its own.
+                state: params.state,
+                code_challenge: params.code_challenge,
+                code_challenge_method: params.code_challenge_method,
+                nonce: params.nonce,
+                via_par: true,
+            }
+        }
+        None => {
+            let (Some(response_type), Some(redirect_uri)) = (q.response_type, q.redirect_uri)
+            else {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "response_type and redirect_uri are required unless \
+                     request_uri is used"
+                        .into(),
+                ));
+            };
+            AuthorizeRequest {
+                tenant_id: user.tenant_id,
+                user_id: user.user_id,
+                response_type,
+                client_id: q.client_id,
+                redirect_uri,
+                scope: q.scope,
+                state: q.state,
+                code_challenge: q.code_challenge,
+                code_challenge_method: q.code_challenge_method,
+                nonce: q.nonce,
+                via_par: false,
+            }
+        }
     };
+
+    // Captured before `req` moves: the error path needs the *resolved*
+    // redirect_uri and state, which for a PAR request came from the pushed
+    // parameters rather than the query string.
+    let resolved_redirect_uri = req.redirect_uri.clone();
+    let resolved_state = req.state.clone();
 
     match state.authorize_service.authorize(req).await {
         Ok(resp) => {
@@ -151,13 +220,17 @@ pub async fn authorize<C: Connection + Clone>(
             // been validated. For InvalidClient / redirect_uri
             // errors, return a direct HTTP error instead.
             match &e {
-                OAuth2Error::InvalidClient(_) | OAuth2Error::InvalidRedirectUri(_) => {
-                    build_oauth2_error_response(&e)
-                }
+                // B5: `ParRequired` joins these two because it is raised
+                // BEFORE redirect_uri validation — redirecting would bounce
+                // the user agent to an unvalidated URI that arrived by the
+                // very channel the setting forbids.
+                OAuth2Error::InvalidClient(_)
+                | OAuth2Error::InvalidRedirectUri(_)
+                | OAuth2Error::ParRequired(_) => build_oauth2_error_response(&e),
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
-                    build_error_redirect(&q.redirect_uri, &e, q.state.as_deref())
+                    build_error_redirect(&resolved_redirect_uri, &e, resolved_state.as_deref())
                 }
             }
         }
@@ -1021,5 +1094,131 @@ mod jwks_handler_tests {
         let resp = jwks(req, state).await;
 
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B5 — Pushed Authorization Requests (RFC 9126)
+// ---------------------------------------------------------------------------
+
+/// Form body accepted by `POST /oauth2/par`.
+///
+/// These are the ordinary authorization-request parameters, plus the client
+/// credentials that make the push attributable. `request_uri` is deliberately
+/// absent: RFC 9126 §2.1 forbids pushing one, because a chained push would let
+/// the second request inherit the first's authentication.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PushedAuthorizationRequest {
+    pub client_id: String,
+    pub client_secret: String,
+    pub response_type: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+}
+
+/// `POST /oauth2/par` success body (RFC 9126 §2.2).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PushedAuthorizationResponse {
+    /// Opaque, single-use, `urn:ietf:params:oauth:request_uri:`-prefixed.
+    pub request_uri: String,
+    /// Seconds until the `request_uri` expires.
+    pub expires_in: i64,
+}
+
+/// `POST /oauth2/par` — RFC 9126 (B5).
+///
+/// Accepts an authorization request over a direct, client-authenticated POST
+/// and returns an opaque `request_uri` to put in the browser redirect instead
+/// of the parameters. What travels through the user agent is then a random
+/// string that cannot be edited into meaning something else.
+///
+/// **Authenticated, unlike `/oauth2/device_authorization`.** That is the whole
+/// point: the parameters stop travelling through the browser, and the ones
+/// that arrive are attributable to a client that proved it holds the secret.
+///
+/// Answers `201`, not `200` — RFC 9126 §2.2 specifies Created, and the
+/// response names a resource that did not exist before the call.
+#[utoipa::path(
+    post,
+    path = "/oauth2/par",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = PushedAuthorizationRequest,
+    ),
+    responses(
+        (status = 201, description = "Pushed authorization request stored",
+         body = PushedAuthorizationResponse),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 401, description = "Client authentication failed",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn pushed_authorization_request<C: Connection + Clone>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<PushedAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+    let req = form.into_inner();
+
+    // One secret-verification path in the codebase, shared with the token
+    // endpoint, rather than a second one to keep correct.
+    let client = match state
+        .token_service
+        .authenticate_client(tenant_id, &req.client_id, &req.client_secret)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // Keyed by the authenticated client and counted AFTER authentication, for
+    // the same reasons as the token exchange: PAR always carries credentials
+    // so there is a real identity to key on, per-IP would collapse a whole
+    // deployment behind one NAT into a single bucket, and counting before
+    // authentication would let an unauthenticated caller burn a real client's
+    // allowance.
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_par:{}:{}", tenant_id, client.client_id),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.par_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .json(OAuth2ErrorResponse {
+                error: "slow_down".into(),
+                error_description: "PAR rate limit exceeded for this client".into(),
+            });
+    }
+
+    match state
+        .par_service
+        .push(axiam_oauth2::par::PushedRequest {
+            tenant_id,
+            client_id: client.client_id,
+            response_type: req.response_type,
+            redirect_uri: req.redirect_uri,
+            scope: req.scope,
+            state: req.state,
+            code_challenge: req.code_challenge,
+            code_challenge_method: req.code_challenge_method,
+            nonce: req.nonce,
+        })
+        .await
+    {
+        Ok(resp) => HttpResponse::Created()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(PushedAuthorizationResponse {
+                request_uri: resp.request_uri,
+                expires_in: resp.expires_in,
+            }),
+        Err(e) => build_oauth2_error_response(&e),
     }
 }

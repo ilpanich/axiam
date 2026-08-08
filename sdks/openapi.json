@@ -7237,9 +7237,13 @@
           {
             "name": "response_type",
             "in": "query",
-            "required": true,
+            "description": "Required unless `request_uri` is present (B5 / RFC 9126 §4).",
+            "required": false,
             "schema": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -7253,9 +7257,13 @@
           {
             "name": "redirect_uri",
             "in": "query",
-            "required": true,
+            "description": "Required unless `request_uri` is present.",
+            "required": false,
             "schema": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -7305,6 +7313,18 @@
           {
             "name": "nonce",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "request_uri",
+            "in": "query",
+            "description": "B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from\n`/oauth2/par`. Mutually exclusive with the inline parameters above.",
             "required": false,
             "schema": {
               "type": [
@@ -7456,6 +7476,69 @@
           },
           "500": {
             "description": "Key parsing error"
+          }
+        }
+      }
+    },
+    "/oauth2/par": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`POST /oauth2/par` — RFC 9126 (B5).",
+        "description": "Accepts an authorization request over a direct, client-authenticated POST\nand returns an opaque `request_uri` to put in the browser redirect instead\nof the parameters. What travels through the user agent is then a random\nstring that cannot be edited into meaning something else.\n\n**Authenticated, unlike `/oauth2/device_authorization`.** That is the whole\npoint: the parameters stop travelling through the browser, and the ones\nthat arrive are attributable to a client that proved it holds the secret.\n\nAnswers `201`, not `200` — RFC 9126 §2.2 specifies Created, and the\nresponse names a resource that did not exist before the call.",
+        "operationId": "pushed_authorization_request",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PushedAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Pushed authorization request stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushedAuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Client authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -10180,6 +10263,8 @@
           "revocation_endpoint",
           "introspection_endpoint",
           "device_authorization_endpoint",
+          "pushed_authorization_request_endpoint",
+          "require_pushed_authorization_requests",
           "response_types_supported",
           "subject_types_supported",
           "id_token_signing_alg_values_supported",
@@ -10222,6 +10307,14 @@
           },
           "jwks_uri": {
             "type": "string"
+          },
+          "pushed_authorization_request_endpoint": {
+            "type": "string",
+            "description": "RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is\nalways mounted."
+          },
+          "require_pushed_authorization_requests": {
+            "type": "boolean",
+            "description": "The **server-wide** default, which is `false`: PAR is available to\nevery client but demanded of none. Per-client enforcement is\n`require_par` on the registration and is deliberately not discoverable\n— RFC 9126 §5 scopes this metadata to the server, and publishing a\nper-client answer here would leak one client's posture to every other\nreader of the document."
           },
           "response_types_supported": {
             "type": "array",
@@ -10686,6 +10779,79 @@
           }
         ],
         "description": "Provider-specific connection details."
+      },
+      "PushedAuthorizationRequest": {
+        "type": "object",
+        "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` is deliberately\nabsent: RFC 9126 §2.1 forbids pushing one, because a chained push would let\nthe second request inherit the first's authentication.",
+        "required": [
+          "client_id",
+          "client_secret",
+          "response_type",
+          "redirect_uri"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "code_challenge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code_challenge_method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nonce": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "response_type": {
+            "type": "string"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PushedAuthorizationResponse": {
+        "type": "object",
+        "description": "`POST /oauth2/par` success body (RFC 9126 §2.2).",
+        "required": [
+          "request_uri",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the `request_uri` expires."
+          },
+          "request_uri": {
+            "type": "string",
+            "description": "Opaque, single-use, `urn:ietf:params:oauth:request_uri:`-prefixed."
+          }
+        }
       },
       "ReadyResponse": {
         "type": "object",

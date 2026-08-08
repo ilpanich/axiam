@@ -23,6 +23,16 @@ pub struct OidcDiscoveryDocument {
     /// always mounted; a device that reads discovery is exactly the client
     /// that cannot be told the URL out of band.
     pub device_authorization_endpoint: String,
+    /// RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is
+    /// always mounted.
+    pub pushed_authorization_request_endpoint: String,
+    /// The **server-wide** default, which is `false`: PAR is available to
+    /// every client but demanded of none. Per-client enforcement is
+    /// `require_par` on the registration and is deliberately not discoverable
+    /// — RFC 9126 §5 scopes this metadata to the server, and publishing a
+    /// per-client answer here would leak one client's posture to every other
+    /// reader of the document.
+    pub require_pushed_authorization_requests: bool,
     pub response_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
@@ -44,6 +54,8 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         revocation_endpoint: format!("{issuer}/oauth2/revoke"),
         introspection_endpoint: format!("{issuer}/oauth2/introspect"),
         device_authorization_endpoint: format!("{issuer}/oauth2/device_authorization"),
+        pushed_authorization_request_endpoint: format!("{issuer}/oauth2/par"),
+        require_pushed_authorization_requests: false,
         response_types_supported: vec!["code".into()],
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],

@@ -151,6 +151,7 @@ use crate::handlers;
         // of the grant is `oauth2::token` above — one path, selected by
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
+        handlers::oauth2::pushed_authorization_request,
         handlers::device::verify,
         handlers::device::decide,
         // OIDC
@@ -346,6 +347,8 @@ use crate::handlers;
         // Device Authorization Grant (RFC 8628, B2)
         axiam_oauth2::device_service::DeviceAuthorizationRequest,
         axiam_oauth2::device_service::DeviceAuthorizationResponse,
+        handlers::oauth2::PushedAuthorizationRequest,
+        handlers::oauth2::PushedAuthorizationResponse,
         handlers::device::VerifyResponse,
         handlers::device::DecideRequest,
         handlers::device::DecideResponse,

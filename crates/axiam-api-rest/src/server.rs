@@ -347,6 +347,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
             )
+            // B5 / RFC 9126. Its own bucket, and unlike
+            // `/device_authorization` this one is client-keyed: PAR always
+            // carries client credentials, so there is a real identity to key
+            // on, and the per-client check happens inside the handler after
+            // authentication so an unauthenticated caller cannot burn a real
+            // client's allowance. The governor here is the per-IP floor that
+            // keeps unauthenticated flooding off the authentication path.
+            .service(
+                web::resource("/par")
+                    .wrap(build_governor(rate_limit_cfg.par_per_min))
+                    .route(
+                        web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
+                    ),
+            )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );

@@ -195,6 +195,8 @@ pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
 /// `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` — B3.
 pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
+pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` — B2, never preset.
 pub const ENV_DEVICE_AUTHORIZATION_PER_MIN: &str =
     "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN";
@@ -351,6 +353,21 @@ pub struct RateLimitConfig {
     /// holding one stolen token would hammer looking for a widening path.
     /// A shared bucket would let ordinary token traffic hide that.
     pub token_exchange_per_min: u32,
+    /// Max `/oauth2/par` requests per minute per authenticated client
+    /// (default: 120 — B5).
+    ///
+    /// Sized like `token_per_min` because the traffic shape is the same: one
+    /// PAR precedes one authorize, which precedes one token request, so a
+    /// deployment that can serve N logins per minute pushes about N. Kept in
+    /// its own bucket because the endpoint ALLOCATES STATE — a stored request
+    /// per call — and sharing the token bucket would let ordinary token
+    /// traffic mask an attempt to fill that store.
+    ///
+    /// Keyed by the authenticated client rather than per-IP: PAR always
+    /// carries client credentials (that is the point of the endpoint), so
+    /// there is a real identity to key on, and per-IP would collapse a whole
+    /// deployment behind one NAT into a single bucket.
+    pub par_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -405,6 +422,7 @@ impl Default for RateLimitConfig {
             device_authorization_per_min: 12,
             device_verify_per_min: 10,
             token_exchange_per_min: 120,
+            par_per_min: 120,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -580,6 +598,7 @@ impl RateLimitConfig {
             self.token_exchange_per_min >= 1,
             "token_exchange_per_min must be >= 1"
         );
+        assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
         // guessing against a code space of 20^8 over the grant's 10-minute

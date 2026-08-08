@@ -239,6 +239,13 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // still checked against the tenant's registered clients inside the
     // handler — the endpoint is unauthenticated, not unvalidated.
     "/oauth2/device_authorization",
+    // B5 / RFC 9126. Public to `AuthzMiddleware` in the same sense the token
+    // endpoint is: it takes no AXIAM session or bearer token, because the
+    // caller is a client authenticating with its own credentials in the form
+    // body — which the handler verifies through the same
+    // `authenticate_client` path the token endpoint uses. Unauthenticated by
+    // the middleware's definition, not by the endpoint's.
+    "/oauth2/par",
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",

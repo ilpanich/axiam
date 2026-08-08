@@ -26,6 +26,14 @@ pub struct AuthorizeRequest {
     /// OIDC nonce — passed through to the authorization code for
     /// inclusion in the ID token.
     pub nonce: Option<String>,
+    /// B5 — whether these parameters arrived via `/oauth2/par` rather than on
+    /// the query string.
+    ///
+    /// Carried here rather than checked in the handler because the
+    /// `require_par` decision needs the client registration, which this
+    /// service already fetches; doing it in the handler would mean a second
+    /// lookup of the same row and a second place for the policy to drift.
+    pub via_par: bool,
 }
 
 /// Authorization response -- contains the code to return to the client.
@@ -75,6 +83,19 @@ where
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+
+        // 1b. B5 / RFC 9126 §5: a client registered as PAR-only may not send
+        //     its parameters through the browser. Checked before the redirect
+        //     is validated, and answered as a non-redirecting error, because
+        //     bouncing the user agent to a redirect_uri that arrived by the
+        //     very channel the client forbade would defeat the setting.
+        if client.require_par && !req.via_par {
+            return Err(OAuth2Error::ParRequired(
+                "this client must use pushed authorization requests \
+                 (RFC 9126); send parameters to /oauth2/par first"
+                    .into(),
+            ));
+        }
 
         // 2. Validate redirect_uri — also before any redirectable
         //    errors per RFC 6749 §4.1.2.1.
@@ -491,6 +512,7 @@ mod tests {
             code_challenge: code_challenge.map(String::from),
             code_challenge_method: code_challenge.map(|_| "S256".into()),
             nonce: None,
+            via_par: false,
         }
     }
 

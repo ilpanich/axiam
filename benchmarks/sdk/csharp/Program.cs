@@ -251,17 +251,33 @@ async Task<Dictionary<string, object?>> TimeForcedRefreshOp()
         if (await OneForcedRefresh() is null) errors++;
     }
 
-    var sw = Stopwatch.StartNew();
     foreach (var _ in Enumerable.Range(0, ITER))
     {
         var ms = await OneForcedRefresh();
         if (ms is null) errors++;
         else lat.Add(ms.Value);
     }
-    sw.Stop();
 
-    double secs = sw.Elapsed.TotalSeconds;
-    double rps = secs > 0 ? lat.Count / secs : 0.0;
+    // J8: throughput comes from the SUM OF THE TIMED CALLS, not from wall
+    // clock across the loop.
+    //
+    // Run 5 reported this op at 20 rps against ~55 for every other SDK, while
+    // its LATENCY (17.2 ms p50) sat right in the middle of the pack — a
+    // combination that cannot describe the same measurement. The cause is
+    // structural and lives in this method: the I9 fix gives every iteration a
+    // fresh client and an untimed `LoginAsync` to seed a fresh RefreshGuard,
+    // and login costs ~250 ms because the server's Argon2id dominates it. A
+    // wall-clock stopwatch around the loop therefore divided N timed refreshes
+    // by N x (login + refresh), reporting roughly a quarter of the real rate.
+    // Every other SDK's bench refreshes on a shared client, so its wall clock
+    // IS the sum of its refresh calls and its number was never affected.
+    //
+    // This op is serial by contract (HARNESS-SPEC.md), so 1 / mean-latency is
+    // exactly the sustained serial rate, and it is the figure that compares
+    // like-for-like with the other ten languages. Setup that exists only to
+    // defeat a cache does not belong in the denominator.
+    double timedSecs = lat.Sum() / 1000.0;
+    double rps = timedSecs > 0 ? lat.Count / timedSecs : 0.0;
     return OpRecord(Pct(lat, 50), Pct(lat, 95), Pct(lat, 99), rps, errors);
 }
 

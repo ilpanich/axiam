@@ -766,9 +766,26 @@ sdk-bench-all:
         BENCH_RESULTS_DIR="$PASS_DIR" bash sdk/run-all.sh
         PASS_DIRS+=("$PASS_DIR")
       done
-      python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT"
+      # J8: median.py exits non-zero when any language merged fewer than
+      # $REPEAT passes — run 5 shipped a C# "median of 2" against repeat=3 and
+      # nobody noticed until analysis. The merged records and the report are
+      # still written (the exit code is the LAST thing it does), so collect.py
+      # below still runs and the operator still gets the numbers; what changes
+      # is that the shell's exit status, and the SDK_BENCH_MEDIAN_INCOMPLETE
+      # banner, make the gap impossible to scroll past. Set
+      # SDK_BENCH_ALLOW_PARTIAL=1 to accept it deliberately.
+      MEDIAN_RC=0
+      if [ "${SDK_BENCH_ALLOW_PARTIAL:-0}" = "1" ]; then
+        python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT" --allow-partial
+      else
+        python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT" || MEDIAN_RC=$?
+      fi
     fi
     python3 sdk/collect.py --results "$RESULTS_ROOT"
+    if [ "${MEDIAN_RC:-0}" != "0" ]; then
+      echo "[sdk-bench-all] SDK_BENCH_MEDIAN_INCOMPLETE: at least one language merged fewer passes than repeat={{repeat}} — see the [median] lines above and each record's passes_missing. The report above is still valid data; it is just built on fewer passes than requested." >&2
+      exit "$MEDIAN_RC"
+    fi
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the

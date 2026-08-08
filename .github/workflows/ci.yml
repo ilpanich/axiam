@@ -335,6 +335,12 @@ jobs:
       - name: bench-pack manifest self-test
         working-directory: benchmarks
         run: bash runner/pack-selftest.sh
+      # J8: the SDK median-of-N merger must name a pass that produced no
+      # record and fail, rather than silently reporting "median of 2" against
+      # repeat=3. Stdlib python only — no SDK toolchains needed.
+      - name: SDK median-of-N provenance self-test
+        working-directory: benchmarks
+        run: bash sdk/test-median-provenance.sh
       # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at

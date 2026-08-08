@@ -1058,6 +1058,9 @@ run_one() {
   "cell_order_index": $cell_order_index,
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json),
+  "connection_model": "$([ "${BENCH_NO_CONN_REUSE:-false}" = "true" ] && echo no-reuse || { [ "${BENCH_NO_VU_CONN_REUSE:-false}" = "true" ] && echo per-iteration-vu-pool || echo pooled-per-vu; })",
+  "no_connection_reuse": ${BENCH_NO_CONN_REUSE:-false},
+  "no_vu_connection_reuse": ${BENCH_NO_VU_CONN_REUSE:-false},
   "seed_scale": ${BENCH_SEED_SCALE:-1},
   "seed_fixture": {
     "users_total": ${BENCH_SEED_USERS_TOTAL:-null},

@@ -366,6 +366,75 @@ cryptographic heavy lifting; policy semantics are pinned above) — with
 the BLOB-chain verification and enforcement diff included in the **F4
 Opus 5 security review**.
 
+### X3 implementation notes (established 2026-08-08, before starting)
+
+Two questions decide how expensive this task is. Both are now answered
+against the pinned dependency tree rather than assumed, so the
+implementation does not have to discover them halfway through an auth
+migration.
+
+**1. There is no credential-storage migration. This was the big risk.**
+
+`finish_attested_passkey_registration` returns `AttestedPasskey`, not
+`Passkey`, which reads like a change of stored shape for every existing
+credential. It is not. In `webauthn-rs` 0.5.5 (`src/interface.rs`) both
+types are newtypes over the *same* inner `Credential`:
+
+```rust
+pub struct Passkey         { pub(crate) cred: Credential }
+pub struct AttestedPasskey { pub(crate) cred: Credential }
+```
+
+Both derive `Serialize`/`Deserialize` with no container attributes, so
+they serialize to identical JSON (`{"cred": …}`), and the crate ships
+`impl From<AttestedPasskey> for Passkey`. So:
+
+- the attested path converts its result to `Passkey` and writes the
+  existing encrypted `passkey_json` column unchanged;
+- `start_authentication` / `finish_authentication` keep using the
+  `Passkey` API for attested and non-attested credentials alike;
+- **no schema migration, no dual-format read path, and no window in
+  which some credentials are unreadable.**
+
+Attestation therefore changes only the *registration* ceremony, which is
+exactly what the policy is about. Note the one behavioural difference the
+crate documents: attested keys always enforce user verification.
+
+The `attestation` feature this needs is in `webauthn-rs`'s **default**
+feature set and the workspace does not set `default-features = false`, so
+`start_attested_passkey_registration` is already compiled in — same
+situation as A6's rustls backend. `webauthn-attestation-ca` is already in
+`Cargo.lock` transitively.
+
+**2. The vendored trust anchor is GlobalSign Root CA – R3, and its
+fingerprint is verifiable.**
+
+The MDS3 BLOB's signing chain roots in GlobalSign Root CA – R3. Fetched
+from `https://secure.globalsign.com/cacert/root-r3.crt`, it presents:
+
+```
+subject = OU = GlobalSign Root CA - R3, O = GlobalSign, CN = GlobalSign
+SHA-256 = CB:B5:22:D7:B7:F1:27:AD:6A:01:13:86:5B:DF:1C:D4:
+          10:2E:7D:07:59:AF:63:5A:7C:F4:72:0D:C9:63:C5:3B
+```
+
+which matches the long-published fingerprint for that root. Vendoring it
+is therefore defensible on evidence rather than on a single unverified
+download, and **the documented update procedure must pin that SHA-256**:
+re-fetching the file is not the check, matching the digest is. This
+matters more than usual here — the vendored certificate is the root of
+trust for every attestation decision the policy makes, so a swapped
+anchor silently converts "only FIDO-certified authenticators" into "any
+authenticator whose attestation an attacker can mint".
+
+**3. What is genuinely blocked in a sandbox.** The registration
+integration tests need *recorded attestation objects* — the plan names a
+YubiKey direct-attestation fixture plus packed/none formats. Those must
+come from real hardware or a vendor-published test vector; they cannot be
+synthesized, and a test that fabricates them would assert the code
+against its own assumptions. Either capture them from a device or lift
+them from `webauthn-rs`'s own test corpus, and say in the test which.
+
 ---
 
 ## X4 — External-IdP token exchange (RFC 8693, cross-domain)

@@ -39,7 +39,8 @@ pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, Rea
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealConsentRepository, SurrealEmailConfigRepository,
+    SurrealCertificateRepository, SurrealConsentRepository, SurrealDeviceGrantRepository,
+    SurrealEmailConfigRepository,
     SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,

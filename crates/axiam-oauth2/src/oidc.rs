@@ -19,6 +19,10 @@ pub struct OidcDiscoveryDocument {
     pub jwks_uri: String,
     pub revocation_endpoint: String,
     pub introspection_endpoint: String,
+    /// RFC 8628 §4 — B2. Advertised unconditionally because the grant is
+    /// always mounted; a device that reads discovery is exactly the client
+    /// that cannot be told the URL out of band.
+    pub device_authorization_endpoint: String,
     pub response_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
@@ -39,6 +43,7 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         jwks_uri: format!("{issuer}/oauth2/jwks"),
         revocation_endpoint: format!("{issuer}/oauth2/revoke"),
         introspection_endpoint: format!("{issuer}/oauth2/introspect"),
+        device_authorization_endpoint: format!("{issuer}/oauth2/device_authorization"),
         response_types_supported: vec!["code".into()],
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],
@@ -60,6 +65,12 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
             "authorization_code".into(),
             "client_credentials".into(),
             "refresh_token".into(),
+            // B2: the URN is the grant's identifier on the wire; a device
+            // matches on this exact string, so it is spelled out rather than
+            // referenced, and the constant it must equal
+            // (`device_service::DEVICE_CODE_GRANT_TYPE`) is asserted against
+            // it in this module's tests.
+            "urn:ietf:params:oauth:grant-type:device_code".into(),
         ],
     }
 }

@@ -579,6 +579,7 @@ fn base_req(grant: &str) -> TokenRequest {
         code_verifier: None,
         refresh_token: None,
         scope: None,
+        device_code: None,
     }
 }
 

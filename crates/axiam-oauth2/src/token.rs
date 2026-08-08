@@ -60,6 +60,12 @@ pub struct TokenRequest {
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
     pub scope: Option<String>,
+    /// B2 — the secret a device polls with, for
+    /// `grant_type=urn:ietf:params:oauth:grant-type:device_code`
+    /// (RFC 8628 §3.4). Present only on that grant; the REST layer routes it
+    /// to [`crate::device_service::DeviceAuthorizationService`] rather than
+    /// to [`TokenService::exchange`], which never sees it.
+    pub device_code: Option<String>,
 }
 
 /// Token response per RFC 6749.

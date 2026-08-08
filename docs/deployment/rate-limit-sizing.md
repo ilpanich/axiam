@@ -67,6 +67,14 @@ machine's ceiling. The `internet` machine defaults were therefore revised:
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 10 | **60** | ~2 716x below |
 | login / register / password-reset / MFA | 10 / 5 / 3 / 5 | **unchanged** | not sized from capacity — see §4 rule 6 |
 
+The two device-flow knobs (B2) join the same "not sized from capacity"
+category, and the presets leave both alone in every profile:
+
+| Knob | Default | Why this number |
+|---|---:|---|
+| `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | Unauthenticated *and* state-allocating. Each accepted request reserves a pending grant and a user code from a deliberately small, human-typable space, so what is being limited is exhaustion of that space, not throughput. |
+| `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | The brute-force bound on user codes. `RateLimitConfig::validate` **asserts** the OWASP condition (`charset^len / (rate × lifetime) > 10⁶`) against the shipped 10-minute grant lifetime, so raising this past the point where an 8-character typed code becomes guessable fails at startup rather than in an incident review. |
+
 The posture did not change: still strict, still per-IP, still opt-in to
 anything else. Only the numbers moved, and only on the four machine
 endpoints. If you had pinned any of these with an env var, nothing about
@@ -125,6 +133,8 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 600 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 60 | 600 | 6000 |
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
+| `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
+| `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |
 | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10 | 10 | 10 |

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OAuth2 Device Authorization Grant is reachable (RFC 8628, B2).** The
+  grant's core, storage and state machine landed earlier; nothing was mounted,
+  so no device could use it. Now: `POST /oauth2/device_authorization` issues
+  the code pair, `POST /oauth2/token` serves
+  `grant_type=urn:ietf:params:oauth:grant-type:device_code` with the full §3.5
+  answer table (`authorization_pending`, `slow_down`, `expired_token`,
+  `access_denied`, `invalid_grant`), and
+  `GET /api/v1/device/verify` + `POST /api/v1/device/decide` back the
+  verification page. The endpoint is advertised in OIDC discovery, because a
+  device that can read discovery is exactly the client that cannot be told the
+  URL out of band.
+
+  The verification endpoints live under `/api/v1`, not `/oauth2`, and that is
+  the design: approval records the approver as the subject the token is minted
+  for (so the caller must be authenticated), and a short typed code is
+  guessable from another origin (so CSRF double-submit is what stops a
+  malicious page approving on a victim's session — RFC 8628 §5.4's phishing
+  shape from the other direction). Unknown, expired and already-decided codes
+  answer identically, so the page is not an oracle for which codes are live.
+
+  Two new rate-limit buckets, neither sized from benchmark capacity:
+  `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` (12) because the endpoint
+  is unauthenticated *and* allocates state, and
+  `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` (10), the user-code brute-force
+  bound — `RateLimitConfig::validate` now **asserts** the OWASP condition
+  against the grant lifetime, so raising it past the point where an
+  8-character typed code becomes guessable fails at startup rather than in an
+  incident review. See [`docs/api/device-flow.md`](docs/api/device-flow.md).
+
 - **Passkeys and security keys in the admin UI.** The server had shipped the
   full WebAuthn registration and authentication ceremonies for releases, but
   the frontend had zero WebAuthn references — the MFA page advertised passkeys
@@ -499,6 +528,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **OAuth2 Device Authorization Grant is reachable (RFC 8628, B2).** The
+  grant's core, storage and state machine landed earlier; nothing was mounted,
+  so no device could use it. Now: `POST /oauth2/device_authorization` issues
+  the code pair, `POST /oauth2/token` serves
+  `grant_type=urn:ietf:params:oauth:grant-type:device_code` with the full §3.5
+  answer table (`authorization_pending`, `slow_down`, `expired_token`,
+  `access_denied`, `invalid_grant`), and
+  `GET /api/v1/device/verify` + `POST /api/v1/device/decide` back the
+  verification page. The endpoint is advertised in OIDC discovery, because a
+  device that can read discovery is exactly the client that cannot be told the
+  URL out of band.
+
+  The verification endpoints live under `/api/v1`, not `/oauth2`, and that is
+  the design: approval records the approver as the subject the token is minted
+  for (so the caller must be authenticated), and a short typed code is
+  guessable from another origin (so CSRF double-submit is what stops a
+  malicious page approving on a victim's session — RFC 8628 §5.4's phishing
+  shape from the other direction). Unknown, expired and already-decided codes
+  answer identically, so the page is not an oracle for which codes are live.
+
+  Two new rate-limit buckets, neither sized from benchmark capacity:
+  `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` (12) because the endpoint
+  is unauthenticated *and* allocates state, and
+  `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` (10), the user-code brute-force
+  bound — `RateLimitConfig::validate` now **asserts** the OWASP condition
+  against the grant lifetime, so raising it past the point where an
+  8-character typed code becomes guessable fails at startup rather than in an
+  incident review. See [`docs/api/device-flow.md`](docs/api/device-flow.md).
 
 - gRPC rate limits are now scoped **per method family** instead of server-wide (I2). One
   bucket each for authz-check (`axiam.v1.AuthorizationService`), identity-read

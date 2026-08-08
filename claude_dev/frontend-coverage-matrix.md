@@ -30,6 +30,7 @@
 | `bootstrap` | `BootstrapPage` | covered | |
 | `ca_certificates` | `certificates/CertificatesPage` | partial | CA listing is visible; CA creation/rotation is API-only |
 | `certificates` | `certificates/CertificatesPage` | covered | |
+| `device` | — | **gap (P1)** | B2's verification page. The device-flow API is complete and the *only* way a user can approve a device today is to call `/api/v1/device/verify` and `/api/v1/device/decide` by hand — which no owner of a television is going to do. A `/device` route that takes a code (or reads `?user_code=` from the QR link), shows the requesting client and scopes, and offers Approve/Deny is what makes the grant usable. Small page; it is the last thing standing between B2 and a working feature |
 | `email_config` | `settings/SettingsPage` | **gap (P2)** | Provider config is editable, but there is no **test-send** button — so the only way to find out an SMTP config is wrong is a user failing to receive a password reset |
 | `email_verification` | `auth/VerifyEmailPage` | covered | |
 | `federation` | `federation/FederationPage` | covered | |

@@ -55,7 +55,8 @@ use axiam_db::DbHandle;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
-    SurrealConsentRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
+    SurrealConsentRepository, SurrealDeviceGrantRepository, SurrealEmailConfigRepository,
+    SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
@@ -70,6 +71,7 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
 };
@@ -169,6 +171,19 @@ pub type TokenServiceT<C> = TokenService<
     SurrealRefreshTokenRepository<C>,
     SurrealUserRepository<C>,
     SurrealServiceAccountRepository<C>,
+>;
+
+/// B2 — the device-authorization grant's own service. Separate from
+/// [`TokenServiceT`] on purpose: the device flow needs one repository nothing
+/// else needs, and threading it through a service that already carries six
+/// would change every construction site in the codebase to serve one grant.
+/// The REST layer keeps the seam at a single `match` arm on `grant_type`.
+pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
+    SurrealDeviceGrantRepository<C>,
+    SurrealOAuth2ClientRepository<C>,
+    SurrealTenantRepository<C>,
+    SurrealRefreshTokenRepository<C>,
+    SurrealUserRepository<C>,
 >;
 
 pub type PasswordResetServiceT<C> = PasswordResetService<
@@ -273,6 +288,9 @@ pub struct AppState<C: Connection + Clone> {
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
     pub authorize_service: AuthorizeServiceT<C>,
     pub token_service: TokenServiceT<C>,
+    /// B2 — device authorization grant (RFC 8628).
+    pub device_authorization_service: DeviceAuthorizationServiceT<C>,
+    pub device_grant_repo: SurrealDeviceGrantRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
     pub federation_link_repo: SurrealFederationLinkRepository<C>,
@@ -443,6 +461,25 @@ impl<C: Connection + Clone> AppState<C> {
             auth_config.clone(),
             2_592_000,
         );
+        // B2: the URI the user is told to visit. Derived from the OIDC issuer
+        // rather than configured separately — a verification URI on a
+        // different origin from the issuer is a phishing shape, and deriving
+        // it means the two cannot drift.
+        let device_grant_repo = SurrealDeviceGrantRepository::new(db.clone());
+        let verification_uri = format!(
+            "{}/device",
+            auth_config.oauth2_issuer_url.trim_end_matches('/')
+        );
+        let device_authorization_service = DeviceAuthorizationService::new(
+            device_grant_repo.clone(),
+            oauth2_client_repo.clone(),
+            tenant_repo.clone(),
+            refresh_token_repo.clone(),
+            user_repo.clone(),
+            auth_config.clone(),
+            2_592_000,
+            verification_uri,
+        );
         let password_reset_service = PasswordResetService::new(
             user_repo.clone(),
             password_reset_token_repo,
@@ -500,6 +537,8 @@ impl<C: Connection + Clone> AppState<C> {
             oauth2_client_repo,
             authorize_service,
             token_service,
+            device_authorization_service,
+            device_grant_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),
             federation_config_repo: federation_config_repo.clone(),
             federation_link_repo: federation_link_repo.clone(),

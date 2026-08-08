@@ -233,6 +233,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/oauth2/userinfo",
     "/oauth2/revoke",
     "/oauth2/introspect",
+    // B2 / RFC 8628 §3.1. Necessarily public: the grant exists precisely for
+    // clients that cannot hold a secret (a television, a headless CLI), so
+    // there is no credential the device could present here. `client_id` is
+    // still checked against the tenant's registered clients inside the
+    // handler — the endpoint is unauthenticated, not unvalidated.
+    "/oauth2/device_authorization",
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",

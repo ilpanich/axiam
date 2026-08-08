@@ -9,6 +9,9 @@ use axiam_oauth2::jwks_cache::JwksCacheResponse;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document,
 };
+use axiam_oauth2::device_service::{
+    DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
+};
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
 };
@@ -199,6 +202,42 @@ pub async fn token<C: Connection + Clone>(
     // input and is what an operator needs to correlate an attack.
     let attempted_client_id = form.client_id.clone();
     let started = std::time::Instant::now();
+
+    // B2 / RFC 8628 §3.4: the device-code grant is served by its own service.
+    // Dispatching here, before `TokenService::exchange`, is the single `match`
+    // arm the device flow costs the rest of the codebase — `TokenService`
+    // never learns that this grant exists.
+    //
+    // Note what is deliberately NOT done: no client authentication. RFC 8628
+    // targets public clients (a television cannot keep a secret), so the
+    // device presents only its `device_code`, which is a 256-bit CSPRNG value
+    // stored as a hash. The device code IS the credential.
+    if grant_type == DEVICE_CODE_GRANT_TYPE {
+        let device_code = match form.device_code.as_deref() {
+            Some(code) if !code.is_empty() => code.to_owned(),
+            _ => {
+                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+                    "device_code is required for the device_code grant".into(),
+                ));
+            }
+        };
+        return match state
+            .device_authorization_service
+            .poll(tenant_id, &device_code)
+            .await
+        {
+            Ok(resp) => HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(resp),
+            // `authorization_pending` and `slow_down` are the NORMAL answers
+            // here — a device polls for as long as the user takes to walk to
+            // another screen — so they are not logged as failures. Treating
+            // the expected path as an error condition would bury the real
+            // ones under it.
+            Err(e) => build_oauth2_error_response(&e),
+        };
+    }
 
     match state.token_service.exchange(tenant_id, form).await {
         Ok(resp) => {
@@ -693,6 +732,58 @@ fn build_error_redirect(
 
 /// Build an OAuth2 JSON error response with the appropriate HTTP status.
 ///
+/// `POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).
+///
+/// Issues a `device_code` (the secret the device polls with), a short
+/// `user_code` (the string a human reads off a screen and types elsewhere),
+/// and the `verification_uri` to send them to.
+///
+/// **Unauthenticated by design.** RFC 8628 exists for input-constrained public
+/// clients — a television, a CLI, an IoT sensor — none of which can keep a
+/// client secret, so there is no secret to present. What is still verified is
+/// that `client_id` names a real client in this tenant that is registered for
+/// this grant; without that check any string could mint pending grants and
+/// exhaust the user-code space, which is a denial of service against every
+/// legitimate device at once.
+///
+/// The endpoint carries its own rate-limit bucket (see `server.rs`) rather
+/// than sharing the generic token bucket: it is unauthenticated and it
+/// allocates state, which is a different abuse profile from the token
+/// endpoint's.
+#[utoipa::path(
+    post,
+    path = "/oauth2/device_authorization",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = DeviceAuthorizationRequest,
+    ),
+    responses(
+        (status = 200, description = "Device and user codes",
+         body = DeviceAuthorizationResponse),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn device_authorization<C: Connection + Clone>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<DeviceAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+    match state
+        .device_authorization_service
+        .authorize(tenant_id, form.into_inner())
+        .await
+    {
+        Ok(resp) => HttpResponse::Ok()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(resp),
+        Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
 /// `invalid_client` returns 401 with a `WWW-Authenticate` header per
 /// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
 /// RFC 6749 §5.2 still requires the 401 response to include

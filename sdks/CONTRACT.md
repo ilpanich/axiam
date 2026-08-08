@@ -1763,8 +1763,18 @@ Normative shape (naming per each language's §1 convention):
    NOT begin polling before the caller has had the chance to display them.
 3. Poll per [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) until a
    terminal outcome.
-4. On success, adopt the tokens into the client's session exactly as `oidc_exchange` does
-   (§12.3), including the refresh-token single-flight guard of §9.
+4. On success, **return the token set**. Whether the SDK also adopts it as the client's own
+   credential is the **same MAY** as `login_client_credentials` adoption in §12.1, and an SDK
+   MUST follow whichever posture it already took there rather than inventing a second one.
+   A refresh token issued by this grant is refreshed through `oidc_refresh` and therefore
+   through the §9 single-flight guard, exactly like any other.
+
+   *(Errata, contract 1.7 — this rule previously read "adopt the tokens into the client's
+   session exactly as `oidc_exchange` does (§12.3)". That instruction was impossible to
+   follow: §12.3 rule 1 makes `oidc_exchange` **stateless by default**, so it adopts nothing,
+   and no SDK's `oidc_exchange` has ever adopted. An implementer reading the old text would
+   have had to pick a behaviour and call it "exactly as `oidc_exchange` does" — the improvised
+   per-language divergence this contract exists to prevent.)*
 
 `verification_uri_complete` embeds the user code so a device that *can* render a QR code
 does not make the user type anything. SDKs MUST surface it when present and MUST NOT
@@ -1796,7 +1806,14 @@ persists across subsequent polls; `authorization_pending` loops rather than rais
 `access_denied` and `expired_token` raise **distinct** errors; polling stops at `expires_in`;
 a `500` mid-poll is retried rather than treated as terminal; `device_login` surfaces the user
 code before its first poll (assert ordering, not just presence); a successful `device_login`
-leaves the client authenticated.
+returns a token set carrying the access token.
+
+An SDK that implements the [§14.3](#§143-device_login--the-composed-helper) rule-4 adoption
+MAY additionally assert the client is authenticated afterwards, and an SDK that gates adoption
+behind a flag MUST assert both states — adopted when set, untouched when not. An SDK that does
+not adopt MUST NOT be read as failing this section. *(Errata, contract 1.7: this test
+previously read "a successful `device_login` leaves the client authenticated", which
+contradicted the stateless posture §12.3 rule 1 requires of every non-adopting SDK.)*
 
 ---
 
@@ -1850,8 +1867,10 @@ slug-only-client consequence apply unchanged.
    refresh guard, and MUST document that re-running the exchange is how you get a fresh
    token.
 5. **The exchanged token is not the client's session.** `token_exchange` MUST NOT adopt the
-   returned token as the SDK client's own credentials (unlike `oidc_exchange` and
-   `device_login`). It is a token to *hand onward* in one outbound call; adopting it would
+   returned token as the SDK client's own credentials — not even in an SDK whose
+   `login_client_credentials` and [§14.3](#§143-device_login--the-composed-helper)
+   `device_login` do adopt, and not behind an opt-in flag. This is a MUST NOT where those are
+   a MAY. It is a token to *hand onward* in one outbound call; adopting it would
    silently re-privilege every subsequent call the client makes.
 6. **`issued_token_type` MUST be surfaced on the result**, not dropped. It is mandatory in
    RFC 8693 §2.2.1 so a client that asked for one type and received another can tell.
@@ -2174,6 +2193,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.6 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07*
+*Contract version: 1.7 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7)*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

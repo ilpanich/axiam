@@ -268,6 +268,47 @@ serves everything at ~45 req/s with the datastore pinned at ~1 core, which
 silently corrupted every cell that ran first after a seed — see
 [`PRIVATE_BENCH_ANALYSIS.md`](PRIVATE_BENCH_ANALYSIS.md) §1.
 
+### Seed-size sensitivity (`bench-bulk-seed`)
+
+Every published AXIAM number so far was measured against a fixture of one
+tenant, two users, one resource and the ~100 built-in registry permissions. The
+obvious reader question — *does the check path hold at 100 000 users and a
+four-deep resource tree?* — had no answer in the archive (J12). It does now:
+
+```bash
+just target=axiam profile=p2-tls13 bench-up
+just target=axiam bench-seed          # the functional fixture, via the REST API
+just scale=10 bench-bulk-seed         # 10 000 users, 2 000 resources, depth 4
+just target=axiam profile=p2-tls13 bench-run
+```
+
+`runner/bulk-seed.sh` writes SurrealQL directly into the datastore in batched
+transactions (`--batch`, default 1 000 statements per `BEGIN`/`COMMIT`) —
+provisioning 100 000 users through the REST API would mean 100 000 Argon2id
+hashes and is not a thing anyone waits for. Three properties make the resulting
+cell comparable:
+
+- **The functional fixture is untouched.** `benchuser`, `bench-resource` and
+  `bench-reader` keep their ids, so the scenario runs the *same logical query*
+  against a bigger index. That is the only comparison worth making.
+- **The tree is deep, not just wide.** `--depth` (default 4) and `--fanout`
+  (6) build a balanced hierarchy, because a flat 10 000-resource fixture
+  exercises the ancestor-walk code exactly as hard as a 1-resource one.
+- **Some grants are denies.** `--deny-ratio` (default 0.05) writes a fraction
+  of grants as `effect: deny`, so the cell measures B1's deny-override path
+  rather than only its no-denies short-circuit. Set `0` to measure the cheap
+  path exclusively.
+
+Bulk users **cannot authenticate by construction** — their `password_hash` is a
+sentinel string that is not an Argon2id encoded hash at all, so verification
+fails to parse. The fixture adds volume; it does not add usable credentials.
+
+The resulting scale is recorded in `.seed/axiam.bulk.env` and lands in every
+cell's `meta.json` as `seed_scale` / `seed_fixture`, so a 10× measurement can
+never be mistaken for a base-fixture one. Absent file means scale 1.
+
+`just bench-bulk-verify` prints the row counts without writing anything.
+
 ## Out of scope (v1.0-beta)
 
 **AMQP async-authz benchmarking** (server `axiam-amqp` + the Go/Python/TypeScript

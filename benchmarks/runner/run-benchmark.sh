@@ -136,6 +136,16 @@ else
   echo "[run] WARN: no seed env ($SEED_ENV) — scenarios needing a tenant/client may fail"
 fi
 
+# E3/J12: the fixture-scale record written by runner/bulk-seed.sh. A cell run
+# against a 10x fixture is NOT comparable to one run against the base fixture,
+# so the scale has to travel with the measurement rather than with whoever
+# remembers which command they ran. Absent file = base fixture (scale 1).
+BULK_ENV="$SEED_DIR/${TARGET}.bulk.env"
+if [ -f "$BULK_ENV" ]; then
+  source "$BULK_ENV"
+  echo "[run] fixture scale: ${BENCH_SEED_SCALE}x (${BENCH_SEED_USERS_TOTAL:-?} users, ${BENCH_SEED_RESOURCES_TOTAL:-?} resources, depth ${BENCH_SEED_DEPTH:-?}, deny_ratio ${BENCH_SEED_DENY_RATIO:-0}) — see runner/bulk-seed.sh"
+fi
+
 # Refuse to start the k6 matrix without a passing post-seed smoke check for this
 # target (runner/seed.sh writes results/<target>.seed.ok only after every
 # scenario-critical flow — ROPC/login, client_credentials, introspect, refresh,
@@ -1048,6 +1058,15 @@ run_one() {
   "cell_order_index": $cell_order_index,
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json),
+  "seed_scale": ${BENCH_SEED_SCALE:-1},
+  "seed_fixture": {
+    "users_total": ${BENCH_SEED_USERS_TOTAL:-null},
+    "resources_total": ${BENCH_SEED_RESOURCES_TOTAL:-null},
+    "roles_total": ${BENCH_SEED_ROLES_TOTAL:-null},
+    "tenants_extra": ${BENCH_SEED_TENANTS_EXTRA:-0},
+    "resource_depth": ${BENCH_SEED_DEPTH:-null},
+    "deny_ratio": ${BENCH_SEED_DENY_RATIO:-0}
+  },
   "axiam_env_required": "$(json_escape "${BENCH_REQUIRE_ENV:-}")",
   "axiam_env_missing": $(env_missing_json),
   "axiam_env_complete": $([ -z "$AXIAM_ENV_MISSING" ] && echo true || echo false)

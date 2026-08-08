@@ -748,6 +748,31 @@ started with the old value. So:
 - to change any of them, **`bench-down` first, then `bench-up` again**. That is
   why the A/B blocks below always tear down between arms.
 
+> **Run 5 broke Rule 2 and lost a whole investigation to it (J9).** The §4.3
+> handler-stage breakdown produced *zero* `axiam::perf` events because
+> `RUST_LOG` was exported for `bench-run` against an already-running stack. The
+> variable was in the compose allow-list the whole time; the timing was wrong,
+> and nothing checked. Post-J9 the harness makes that self-enforcing:
+>
+> - `bench-up` now sets and **echoes** `RUST_LOG` (default `axiam=warn`), so
+>   the value baked into the container is part of the bring-up record;
+> - `run-benchmark.sh` accepts `BENCH_REQUIRE_ENV="<names>"` and asserts each
+>   name off `docker inspect` **before the settle gate and the first cell**,
+>   failing in seconds rather than after hours of k6 time;
+> - every cell's `meta.json` records `axiam_env_required`,
+>   `axiam_env_missing` and `axiam_env_complete`, and `axiam_env` itself now
+>   captures `RUST_LOG`/`RUST_BACKTRACE` alongside the `AXIAM__*` dump — so a
+>   pass that ran without its required knob is visible in the artifact rather
+>   than in a post-mortem.
+>
+> Any pass that depends on debug logging must therefore run as:
+>
+> ```bash
+> RUST_LOG="axiam=warn,axiam_oauth2=debug,axiam_api_rest=debug" \
+>   just target=axiam profile=p2-tls13 bench-up
+> BENCH_REQUIRE_ENV="RUST_LOG" just target=axiam profile=p2-tls13 bench-run
+> ```
+
 `just` variables (`target=`, `profile=`, `rl=`, `dbcaps=`, `repeat=`,
 `scenario=`, `targets=`, `profiles=`) are a different mechanism — they go
 **before the recipe name**, never after, and are not environment variables:

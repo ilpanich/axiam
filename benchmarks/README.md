@@ -192,6 +192,44 @@ cell — see [§8 "Multiple runs — median-of-N"](docs/methodology.md#8-multipl
 just repeat=3 targets="axiam keycloak" profiles="p0-plaintext p2-tls13" bench-matrix
 ```
 
+### Sharing a run (`bench-pack`) — what the archive contains
+
+`just bench-pack` writes `results-<date>.tar.xz`. Its manifest is produced by
+[`runner/pack-filelist.sh`](runner/pack-filelist.sh) — one script, so the
+archive and its regression test can never disagree:
+
+| Included (by extension, anywhere under `results/`) | Why |
+|---|---|
+| `*.json` | k6 summaries (`*.k6.json`) and per-cell run metadata (`*.meta.json`) |
+| `*.csv` / `*.tsv` | container resource samples (`*.res.csv`) and host telemetry (`*.host.csv`) |
+| `*.md` | the generated `report.md`, plus every investigation verdict — `rl-prod-summary.md`, `sdk-report.md`, targeted-run write-ups |
+| `*.log` / `*.txt` | investigation captures — `nsenter.log` socket snapshots, `h5-revocation.log`, docker-log excerpts |
+
+Excluded by construction (pruned, not filtered afterwards):
+
+- `results/dry-run/**` — a dry run writes real-*looking* artifacts for
+  five-second unsettled windows. They are diagnostics, never measurements.
+- anything matching `*seed*` — client secrets and the bench user's password.
+  These normally live in `.seed/` (outside `results/` entirely); the prune also
+  covers the legacy `results/<target>.seed.env` path `run-benchmark.sh` still
+  honours.
+
+The include list is by extension on purpose. Run 5 shipped an archive that
+dropped every investigation artifact because the list named five exact
+filenames and could not anticipate the sixth (J13). Matching extensions means
+the *next* investigation's artifact is packed by default rather than found
+missing after the fact.
+
+```bash
+just bench-pack-selftest   # hermetic; no docker, no k6. Asserts both directions.
+```
+
+The self-test builds a fixture tree carrying one of every run-5 artifact shape,
+runs the real selection script over it, and fails if an investigation artifact
+is missing *or* if a dry-run/seed path survives. After packing, `bench-pack`
+additionally re-scans the finished archive for `SECRET`/`PASSWORD` content
+(ignoring the `"<redacted>"` key names `axiam_env` legitimately records).
+
 ## Status of components
 
 | Component                         | State                                                        |

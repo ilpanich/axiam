@@ -179,6 +179,17 @@ bench-up:
         export BENCH_AXIAM_COOKIE_SECURE="${BENCH_AXIAM_COOKIE_SECURE:-false}"
         echo "[bench-up] p0-plaintext: AXIAM__AUTH__COOKIE_SECURE=${BENCH_AXIAM_COOKIE_SECURE} (k6's jar cannot replay Secure cookies over http://)"
       fi
+      # J9/E1: RUST_LOG is what decides whether the server emits the
+      # `axiam::perf` stage-timing events an investigation pass reads. It is
+      # already wired through targets/axiam/docker-compose.yml, but run 5's I5
+      # pass still produced empty logs because the variable was exported for
+      # `bench-run` — long after `bench-up` had baked the container's
+      # environment (PRIVATE_BENCH_ANALYSIS.md §2.6). Setting it here, loudly,
+      # makes the value that actually lands in the container part of the
+      # bring-up record; run-benchmark.sh's BENCH_REQUIRE_ENV preflight then
+      # verifies it off `docker inspect` before spending any k6 time.
+      export RUST_LOG="${RUST_LOG:-axiam=warn}"
+      echo "[bench-up] RUST_LOG=$RUST_LOG (stage timings need axiam=debug — set it HERE, on bench-up, not on bench-run)"
       # Default the prebuilt image tag to the workspace version so it tracks
       # releases automatically (override with BENCH_AXIAM_IMAGE).
       if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then
@@ -752,26 +763,22 @@ sdk-bench-test *languages:
 bench-clean:
     find results -type f ! -name '.gitkeep' -delete || true
 
-# Package shareable results into results-<date>.tar.xz. Only k6 summaries,
-# resource/host CSVs, run metadata, and the generated report are included —
-# NOT .seed/ (client secrets, bench user password), which report.py and this
+# Package shareable results into results-<date>.tar.xz. k6 summaries,
+# resource/host CSVs, run metadata, the generated report AND every
+# investigation artifact (*.md / *.log / *.tsv / *.txt) are included — NOT
+# .seed/ (client secrets, bench user password), which report.py and this
 # recipe never read from and which `git` never sees (see .gitignore / A7 in
-# claude_dev/benchmark-improvement-plan.md). Verifies the archive is clean
-# before leaving it on disk.
+# claude_dev/benchmark-improvement-plan.md). The selection lives in
+# runner/pack-filelist.sh so `bench-pack-selftest` can exercise exactly this
+# logic rather than a re-implementation of it (J13/E2). Verifies the archive
+# is clean before leaving it on disk.
 bench-pack:
     #!/usr/bin/env bash
     set -euo pipefail
     OUT="results-$(date +%Y-%m-%d).tar.xz"
     FILELIST="$(mktemp)"
     trap 'rm -f "$FILELIST"' EXIT
-    # -path results/dry-run -prune: a dry run writes real-looking artifacts
-    # (k6 summaries, res/host CSVs, meta.json) for 5-second unsettled windows.
-    # They are diagnostics, never measurements, so they must not reach a shared
-    # archive — meta.json carries "dry_run": true, but pruning the whole subtree
-    # is the guarantee that does not depend on anyone reading that field.
-    find results -path results/dry-run -prune -o \
-      \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
-      -o -name '*.meta.json' -o -name 'report.md' \) -type f -print > "$FILELIST"
+    bash runner/pack-filelist.sh results > "$FILELIST"
     if [ ! -s "$FILELIST" ]; then
       echo "[bench-pack] nothing to pack — run a benchmark + 'just bench-report' first" >&2
       exit 1
@@ -797,3 +804,10 @@ bench-pack:
       exit 1
     fi
     echo "[bench-pack] OK — $OUT contains no secret material."
+
+# J13/E2 regression guard for the bench-pack manifest: builds a fixture
+# results tree carrying one of every artifact shape run 5 produced, runs the
+# REAL selection logic over it, and asserts both directions. Hermetic (no
+# docker, no k6) — CI runs the same script on every PR.
+bench-pack-selftest:
+    bash runner/pack-selftest.sh

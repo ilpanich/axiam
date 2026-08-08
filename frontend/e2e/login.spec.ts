@@ -67,7 +67,7 @@ test.describe("Login flow", () => {
     await page.getByRole("button", { name: "Continue" }).click();
     await page.getByLabel("Username or email").fill("wrong@example.com");
     await page.getByLabel("Password").fill("wrongpassword123");
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     // Should remain on /login and show an error. Allow extra time: a
     // wrong-credentials attempt still runs a full Argon2id verification on the
     // backend (constant-time by design), which under a loaded CI runner can

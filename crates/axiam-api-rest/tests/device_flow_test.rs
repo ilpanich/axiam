@@ -127,6 +127,9 @@ async fn setup() -> Fixture {
             redirect_uris: vec![],
             grant_types: vec![DEVICE_CODE_GRANT_TYPE.into()],
             scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
         })
         .await
         .unwrap();

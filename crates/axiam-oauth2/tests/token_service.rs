@@ -504,6 +504,9 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> OAuth2Client {
         redirect_uris: vec!["https://app.example.com/cb".into()],
         grant_types: grants.iter().map(|s| s.to_string()).collect(),
         scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

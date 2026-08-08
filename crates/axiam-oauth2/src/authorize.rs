@@ -467,6 +467,9 @@ mod tests {
             redirect_uris: vec!["https://app.example.com/callback".into()],
             grant_types: vec!["authorization_code".into()],
             scopes: vec!["openid".into(), "profile".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

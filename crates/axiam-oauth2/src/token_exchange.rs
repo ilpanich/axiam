@@ -528,6 +528,9 @@ mod tests {
             redirect_uris: vec![],
             grant_types: vec![TOKEN_EXCHANGE_GRANT_TYPE.into()],
             scopes: v(&["read"]),
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

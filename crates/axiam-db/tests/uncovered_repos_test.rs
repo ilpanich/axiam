@@ -438,6 +438,9 @@ async fn oauth2_client_crud() {
             redirect_uris: vec!["https://app.example.com/cb".into()],
             grant_types: vec!["authorization_code".into()],
             scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
         })
         .await
         .unwrap();
@@ -492,6 +495,9 @@ async fn oauth2_client_secret_hash_is_upgraded_with_a_compare_and_swap() {
             redirect_uris: vec!["https://app.example.com/cb".into()],
             grant_types: vec!["client_credentials".into()],
             scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
         })
         .await
         .unwrap();

@@ -38,6 +38,14 @@ struct OAuth2ClientRow {
     redirect_uris: Vec<String>,
     grant_types: Vec<String>,
     scopes: Vec<String>,
+    // B5. Rows written before schema v27 have none of these, so all three
+    // must tolerate absence rather than fail the whole read.
+    #[surreal(default)]
+    post_logout_redirect_uris: Vec<String>,
+    #[surreal(default)]
+    backchannel_logout_uri: Option<String>,
+    #[surreal(default)]
+    require_par: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -52,6 +60,14 @@ struct OAuth2ClientRowWithId {
     redirect_uris: Vec<String>,
     grant_types: Vec<String>,
     scopes: Vec<String>,
+    // B5. Rows written before schema v27 have none of these, so all three
+    // must tolerate absence rather than fail the whole read.
+    #[surreal(default)]
+    post_logout_redirect_uris: Vec<String>,
+    #[surreal(default)]
+    backchannel_logout_uri: Option<String>,
+    #[surreal(default)]
+    require_par: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -71,6 +87,9 @@ impl OAuth2ClientRowWithId {
             redirect_uris: self.redirect_uris,
             grant_types: self.grant_types,
             scopes: self.scopes,
+            post_logout_redirect_uris: self.post_logout_redirect_uris,
+            backchannel_logout_uri: self.backchannel_logout_uri,
+            require_par: self.require_par,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -111,7 +130,10 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  name = $name, \
                  redirect_uris = $redirect_uris, \
                  grant_types = $grant_types, \
-                 scopes = $scopes",
+                 scopes = $scopes, \
+                 post_logout_redirect_uris = $post_logout_redirect_uris, \
+                 backchannel_logout_uri = $backchannel_logout_uri, \
+                 require_par = $require_par",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -121,6 +143,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .bind(("redirect_uris", input.redirect_uris))
             .bind(("grant_types", input.grant_types))
             .bind(("scopes", input.scopes))
+            .bind(("post_logout_redirect_uris", input.post_logout_redirect_uris))
+            .bind(("backchannel_logout_uri", input.backchannel_logout_uri))
+            .bind(("require_par", input.require_par))
             .await
             .map_err(DbError::from)?;
 
@@ -143,6 +168,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             redirect_uris: row.redirect_uris,
             grant_types: row.grant_types,
             scopes: row.scopes,
+            post_logout_redirect_uris: row.post_logout_redirect_uris,
+            backchannel_logout_uri: row.backchannel_logout_uri,
+            require_par: row.require_par,
             created_at: row.created_at,
             updated_at: row.updated_at,
         };
@@ -180,6 +208,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             redirect_uris: row.redirect_uris,
             grant_types: row.grant_types,
             scopes: row.scopes,
+            post_logout_redirect_uris: row.post_logout_redirect_uris,
+            backchannel_logout_uri: row.backchannel_logout_uri,
+            require_par: row.require_par,
             created_at: row.created_at,
             updated_at: row.updated_at,
         })
@@ -236,6 +267,15 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.scopes.is_some() {
             sets.push("scopes = $scopes");
         }
+        if input.post_logout_redirect_uris.is_some() {
+            sets.push("post_logout_redirect_uris = $post_logout_redirect_uris");
+        }
+        if input.backchannel_logout_uri.is_some() {
+            sets.push("backchannel_logout_uri = $backchannel_logout_uri");
+        }
+        if input.require_par.is_some() {
+            sets.push("require_par = $require_par");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -262,6 +302,19 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if let Some(scopes) = input.scopes {
             builder = builder.bind(("scopes", scopes));
         }
+        if let Some(uris) = input.post_logout_redirect_uris {
+            builder = builder.bind(("post_logout_redirect_uris", uris));
+        }
+        if let Some(uri) = input.backchannel_logout_uri {
+            // Empty string is the documented "clear it" sentinel
+            // (`UpdateOAuth2Client::backchannel_logout_uri`); it is not a valid
+            // URI, so it cannot collide with a real value.
+            let stored = if uri.is_empty() { None } else { Some(uri) };
+            builder = builder.bind(("backchannel_logout_uri", stored));
+        }
+        if let Some(require_par) = input.require_par {
+            builder = builder.bind(("require_par", require_par));
+        }
 
         let result = builder.await.map_err(DbError::from)?;
         let mut result = result
@@ -283,6 +336,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             redirect_uris: row.redirect_uris,
             grant_types: row.grant_types,
             scopes: row.scopes,
+            post_logout_redirect_uris: row.post_logout_redirect_uris,
+            backchannel_logout_uri: row.backchannel_logout_uri,
+            require_par: row.require_par,
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

@@ -126,6 +126,9 @@ async fn setup() -> Fixture {
             redirect_uris: vec!["https://orders.internal".into()],
             grant_types: vec![TOKEN_EXCHANGE_GRANT_TYPE.into()],
             scopes: vec!["read".into(), "write".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
         })
         .await
         .unwrap();
@@ -139,6 +142,9 @@ async fn setup() -> Fixture {
                 MAY_IMPERSONATE_GRANT.into(),
             ],
             scopes: vec!["read".into(), "write".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
         })
         .await
         .unwrap();

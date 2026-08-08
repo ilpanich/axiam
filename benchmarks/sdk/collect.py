@@ -55,17 +55,49 @@ def load_sdk_records(results):
     return recs
 
 
+# J7: the transport shape a wire baseline must have before its p95 can be
+# subtracted from an SDK's. Every SDK client in this harness pools connections
+# and reuses them across calls; a k6 baseline that handshakes per request is
+# measuring a different thing, and the resulting "overhead" is the difference
+# between two transports, not the cost of an SDK.
+COMPARABLE_CONNECTION_MODEL = "pooled-per-vu"
+
+
 def server_p95(results, target, profile, scenario):
-    """Best-effort lookup of a server scenario p95 to compute overhead."""
+    """Look up a server scenario p95, and say whether it is comparable.
+
+    Returns `(p95, reason_or_None)`. A non-None reason means the number exists
+    but must NOT be turned into an overhead delta.
+
+    Run 5 published TypeScript rows showing 21-23 ms of NEGATIVE overhead —
+    the SDK apparently beating the wire baseline measured on the same host and
+    the same server. That cannot happen if both sides are doing the same work,
+    so one of them was not, and the archive recorded nothing about the
+    baseline's transport that could settle it (J7). Rather than publish a
+    number that is either wrong or unexplainable, the overhead column now
+    renders as "n/c" with the reason, and the audit is what unblocks it.
+    """
     meta = os.path.join(results, target, profile, f"{scenario}.meta.json")
     if not os.path.exists(meta):
-        return None
+        return None, None
     m = json.load(open(meta))
     k6 = os.path.join(results, target, profile, m.get("k6_summary_file", ""))
     if not os.path.exists(k6):
-        return None
+        return None, None
     data = json.load(open(k6)).get("metrics", {}).get("bench_op_latency_ms", {})
-    return float(data.get("p(95)", 0) or 0) or None
+    p95 = float(data.get("p(95)", 0) or 0) or None
+    if p95 is None:
+        return None, None
+
+    # Pre-J7 archives have no connection_model field at all. Absent is not
+    # "fine" — it is exactly the state that made run 5 unexplainable — so it
+    # blocks the delta just as an incomparable model does.
+    model = m.get("connection_model")
+    if model is None:
+        return p95, "baseline predates the J7 connection-model record"
+    if model != COMPARABLE_CONNECTION_MODEL:
+        return p95, f"baseline transport is {model}, SDK clients pool"
+    return p95, None
 
 
 def md_table(headers, rows):
@@ -106,6 +138,7 @@ def build(results, recs):
             "often negative \"overhead\" deltas purely from the load-shape "
             "mismatch, not genuine SDK cost.", "",
         ]
+        incomparable = set()
         by_profile = defaultdict(list)
         for r in measured:
             by_profile[r.get("profile", "?")].append(r)
@@ -129,10 +162,27 @@ def build(results, recs):
                 conc = r.get("concurrency", 0)
                 target_rows = serial_rows if conc == 1 else concurrent_rows
                 for op, stats in r.get("ops", {}).items():
-                    sp95 = server_p95(results, r["target"], profile,
-                                      OP_TO_SCENARIO.get(op, ""))
+                    sp95, blocked = server_p95(results, r["target"], profile,
+                                               OP_TO_SCENARIO.get(op, ""))
                     wire = ("%.2f" % sp95) if sp95 else "—"
-                    overhead = ("%+.2f" % (stats["p95_ms"] - sp95)) if sp95 else "—"
+                    if not sp95:
+                        overhead = "—"
+                    elif blocked:
+                        overhead = "n/c"
+                        incomparable.add(blocked)
+                    else:
+                        delta = stats["p95_ms"] - sp95
+                        # J7: a negative delta is not an SDK achievement, it is
+                        # a comparability failure that survived the model
+                        # check. Flag it in place rather than letting a "-23 ms
+                        # overhead" cell read as a result.
+                        overhead = ("%+.2f" % delta) + (" ⚠" if delta < 0 else "")
+                        if delta < 0:
+                            incomparable.add(
+                                "a negative overhead was computed against a "
+                                "model-matched baseline — the remaining "
+                                "asymmetry is response validation, payload, or "
+                                "concurrency accounting (J7)")
                     target_rows.append([r["sdk"], op, str(conc), f"{stats['p50_ms']:.2f}",
                                         f"{stats['p95_ms']:.2f}", wire,
                                         f"{stats['throughput_rps']:.0f}",
@@ -141,6 +191,15 @@ def build(results, recs):
                        "wire p95(ms)", "thr(rps)", "errors", "p95 overhead vs wire(ms)"]
             if concurrent_rows:
                 lines += [md_table(headers, concurrent_rows), ""]
+            if incomparable:
+                lines += [
+                    "> **J7 — `n/c` / ⚠ in the overhead column.** An SDK-vs-wire "
+                    "delta is only meaningful when both sides use the same "
+                    "transport, validate the same responses and account "
+                    "concurrency the same way. Where that could not be "
+                    "established the delta is withheld rather than published:",
+                    "",
+                ] + [f">  - {why}" for why in sorted(incomparable)] + [""]
             if serial_rows:
                 lines += [
                     "#### conc=1 — serial benches "

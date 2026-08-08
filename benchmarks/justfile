@@ -68,6 +68,8 @@ repeat := "3"
 # the whole target x profile matrix. See runner/run-benchmark.sh's `--dry-run`
 # block for the exact knobs (BENCH_DRY_VUS / BENCH_DRY_DURATION / ...).
 dry := "0"
+# E3: fixture-size multiplier for `bench-bulk-seed` (see that recipe).
+scale := "10"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -179,6 +181,17 @@ bench-up:
         export BENCH_AXIAM_COOKIE_SECURE="${BENCH_AXIAM_COOKIE_SECURE:-false}"
         echo "[bench-up] p0-plaintext: AXIAM__AUTH__COOKIE_SECURE=${BENCH_AXIAM_COOKIE_SECURE} (k6's jar cannot replay Secure cookies over http://)"
       fi
+      # J9/E1: RUST_LOG is what decides whether the server emits the
+      # `axiam::perf` stage-timing events an investigation pass reads. It is
+      # already wired through targets/axiam/docker-compose.yml, but run 5's I5
+      # pass still produced empty logs because the variable was exported for
+      # `bench-run` — long after `bench-up` had baked the container's
+      # environment (PRIVATE_BENCH_ANALYSIS.md §2.6). Setting it here, loudly,
+      # makes the value that actually lands in the container part of the
+      # bring-up record; run-benchmark.sh's BENCH_REQUIRE_ENV preflight then
+      # verifies it off `docker inspect` before spending any k6 time.
+      export RUST_LOG="${RUST_LOG:-axiam=warn}"
+      echo "[bench-up] RUST_LOG=$RUST_LOG (stage timings need axiam=debug — set it HERE, on bench-up, not on bench-run)"
       # Default the prebuilt image tag to the workspace version so it tracks
       # releases automatically (override with BENCH_AXIAM_IMAGE).
       if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then
@@ -403,6 +416,28 @@ bench-seed:
     else
       bash runner/seed.sh {{target}}
     fi
+
+# E3/J12: inflate the seeded AXIAM fixture to N x scale for the seed-size
+# sensitivity cell. Requires the stack up and `bench-seed` done. Writes rows
+# straight into SurrealDB in batched transactions (the REST path is fine for
+# the functional fixture and hopeless for 100 000 users), leaves the seeded
+# benchuser/bench-resource/bench-reader objects untouched so before/after
+# numbers compare the same logical query against a bigger index, and records
+# the resulting scale in .seed/axiam.bulk.env → every cell's meta.json.
+#
+#   just scale=10 bench-bulk-seed          # 10 000 users, 2 000 resources
+#   just scale=100 bench-bulk-seed         # the 100x cell
+#   just bench-bulk-verify                 # row counts only, no writes
+#
+# Knobs (env): BENCH_SEED_USERS/RESOURCES/ROLES (per-tenant bases before the
+# multiplier), BENCH_SEED_TENANTS (extra tenants), BENCH_SEED_DEPTH,
+# BENCH_SEED_DENY_RATIO, BENCH_SEED_BATCH.
+bench-bulk-seed:
+    bash runner/bulk-seed.sh --scale {{scale}}
+
+# Row counts for the tables the bulk seed touches — no writes.
+bench-bulk-verify:
+    bash runner/bulk-seed.sh --verify-only
 
 # Run the scenario suite (load + resource sampling) for a target/profile.
 # G2/H1: run-benchmark.sh gates its first cell behind a post-seed settle check
@@ -731,9 +766,26 @@ sdk-bench-all:
         BENCH_RESULTS_DIR="$PASS_DIR" bash sdk/run-all.sh
         PASS_DIRS+=("$PASS_DIR")
       done
-      python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT"
+      # J8: median.py exits non-zero when any language merged fewer than
+      # $REPEAT passes — run 5 shipped a C# "median of 2" against repeat=3 and
+      # nobody noticed until analysis. The merged records and the report are
+      # still written (the exit code is the LAST thing it does), so collect.py
+      # below still runs and the operator still gets the numbers; what changes
+      # is that the shell's exit status, and the SDK_BENCH_MEDIAN_INCOMPLETE
+      # banner, make the gap impossible to scroll past. Set
+      # SDK_BENCH_ALLOW_PARTIAL=1 to accept it deliberately.
+      MEDIAN_RC=0
+      if [ "${SDK_BENCH_ALLOW_PARTIAL:-0}" = "1" ]; then
+        python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT" --allow-partial
+      else
+        python3 sdk/median.py --runs "${PASS_DIRS[@]}" --out "$RESULTS_ROOT" || MEDIAN_RC=$?
+      fi
     fi
     python3 sdk/collect.py --results "$RESULTS_ROOT"
+    if [ "${MEDIAN_RC:-0}" != "0" ]; then
+      echo "[sdk-bench-all] SDK_BENCH_MEDIAN_INCOMPLETE: at least one language merged fewer passes than repeat={{repeat}} — see the [median] lines above and each record's passes_missing. The report above is still valid data; it is just built on fewer passes than requested." >&2
+      exit "$MEDIAN_RC"
+    fi
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the
@@ -752,26 +804,22 @@ sdk-bench-test *languages:
 bench-clean:
     find results -type f ! -name '.gitkeep' -delete || true
 
-# Package shareable results into results-<date>.tar.xz. Only k6 summaries,
-# resource/host CSVs, run metadata, and the generated report are included —
-# NOT .seed/ (client secrets, bench user password), which report.py and this
+# Package shareable results into results-<date>.tar.xz. k6 summaries,
+# resource/host CSVs, run metadata, the generated report AND every
+# investigation artifact (*.md / *.log / *.tsv / *.txt) are included — NOT
+# .seed/ (client secrets, bench user password), which report.py and this
 # recipe never read from and which `git` never sees (see .gitignore / A7 in
-# claude_dev/benchmark-improvement-plan.md). Verifies the archive is clean
-# before leaving it on disk.
+# claude_dev/benchmark-improvement-plan.md). The selection lives in
+# runner/pack-filelist.sh so `bench-pack-selftest` can exercise exactly this
+# logic rather than a re-implementation of it (J13/E2). Verifies the archive
+# is clean before leaving it on disk.
 bench-pack:
     #!/usr/bin/env bash
     set -euo pipefail
     OUT="results-$(date +%Y-%m-%d).tar.xz"
     FILELIST="$(mktemp)"
     trap 'rm -f "$FILELIST"' EXIT
-    # -path results/dry-run -prune: a dry run writes real-looking artifacts
-    # (k6 summaries, res/host CSVs, meta.json) for 5-second unsettled windows.
-    # They are diagnostics, never measurements, so they must not reach a shared
-    # archive — meta.json carries "dry_run": true, but pruning the whole subtree
-    # is the guarantee that does not depend on anyone reading that field.
-    find results -path results/dry-run -prune -o \
-      \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
-      -o -name '*.meta.json' -o -name 'report.md' \) -type f -print > "$FILELIST"
+    bash runner/pack-filelist.sh results > "$FILELIST"
     if [ ! -s "$FILELIST" ]; then
       echo "[bench-pack] nothing to pack — run a benchmark + 'just bench-report' first" >&2
       exit 1
@@ -797,3 +845,10 @@ bench-pack:
       exit 1
     fi
     echo "[bench-pack] OK — $OUT contains no secret material."
+
+# J13/E2 regression guard for the bench-pack manifest: builds a fixture
+# results tree carrying one of every artifact shape run 5 produced, runs the
+# REAL selection logic over it, and asserts both directions. Hermetic (no
+# docker, no k6) — CI runs the same script on every PR.
+bench-pack-selftest:
+    bash runner/pack-selftest.sh

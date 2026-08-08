@@ -26,7 +26,13 @@ if ! "$PY" -c 'import axiam_sdk' >/dev/null 2>&1; then
   if [ -f "$SIBLING_SDK/pyproject.toml" ] || [ -f "$SIBLING_SDK/setup.py" ]; then
     echo "[python] axiam_sdk not importable in $VENV — installing from $SIBLING_SDK" >&2
     "$PY" -m pip install --quiet --upgrade pip >&2
-    "$PY" -m pip install --quiet -e "$SIBLING_SDK" >&2
+    # D1/J5: install with the [speed] extra so the bench measures the SDK's
+    # recommended async setup (uvloop) rather than the stdlib loop the
+    # recommendation exists to replace. bench.py records which loop actually
+    # ran, and falls back cleanly when the extra is unavailable (e.g. an
+    # older checkout without it, or Windows), so a run never fails over this.
+    "$PY" -m pip install --quiet -e "$SIBLING_SDK[speed]" >&2 \
+      || "$PY" -m pip install --quiet -e "$SIBLING_SDK" >&2
   fi
 fi
 

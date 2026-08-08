@@ -82,6 +82,12 @@ struct Config {
     std::optional<std::string> ca_pem;
     std::optional<std::string> client_cert_pem;
     std::optional<std::string> client_key_pem;
+    // D2: SDK_BENCH_CONCURRENCY has to reach the CLIENT, not just the worker
+    // loop. Run 5's cpp row (check p50 3.2 ms, p95 280 ms) was the shape of
+    // sixteen threads queueing inside one client, and a bench that spawns
+    // sixteen workers against a client permitting one in-flight request is
+    // measuring the queue, not the SDK.
+    int concurrency = 16;
     // Non-empty when a TLS input is unusable. build_ops() rethrows it inside
     // main()'s try, so it reaches the operator as the harness' contractual
     // status:"error" record — load_config() itself must not throw, because it
@@ -146,7 +152,11 @@ axiam::Client make_client(const Config& cfg) {
     axiam::Client::Builder b = axiam::Client::builder()
         .base_url(cfg.base_url)
         .tenant_slug(cfg.tenant_slug)
-        .org_slug(cfg.org_slug);
+        .org_slug(cfg.org_slug)
+        // D2: size the client's in-flight capacity to the bench's worker
+        // count. Applied to the per-iteration `login` client too — every
+        // construction site, so the two can never drift.
+        .max_concurrent_requests(static_cast<unsigned>(cfg.concurrency < 1 ? 1 : cfg.concurrency));
     if (cfg.ca_pem) b.with_custom_ca(*cfg.ca_pem);
     if (cfg.client_cert_pem && cfg.client_key_pem) {
         b.with_client_cert(*cfg.client_cert_pem, *cfg.client_key_pem);
@@ -418,10 +428,14 @@ void assert_refresh_hit_the_wire(const OpResult& refresh, int iterations) {
 }  // namespace
 
 int main() {
-    const Config cfg = load_config();
     const int iter = env_int("SDK_BENCH_ITERATIONS", 2000);
     const int warmup = env_int("SDK_BENCH_WARMUP", 200);
     const int conc = env_int("SDK_BENCH_CONCURRENCY", 16);
+
+    // D2: the client's in-flight capacity comes from the SAME value as the
+    // worker count, resolved before the client is built.
+    Config cfg = load_config();
+    cfg.concurrency = conc;
 
     std::vector<std::pair<std::string, OpFn>> ops_fns;
     try {

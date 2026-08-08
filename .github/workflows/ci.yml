@@ -322,6 +322,33 @@ jobs:
         working-directory: frontend
         run: npm run test:a11y
 
+  bench-harness:
+    name: Bench Harness Self-Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # J13/E2: the bench-pack manifest guard. Hermetic — it builds a fixture
+      # results tree and runs runner/pack-filelist.sh over it, so no docker, no
+      # k6, no seeded stack. Run 5 shipped a shareable archive that silently
+      # dropped every investigation artifact; this is the regression that
+      # catches the next such drop in seconds rather than after a matrix.
+      - name: bench-pack manifest self-test
+        working-directory: benchmarks
+        run: bash runner/pack-selftest.sh
+      # J8: the SDK median-of-N merger must name a pass that produced no
+      # record and fail, rather than silently reporting "median of 2" against
+      # repeat=3. Stdlib python only — no SDK toolchains needed.
+      - name: SDK median-of-N provenance self-test
+        working-directory: benchmarks
+        run: bash sdk/test-median-provenance.sh
+      # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
+      # but the runner is 1 000+ lines of bash that only ever executes inside a
+      # multi-hour matrix run — a syntax error there is otherwise discovered at
+      # the worst possible moment.
+      - name: Runner scripts parse
+        working-directory: benchmarks
+        run: for f in runner/*.sh; do bash -n "$f"; done
+
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest

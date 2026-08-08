@@ -136,6 +136,16 @@ else
   echo "[run] WARN: no seed env ($SEED_ENV) — scenarios needing a tenant/client may fail"
 fi
 
+# E3/J12: the fixture-scale record written by runner/bulk-seed.sh. A cell run
+# against a 10x fixture is NOT comparable to one run against the base fixture,
+# so the scale has to travel with the measurement rather than with whoever
+# remembers which command they ran. Absent file = base fixture (scale 1).
+BULK_ENV="$SEED_DIR/${TARGET}.bulk.env"
+if [ -f "$BULK_ENV" ]; then
+  source "$BULK_ENV"
+  echo "[run] fixture scale: ${BENCH_SEED_SCALE}x (${BENCH_SEED_USERS_TOTAL:-?} users, ${BENCH_SEED_RESOURCES_TOTAL:-?} resources, depth ${BENCH_SEED_DEPTH:-?}, deny_ratio ${BENCH_SEED_DENY_RATIO:-0}) — see runner/bulk-seed.sh"
+fi
+
 # Refuse to start the k6 matrix without a passing post-seed smoke check for this
 # target (runner/seed.sh writes results/<target>.seed.ok only after every
 # scenario-critical flow — ROPC/login, client_credentials, introspect, refresh,
@@ -646,16 +656,30 @@ settle_gate() {
 # packed content for SECRET/PASSWORD, specifically so these legitimately-named
 # (and fully redacted) keys don't trip it — see the comment there.
 AXIAM_ENV_REDACT_RE='PASSWORD|SECRET|KEY|PEPPER|PEM|TOKEN'
+# J9/E1: the AXIAM__* prefix is not the whole story. `RUST_LOG` governs whether
+# the `axiam::perf` stage-timing events an investigation pass depends on are
+# emitted at all, and it carries NO prefix — so run 5's I5 pass recorded a
+# complete-looking `axiam_env` while the one variable the runbook needed was
+# silently absent from the container (PRIVATE_BENCH_ANALYSIS.md §2.6). Capture
+# these unprefixed runtime knobs alongside the AXIAM__* dump so their absence
+# is visible in the metadata rather than discovered after the k6 hours are
+# spent. Extend this list, not the prefix test, when a new one matters.
+AXIAM_ENV_EXTRA_KEYS='RUST_LOG RUST_BACKTRACE'
+axiam_env_extra_re() {
+  # "^(RUST_LOG|RUST_BACKTRACE)=" — built from the list so the two never drift.
+  printf '^(%s)=' "$(printf '%s' "$AXIAM_ENV_EXTRA_KEYS" | tr ' ' '|')"
+}
 axiam_env_json() {
   [ "$TARGET" = "axiam" ] || { echo -n "{}"; return; }
   command -v docker >/dev/null 2>&1 || { echo -n "{}"; return; }
-  local env_dump line k v first=1
+  local env_dump line k v first=1 extra_re
+  extra_re="$(axiam_env_extra_re)"
   env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null)" || { echo -n "{}"; return; }
   echo -n "{"
   while IFS= read -r line; do
     case "$line" in
       AXIAM__*=*) : ;;
-      *) continue ;;
+      *) printf '%s' "$line" | grep -qE "$extra_re" || continue ;;
     esac
     k="${line%%=*}"
     v="${line#*=}"
@@ -670,6 +694,67 @@ axiam_env_json() {
   done <<< "$env_dump"
   [ "$first" -eq 1 ] || echo
   echo -n "}"
+}
+
+# --- J9/E1: required-env preflight ------------------------------------------
+# BENCH_REQUIRE_ENV is a space-separated list of environment variable NAMES a
+# runbook pass declares it depends on (e.g. `BENCH_REQUIRE_ENV="RUST_LOG"` for
+# a stage-timing investigation). Every name is checked against what the server
+# container ACTUALLY received — `docker inspect`, the same source of truth
+# axiam_env_json() and detect_rl_posture() use — because the failure mode this
+# closes is precisely a variable that the invoking shell exported and the
+# container never saw. A container is created once by `bench-up`; exporting the
+# variable later, for `bench-run`, changes nothing.
+#
+# Empty (the default) means "assert nothing", so ordinary matrix runs are
+# unaffected. Names are matched exactly against the `NAME=` prefix, so a
+# variable present but set to the empty string still counts as absent — an
+# empty RUST_LOG emits no events, which is the condition being guarded.
+#
+# Populated by env_missing() and consumed by the meta.json writer, so every
+# cell records WHICH required names were missing, not just that something was.
+AXIAM_ENV_MISSING=""
+env_missing() {
+  # Echoes the space-separated subset of $1 that the server container lacks.
+  local want="$1" name miss="" env_dump
+  [ -n "$want" ] || { echo -n ""; return; }
+  command -v docker >/dev/null 2>&1 || { echo -n "$want"; return; }
+  env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null)" || { echo -n "$want"; return; }
+  for name in $want; do
+    printf '%s\n' "$env_dump" | grep -qE "^${name}=.+" || miss="${miss:+$miss }$name"
+  done
+  echo -n "$miss"
+}
+
+# JSON array of the missing names, for meta.json.
+env_missing_json() {
+  local n first=1
+  echo -n "["
+  for n in $AXIAM_ENV_MISSING; do
+    [ "$first" -eq 1 ] || echo -n ", "
+    first=0
+    printf '"%s"' "$(json_escape "$n")"
+  done
+  echo -n "]"
+}
+
+# Fails the run before any k6 time is spent (the I18 build_ref precedent).
+# BENCH_REQUIRE_ENV_SOFT=1 downgrades to a warning for an exploratory pass.
+require_env_preflight() {
+  local want="${BENCH_REQUIRE_ENV:-}"
+  [ -n "$want" ] || return 0
+  if [ "$TARGET" != "axiam" ]; then
+    echo "[run] WARN (J9/E1): BENCH_REQUIRE_ENV is set but target is '$TARGET' — the check inspects AXIAM's server container only; skipping." >&2
+    return 0
+  fi
+  AXIAM_ENV_MISSING="$(env_missing "$want")"
+  [ -n "$AXIAM_ENV_MISSING" ] || { echo "[run] env preflight OK — bench-${TARGET}-server carries all of: $want"; return 0; }
+  echo "[run] FATAL (J9/E1): bench-${TARGET}-server is missing required env: $AXIAM_ENV_MISSING" >&2
+  echo "[run]   The container's environment is fixed when 'bench-up' creates it — exporting the variable for 'bench-run' is too late." >&2
+  echo "[run]   Fix: RUST_LOG='axiam=debug' just target=$TARGET profile=$PROFILE bench-up   (then re-run this cell)" >&2
+  echo "[run]   Or set BENCH_REQUIRE_ENV_SOFT=1 to downgrade this to a warning." >&2
+  [ "${BENCH_REQUIRE_ENV_SOFT:-0}" = "1" ] || exit 1
+  echo "[run] WARN: BENCH_REQUIRE_ENV_SOFT=1 — proceeding with incomplete env; the cell's metadata records the gap." >&2
 }
 
 # Container names that make up each target's stack, with a role used to look
@@ -972,7 +1057,22 @@ run_one() {
   "settle_probe_thr": $SETTLE_PROBE_THR_USED,
   "cell_order_index": $cell_order_index,
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
-  "axiam_env": $(axiam_env_json)
+  "axiam_env": $(axiam_env_json),
+  "connection_model": "$([ "${BENCH_NO_CONN_REUSE:-false}" = "true" ] && echo no-reuse || { [ "${BENCH_NO_VU_CONN_REUSE:-false}" = "true" ] && echo per-iteration-vu-pool || echo pooled-per-vu; })",
+  "no_connection_reuse": ${BENCH_NO_CONN_REUSE:-false},
+  "no_vu_connection_reuse": ${BENCH_NO_VU_CONN_REUSE:-false},
+  "seed_scale": ${BENCH_SEED_SCALE:-1},
+  "seed_fixture": {
+    "users_total": ${BENCH_SEED_USERS_TOTAL:-null},
+    "resources_total": ${BENCH_SEED_RESOURCES_TOTAL:-null},
+    "roles_total": ${BENCH_SEED_ROLES_TOTAL:-null},
+    "tenants_extra": ${BENCH_SEED_TENANTS_EXTRA:-0},
+    "resource_depth": ${BENCH_SEED_DEPTH:-null},
+    "deny_ratio": ${BENCH_SEED_DENY_RATIO:-0}
+  },
+  "axiam_env_required": "$(json_escape "${BENCH_REQUIRE_ENV:-}")",
+  "axiam_env_missing": $(env_missing_json),
+  "axiam_env_complete": $([ -z "$AXIAM_ENV_MISSING" ] && echo true || echo false)
 }
 EOF
   echo "[run] wrote $k6sum, $rescsv, $hostcsv, $meta"
@@ -987,6 +1087,11 @@ EOF
 }
 
 SCENARIO_COUNT=${#SCENARIOS[@]}
+
+# J9/E1: assert the runbook-required container env BEFORE the settle gate and
+# the first cell — the whole point is to fail in seconds rather than after the
+# k6 hours that produced run 5's empty stage-timing logs.
+require_env_preflight
 
 # G2 item 1: gate the FIRST cell of this run behind the settle check (once —
 # not per cell; every cell in this run records the same settle_wait_secs /

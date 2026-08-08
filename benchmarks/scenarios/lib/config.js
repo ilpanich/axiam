@@ -66,6 +66,13 @@ export const cfg = {
   clientCert: str('BENCH_CLIENT_CERT', ''),
   clientKey: str('BENCH_CLIENT_KEY', ''),
 
+  // --- transport (J7) ---
+  // k6's two connection knobs, surfaced as env so the shape a run used is a
+  // deliberate, recorded choice rather than an inherited default nobody wrote
+  // down. See tlsOptions()/connectionModel() for why this exists.
+  noConnectionReuse: str('BENCH_NO_CONN_REUSE', 'false') === 'true',
+  noVUConnectionReuse: str('BENCH_NO_VU_CONN_REUSE', 'false') === 'true',
+
   // --- load model ---
   vus: num('BENCH_VUS', 50),
   warmup: str('BENCH_WARMUP', '30s'),
@@ -160,7 +167,36 @@ export function tlsOptions() {
       key: open(cfg.clientKey),
     }];
   }
+  // J7: state the connection model EXPLICITLY rather than inheriting k6's
+  // defaults silently.
+  //
+  // Run 5 published a TypeScript SDK row with NEGATIVE overhead — check/batch
+  // p95 21–23 ms *below* the k6 wire baseline measured on the same host. A
+  // client cannot beat the wire doing the same work, so one of the two was not
+  // doing the same work, and nothing in the archive recorded enough about the
+  // baseline's transport to say which. These two flags are k6's whole
+  // connection story, and writing them down here means the next run's
+  // metadata answers the question instead of re-opening it.
+  //
+  // Both default false, which is k6's default and the one that matches an SDK:
+  // connections are pooled and reused per VU across iterations, exactly as a
+  // long-lived SDK client pools them. Setting BENCH_NO_CONN_REUSE=true forces
+  // a fresh TCP (and TLS) handshake per request — a legitimate thing to
+  // measure, and a baseline that must never be compared against an SDK's
+  // pooled numbers.
+  o.noConnectionReuse = cfg.noConnectionReuse;
+  o.noVUConnectionReuse = cfg.noVUConnectionReuse;
   return o;
+}
+
+// J7: a short, stable descriptor of the transport shape this run used, written
+// into every cell's meta.json by run-benchmark.sh and read by sdk/collect.py,
+// which refuses to publish an SDK-vs-wire overhead column when the baseline's
+// model is not the pooled one an SDK client uses.
+export function connectionModel() {
+  if (cfg.noConnectionReuse) return 'no-reuse';
+  if (cfg.noVUConnectionReuse) return 'per-iteration-vu-pool';
+  return 'pooled-per-vu';
 }
 
 // k6 net/grpc `Client.connect(addr, params)` params for AXIAM's dedicated gRPC

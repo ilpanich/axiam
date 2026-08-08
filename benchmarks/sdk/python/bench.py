@@ -296,6 +296,16 @@ def client_resource_usage():
     return cpu_ms_total, rss_mib_peak
 
 
+# D1/J5: which event loop actually ran. Set by __main__ below. Run 5's Python
+# row (311 rps, p50 40.2 ms) turned out to be the CPython+httpx per-request
+# ceiling rather than anything AXIAM does — three client processes against a
+# ZERO-WORK stub server reached 320+308+301 rps, each capped at the same ~310
+# — and uvloop moves that ceiling by ~20% of client CPU. A CPU number that
+# does not say which loop produced it is therefore not comparable to the next
+# run's. See the Python SDK's PERFORMANCE.md.
+EVENT_LOOP = "asyncio"
+
+
 def emit(status, ops, iterations, concurrency, notes):
     cpu_ms_total, rss_mib_peak = client_resource_usage()
     print(json.dumps({
@@ -306,6 +316,11 @@ def emit(status, ops, iterations, concurrency, notes):
         "profile": os.environ.get("BENCH_PROFILE", "p0-plaintext"),
         "status": status, "iterations": iterations, "concurrency": concurrency,
         "ops": ops, "client_cpu_ms_total": cpu_ms_total, "client_rss_mib_peak": rss_mib_peak,
+        "event_loop": EVENT_LOOP,
+        # One process, one event-loop thread: `concurrency` in-flight calls all
+        # queue on it. This is published so a reader can see that the Python
+        # row's latency is dominated by client-side queueing, not by AXIAM.
+        "client_worker_threads": 1,
         "notes": notes,
     }, indent=2))
 
@@ -338,4 +353,27 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # D1/J5: prefer uvloop when the environment has it (axiam-sdk[speed]).
+    # Measured on this bench's own check_access path against a zero-work
+    # server at 16 in-flight calls: client CPU 2 182 -> 1 735 us/call (-20%),
+    # p95 68 -> 55 ms, throughput +7%. Set SDK_BENCH_EVENT_LOOP=asyncio to
+    # force the stdlib loop for an A/B; the record says which one ran either
+    # way, so the two are never silently mixed in a median.
+    _want = os.environ.get("SDK_BENCH_EVENT_LOOP", "auto")
+    if _want in ("auto", "uvloop"):
+        try:
+            import uvloop
+            EVENT_LOOP = "uvloop"
+        except ImportError:
+            if _want == "uvloop":
+                print("[python] SDK_BENCH_EVENT_LOOP=uvloop but uvloop is not "
+                      "installed — falling back to stdlib asyncio "
+                      "(pip install 'axiam-sdk[speed]')", file=sys.stderr)
+            uvloop = None
+    else:
+        uvloop = None
+
+    if uvloop is not None:
+        uvloop.run(main())
+    else:
+        asyncio.run(main())

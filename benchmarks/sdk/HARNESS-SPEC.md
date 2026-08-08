@@ -199,9 +199,80 @@ aggregator (`sdk/collect.py`) reads them and folds them into the main report's
   },
   "client_cpu_ms_total": 0,             // optional: CPU consumed by the client process
   "client_rss_mib_peak": 0,             // optional: peak client memory
+  "client_worker_threads": 0,           // optional (J8b): async-runtime worker count
+  "passes_requested": 3,                // written by median.py (J8)
+  "passes_present": 3,
+  "passes_ok": 3,
+  "passes_missing": [],
   "notes": ""
 }
 ```
+
+Each op record MAY additionally carry `cpu_ms` (client CPU consumed during
+that op's timed window) and `cpu_us_per_call` (the same divided by completed
+calls). Both are optional; `collect.py` ignores them when absent.
+
+### Attributing client CPU (J8b)
+
+Run 5 published a single `client_cpu_ms_total` per SDK and nothing else, which
+produced an observation nobody could act on: **Rust 23.4 s — highest of every
+compiled SDK, 7× Go's — alongside the best latency and throughput in the
+matrix.** Two things made that number unusable, and both are harness
+properties rather than SDK ones:
+
+1. **It was a function of the host.** A bench that builds its async runtime
+   with one worker per CPU reports more client CPU on a 32-core box than on a
+   4-core one for identical work, because idle workers spin briefly before
+   parking. Every bench must size its runtime/thread pool to
+   `SDK_BENCH_CONCURRENCY`, not to the machine, and publish the resulting
+   count as `client_worker_threads`.
+2. **It was one number for four ops.** `login` builds a fresh client per
+   iteration by contract (fresh TLS material, fresh connection); the other
+   three reuse a pooled one. Aggregating them hides which is expensive.
+   Per-op `cpu_ms` / `cpu_us_per_call` is what makes the next observation
+   actionable.
+
+Fix the measurement before suspecting the SDK. If a figure is still an outlier
+with the runtime pinned and per-op attribution in hand, the finding is real.
+
+### Comparing against the wire baseline (J7)
+
+`collect.py` subtracts the matching k6 scenario's p95 from the SDK's to give a
+"p95 overhead vs wire" column. Run 5 published **negative** overhead for
+TypeScript — check/batch p95 21–23 ms *below* the baseline measured on the
+same host against the same server. A client cannot beat the wire doing the
+same work, so one side was not doing the same work, and nothing in the archive
+recorded enough about the baseline to say which.
+
+The delta is now withheld unless the baseline is comparable:
+
+- every cell's `meta.json` records `connection_model`
+  (`pooled-per-vu` | `per-iteration-vu-pool` | `no-reuse`), driven by
+  `BENCH_NO_CONN_REUSE` / `BENCH_NO_VU_CONN_REUSE`. Only `pooled-per-vu`
+  matches how an SDK client holds connections;
+- a baseline from before this field existed is treated as *not established*,
+  not as fine;
+- a negative delta that survives the model check is rendered with a `⚠` and a
+  footnote, because the remaining asymmetry (response validation, payload
+  shape, or in-flight-vs-VU concurrency accounting) has not been ruled out.
+
+The overhead column shows `n/c` where a delta was withheld. Publishing an
+SDK-vs-wire claim requires that column to carry neither `n/c` nor `⚠`.
+
+### Median-of-N provenance (J8)
+
+`median.py` merges `repeat=N` passes. Run 5's C# row read "median of 2"
+against `repeat=3`, and nothing recorded which pass vanished or why — a pass
+that produces *no record at all* is invisible to a merger that only sees the
+records it received, so "2 of 2 ok" was both true and misleading.
+
+Merged records now carry `passes_requested` / `passes_present` / `passes_ok` /
+`passes_missing` (pass directory names, not counts), `median.py` exits
+non-zero when any language merged fewer passes than requested, and
+`sdk-bench-all` prints an `SDK_BENCH_MEDIAN_INCOMPLETE` banner. The report is
+still written either way — the numbers are valid data built on fewer passes —
+but the gap can no longer be scrolled past. `SDK_BENCH_ALLOW_PARTIAL=1`
+accepts it deliberately.
 
 `status: "pending"` (the current state of the five unwired scaffolds) means "SDK
 bench glue not yet wired"; the report lists these as not-yet-measured rather than

@@ -25,6 +25,12 @@ use uuid::Uuid;
 
 const OP_KEYS: [&str; 4] = ["login", "refresh", "check_access", "batch_check"];
 
+/// Worker count the async runtime was built with, published in the record
+/// (see `main`). Global rather than threaded through `emit` because every
+/// early-exit error path emits too, and a record that omits it on exactly the
+/// runs that went wrong is the least useful place to omit it.
+static WORKER_THREADS: AtomicUsize = AtomicUsize::new(0);
+
 /// Read an env var, falling back to `default`.
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -235,6 +241,10 @@ async fn time_op(
     }
 
     let counter = Arc::new(AtomicUsize::new(0));
+    // J8b: bracket the timed window only — warm-up CPU is excluded, matching
+    // the latency numbers, so `cpu_ms` and `throughput_rps` describe the same
+    // work.
+    let cpu0 = cpu_ms_now();
     let start = Instant::now();
 
     let mut set = tokio::task::JoinSet::new();
@@ -269,6 +279,7 @@ async fn time_op(
     }
 
     let secs = start.elapsed().as_secs_f64();
+    let cpu_ms = (cpu_ms_now() - cpu0).max(0.0);
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let throughput = if secs > 0.0 {
         lat.len() as f64 / secs
@@ -282,6 +293,13 @@ async fn time_op(
         "p99_ms": pct(&lat, 99.0),
         "throughput_rps": throughput,
         "errors": errors,
+        // J8b, optional per HARNESS-SPEC.md: CPU consumed by the client
+        // process during THIS op's timed window, and the same divided by
+        // completed calls. The per-call figure is the comparable one — an op
+        // that runs longer naturally burns more CPU, which is what made the
+        // single aggregate uninterpretable.
+        "cpu_ms": cpu_ms,
+        "cpu_us_per_call": if lat.is_empty() { 0.0 } else { cpu_ms * 1000.0 / lat.len() as f64 },
     })
 }
 
@@ -353,6 +371,16 @@ fn client_resource_usage() -> (f64, f64) {
     (cpu_ms_total, rss_mib_peak)
 }
 
+/// J8b: cumulative process CPU in ms, on its own, so an op's timed window can
+/// be bracketed. Run 5 published one aggregate `client_cpu_ms_total` of 23.4 s
+/// for this bench — highest of every compiled SDK and 7x Go's — against the
+/// best latency and throughput in the matrix. One number for four ops is not
+/// something anyone can act on, so the op records now carry their own share
+/// and the next run says WHICH op owns it instead of re-opening the question.
+fn cpu_ms_now() -> f64 {
+    client_resource_usage().0
+}
+
 /// Print exactly one `axiam.sdk-bench/v1` JSON object to stdout.
 fn emit(
     status: &str,
@@ -377,6 +405,10 @@ fn emit(
         "ops": ops,
         "client_cpu_ms_total": cpu_ms_total,
         "client_rss_mib_peak": rss_mib_peak,
+        // J8b: the async runtime's worker count, so a reader can tell whether
+        // a CPU figure came from a runtime sized to the declared concurrency
+        // or (pre-J8b) to whatever core count the host happened to have.
+        "client_worker_threads": WORKER_THREADS.load(Ordering::Relaxed),
         "notes": notes,
     });
     println!(
@@ -419,8 +451,44 @@ fn assert_refresh_hit_the_wire(refresh: &serde_json::Value, iterations: usize) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// J8b: the runtime is built by hand instead of via `#[tokio::main]`, and
+/// sized to `SDK_BENCH_CONCURRENCY` rather than to the host's core count.
+///
+/// `#[tokio::main]` defaults to a multi-thread runtime with one worker per
+/// CPU. That makes this bench's `client_cpu_ms_total` a function of the
+/// MACHINE it ran on: every worker thread spins briefly before parking on
+/// each wakeup, so a 32-core box reports more client CPU than a 4-core box
+/// for identical work against an identical server — a variable no other axis
+/// of this harness leaves uncontrolled, and one that made run 5's "Rust burns
+/// 7x Go's CPU" observation unattributable.
+///
+/// Sizing to the declared concurrency makes the number comparable across
+/// hosts AND across languages: every other bench in this harness drives
+/// `SDK_BENCH_CONCURRENCY` in-flight calls, so a runtime with exactly that
+/// many workers is the like-for-like shape. The floor of 2 keeps a
+/// `concurrency=1` serial run off the current-thread scheduler, where
+/// timer/IO behaviour differs enough to be its own confound.
+///
+/// This is the measurement fix D3 asks for BEFORE suspecting the SDK. If the
+/// next run still shows an outsized figure with the runtime pinned and the
+/// new per-op `cpu_ms` attribution in hand, the finding is real and belongs
+/// to the SDK.
+fn main() {
+    let workers = std::env::var("SDK_BENCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(16)
+        .clamp(2, 256);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio runtime builds");
+    WORKER_THREADS.store(workers, Ordering::Relaxed);
+    rt.block_on(run());
+}
+
+async fn run() {
     // Config / env parsing failures (e.g. a non-UUID BENCH_RESOURCE_ID) are a
     // setup error, not a crash: emit a zeroed `error` record and exit 0.
     let cfg = match Cfg::from_env() {

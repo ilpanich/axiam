@@ -89,7 +89,11 @@ fn test_config() -> AuthConfig {
 
 #[derive(Clone)]
 enum ClientOutcome {
-    Found(OAuth2Client),
+    // Boxed to keep the variants balanced: `OAuth2Client` grew past clippy's
+    // `large_enum_variant` threshold when B5 added its three registration
+    // fields, and `NotFound`/`Db` are unit variants. Same shape as `SaOutcome`
+    // below, which boxes `ServiceAccount` for the same reason.
+    Found(Box<OAuth2Client>),
     NotFound,
     Db,
 }
@@ -170,7 +174,7 @@ impl OAuth2ClientRepository for MockClientRepo {
     }
     async fn get_by_client_id(&self, _t: Uuid, _c: &str) -> AxiamResult<OAuth2Client> {
         match &self.0 {
-            ClientOutcome::Found(c) => Ok(c.clone()),
+            ClientOutcome::Found(c) => Ok((**c).clone()),
             ClientOutcome::NotFound => Err(not_found()),
             ClientOutcome::Db => Err(AxiamError::Database("outage".into())),
         }
@@ -494,8 +498,8 @@ fn client_tenant() -> Uuid {
     Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001)
 }
 
-fn make_client(grants: &[&str], scopes: &[&str]) -> OAuth2Client {
-    OAuth2Client {
+fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
+    Box::new(OAuth2Client {
         id: Uuid::new_v4(),
         tenant_id: client_tenant(),
         client_id: "client-1".into(),
@@ -509,7 +513,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> OAuth2Client {
         require_par: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
-    }
+    })
 }
 
 fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode {

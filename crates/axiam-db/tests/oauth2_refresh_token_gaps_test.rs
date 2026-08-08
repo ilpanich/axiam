@@ -71,6 +71,7 @@ async fn insert_token_expiring(
         token_hash: hash.clone(),
         client_id: client_id.into(),
         scopes: vec!["openid".into()],
+        session_id: None,
         expires_at,
     })
     .await

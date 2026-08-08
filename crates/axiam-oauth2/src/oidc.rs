@@ -19,6 +19,28 @@ pub struct OidcDiscoveryDocument {
     pub jwks_uri: String,
     pub revocation_endpoint: String,
     pub introspection_endpoint: String,
+    /// RFC 8628 §4 — B2. Advertised unconditionally because the grant is
+    /// always mounted; a device that reads discovery is exactly the client
+    /// that cannot be told the URL out of band.
+    pub device_authorization_endpoint: String,
+    /// RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is
+    /// always mounted.
+    pub pushed_authorization_request_endpoint: String,
+    /// The **server-wide** default, which is `false`: PAR is available to
+    /// every client but demanded of none. Per-client enforcement is
+    /// `require_par` on the registration and is deliberately not discoverable
+    /// — RFC 9126 §5 scopes this metadata to the server, and publishing a
+    /// per-client answer here would leak one client's posture to every other
+    /// reader of the document.
+    pub require_pushed_authorization_requests: bool,
+    /// OIDC RP-Initiated Logout 1.0 §3 — B5.
+    pub end_session_endpoint: String,
+    /// Back-Channel Logout 1.0 §3.
+    pub backchannel_logout_supported: bool,
+    /// The claim that AXIAM puts `sid` in its logout tokens — which it does,
+    /// unconditionally. An RP reads this to know it can match a logout token
+    /// to one session rather than having to end every session for the subject.
+    pub backchannel_logout_session_supported: bool,
     pub response_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
@@ -39,6 +61,12 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         jwks_uri: format!("{issuer}/oauth2/jwks"),
         revocation_endpoint: format!("{issuer}/oauth2/revoke"),
         introspection_endpoint: format!("{issuer}/oauth2/introspect"),
+        device_authorization_endpoint: format!("{issuer}/oauth2/device_authorization"),
+        pushed_authorization_request_endpoint: format!("{issuer}/oauth2/par"),
+        require_pushed_authorization_requests: false,
+        end_session_endpoint: format!("{issuer}/oauth2/end_session"),
+        backchannel_logout_supported: true,
+        backchannel_logout_session_supported: true,
         response_types_supported: vec!["code".into()],
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],
@@ -60,6 +88,17 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
             "authorization_code".into(),
             "client_credentials".into(),
             "refresh_token".into(),
+            // B2: the URN is the grant's identifier on the wire; a device
+            // matches on this exact string, so it is spelled out rather than
+            // referenced, and the constant it must equal
+            // (`device_service::DEVICE_CODE_GRANT_TYPE`) is asserted against
+            // it in this module's tests.
+            "urn:ietf:params:oauth:grant-type:device_code".into(),
+            // B3 / RFC 8693. Advertised so a mesh service can discover that
+            // narrowing a token is possible here rather than being told out
+            // of band; whether a given client MAY exchange is still its own
+            // registration's business.
+            "urn:ietf:params:oauth:grant-type:token-exchange".into(),
         ],
     }
 }

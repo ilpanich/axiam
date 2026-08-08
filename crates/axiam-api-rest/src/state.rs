@@ -55,13 +55,14 @@ use axiam_db::DbHandle;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
-    SurrealConsentRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
-    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealConsentRepository, SurrealDeviceGrantRepository, SurrealEmailConfigRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebhookRepository,
 };
@@ -70,10 +71,13 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
 };
+use axiam_oauth2::par::ParService;
 use axiam_oauth2::token::TokenService;
+use axiam_oauth2::token_exchange::TokenExchangeService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
 use surrealdb::Connection;
 use tokio::sync::Semaphore;
@@ -170,6 +174,31 @@ pub type TokenServiceT<C> = TokenService<
     SurrealUserRepository<C>,
     SurrealServiceAccountRepository<C>,
 >;
+
+/// B2 — the device-authorization grant's own service. Separate from
+/// [`TokenServiceT`] on purpose: the device flow needs one repository nothing
+/// else needs, and threading it through a service that already carries six
+/// would change every construction site in the codebase to serve one grant.
+/// The REST layer keeps the seam at a single `match` arm on `grant_type`.
+pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
+    SurrealDeviceGrantRepository<C>,
+    SurrealOAuth2ClientRepository<C>,
+    SurrealTenantRepository<C>,
+    SurrealRefreshTokenRepository<C>,
+    SurrealUserRepository<C>,
+>;
+
+/// B3 — RFC 8693 token exchange. Needs only the tenant repository: the
+/// exchanging client is authenticated by `TokenService::authenticate_client`
+/// and handed in, so there is exactly one secret-verification path in the
+/// codebase rather than two to keep correct.
+pub type TokenExchangeServiceT<C> = TokenExchangeService<SurrealTenantRepository<C>>;
+
+/// B5 — RFC 9126 pushed authorization requests. Two repositories: the client
+/// registry (to validate `redirect_uri` at push time, while the client is
+/// authenticated) and the pushed-request store.
+pub type ParServiceT<C> =
+    ParService<SurrealOAuth2ClientRepository<C>, SurrealPushedAuthRequestRepository<C>>;
 
 pub type PasswordResetServiceT<C> = PasswordResetService<
     SurrealUserRepository<C>,
@@ -273,6 +302,16 @@ pub struct AppState<C: Connection + Clone> {
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
     pub authorize_service: AuthorizeServiceT<C>,
     pub token_service: TokenServiceT<C>,
+    /// B2 — device authorization grant (RFC 8628).
+    pub device_authorization_service: DeviceAuthorizationServiceT<C>,
+    /// B3 — token exchange (RFC 8693).
+    pub token_exchange_service: TokenExchangeServiceT<C>,
+    /// B5 — pushed authorization requests (RFC 9126).
+    pub par_service: ParServiceT<C>,
+    /// B5 — which clients joined which session, for the back-channel logout
+    /// fan-out.
+    pub session_client_repo: SurrealSessionClientRepository<C>,
+    pub device_grant_repo: SurrealDeviceGrantRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
     pub federation_link_repo: SurrealFederationLinkRepository<C>,
@@ -313,6 +352,11 @@ pub struct AppState<C: Connection + Clone> {
     /// Absence of the whole `AppState` (a misconfigured harness) makes the
     /// middleware fail open, exactly as a missing DB handle did before.
     pub shared_rate_limit: SharedRateLimitCounter,
+    /// B3: the token endpoint serves every grant behind one route, so a
+    /// per-grant limit cannot be route middleware — the grant is not knowable
+    /// until the body has been read. The exchange arm reads its ceiling from
+    /// here instead.
+    pub rate_limit_cfg: crate::config::rate_limit::RateLimitConfig,
 
     // -- QUAL-07: hoisted per-request service constructions (13 call sites) --
     pub password_reset_service: PasswordResetServiceT<C>,
@@ -443,6 +487,40 @@ impl<C: Connection + Clone> AppState<C> {
             auth_config.clone(),
             2_592_000,
         );
+        // B2: the URI the user is told to visit. Derived from the OIDC issuer
+        // rather than configured separately — a verification URI on a
+        // different origin from the issuer is a phishing shape, and deriving
+        // it means the two cannot drift.
+        let device_grant_repo = SurrealDeviceGrantRepository::new(db.clone());
+        let verification_uri = format!(
+            "{}/device",
+            auth_config.oauth2_issuer_url.trim_end_matches('/')
+        );
+        let session_client_repo = SurrealSessionClientRepository::new(db.clone());
+        let par_service = ParService::new(
+            oauth2_client_repo.clone(),
+            SurrealPushedAuthRequestRepository::new(db.clone()),
+        );
+        let device_authorization_service = DeviceAuthorizationService::new(
+            device_grant_repo.clone(),
+            oauth2_client_repo.clone(),
+            tenant_repo.clone(),
+            refresh_token_repo.clone(),
+            user_repo.clone(),
+            auth_config.clone(),
+            2_592_000,
+            verification_uri,
+        );
+        // B3: the exchanged-token ceiling. The ordinary access-token lifetime
+        // is the right default — an exchange is a narrowing, so it has no
+        // business producing something longer-lived than a normal token — and
+        // it is applied on top of "never outlives its subject", not instead
+        // of it.
+        let token_exchange_service = TokenExchangeService::new(
+            tenant_repo.clone(),
+            auth_config.clone(),
+            auth_config.access_token_lifetime_secs as i64,
+        );
         let password_reset_service = PasswordResetService::new(
             user_repo.clone(),
             password_reset_token_repo,
@@ -500,6 +578,11 @@ impl<C: Connection + Clone> AppState<C> {
             oauth2_client_repo,
             authorize_service,
             token_service,
+            device_authorization_service,
+            par_service,
+            session_client_repo,
+            token_exchange_service,
+            device_grant_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),
             federation_config_repo: federation_config_repo.clone(),
             federation_link_repo: federation_link_repo.clone(),
@@ -517,6 +600,7 @@ impl<C: Connection + Clone> AppState<C> {
             // deterministic convergence can replace this field with
             // `SharedRateLimitCounter::without_flusher(..)` and drive
             // `flush_once()` itself.
+            rate_limit_cfg: crate::config::rate_limit::RateLimitConfig::default(),
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),

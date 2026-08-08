@@ -21,6 +21,21 @@ pub enum OAuth2Error {
     InvalidClient(String),
     #[error("invalid_request: {0}")]
     InvalidRedirectUri(String),
+    /// B5 — the client is registered `require_par` and sent its parameters
+    /// through the browser anyway.
+    ///
+    /// A distinct variant rather than a plain `InvalidRequest` because of how
+    /// the authorize handler decides whether to redirect: `InvalidRequest`
+    /// means "we got past client and redirect_uri validation", and is
+    /// therefore safe to report by redirecting. This refusal happens
+    /// *before* the redirect_uri is validated — deliberately, since the whole
+    /// point is that this client's parameters must not travel through the
+    /// browser — so redirecting would bounce the user agent to an unvalidated
+    /// URI supplied by the very channel the setting forbids. On the wire it
+    /// is still `invalid_request` per RFC 9126 §5; the variant exists to keep
+    /// the response non-redirecting.
+    #[error("invalid_request: {0}")]
+    ParRequired(String),
     #[error("unsupported_grant_type: grant type is not supported")]
     UnsupportedGrantType,
     #[error("server_error: {0}")]
@@ -44,6 +59,14 @@ pub enum OAuth2Error {
     /// The device code expired before the user acted.
     #[error("expired_token: the device code has expired; restart the flow")]
     ExpiredToken,
+
+    // --- RFC 8693 token exchange (B3) --------------------------------------
+    /// RFC 8693 §2.2.2 — the requested `audience`/`resource` is not one the
+    /// exchanging client may address. Its own error code rather than
+    /// `invalid_request` because a caller can act on it: the target is
+    /// well-formed, it is simply not theirs to address.
+    #[error("invalid_target: {0}")]
+    InvalidTarget(String),
 }
 
 impl OAuth2Error {
@@ -58,11 +81,13 @@ impl OAuth2Error {
             Self::InvalidGrant(_) => "invalid_grant",
             Self::InvalidClient(_) => "invalid_client",
             Self::InvalidRedirectUri(_) => "invalid_request",
+            Self::ParRequired(_) => "invalid_request",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::ServerError(_) => "server_error",
             Self::AuthorizationPending => "authorization_pending",
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
+            Self::InvalidTarget(_) => "invalid_target",
         }
     }
 

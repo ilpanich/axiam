@@ -1407,6 +1407,85 @@
         ]
       }
     },
+    "/api/v1/device/decide": {
+      "post": {
+        "tags": [
+          "device"
+        ],
+        "summary": "Record the user's approval or refusal.",
+        "operationId": "decide",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Decision recorded, or ok=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecideResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/device/verify": {
+      "get": {
+        "tags": [
+          "device"
+        ],
+        "summary": "Look up a pending grant by the code the user typed.",
+        "operationId": "verify",
+        "parameters": [
+          {
+            "name": "user_code",
+            "in": "query",
+            "description": "The code as the user typed it. Case, spaces and dashes are normalized\nserver-side, so `WXYZ-1234`, `wxyz 1234` and `WXYZ1234` are one code.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grant details, or found=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/federation-configs": {
       "get": {
         "tags": [
@@ -7158,9 +7237,13 @@
           {
             "name": "response_type",
             "in": "query",
-            "required": true,
+            "description": "Required unless `request_uri` is present (B5 / RFC 9126 §4).",
+            "required": false,
             "schema": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -7174,9 +7257,13 @@
           {
             "name": "redirect_uri",
             "in": "query",
-            "required": true,
+            "description": "Required unless `request_uri` is present.",
+            "required": false,
             "schema": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -7233,6 +7320,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "request_uri",
+            "in": "query",
+            "description": "B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from\n`/oauth2/par`. Mutually exclusive with the inline parameters above.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -7245,6 +7344,146 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/oauth2/device_authorization": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "Build an OAuth2 JSON error response with the appropriate HTTP status.",
+        "description": "`POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).\n\nIssues a `device_code` (the secret the device polls with), a short\n`user_code` (the string a human reads off a screen and types elsewhere),\nand the `verification_uri` to send them to.\n\n**Unauthenticated by design.** RFC 8628 exists for input-constrained public\nclients — a television, a CLI, an IoT sensor — none of which can keep a\nclient secret, so there is no secret to present. What is still verified is\nthat `client_id` names a real client in this tenant that is registered for\nthis grant; without that check any string could mint pending grants and\nexhaust the user-code space, which is a denial of service against every\nlegitimate device at once.\n\nThe endpoint carries its own rate-limit bucket (see `server.rs`) rather\nthan sharing the generic token bucket: it is unauthenticated and it\nallocates state, which is a different abuse profile from the token\nendpoint's.",
+        "operationId": "device_authorization",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Device and user codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceAuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth2/end_session": {
+      "get": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`GET`/`POST /oauth2/end_session` — OIDC RP-Initiated Logout 1.0 (B5).",
+        "description": "Ends the session named by `id_token_hint` and notifies every client that\nparticipated in it (Back-Channel Logout 1.0), then either redirects to an\nallow-listed `post_logout_redirect_uri` or renders AXIAM's own logged-out\npage.\n\n# The redirect is the whole security surface\n\nThis endpoint is reachable without authentication by design — a user whose\nsession has already expired must still be able to complete a logout — so an\nunvalidated `post_logout_redirect_uri` would be an open redirect on an\nunauthenticated endpoint. It is honoured **only** on exact match against\nthe identified client's `post_logout_redirect_uris`.\n\nA non-matching URI does not fail the request: the session is still ended\nand AXIAM renders its own page. Refusing to log a user out because their RP\nsent a bad parameter would be the wrong failure — they asked to log out.\n\n# Why an unverifiable hint cannot end a session\n\nWithout a verifiable `id_token_hint` there is nothing to identify but the\nbrowser's own AXIAM cookie, so the endpoint ends the cookie session if\nthere is one and does nothing otherwise. It deliberately does **not** fall\nback to \"end every session for the subject named in an unverified\nparameter\": that is a denial-of-service primitive handed to anyone who\nknows a user id.\n\n# No confirmation prompt\n\nRP-Initiated Logout 1.0 §2 permits one, and a prompt is the mitigation for\nlogout CSRF. We take the other side deliberately: a forced logout is a\nnuisance, not a privilege escalation, and a prompt shown on every logout is\ntrained away within a week.",
+        "operationId": "end_session",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id_token_hint",
+            "in": "query",
+            "description": "A previously-issued ID token identifying the session to end. The only\n*authenticated* statement of which session and client this is about.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "post_logout_redirect_uri",
+            "in": "query",
+            "description": "Where to send the browser afterwards. Honoured only on the identified\nclient's allow-list, by exact match.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Echoed verbatim on a redirect that actually happens. Never interpreted.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "client_id",
+            "in": "query",
+            "description": "Fallback identification when no `id_token_hint` is supplied.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session ended; AXIAM's logged-out page"
+          },
+          "302": {
+            "description": "Session ended; redirected to an allow-listed URI"
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/oauth2/introspect": {
@@ -7324,6 +7563,69 @@
           },
           "500": {
             "description": "Key parsing error"
+          }
+        }
+      }
+    },
+    "/oauth2/par": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`POST /oauth2/par` — RFC 9126 (B5).",
+        "description": "Accepts an authorization request over a direct, client-authenticated POST\nand returns an opaque `request_uri` to put in the browser redirect instead\nof the parameters. What travels through the user agent is then a random\nstring that cannot be edited into meaning something else.\n\n**Authenticated, unlike `/oauth2/device_authorization`.** That is the whole\npoint: the parameters stop travelling through the browser, and the ones\nthat arrive are attributable to a client that proved it holds the secret.\n\nAnswers `201`, not `200` — RFC 9126 §2.2 specifies Created, and the\nresponse names a resource that did not exist before the call.",
+        "operationId": "pushed_authorization_request",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PushedAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Pushed authorization request stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushedAuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Client authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -8193,6 +8495,13 @@
           "scopes"
         ],
         "properties": {
+          "backchannel_logout_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+          },
           "grant_types": {
             "type": "array",
             "items": {
@@ -8204,12 +8513,23 @@
             "type": "string",
             "description": "Human-readable name for the client."
           },
+          "post_logout_redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "B5 — allow-list for RP-initiated logout's `post_logout_redirect_uri`.\nSeparate from `redirect_uris` on purpose: that list receives\nauthorization codes, this one receives a browser after logout."
+          },
           "redirect_uris": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev)."
+          },
+          "require_par": {
+            "type": "boolean",
+            "description": "B5 — require this client to push its authorization parameters to\n`/oauth2/par` (RFC 9126) rather than sending them through the browser."
           },
           "scopes": {
             "type": "array",
@@ -8671,6 +8991,35 @@
           }
         }
       },
+      "DecideRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/device/decide` — the user approves or refuses.",
+        "required": [
+          "user_code",
+          "approved"
+        ],
+        "properties": {
+          "approved": {
+            "type": "boolean",
+            "description": "`true` approves, `false` refuses. A refusal is recorded rather than\nignored: it is what lets the polling device stop immediately instead\nof waiting out the full grant lifetime after the user has already said\nno (see `device_service`'s polling table)."
+          },
+          "user_code": {
+            "type": "string"
+          }
+        }
+      },
+      "DecideResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "`false` for unknown, expired, or already-decided codes alike."
+          }
+        }
+      },
       "DeviceAuthResponse": {
         "type": "object",
         "description": "Response returned when a device authenticates via certificate.",
@@ -8690,6 +9039,64 @@
           },
           "token_type": {
             "type": "string"
+          }
+        }
+      },
+      "DeviceAuthorizationRequest": {
+        "type": "object",
+        "description": "`POST /oauth2/device_authorization` request (RFC 8628 §3.1).",
+        "required": [
+          "client_id"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DeviceAuthorizationResponse": {
+        "type": "object",
+        "description": "`POST /oauth2/device_authorization` response (RFC 8628 §3.2).",
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "description": "The secret the device polls with. Returned once; only its hash is kept."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "interval": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "user_code": {
+            "type": "string",
+            "description": "The short code the user reads off the device and types."
+          },
+          "verification_uri": {
+            "type": "string",
+            "description": "Where the user should go to enter it."
+          },
+          "verification_uri_complete": {
+            "type": "string",
+            "description": "The same URI with the code pre-filled, for devices that can render a\nQR code. RFC 8628 §3.3.1 — optional, but it is the difference between\na user typing eight characters and scanning."
           }
         }
       },
@@ -9942,6 +10349,12 @@
           "jwks_uri",
           "revocation_endpoint",
           "introspection_endpoint",
+          "device_authorization_endpoint",
+          "pushed_authorization_request_endpoint",
+          "require_pushed_authorization_requests",
+          "end_session_endpoint",
+          "backchannel_logout_supported",
+          "backchannel_logout_session_supported",
           "response_types_supported",
           "subject_types_supported",
           "id_token_signing_alg_values_supported",
@@ -9954,11 +10367,27 @@
           "authorization_endpoint": {
             "type": "string"
           },
+          "backchannel_logout_session_supported": {
+            "type": "boolean",
+            "description": "The claim that AXIAM puts `sid` in its logout tokens — which it does,\nunconditionally. An RP reads this to know it can match a logout token\nto one session rather than having to end every session for the subject."
+          },
+          "backchannel_logout_supported": {
+            "type": "boolean",
+            "description": "Back-Channel Logout 1.0 §3."
+          },
           "claims_supported": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "device_authorization_endpoint": {
+            "type": "string",
+            "description": "RFC 8628 §4 — B2. Advertised unconditionally because the grant is\nalways mounted; a device that reads discovery is exactly the client\nthat cannot be told the URL out of band."
+          },
+          "end_session_endpoint": {
+            "type": "string",
+            "description": "OIDC RP-Initiated Logout 1.0 §3 — B5."
           },
           "grant_types_supported": {
             "type": "array",
@@ -9980,6 +10409,14 @@
           },
           "jwks_uri": {
             "type": "string"
+          },
+          "pushed_authorization_request_endpoint": {
+            "type": "string",
+            "description": "RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is\nalways mounted."
+          },
+          "require_pushed_authorization_requests": {
+            "type": "boolean",
+            "description": "The **server-wide** default, which is `false`: PAR is available to\nevery client but demanded of none. Per-client enforcement is\n`require_par` on the registration and is deliberately not discoverable\n— RFC 9126 §5 scopes this metadata to the server, and publishing a\nper-client answer here would leak one client's posture to every other\nreader of the document."
           },
           "response_types_supported": {
             "type": "array",
@@ -10444,6 +10881,79 @@
           }
         ],
         "description": "Provider-specific connection details."
+      },
+      "PushedAuthorizationRequest": {
+        "type": "object",
+        "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` is deliberately\nabsent: RFC 9126 §2.1 forbids pushing one, because a chained push would let\nthe second request inherit the first's authentication.",
+        "required": [
+          "client_id",
+          "client_secret",
+          "response_type",
+          "redirect_uri"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "code_challenge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code_challenge_method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nonce": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "response_type": {
+            "type": "string"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PushedAuthorizationResponse": {
+        "type": "object",
+        "description": "`POST /oauth2/par` success body (RFC 9126 §2.2).",
+        "required": [
+          "request_uri",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the `request_uri` expires."
+          },
+          "request_uri": {
+            "type": "string",
+            "description": "Opaque, single-use, `urn:ietf:params:oauth:request_uri:`-prefixed."
+          }
+        }
       },
       "ReadyResponse": {
         "type": "object",
@@ -11467,6 +11977,95 @@
           "Suspended"
         ]
       },
+      "TokenExchangeRequest": {
+        "type": "object",
+        "description": "`POST /oauth2/token` with `grant_type=…:token-exchange` (RFC 8693 §2.1).",
+        "required": [
+          "subject_token",
+          "subject_token_type"
+        ],
+        "properties": {
+          "actor_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Presence of an actor token selects **delegation**; absence selects\n**impersonation**, which is off unless the client is granted it."
+          },
+          "actor_token_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_token_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8693 §2.1. Optional, and the AS picks the default — but a client\nthat *names* a type it does not get must be told, not handed an\naccess token and left to discover the difference. v1 issues access\ntokens only, so any other explicit value is refused."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8707. Treated as a synonym of `audience`; if both are given they\nmust agree, because silently preferring one would make the request\nmean something the caller did not write."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Space-separated. Absent means \"the subject's own scopes\"."
+          },
+          "subject_token": {
+            "type": "string"
+          },
+          "subject_token_type": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenExchangeResponse": {
+        "type": "object",
+        "description": "RFC 8693 §2.2.1 response.",
+        "required": [
+          "access_token",
+          "issued_token_type",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "issued_token_type": {
+            "type": "string",
+            "description": "Mandatory per §2.2.1, and not decoration: a client that asked for one\ntoken type and got another must be able to tell."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_type": {
+            "type": "string"
+          }
+        }
+      },
       "TokenPolicy": {
         "type": "object",
         "description": "Token lifetime configuration.",
@@ -11494,6 +12093,24 @@
           "grant_type"
         ],
         "properties": {
+          "actor_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actor_token_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": [
               "string",
@@ -11518,6 +12135,13 @@
               "null"
             ]
           },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "B2 — the secret a device polls with, for\n`grant_type=urn:ietf:params:oauth:grant-type:device_code`\n(RFC 8628 §3.4). Present only on that grant; the REST layer routes it\nto [`crate::device_service::DeviceAuthorizationService`] rather than\nto [`TokenService::exchange`], which never sees it."
+          },
           "grant_type": {
             "type": "string"
           },
@@ -11533,7 +12157,31 @@
               "null"
             ]
           },
+          "requested_token_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject_token_type": {
             "type": [
               "string",
               "null"
@@ -11696,6 +12344,13 @@
       "UpdateOAuth2ClientRequest": {
         "type": "object",
         "properties": {
+          "backchannel_logout_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+          },
           "grant_types": {
             "type": [
               "array",
@@ -11711,6 +12366,15 @@
               "null"
             ]
           },
+          "post_logout_redirect_uris": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
           "redirect_uris": {
             "type": [
               "array",
@@ -11719,6 +12383,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "require_par": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "scopes": {
             "type": [
@@ -12351,6 +13021,34 @@
           },
           "token": {
             "type": "string"
+          }
+        }
+      },
+      "VerifyResponse": {
+        "type": "object",
+        "description": "The consent screen's data. Deliberately minimal: a client id and the\nscopes being asked for. Nothing here identifies the device or its network.",
+        "required": [
+          "found"
+        ],
+        "properties": {
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "found": {
+            "type": "boolean",
+            "description": "`false` for unknown, expired, or already-decided codes alike."
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

@@ -147,6 +147,14 @@ use crate::handlers;
         handlers::oauth2::token,
         handlers::oauth2::revoke,
         handlers::oauth2::introspect,
+        // Device Authorization Grant (RFC 8628, B2). The token-endpoint arm
+        // of the grant is `oauth2::token` above — one path, selected by
+        // `grant_type` — so only the two extra paths appear here.
+        handlers::oauth2::device_authorization,
+        handlers::oauth2::pushed_authorization_request,
+        handlers::oauth2::end_session,
+        handlers::device::verify,
+        handlers::device::decide,
         // OIDC
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
@@ -336,6 +344,20 @@ use crate::handlers;
         axiam_oauth2::token::RevokeRequest,
         axiam_oauth2::token::IntrospectRequest,
         axiam_oauth2::token::IntrospectionResponse,
+        axiam_oauth2::token::TokenRequest,
+        // Device Authorization Grant (RFC 8628, B2)
+        axiam_oauth2::device_service::DeviceAuthorizationRequest,
+        axiam_oauth2::device_service::DeviceAuthorizationResponse,
+        handlers::oauth2::PushedAuthorizationRequest,
+        handlers::oauth2::PushedAuthorizationResponse,
+        handlers::device::VerifyResponse,
+        handlers::device::DecideRequest,
+        handlers::device::DecideResponse,
+        // Token Exchange (RFC 8693, B3). The request rides on `TokenRequest`
+        // at `POST /oauth2/token`; these are the projected shape and the
+        // distinct response body, both of which an SDK generator needs.
+        axiam_oauth2::token_exchange::TokenExchangeRequest,
+        axiam_oauth2::token_exchange::TokenExchangeResponse,
         // OIDC
         axiam_oauth2::oidc::OidcDiscoveryDocument,
         axiam_oauth2::oidc::JwksDocument,

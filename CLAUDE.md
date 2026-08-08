@@ -113,11 +113,18 @@ This applies to every orchestrator run and every spawned executor, on **every wa
   (e.g. the end-of-phase regression gate).
 - **swagger-ui GitHub-egress workaround (required after any `target/` wipe).** `utoipa-swagger-ui`
   downloads `swagger-ui-5.17.14.zip` from `github.com` at build time, which this environment's
-  proxy blocks (403). A durable placeholder zip is cached at
-  `/home/user/.axiam-build-cache/swagger-ui-5.17.14.zip`. Point the build script at it for any
-  build/test of `axiam-api-rest` (and anything depending on it) with:
-  `export SWAGGER_UI_DOWNLOAD_URL=file:///home/user/.axiam-build-cache/swagger-ui-5.17.14.zip`
+  proxy blocks (403). Generate the placeholder zip and point the build script at it:
+  ```bash
+  export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"
+  ```
+  The cache lives OUTSIDE the repo (`~/.axiam-build-cache/`) and therefore does **not** survive a
+  fresh container — earlier revisions of this file described it as durable, and a session that
+  trusted that failed in `utoipa-swagger-ui`'s build script with
+  `swagger ui download path should exists`. Run the script; it takes a second and is idempotent.
   This is a local-only build input substitution — it touches no tracked file, `Cargo.toml`, or CI config.
+- **`--no-default-features` when libxml2 is unavailable.** `axiam-api-rest`'s default `saml`
+  feature pulls `libxml`, whose build script needs system libxml2 headers. Where those are absent,
+  build and test with `--no-default-features` — the same thing CI's "Build (SAML off)" job does.
 
 ## Security Standards
 

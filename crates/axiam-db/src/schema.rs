@@ -172,6 +172,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "device_grant_rfc8628",
         sql: SCHEMA_V26,
     },
+    Migration {
+        version: 27,
+        name: "oidc_logout_and_par",
+        sql: SCHEMA_V27,
+    },
+    Migration {
+        version: 28,
+        name: "session_client_participation",
+        sql: SCHEMA_V28,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1329,6 +1339,98 @@ DEFINE INDEX IF NOT EXISTS idx_device_grant_user_code
     ON TABLE device_grant FIELDS tenant_id, user_code UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_device_grant_code_hash
     ON TABLE device_grant FIELDS device_code_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v27 — RP-initiated logout, back-channel logout, PAR (B5)
+// -----------------------------------------------------------------------
+//
+// Three additive client-registration fields and one new table. Every
+// existing client keeps working: the two arrays default empty, the URI is
+// optional, and `require_par` defaults false, so a registration that
+// predates this migration behaves exactly as it did.
+//
+// `post_logout_redirect_uris` is deliberately a SEPARATE list from
+// `redirect_uris` rather than a reuse of it. They are allow-lists for
+// different things — one receives an authorization code, the other receives
+// a browser after a session ended — and deployments routinely want the
+// second to be a marketing page that must never be a code destination.
+// Reusing one list would silently widen the code allow-list the first time
+// an operator added a post-logout landing page.
+//
+// `pushed_auth_request` mirrors `device_grant`'s shape for the same reasons:
+// the lookup key is a hash of a 256-bit CSPRNG value (the `request_uri` is a
+// bearer credential for the 60 s it lives, so the plaintext is never
+// stored), and the index on it is UNIQUE globally because the authorize
+// path resolves it on every PAR-initiated login.
+//
+// `consumed` exists rather than deleting the row on use: RFC 9126 requires
+// single-use, and the difference between "never existed" and "already used"
+// is worth having in an audit trail even though both answer
+// `invalid_request` on the wire.
+const SCHEMA_V27: &str = "\
+DEFINE FIELD IF NOT EXISTS post_logout_redirect_uris ON TABLE oauth2_client
+    TYPE array DEFAULT [];
+DEFINE FIELD IF NOT EXISTS post_logout_redirect_uris.* ON TABLE oauth2_client TYPE string;
+DEFINE FIELD IF NOT EXISTS backchannel_logout_uri ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS require_par ON TABLE oauth2_client TYPE bool DEFAULT false;
+
+DEFINE TABLE IF NOT EXISTS pushed_auth_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS request_uri_hash ON TABLE pushed_auth_request TYPE string;
+DEFINE FIELD IF NOT EXISTS params ON TABLE pushed_auth_request TYPE object FLEXIBLE DEFAULT {};
+DEFINE FIELD IF NOT EXISTS consumed ON TABLE pushed_auth_request TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE pushed_auth_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE pushed_auth_request TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_pushed_auth_request_uri_hash
+    ON TABLE pushed_auth_request FIELDS request_uri_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v28 — session/client participation for back-channel logout (B5)
+// -----------------------------------------------------------------------
+//
+// Back-channel logout notifies "every client that participated in the session
+// that just ended". Two things have to exist for that sentence to be
+// implementable, and neither did.
+//
+// **`session_client` is a table, not a column on `session`.** One AXIAM
+// session serves many relying parties — that is what SSO *is* — so a single
+// `client_id` on the session would record only whichever RP happened to log
+// in last, and back-channel logout would silently skip every other RP the
+// user was signed into. The row is written when an authorization code is
+// issued, which is the moment a client actually joins the session.
+//
+// The index is on `(tenant_id, session_id)` rather than UNIQUE across the
+// triple: a client legitimately re-authorizes within one session (a second
+// tab, a refreshed consent), and making that a constraint violation would
+// turn a normal flow into an error. Duplicates are deduplicated at fan-out
+// time, where the cost is a small in-memory set rather than a write failure.
+//
+// **`oauth2_auth_code.session_id`** carries the session through to the
+// token endpoint so the ID token can assert `sid`. Without it the ID token
+// names a user but not a session, and both halves of B5 need session
+// precision: RP-initiated logout must end *one* session (a user with a phone
+// and a laptop expects the other to survive), and a logout token carrying
+// only `sub` tells an RP to end every session it holds for that user, which
+// is not what happened.
+//
+// `option<string>` rather than a required field: codes issued before this
+// migration have no session, and a device-grant or client-credentials path
+// legitimately has none either.
+const SCHEMA_V28: &str = "\
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE oauth2_refresh_token TYPE option<string>;
+
+DEFINE TABLE IF NOT EXISTS session_client SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE session_client TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_session_client_session
+    ON TABLE session_client FIELDS tenant_id, session_id;
 ";
 
 // -----------------------------------------------------------------------

@@ -60,6 +60,51 @@ pub struct TokenRequest {
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
     pub scope: Option<String>,
+    /// B2 — the secret a device polls with, for
+    /// `grant_type=urn:ietf:params:oauth:grant-type:device_code`
+    /// (RFC 8628 §3.4). Present only on that grant; the REST layer routes it
+    /// to [`crate::device_service::DeviceAuthorizationService`] rather than
+    /// to [`TokenService::exchange`], which never sees it.
+    pub device_code: Option<String>,
+
+    // --- B3 / RFC 8693 token exchange -----------------------------------
+    //
+    // Carried here rather than in a second form type because actix
+    // deserializes one body once, and the token endpoint cannot know which
+    // grant it is serving until it has read `grant_type` out of that body.
+    // `exchange_request()` below projects them into the shape the exchange
+    // service takes, so the grant's own module never sees these Options.
+    pub subject_token: Option<String>,
+    pub subject_token_type: Option<String>,
+    pub requested_token_type: Option<String>,
+    pub actor_token: Option<String>,
+    pub actor_token_type: Option<String>,
+    pub audience: Option<String>,
+    pub resource: Option<String>,
+}
+
+impl TokenRequest {
+    /// Project the RFC 8693 parameters, or `None` when the two mandatory ones
+    /// are absent.
+    ///
+    /// Returning `None` rather than a half-populated request means the caller
+    /// answers `invalid_request` naming what is missing, instead of the
+    /// exchange service reporting a confusing downstream failure about a
+    /// token it was handed as an empty string.
+    pub fn exchange_request(&self) -> Option<crate::token_exchange::TokenExchangeRequest> {
+        let subject_token = self.subject_token.clone().filter(|t| !t.is_empty())?;
+        let subject_token_type = self.subject_token_type.clone().filter(|t| !t.is_empty())?;
+        Some(crate::token_exchange::TokenExchangeRequest {
+            subject_token,
+            subject_token_type,
+            requested_token_type: self.requested_token_type.clone().filter(|t| !t.is_empty()),
+            actor_token: self.actor_token.clone().filter(|t| !t.is_empty()),
+            actor_token_type: self.actor_token_type.clone().filter(|t| !t.is_empty()),
+            scope: self.scope.clone(),
+            audience: self.audience.clone().filter(|t| !t.is_empty()),
+            resource: self.resource.clone().filter(|t| !t.is_empty()),
+        })
+    }
 }
 
 /// Token response per RFC 6749.
@@ -584,6 +629,7 @@ where
                     client_id: client_id.to_string(),
                     user_id: Some(auth_code.user_id),
                     scopes: auth_code.scopes.clone(),
+                    session_id: auth_code.session_id,
                     expires_at: refresh_expires,
                 })
                 .await
@@ -611,6 +657,7 @@ where
                     Some(&user.username),
                     &auth_code.scopes,
                     &self.auth_config,
+                    auth_code.session_id,
                 )
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
             )
@@ -961,6 +1008,9 @@ where
                 client_id: client_id.to_string(),
                 user_id: stored.user_id,
                 scopes: stored.scopes.clone(),
+                // Rotation preserves the session: the new token descends from
+                // the same login, so it must carry the same `sid`.
+                session_id: stored.session_id,
                 expires_at: refresh_expires,
             })
             .await
@@ -1013,6 +1063,10 @@ where
                         Some(&user.username),
                         &stored.scopes,
                         &self.auth_config,
+                        // The same session the original login created: an RP
+                        // that only ever sees refreshed ID tokens must still
+                        // be able to match a logout token to its session.
+                        stored.session_id,
                     )
                     .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
                 )
@@ -1151,13 +1205,24 @@ where
         })
     }
 
-    /// Verify client credentials. Shared by revoke and introspect.
-    async fn authenticate_client(
+    /// Verify client credentials and return the authenticated registration.
+    ///
+    /// Shared by revoke, introspect, and — since B3 — the token-exchange
+    /// grant. The first two discard the returned row; the exchange needs it,
+    /// because the client's registered scopes bound what an exchange may
+    /// grant and its registered URIs bound which audiences it may address.
+    ///
+    /// Returning the row rather than `()` is what keeps ONE
+    /// secret-verification path in this crate. The alternative — a second
+    /// method for the one caller that needs the row — would mean two places
+    /// to keep the OBS-1 transparent-hash-upgrade behaviour correct, and the
+    /// one that drifted would be the one nobody was looking at.
+    pub async fn authenticate_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<(), OAuth2Error> {
+    ) -> Result<OAuth2Client, OAuth2Error> {
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
@@ -1176,9 +1241,18 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
+        // Defence in depth. The lookup above is tenant-scoped in SQL, so this
+        // can only fire if that predicate is dropped or a repository
+        // implementation ignores `tenant_id` — which is exactly the
+        // regression worth catching, since otherwise the cross-tenant
+        // property lives entirely in a WHERE clause two crates away.
+        if client.tenant_id != tenant_id {
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        }
+
         self.verify_client_secret(tenant_id, &client, client_secret)
             .await?;
 
-        Ok(())
+        Ok(client)
     }
 }

@@ -26,6 +26,17 @@ pub struct AuthorizeRequest {
     /// OIDC nonce — passed through to the authorization code for
     /// inclusion in the ID token.
     pub nonce: Option<String>,
+    /// B5 — the AXIAM session this authorization is happening within, stored
+    /// on the code so the ID token minted from it can assert `sid`.
+    pub session_id: Option<Uuid>,
+    /// B5 — whether these parameters arrived via `/oauth2/par` rather than on
+    /// the query string.
+    ///
+    /// Carried here rather than checked in the handler because the
+    /// `require_par` decision needs the client registration, which this
+    /// service already fetches; doing it in the handler would mean a second
+    /// lookup of the same row and a second place for the policy to drift.
+    pub via_par: bool,
 }
 
 /// Authorization response -- contains the code to return to the client.
@@ -75,6 +86,19 @@ where
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+
+        // 1b. B5 / RFC 9126 §5: a client registered as PAR-only may not send
+        //     its parameters through the browser. Checked before the redirect
+        //     is validated, and answered as a non-redirecting error, because
+        //     bouncing the user agent to a redirect_uri that arrived by the
+        //     very channel the client forbade would defeat the setting.
+        if client.require_par && !req.via_par {
+            return Err(OAuth2Error::ParRequired(
+                "this client must use pushed authorization requests \
+                 (RFC 9126); send parameters to /oauth2/par first"
+                    .into(),
+            ));
+        }
 
         // 2. Validate redirect_uri — also before any redirectable
         //    errors per RFC 6749 §4.1.2.1.
@@ -165,6 +189,7 @@ where
                 code_challenge: req.code_challenge,
                 code_challenge_method: req.code_challenge_method,
                 nonce: req.nonce,
+                session_id: req.session_id,
                 expires_at,
             })
             .await
@@ -339,6 +364,7 @@ mod tests {
                 code_challenge: input.code_challenge,
                 code_challenge_method: input.code_challenge_method,
                 nonce: input.nonce,
+                session_id: None,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -467,6 +493,9 @@ mod tests {
             redirect_uris: vec!["https://app.example.com/callback".into()],
             grant_types: vec!["authorization_code".into()],
             scopes: vec!["openid".into(), "profile".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -488,6 +517,8 @@ mod tests {
             code_challenge: code_challenge.map(String::from),
             code_challenge_method: code_challenge.map(|_| "S256".into()),
             nonce: None,
+            session_id: None,
+            via_par: false,
         }
     }
 

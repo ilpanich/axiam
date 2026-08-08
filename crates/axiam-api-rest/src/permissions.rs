@@ -233,6 +233,25 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/oauth2/userinfo",
     "/oauth2/revoke",
     "/oauth2/introspect",
+    // B2 / RFC 8628 §3.1. Necessarily public: the grant exists precisely for
+    // clients that cannot hold a secret (a television, a headless CLI), so
+    // there is no credential the device could present here. `client_id` is
+    // still checked against the tenant's registered clients inside the
+    // handler — the endpoint is unauthenticated, not unvalidated.
+    "/oauth2/device_authorization",
+    // B5 / RFC 9126. Public to `AuthzMiddleware` in the same sense the token
+    // endpoint is: it takes no AXIAM session or bearer token, because the
+    // caller is a client authenticating with its own credentials in the form
+    // body — which the handler verifies through the same
+    // `authenticate_client` path the token endpoint uses. Unauthenticated by
+    // the middleware's definition, not by the endpoint's.
+    "/oauth2/par",
+    // B5 / RP-Initiated Logout 1.0 §2. Necessarily public: a user whose
+    // session has ALREADY expired must still be able to complete a logout,
+    // and requiring a live session to end a session is a contradiction. The
+    // endpoint identifies what to terminate from a *signed* `id_token_hint`,
+    // so it is unauthenticated, not unauthenticated-and-unbounded.
+    "/oauth2/end_session",
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",

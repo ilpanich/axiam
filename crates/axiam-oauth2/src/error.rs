@@ -44,6 +44,14 @@ pub enum OAuth2Error {
     /// The device code expired before the user acted.
     #[error("expired_token: the device code has expired; restart the flow")]
     ExpiredToken,
+
+    // --- RFC 8693 token exchange (B3) --------------------------------------
+    /// RFC 8693 §2.2.2 — the requested `audience`/`resource` is not one the
+    /// exchanging client may address. Its own error code rather than
+    /// `invalid_request` because a caller can act on it: the target is
+    /// well-formed, it is simply not theirs to address.
+    #[error("invalid_target: {0}")]
+    InvalidTarget(String),
 }
 
 impl OAuth2Error {
@@ -63,6 +71,7 @@ impl OAuth2Error {
             Self::AuthorizationPending => "authorization_pending",
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
+            Self::InvalidTarget(_) => "invalid_target",
         }
     }
 

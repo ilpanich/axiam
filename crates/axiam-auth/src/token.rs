@@ -81,7 +81,49 @@ pub struct AccessTokenClaims {
     /// only — does not affect validation or authorization decisions.
     #[serde(default)]
     pub sub_kind: SubjectKind,
+    /// RFC 8693 §4.1 actor claim — B3 token exchange, **delegation only**.
+    ///
+    /// Present when this token was minted by an exchange that carried an
+    /// `actor_token`: `sub` remains the user, and this names the party acting
+    /// for them. Absent on every ordinary token, and — deliberately — absent
+    /// on an *impersonation* exchange too, because impersonation's whole
+    /// definition is that the resulting token is indistinguishable from one
+    /// the subject obtained directly. That is exactly why impersonation is
+    /// off by default, gated behind a per-client grant, and audited: the
+    /// audit record is the only place it is visible.
+    ///
+    /// Nested for chained delegation (`act.act`), capped at
+    /// [`MAX_ACT_CHAIN_DEPTH`] — an uncapped chain is an unbounded field
+    /// inside a signed token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<ActClaim>,
 }
+
+/// RFC 8693 §4.1 `act` claim: who is acting on the subject's behalf.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActClaim {
+    /// The actor's identifier — a `client_id` for a service actor.
+    pub sub: String,
+    /// The previous actor in a delegation chain, innermost last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<Box<ActClaim>>,
+}
+
+impl ActClaim {
+    /// Number of actors in this chain, counting `self`.
+    pub fn depth(&self) -> usize {
+        1 + self.act.as_ref().map_or(0, |inner| inner.depth())
+    }
+}
+
+/// How many actors an `act` chain may name before an exchange is refused.
+///
+/// Three is not a round number chosen for tidiness: beyond a
+/// user → gateway → service → service hop nobody reads the chain, and the
+/// claim is carried in every request the token authenticates. A cap makes the
+/// token size bounded; no cap makes it a function of how many times an
+/// attacker can re-exchange.
+pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
 
 /// Issue a signed EdDSA (Ed25519) JWT access token.
 ///
@@ -120,9 +162,77 @@ pub fn issue_access_token(
         aud: Some(aud.to_string()),
         scope,
         sub_kind: SubjectKind::User,
+        act: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Issue an access token for an RFC 8693 token exchange (B3).
+///
+/// Distinct from [`issue_access_token`] in exactly the two ways the exchange
+/// needs, and no others:
+///
+/// * **`expires_at` is supplied by the caller, not derived from the config.**
+///   An exchanged token must never outlive the subject token it came from, or
+///   an exchange becomes a lifetime-laundering step: hold a token for thirty
+///   seconds, exchange it, hold the result for fifteen minutes. The caller
+///   computes `min(subject remaining, configured max)` and passes it here.
+/// * **`act` may be set**, naming the delegating party (§4.1).
+///
+/// Everything else — issuer, algorithm, key handling — is identical, so an
+/// exchanged token validates through exactly the same path as any other.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_exchanged_token(
+    subject: &str,
+    sub_kind: SubjectKind,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    jti: String,
+    aud: &str,
+    expires_at: i64,
+    act: Option<ActClaim>,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+    if expires_at <= now {
+        return Err(AuthError::Crypto(
+            "exchanged token would already be expired".into(),
+        ));
+    }
+    let scope = if scopes.is_empty() {
+        None
+    } else {
+        Some(scopes.join(" "))
+    };
+
+    let claims = AccessTokenClaims {
+        sub: subject.to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        iss: config.effective_issuer().to_owned(),
+        iat: now,
+        exp: expires_at,
+        jti,
+        aud: Some(aud.to_string()),
+        scope,
+        sub_kind,
+        act,
+    };
+
     let owned;
     let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
         cached.as_ref()
@@ -171,6 +281,7 @@ pub fn issue_client_credentials_token(
         aud: Some(AUD_M2M.to_string()),
         scope,
         sub_kind: SubjectKind::OAuth2Client,
+        act: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -237,6 +348,7 @@ pub fn issue_service_account_token(
         aud: Some(AUD_M2M.to_string()),
         scope: None,
         sub_kind: SubjectKind::ServiceAccount,
+        act: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -305,6 +417,7 @@ pub fn issue_service_account_client_credentials_token(
         aud: Some(AUD_M2M.to_string()),
         scope,
         sub_kind: SubjectKind::ServiceAccount,
+        act: None,
     };
 
     let owned;

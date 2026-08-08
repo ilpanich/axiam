@@ -8,3 +8,4 @@ pub mod jwks_cache;
 pub mod oidc;
 pub mod pkce;
 pub mod token;
+pub mod token_exchange;

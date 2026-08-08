@@ -109,6 +109,21 @@ services:
       AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS: "${AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS:-5}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
+      # --- A4/E4: gRPC strict session-revocation mode ----------------------
+      # Shipped default is `false`: the gRPC data plane validates the JWT and
+      # stops, so its revocation bound is the token's 15-minute lifetime —
+      # which is a real part of why gRPC reads faster than REST, and is
+      # documented as a posture choice rather than an oversight. Setting this
+      # to "true" adds the session-revocation read to the interceptor (served
+      # from the session-validation cache when that is enabled), matching
+      # REST's posture.
+      #
+      # Listed here because compose forwards only the names in this block — a
+      # shell `export` of a name absent from it reaches nothing, which is
+      # exactly the J9 failure that cost run 5 its stage timings. The E4
+      # strict-revocation cell exists to publish what this posture costs, so
+      # the knob has to be reachable from `bench-up`.
+      AXIAM__GRPC__STRICT_REVOCATION: "${AXIAM__GRPC__STRICT_REVOCATION:-false}"
       # --- I5: Nagle on the REST listener ---------------------------------
       # actix-web leaves the socket at its OS default (Nagle ON) unless told
       # otherwise; tonic sets TCP_NODELAY itself. Shipped default is `true`.

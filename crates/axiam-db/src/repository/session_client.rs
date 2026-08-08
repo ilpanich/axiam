@@ -135,6 +135,6 @@ impl<C: Connection> SessionClientRepository for SurrealSessionClientRepository<C
             .map_err(DbError::from)?;
 
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        Ok(rows.first().map(|r| r.total.max(0) as u64).unwrap_or(0))
+        Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 }

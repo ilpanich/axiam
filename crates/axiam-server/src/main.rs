@@ -62,8 +62,9 @@ use axiam_db::{
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealPushedAuthRequestRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -732,6 +733,7 @@ async fn main() -> std::io::Result<()> {
     // B5 / RFC 9126. Composed here at the root, not lazily: an AppState field
     // that only the test builder populates is exactly the gap that left B2's
     // grant unreachable in a real deployment.
+    let session_client_repo = SurrealSessionClientRepository::new(pool.handle_for_repo());
     let par_service = ParService::new(
         oauth2_client_repo.clone(),
         SurrealPushedAuthRequestRepository::new(pool.handle_for_repo()),
@@ -1523,6 +1525,7 @@ async fn main() -> std::io::Result<()> {
         device_authorization_service: device_authorization_service.clone(),
         token_exchange_service: token_exchange_service.clone(),
         par_service: par_service.clone(),
+        session_client_repo: session_client_repo.clone(),
         device_grant_repo: device_grant_repo.clone(),
         // The device endpoints size their own governors from this (see
         // `server.rs`), so the handlers need the same numbers the middleware

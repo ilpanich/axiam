@@ -195,6 +195,8 @@ pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
 /// `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` — B3.
 pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` — B5, never preset.
+pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` — B2, never preset.
@@ -368,6 +370,18 @@ pub struct RateLimitConfig {
     /// there is a real identity to key on, and per-IP would collapse a whole
     /// deployment behind one NAT into a single bucket.
     pub par_per_min: u32,
+    /// Max `/oauth2/end_session` requests per minute per IP (default: 30 —
+    /// B5). Deliberately NOT part of [`MachineLimitPreset`]: like the other
+    /// human-driven endpoints this is not sized from capacity.
+    ///
+    /// The endpoint is unauthenticated (a user whose session already expired
+    /// must still be able to complete a logout) and it TERMINATES state. The
+    /// thing being limited is therefore forced-logout abuse, not throughput.
+    /// 30/min is generous for a human clicking "sign out" and low enough that
+    /// scripting mass logouts against guessed sessions is not free — though
+    /// the real defence there is that an unverifiable `id_token_hint` ends
+    /// nothing at all.
+    pub end_session_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -423,6 +437,7 @@ impl Default for RateLimitConfig {
             device_verify_per_min: 10,
             token_exchange_per_min: 120,
             par_per_min: 120,
+            end_session_per_min: 30,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -599,6 +614,10 @@ impl RateLimitConfig {
             "token_exchange_per_min must be >= 1"
         );
         assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
+        assert!(
+            self.end_session_per_min >= 1,
+            "end_session_per_min must be >= 1"
+        );
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
         // guessing against a code space of 20^8 over the grant's 10-minute

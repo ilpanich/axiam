@@ -7399,6 +7399,93 @@
         }
       }
     },
+    "/oauth2/end_session": {
+      "get": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`GET`/`POST /oauth2/end_session` — OIDC RP-Initiated Logout 1.0 (B5).",
+        "description": "Ends the session named by `id_token_hint` and notifies every client that\nparticipated in it (Back-Channel Logout 1.0), then either redirects to an\nallow-listed `post_logout_redirect_uri` or renders AXIAM's own logged-out\npage.\n\n# The redirect is the whole security surface\n\nThis endpoint is reachable without authentication by design — a user whose\nsession has already expired must still be able to complete a logout — so an\nunvalidated `post_logout_redirect_uri` would be an open redirect on an\nunauthenticated endpoint. It is honoured **only** on exact match against\nthe identified client's `post_logout_redirect_uris`.\n\nA non-matching URI does not fail the request: the session is still ended\nand AXIAM renders its own page. Refusing to log a user out because their RP\nsent a bad parameter would be the wrong failure — they asked to log out.\n\n# Why an unverifiable hint cannot end a session\n\nWithout a verifiable `id_token_hint` there is nothing to identify but the\nbrowser's own AXIAM cookie, so the endpoint ends the cookie session if\nthere is one and does nothing otherwise. It deliberately does **not** fall\nback to \"end every session for the subject named in an unverified\nparameter\": that is a denial-of-service primitive handed to anyone who\nknows a user id.\n\n# No confirmation prompt\n\nRP-Initiated Logout 1.0 §2 permits one, and a prompt is the mitigation for\nlogout CSRF. We take the other side deliberately: a forced logout is a\nnuisance, not a privilege escalation, and a prompt shown on every logout is\ntrained away within a week.",
+        "operationId": "end_session",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id_token_hint",
+            "in": "query",
+            "description": "A previously-issued ID token identifying the session to end. The only\n*authenticated* statement of which session and client this is about.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "post_logout_redirect_uri",
+            "in": "query",
+            "description": "Where to send the browser afterwards. Honoured only on the identified\nclient's allow-list, by exact match.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Echoed verbatim on a redirect that actually happens. Never interpreted.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "client_id",
+            "in": "query",
+            "description": "Fallback identification when no `id_token_hint` is supplied.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session ended; AXIAM's logged-out page"
+          },
+          "302": {
+            "description": "Session ended; redirected to an allow-listed URI"
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/oauth2/introspect": {
       "post": {
         "tags": [
@@ -10265,6 +10352,9 @@
           "device_authorization_endpoint",
           "pushed_authorization_request_endpoint",
           "require_pushed_authorization_requests",
+          "end_session_endpoint",
+          "backchannel_logout_supported",
+          "backchannel_logout_session_supported",
           "response_types_supported",
           "subject_types_supported",
           "id_token_signing_alg_values_supported",
@@ -10277,6 +10367,14 @@
           "authorization_endpoint": {
             "type": "string"
           },
+          "backchannel_logout_session_supported": {
+            "type": "boolean",
+            "description": "The claim that AXIAM puts `sid` in its logout tokens — which it does,\nunconditionally. An RP reads this to know it can match a logout token\nto one session rather than having to end every session for the subject."
+          },
+          "backchannel_logout_supported": {
+            "type": "boolean",
+            "description": "Back-Channel Logout 1.0 §3."
+          },
           "claims_supported": {
             "type": "array",
             "items": {
@@ -10286,6 +10384,10 @@
           "device_authorization_endpoint": {
             "type": "string",
             "description": "RFC 8628 §4 — B2. Advertised unconditionally because the grant is\nalways mounted; a device that reads discovery is exactly the client\nthat cannot be told the URL out of band."
+          },
+          "end_session_endpoint": {
+            "type": "string",
+            "description": "OIDC RP-Initiated Logout 1.0 §3 — B5."
           },
           "grant_types_supported": {
             "type": "array",

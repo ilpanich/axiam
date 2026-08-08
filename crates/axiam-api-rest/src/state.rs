@@ -62,9 +62,9 @@ use axiam_db::{
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -308,6 +308,9 @@ pub struct AppState<C: Connection + Clone> {
     pub token_exchange_service: TokenExchangeServiceT<C>,
     /// B5 — pushed authorization requests (RFC 9126).
     pub par_service: ParServiceT<C>,
+    /// B5 — which clients joined which session, for the back-channel logout
+    /// fan-out.
+    pub session_client_repo: SurrealSessionClientRepository<C>,
     pub device_grant_repo: SurrealDeviceGrantRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
@@ -493,6 +496,7 @@ impl<C: Connection + Clone> AppState<C> {
             "{}/device",
             auth_config.oauth2_issuer_url.trim_end_matches('/')
         );
+        let session_client_repo = SurrealSessionClientRepository::new(db.clone());
         let par_service = ParService::new(
             oauth2_client_repo.clone(),
             SurrealPushedAuthRequestRepository::new(db.clone()),
@@ -576,6 +580,7 @@ impl<C: Connection + Clone> AppState<C> {
             token_service,
             device_authorization_service,
             par_service,
+            session_client_repo,
             token_exchange_service,
             device_grant_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),

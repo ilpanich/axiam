@@ -152,6 +152,7 @@ use crate::handlers;
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
         handlers::oauth2::pushed_authorization_request,
+        handlers::oauth2::end_session,
         handlers::device::verify,
         handlers::device::decide,
         // OIDC

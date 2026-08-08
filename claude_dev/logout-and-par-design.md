@@ -139,29 +139,43 @@ Four constraints the spec states and implementations skip:
    immediately or not at all; a long-lived one is a replayable
    session-termination command.
 
-### Delivery reuses the webhook machinery
+### Delivery
 
-The webhook delivery path already has bounded retry, a DLQ, and per-delivery
-audit. Back-channel logout has the same shape — an outbound POST to a
-per-tenant registered URL that may be down — so it rides on that rather than
-growing a second delivery system with its own half-implemented retry.
+**Revised during implementation.** This section originally proposed reusing the
+AMQP webhook pipeline for its retry and DLQ. Delivery is instead a direct POST
+with a small bounded retry of its own (3 attempts, 500 ms then 2 s backoff,
+5 s per-attempt timeout), for two reasons that only became clear against the
+code:
 
-Two differences from a webhook, both deliberate:
+- The webhook consumer signs every delivery with the §13 HMAC header scheme,
+  which is exactly what a logout token must **not** carry. The signed JWT *is*
+  the authentication, and offering a second, cheaper check invites an RP to
+  verify that one instead.
+- Routing through AMQP would make logout notification silently depend on the
+  broker being up. That is a stronger coupling than a best-effort side effect
+  should have — a deployment with RabbitMQ down would stop telling RPs about
+  logouts without any signal that it had.
 
-- **No HMAC header.** The signed JWT *is* the authentication; adding
-  `X-Axiam-Signature` would invite an RP to check the cheaper one.
-- **Delivery is best-effort and never blocks the logout.** The user's session
-  is gone from AXIAM the moment the request returns, whether or not any RP
-  acknowledged. An RP that is down stays logged in until its own session
-  expires — that is the spec's model, and making logout synchronous on N
-  external HTTP calls would make the feature a hostage to the least reliable
-  RP.
+The retry keeps the property that actually mattered about the webhook path: a
+briefly-unavailable RP still gets told. It deliberately does not cover a
+sustained outage — such an RP keeps its own session until it expires, and
+queueing indefinitely would mean holding a session-termination command, a
+security-relevant instruction, for an unbounded time.
+
+**Delivery is best-effort and never blocks the logout.** The user's session is
+gone from AXIAM the moment the request returns, whether or not any RP
+acknowledged. Making logout synchronous on N external HTTP calls would make the
+feature a hostage to the least reliable RP — one hung endpoint would hang the
+user's logout.
 
 ### Which clients get told
 
-Only clients that actually participated in the session. AXIAM records the
-`client_id` on each session created through the authorization-code flow;
-back-channel logout iterates those, not every client in the tenant.
+Only clients that actually participated in the session. Participation is recorded in a
+`session_client` **table**, not a column on `session`: one AXIAM session serves
+many relying parties — that is what SSO is — so a single `client_id` would
+record only whichever RP authorized last and the fan-out would skip every other
+RP the user was signed into. Back-channel logout iterates those rows, not every
+client in the tenant.
 Broadcasting to every registered client would leak the existence of a session
 to clients that were never part of it.
 

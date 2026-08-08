@@ -1408,7 +1408,7 @@ DEFINE INDEX IF NOT EXISTS idx_pushed_auth_request_uri_hash
 // turn a normal flow into an error. Duplicates are deduplicated at fan-out
 // time, where the cost is a small in-memory set rather than a write failure.
 //
-// **`authorization_code.session_id`** carries the session through to the
+// **`oauth2_auth_code.session_id`** carries the session through to the
 // token endpoint so the ID token can assert `sid`. Without it the ID token
 // names a user but not a session, and both halves of B5 need session
 // precision: RP-initiated logout must end *one* session (a user with a phone
@@ -1420,8 +1420,8 @@ DEFINE INDEX IF NOT EXISTS idx_pushed_auth_request_uri_hash
 // migration have no session, and a device-grant or client-credentials path
 // legitimately has none either.
 const SCHEMA_V28: &str = "\
-DEFINE FIELD IF NOT EXISTS session_id ON TABLE authorization_code TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS session_id ON TABLE refresh_token TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE oauth2_refresh_token TYPE option<string>;
 
 DEFINE TABLE IF NOT EXISTS session_client SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE session_client TYPE string;

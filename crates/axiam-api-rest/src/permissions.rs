@@ -246,6 +246,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // `authenticate_client` path the token endpoint uses. Unauthenticated by
     // the middleware's definition, not by the endpoint's.
     "/oauth2/par",
+    // B5 / RP-Initiated Logout 1.0 §2. Necessarily public: a user whose
+    // session has ALREADY expired must still be able to complete a logout,
+    // and requiring a live session to end a session is a contradiction. The
+    // endpoint identifies what to terminate from a *signed* `id_token_hint`,
+    // so it is unauthenticated, not unauthenticated-and-unbounded.
+    "/oauth2/end_session",
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",

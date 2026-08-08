@@ -106,6 +106,52 @@ pub fn issue_logout_token(
         .map_err(|e| AuthError::Crypto(format!("logout token encode: {e}")))
 }
 
+/// The parts of an `id_token_hint` the end-session endpoint acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdTokenHint {
+    /// The session to end. `None` when the token predates `sid` (B5).
+    pub session_id: Option<Uuid>,
+    /// The client the token was issued to — the allow-list to check the
+    /// `post_logout_redirect_uri` against.
+    pub client_id: String,
+    pub subject_id: Option<Uuid>,
+}
+
+/// Decode an `id_token_hint`.
+///
+/// Two validation choices, both deliberate:
+///
+/// - **Expiry is not checked.** An ID token presented here has routinely
+///   expired already: the user is logging out, which commonly happens long
+///   after a 15-minute token was minted. Rejecting expired hints would make
+///   the hint useless exactly when it is most needed.
+/// - **The signature IS checked.** That is what makes the hint an
+///   authenticated statement of which session and client this is about rather
+///   than a suggestion. Without it, anyone could name any session.
+///
+/// `aud` is read out rather than validated against — there is no expected
+/// value to compare to, since the client's identity is what we are learning.
+///
+/// Anything unverifiable returns `None` and is treated by the caller as an
+/// absent hint, per RP-Initiated Logout 1.0 §2 — not as an error.
+pub fn decode_id_token_hint(token: &str, public_key_pem: &str) -> Option<IdTokenHint> {
+    use jsonwebtoken::{DecodingKey, Validation};
+
+    let key = DecodingKey::from_ed_pem(public_key_pem.as_bytes()).ok()?;
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.validate_aud = false;
+
+    let claims = jsonwebtoken::decode::<axiam_auth::token::IdTokenClaims>(token, &key, &validation)
+        .ok()?
+        .claims;
+    Some(IdTokenHint {
+        session_id: claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+        client_id: claims.aud,
+        subject_id: Uuid::parse_str(&claims.sub).ok(),
+    })
+}
+
 /// What the end-session endpoint decided to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogoutOutcome {
@@ -334,5 +380,67 @@ mod tests {
         let outcome =
             resolve_post_logout_redirect(Some("https://elsewhere.example"), &allow, Some("xyz"));
         assert_eq!(outcome, LogoutOutcome::Rendered);
+    }
+
+    #[test]
+    fn an_expired_id_token_hint_is_still_decoded() {
+        // The common case: the user logs out well after their 15-minute token
+        // expired. Rejecting it would make the hint useless when it matters.
+        let cfg = test_config();
+        let sid = Uuid::new_v4();
+        let sub = Uuid::new_v4();
+        let mut expired_cfg = cfg.clone();
+        expired_cfg.access_token_lifetime_secs = 1;
+        let token = axiam_auth::token::issue_id_token(
+            sub,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "rp-1",
+            None,
+            None,
+            None,
+            &[],
+            &expired_cfg,
+            Some(sid),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let hint = decode_id_token_hint(&token, &cfg.jwt_public_key_pem).expect("decodes");
+        assert_eq!(hint.session_id, Some(sid));
+        assert_eq!(hint.client_id, "rp-1");
+        assert_eq!(hint.subject_id, Some(sub));
+    }
+
+    #[test]
+    fn a_hint_signed_by_another_key_is_rejected() {
+        // The signature is what makes the hint a statement rather than a
+        // suggestion; without this check anyone could name any session.
+        let cfg = test_config();
+        let token = axiam_auth::token::issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "rp-1",
+            None,
+            None,
+            None,
+            &[],
+            &cfg,
+            Some(Uuid::new_v4()),
+        )
+        .unwrap();
+        let other = concat!(
+            "-----BEGIN PUBLIC KEY-----\n",
+            "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n",
+            "-----END PUBLIC KEY-----"
+        );
+        assert!(decode_id_token_hint(&token, other).is_none());
+    }
+
+    #[test]
+    fn garbage_is_treated_as_an_absent_hint() {
+        let cfg = test_config();
+        assert!(decode_id_token_hint("not-a-jwt", &cfg.jwt_public_key_pem).is_none());
+        assert!(decode_id_token_hint("", &cfg.jwt_public_key_pem).is_none());
     }
 }

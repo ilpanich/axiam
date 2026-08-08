@@ -33,6 +33,14 @@ pub struct OidcDiscoveryDocument {
     /// per-client answer here would leak one client's posture to every other
     /// reader of the document.
     pub require_pushed_authorization_requests: bool,
+    /// OIDC RP-Initiated Logout 1.0 §3 — B5.
+    pub end_session_endpoint: String,
+    /// Back-Channel Logout 1.0 §3.
+    pub backchannel_logout_supported: bool,
+    /// The claim that AXIAM puts `sid` in its logout tokens — which it does,
+    /// unconditionally. An RP reads this to know it can match a logout token
+    /// to one session rather than having to end every session for the subject.
+    pub backchannel_logout_session_supported: bool,
     pub response_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
@@ -56,6 +64,9 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         device_authorization_endpoint: format!("{issuer}/oauth2/device_authorization"),
         pushed_authorization_request_endpoint: format!("{issuer}/oauth2/par"),
         require_pushed_authorization_requests: false,
+        end_session_endpoint: format!("{issuer}/oauth2/end_session"),
+        backchannel_logout_supported: true,
+        backchannel_logout_session_supported: true,
         response_types_supported: vec!["code".into()],
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],

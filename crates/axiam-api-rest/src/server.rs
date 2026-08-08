@@ -361,6 +361,21 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
                     ),
             )
+            // B5 / RP-Initiated Logout 1.0. GET and POST both, because §2
+            // permits either and browsers reach it by navigation. Its own
+            // bucket, per-IP: like `/device_authorization` it is
+            // unauthenticated and it TERMINATES state, which is a different
+            // abuse profile from the token endpoint's.
+            .service(
+                web::resource("/end_session")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_end_session",
+                        rate_limit_cfg.end_session_per_min,
+                    ))
+                    .route(web::get().to(handlers::oauth2::end_session::<C>))
+                    .route(web::post().to(handlers::oauth2::end_session::<C>)),
+            )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );

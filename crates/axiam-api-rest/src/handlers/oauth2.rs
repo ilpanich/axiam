@@ -2,7 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
-use axiam_core::repository::UserRepository;
+use axiam_core::repository::{OAuth2ClientRepository, SessionClientRepository, UserRepository};
 use axiam_oauth2::authorize::AuthorizeRequest;
 use axiam_oauth2::device_service::{
     DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
@@ -196,9 +196,33 @@ pub async fn authorize<C: Connection + Clone>(
     // parameters rather than the query string.
     let resolved_redirect_uri = req.redirect_uri.clone();
     let resolved_state = req.state.clone();
+    let authorized_client_id = req.client_id.clone();
 
     match state.authorize_service.authorize(req).await {
         Ok(resp) => {
+            // B5: the client has just joined this session. Recorded here —
+            // the moment a code is issued — because that is when
+            // participation becomes true, and back-channel logout iterates
+            // exactly these rows. A failure is logged and swallowed: losing a
+            // logout notification is bad, but failing the login that would
+            // have created the session is worse.
+            if let Err(e) = state
+                .session_client_repo
+                .record(axiam_core::models::oauth2_client::CreateSessionClient {
+                    tenant_id: user.tenant_id,
+                    session_id: user.session_id,
+                    client_id: authorized_client_id.clone(),
+                    user_id: user.user_id,
+                })
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "could not record session participation; back-channel \
+                     logout will not reach this client"
+                );
+            }
+
             match url::Url::parse(&resp.redirect_uri) {
                 Ok(mut url) => {
                     url.query_pairs_mut().append_pair("code", &resp.code);
@@ -1226,5 +1250,242 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
                 expires_in: resp.expires_in,
             }),
         Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B5 — RP-Initiated Logout 1.0
+// ---------------------------------------------------------------------------
+
+/// Query parameters accepted by `/oauth2/end_session`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct EndSessionQuery {
+    pub tenant_id: Uuid,
+    /// A previously-issued ID token identifying the session to end. The only
+    /// *authenticated* statement of which session and client this is about.
+    pub id_token_hint: Option<String>,
+    /// Where to send the browser afterwards. Honoured only on the identified
+    /// client's allow-list, by exact match.
+    pub post_logout_redirect_uri: Option<String>,
+    /// Echoed verbatim on a redirect that actually happens. Never interpreted.
+    pub state: Option<String>,
+    /// Fallback identification when no `id_token_hint` is supplied.
+    pub client_id: Option<String>,
+}
+
+/// `GET`/`POST /oauth2/end_session` — OIDC RP-Initiated Logout 1.0 (B5).
+///
+/// Ends the session named by `id_token_hint` and notifies every client that
+/// participated in it (Back-Channel Logout 1.0), then either redirects to an
+/// allow-listed `post_logout_redirect_uri` or renders AXIAM's own logged-out
+/// page.
+///
+/// # The redirect is the whole security surface
+///
+/// This endpoint is reachable without authentication by design — a user whose
+/// session has already expired must still be able to complete a logout — so an
+/// unvalidated `post_logout_redirect_uri` would be an open redirect on an
+/// unauthenticated endpoint. It is honoured **only** on exact match against
+/// the identified client's `post_logout_redirect_uris`.
+///
+/// A non-matching URI does not fail the request: the session is still ended
+/// and AXIAM renders its own page. Refusing to log a user out because their RP
+/// sent a bad parameter would be the wrong failure — they asked to log out.
+///
+/// # Why an unverifiable hint cannot end a session
+///
+/// Without a verifiable `id_token_hint` there is nothing to identify but the
+/// browser's own AXIAM cookie, so the endpoint ends the cookie session if
+/// there is one and does nothing otherwise. It deliberately does **not** fall
+/// back to "end every session for the subject named in an unverified
+/// parameter": that is a denial-of-service primitive handed to anyone who
+/// knows a user id.
+///
+/// # No confirmation prompt
+///
+/// RP-Initiated Logout 1.0 §2 permits one, and a prompt is the mitigation for
+/// logout CSRF. We take the other side deliberately: a forced logout is a
+/// nuisance, not a privilege escalation, and a prompt shown on every logout is
+/// trained away within a week.
+#[utoipa::path(
+    get,
+    path = "/oauth2/end_session",
+    tag = "oauth2",
+    params(EndSessionQuery),
+    responses(
+        (status = 302, description = "Session ended; redirected to an allow-listed URI"),
+        (status = 200, description = "Session ended; AXIAM's logged-out page"),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn end_session<C: Connection + Clone>(
+    query: web::Query<EndSessionQuery>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let q = query.into_inner();
+    let tenant_id = q.tenant_id;
+
+    // 1. Identify the session and client. The hint is a *signed* statement of
+    //    both; `client_id` is an unauthenticated parameter and is only a
+    //    fallback for choosing the redirect allow-list.
+    let hinted = q.id_token_hint.as_deref().and_then(|t| {
+        axiam_oauth2::logout::decode_id_token_hint(t, &state.auth_config.jwt_public_key_pem)
+    });
+
+    let (session_id, hint_client_id, subject_id) = match hinted {
+        Some(h) => (h.session_id, Some(h.client_id), h.subject_id),
+        None => (None, None, None),
+    };
+
+    // 2. When both are present and disagree, refuse rather than resolve in
+    //    favour of either. Picking the signed one would silently ignore what
+    //    the caller asked; picking the unsigned one would let a parameter
+    //    override a signature.
+    if let (Some(hint_client), Some(param_client)) =
+        (hint_client_id.as_deref(), q.client_id.as_deref())
+        && hint_client != param_client
+    {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "id_token_hint and client_id identify different clients".into(),
+        ));
+    }
+
+    let effective_client_id = hint_client_id.or_else(|| q.client_id.clone());
+
+    // 3. End the session, and notify the clients that were in it.
+    if let (Some(session_id), Some(subject_id)) = (session_id, subject_id) {
+        dispatch_backchannel_logout(&state, tenant_id, session_id, subject_id).await;
+        // Best-effort: a session that has already expired is not an error —
+        // the user asked to be logged out and they are.
+        let _ = state.auth_service.logout(tenant_id, session_id).await;
+    }
+
+    // 4. Resolve the redirect against the identified client's allow-list.
+    let allow_list = match effective_client_id.as_deref() {
+        Some(client_id) => state
+            .oauth2_client_repo
+            .get_by_client_id(tenant_id, client_id)
+            .await
+            .map(|c| c.post_logout_redirect_uris)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    match axiam_oauth2::logout::resolve_post_logout_redirect(
+        q.post_logout_redirect_uri.as_deref(),
+        &allow_list,
+        q.state.as_deref(),
+    ) {
+        axiam_oauth2::logout::LogoutOutcome::Redirect { uri, state: st } => {
+            let location = match (url::Url::parse(&uri), st) {
+                (Ok(mut url), Some(st)) => {
+                    url.query_pairs_mut().append_pair("state", &st);
+                    url.to_string()
+                }
+                (Ok(url), None) => url.to_string(),
+                // An allow-listed entry that will not parse is an operator
+                // error, not a user-facing one; render rather than emit a
+                // Location header we could not construct.
+                (Err(_), _) => {
+                    return logged_out_page();
+                }
+            };
+            HttpResponse::Found()
+                .append_header(("Location", location))
+                .append_header(("Cache-Control", "no-store"))
+                .cookie(crate::middleware::csrf::clear_access_cookie())
+                .cookie(crate::middleware::csrf::clear_refresh_cookie())
+                .cookie(crate::middleware::csrf::clear_csrf_cookie())
+                .finish()
+        }
+        axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(),
+    }
+}
+
+/// AXIAM's own logged-out page.
+///
+/// Deliberately carries no RP-supplied content — not the `state`, not the
+/// rejected URI. Echoing either would put an attacker-controlled string into
+/// a page served from AXIAM's own origin.
+fn logged_out_page() -> HttpResponse {
+    HttpResponse::Ok()
+        .append_header(("Cache-Control", "no-store"))
+        .content_type("text/html; charset=utf-8")
+        .cookie(crate::middleware::csrf::clear_access_cookie())
+        .cookie(crate::middleware::csrf::clear_refresh_cookie())
+        .cookie(crate::middleware::csrf::clear_csrf_cookie())
+        .body(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <title>Signed out</title></head><body><h1>You are signed out.</h1>\
+             </body></html>",
+        )
+}
+
+/// Build and dispatch logout tokens for a session's participants.
+///
+/// Spawned rather than awaited: the user's session is gone the moment this
+/// request returns, and making logout wait on N external HTTP calls would make
+/// it a hostage to the least reliable RP.
+async fn dispatch_backchannel_logout<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    tenant_id: Uuid,
+    session_id: Uuid,
+    subject_id: Uuid,
+) {
+    let participants = match state
+        .session_client_repo
+        .list_for_session(tenant_id, session_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list session participants for logout");
+            return;
+        }
+    };
+    if participants.is_empty() {
+        return;
+    }
+
+    let mut clients = Vec::new();
+    for client_id in participants
+        .iter()
+        .map(|p| p.client_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        if let Ok(c) = state
+            .oauth2_client_repo
+            .get_by_client_id(tenant_id, &client_id)
+            .await
+        {
+            clients.push(c);
+        }
+    }
+
+    let issuer = state.auth_config.effective_issuer().to_string();
+    let auth_config = state.auth_config.clone();
+    let participant_ids: Vec<String> = participants.into_iter().map(|p| p.client_id).collect();
+
+    let deliveries =
+        crate::backchannel_logout::select_targets(&participant_ids, &clients, |client_id| {
+            axiam_oauth2::logout::issue_logout_token(
+                &issuer,
+                client_id,
+                session_id,
+                subject_id,
+                &auth_config,
+            )
+            .ok()
+        });
+
+    // Participation records are dropped after the fan-out list is built, not
+    // before — the list is what the fan-out iterates.
+    let _ = state
+        .session_client_repo
+        .delete_for_session(tenant_id, session_id)
+        .await;
+
+    if !deliveries.is_empty() {
+        actix_web::rt::spawn(crate::backchannel_logout::deliver_all(deliveries));
     }
 }

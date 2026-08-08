@@ -2,6 +2,7 @@
 //! and error handling.
 
 pub mod authz;
+pub mod backchannel_logout;
 pub mod config;
 pub mod error;
 pub mod extractors;

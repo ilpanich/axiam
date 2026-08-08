@@ -987,7 +987,7 @@ macro over an `axiam_require_access(...)` guard function. All compose strictly o
    Required tests: an allow, a `no_grant` deny and a `denied_by_rule` deny each
    surface their own reason code; the guard returns 403 for both refusals; an
    unknown reason code does not alter the outcome.
-9. **`require_role` is local.** It reads the verified claims already in the request
+10. **`require_role` is local.** It reads the verified claims already in the request
    context; it never calls the server. Docs in every SDK must state that role names are
    tenant-defined and that `require_access` is the authoritative check.
 
@@ -1565,6 +1565,221 @@ body      = {"event":"user.created","id":"01JQ0000000000000000000000"}
 
 ---
 
+## §14 Device Authorization Grant (RFC 8628)
+
+**Requirement level: SHOULD (v1.0).** An SDK that ships §14 states conformance to it
+alongside whatever else it implements. This section covers the *client* half of the grant —
+the device that cannot show a browser. The verification page (`GET /api/v1/device/verify`,
+`POST /api/v1/device/decide`) is an authenticated first-party surface and is **out of
+scope**: it is the AXIAM console's job, not an SDK's.
+
+Server documentation: [`docs/api/device-flow.md`](../docs/api/device-flow.md).
+
+### §14.1 Canonical operation set and endpoint map
+
+| Canonical operation | Wire call | Request (content type / schema) | Success response |
+|---|---|---|---|
+| `device_authorize` | `POST /oauth2/device_authorization?tenant_id=<uuid>` | `application/x-www-form-urlencoded` / `DeviceAuthorizationRequest` | `200` `DeviceAuthorizationResponse` |
+| `device_poll` | `POST /oauth2/token?tenant_id=<uuid>` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` | `application/x-www-form-urlencoded` / `TokenRequest` | `200` `TokenResponse` |
+| `device_login` | the two above, composed — see [§14.3](#§143-device_login-the-composed-helper) | — | `200` `TokenResponse` |
+
+`device_authorize` is **unauthenticated**: a device that cannot show a browser also cannot
+hold a client secret. SDKs MUST NOT send `client_secret` on it, and MUST NOT refuse to call
+it from a client constructed without one.
+
+The §12.1 wire rules apply unchanged: form-encoded bodies, `tenant_id` as a **query**
+parameter and never a body field, `X-Tenant-ID` still emitted per §5 rule 2, no HTTP Basic.
+A slug-only client therefore cannot call either operation, exactly as for the five §12
+operations — same rule, same client-side error, same remedy.
+
+### §14.2 Polling (normative — the part implementations get wrong)
+
+`device_poll` maps the RFC 8628 §3.5 answer table. Every row is a `400` with an
+`OAuth2ErrorResponse` body, and only two of the five are terminal:
+
+| `error` | Meaning | SDK behaviour |
+|---|---|---|
+| `authorization_pending` | user has not decided yet | keep polling at the current interval |
+| `slow_down` | polling too fast | **add 5 s to the interval**, then keep polling |
+| `expired_token` | the grant's lifetime ran out | terminal — raise |
+| `access_denied` | the user refused | terminal — raise, and distinctly from `expired_token` |
+| `invalid_grant` | unknown/consumed device code | terminal — raise |
+
+1. **`slow_down` increases the interval permanently, and never resets it.** RFC 8628 §3.5
+   requires the increase; an SDK that backs off for one round and returns to the original
+   interval will be told to slow down again, forever. The increment is 5 s per occurrence,
+   added to the *current* interval.
+2. **The initial interval comes from the response, not from a constant.** `interval` is a
+   field of `DeviceAuthorizationResponse`; when the server omits it, default to **5 s**
+   (RFC 8628 §3.2). An SDK MUST NOT hard-code a faster floor.
+3. **The two refusals are distinct errors.** `access_denied` means a human said no;
+   `expired_token` means nobody answered. Collapsing them into one error loses the only
+   information the device can act on — retry versus stop asking.
+4. **Polling stops at `expires_in`.** The SDK MUST NOT poll past the deadline the
+   authorization response gave it even if the server has not yet answered `expired_token`;
+   the deadline is authoritative and the extra requests are pure load.
+5. **These five are not §2 taxonomy errors from the HTTP status.** All arrive as `400`,
+   which §2 would map to `ValidationError`. §14 overrides that for this grant: an SDK MUST
+   dispatch on the `error` field first. A `400` whose `error` is none of the five falls back
+   to the §2 mapping.
+6. **`5xx` and transport failures remain §2 `NetworkError`** and are **not** terminal —
+   they are retried under the SDK's existing bounded read-only retry policy, then surfaced.
+   A server restart mid-flow must not lose a grant the user has already approved.
+
+### §14.3 `device_login` — the composed helper
+
+The one operation applications actually want: start the grant, hand the caller the user code
+and verification URI, poll to completion, and adopt the resulting session per the SDK's
+existing credential-adoption rule.
+
+Normative shape (naming per each language's §1 convention):
+
+1. Call `device_authorize`.
+2. Surface `user_code`, `verification_uri` and `verification_uri_complete` to the caller
+   **before** polling begins — via a callback, an emitted event, or a returned handle the
+   caller polls itself. An SDK MUST NOT print them to stdout on the caller's behalf, and MUST
+   NOT begin polling before the caller has had the chance to display them.
+3. Poll per [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) until a
+   terminal outcome.
+4. On success, adopt the tokens into the client's session exactly as `oidc_exchange` does
+   (§12.3), including the refresh-token single-flight guard of §9.
+
+`verification_uri_complete` embeds the user code so a device that *can* render a QR code
+does not make the user type anything. SDKs MUST surface it when present and MUST NOT
+synthesise it by concatenation when absent — its format is the server's to choose.
+
+### §14.4 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `device_authorize` | `device_authorize` | `deviceAuthorize` | `device_authorize` | `deviceAuthorize` | `deviceAuthorize` | `DeviceAuthorizeAsync` | `deviceAuthorize` | `DeviceAuthorize` | `deviceAuthorize` | `axiam_device_authorize` | `device_authorize` |
+| `device_poll` | `device_poll` | `devicePoll` | `device_poll` | `devicePoll` | `devicePoll` | `DevicePollAsync` | `devicePoll` | `DevicePoll` | `devicePoll` | `axiam_device_poll` | `device_poll` |
+| `device_login` | `device_login` | `deviceLogin` | `device_login` | `deviceLogin` | `deviceLogin` | `DeviceLoginAsync` | `deviceLogin` | `DeviceLogin` | `deviceLogin` | `axiam_device_login` | `device_login` |
+
+Async-twin rules follow §1: Java/C# add their `*Async` companions, Kotlin uses `suspend`,
+Python exposes the same three names on both `AxiamClient` and `AsyncAxiamClient`.
+
+### §14.5 `Sensitive<T>` applicability
+
+`device_code` is a bearer credential for the duration of the grant and MUST be wrapped in
+`Sensitive<T>` (§7) wherever the SDK has that type, and MUST NOT appear in logs at any
+level. `user_code` is **not** wrapped: it is designed to be read aloud and typed by a human,
+and wrapping it would defeat the one thing it exists for. It still MUST NOT be logged —
+displaying is the caller's job.
+
+### §14.6 Required tests
+
+Interval honoured from the response; `slow_down` raises the interval and the raised interval
+persists across subsequent polls; `authorization_pending` loops rather than raising;
+`access_denied` and `expired_token` raise **distinct** errors; polling stops at `expires_in`;
+a `500` mid-poll is retried rather than treated as terminal; `device_login` surfaces the user
+code before its first poll (assert ordering, not just presence); a successful `device_login`
+leaves the client authenticated.
+
+---
+
+## §15 Token Exchange (RFC 8693)
+
+**Requirement level: SHOULD (v1.0).** For service-to-service calls: a backend holding a
+user's access token exchanges it for a *narrower* one before calling the next service.
+
+Server documentation: [`docs/api/token-exchange.md`](../docs/api/token-exchange.md).
+
+**The rule an SDK must not paper over: an exchange only ever narrows.** The server enforces
+this; an SDK's job is to not hide the refusals, because every one of them is the server
+telling the caller their assumption about their own privileges was wrong.
+
+### §15.1 Canonical operation and endpoint map
+
+| Canonical operation | Wire call | Request (content type / schema) | Success response |
+|---|---|---|---|
+| `token_exchange` | `POST /oauth2/token?tenant_id=<uuid>` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` | `application/x-www-form-urlencoded` / `TokenRequest` | `200` `TokenExchangeResponse` |
+
+Signature (canonical order; each language's §1 casing applies):
+
+```
+token_exchange(subject_token, *, actor_token=None, scopes=None, audience=None, resource=None)
+```
+
+`subject_token` is positional and first. Everything else is optional and keyword/named where
+the language has that, because four optional strings in positional order is a bug waiting to
+be written.
+
+The exchanging client **authenticates** (`client_secret_post`, per §12.1 rule 3) — unlike
+§14's device, this is a confidential service. §12.1's `tenant_id`-as-query rule and the
+slug-only-client consequence apply unchanged.
+
+### §15.2 Semantics (normative)
+
+1. **`actor_token` selects delegation; its absence selects impersonation.** These are
+   different operations with different risk, and an SDK MUST NOT paper over the difference —
+   no default actor token, no "helpfully" reusing the client's own session token as the
+   actor. If the caller passed no actor token they asked for impersonation, and the server
+   will refuse unless the client holds the grant.
+2. **Surface `unauthorized_client` verbatim.** It means either "this client may not exchange
+   at all" or "this client may not impersonate". Both are registration facts an operator
+   must fix; an SDK that retries, downgrades, or reworks the request into a delegation is
+   sending a request the caller did not write.
+3. **`invalid_scope` is not a hint to retry with fewer scopes.** The server refuses rather
+   than silently narrowing precisely so the caller finds out here. An SDK MUST NOT
+   auto-narrow and re-send.
+4. **No refresh token comes back, ever.** `TokenExchangeResponse` has no `refresh_token`
+   field. An SDK MUST NOT synthesise one, MUST NOT feed the result into the §9 single-flight
+   refresh guard, and MUST document that re-running the exchange is how you get a fresh
+   token.
+5. **The exchanged token is not the client's session.** `token_exchange` MUST NOT adopt the
+   returned token as the SDK client's own credentials (unlike `oidc_exchange` and
+   `device_login`). It is a token to *hand onward* in one outbound call; adopting it would
+   silently re-privilege every subsequent call the client makes.
+6. **`issued_token_type` MUST be surfaced on the result**, not dropped. It is mandatory in
+   RFC 8693 §2.2.1 so a client that asked for one type and received another can tell.
+7. **`scope` in the response is the granted set, which may be narrower than requested** even
+   on success (when `scope` was omitted and the client's registration bounds the subject's
+   own). Applications MUST be able to read what they actually got.
+
+### §15.3 Error mapping
+
+Extends §2. As in §14.2 rule 5, dispatch on the `error` field of `OAuth2ErrorResponse`
+before falling back to the status-code mapping:
+
+| `error` | Meaning |
+|---|---|
+| `invalid_request` | malformed, unsupported `subject_token_type`/`requested_token_type`, `audience`/`resource` disagree, or the `act` chain is already at depth 3 |
+| `invalid_grant` | subject or actor token invalid, expired, or from another tenant |
+| `invalid_scope` | a requested scope the subject does not hold, or an empty intersection |
+| `invalid_target` | `audience`/`resource` not registered to this client |
+| `unauthorized_client` | client not registered for the grant, or impersonation without the grant |
+| `invalid_client` | client authentication failed |
+
+**Cross-tenant answers `invalid_grant`, deliberately.** An SDK MUST NOT try to distinguish
+"wrong tenant" from "bad token" or report a guess to the caller — the server collapses them
+because telling them apart is a tenant-enumeration signal, and re-deriving the distinction
+client-side hands back what the server withheld.
+
+### §15.4 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `token_exchange` | `token_exchange` | `tokenExchange` | `token_exchange` | `tokenExchange` | `tokenExchange` | `TokenExchangeAsync` | `tokenExchange` | `TokenExchange` | `tokenExchange` | `axiam_token_exchange` | `token_exchange` |
+
+### §15.5 `Sensitive<T>` applicability
+
+`subject_token`, `actor_token` and the returned `access_token` are all bearer credentials and
+MUST be wrapped in `Sensitive<T>` (§7) wherever the SDK has that type. None may be logged at
+any level, including in error paths — an exchange failure is exactly when a naive
+implementation logs the request body.
+
+### §15.6 Required tests
+
+A delegation narrows scopes and the result carries the granted set; omitting `scope` inherits
+the subject's; an impersonation request without the grant surfaces `unauthorized_client`
+unchanged (assert no retry and no request rewriting); `invalid_scope` is not auto-narrowed;
+the response carries no refresh token and the client's own session is unchanged after the
+call; `issued_token_type` is surfaced; a cross-tenant subject token surfaces `invalid_grant`
+with no attempt to refine it.
+
+---
+
 ## Closing Notes
 
 ### Conformance Statement
@@ -1585,6 +1800,16 @@ An SDK that additionally ships the §12 OIDC/SSO relying-party helpers updates i
 An SDK that additionally ships the §13 webhook-signature verifier updates its statement to:
 
 > "This SDK conforms to CONTRACT.md §1–§13."
+
+§14 (device authorization grant) and §15 (token exchange) are **independent** SHOULD-level
+sections, not a continuation of the §1–§13 run: an SDK may ship either, both, or neither.
+Because of that, they are stated by name rather than by extending the range — an SDK that
+ships both writes:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14 and §15."
+
+and one that ships only the device grant names only §14. Writing "§1–§15" would claim the
+other section by implication, which is the failure mode a range invites.
 
 The three SDKs that defer §12 ([§12.6](#§126-deferred-sdks-swift-c-c)) keep their existing
 statement and MUST NOT claim §12.

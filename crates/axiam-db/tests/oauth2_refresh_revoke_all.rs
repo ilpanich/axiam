@@ -88,6 +88,7 @@ async fn insert_token(
         token_hash: hash.clone(),
         client_id: "test-client".into(),
         scopes: vec![],
+        session_id: None,
         expires_at: Utc::now() + Duration::days(30),
     })
     .await

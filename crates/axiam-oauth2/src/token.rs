@@ -629,6 +629,7 @@ where
                     client_id: client_id.to_string(),
                     user_id: Some(auth_code.user_id),
                     scopes: auth_code.scopes.clone(),
+                    session_id: auth_code.session_id,
                     expires_at: refresh_expires,
                 })
                 .await
@@ -656,6 +657,7 @@ where
                     Some(&user.username),
                     &auth_code.scopes,
                     &self.auth_config,
+                    auth_code.session_id,
                 )
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
             )
@@ -1006,6 +1008,9 @@ where
                 client_id: client_id.to_string(),
                 user_id: stored.user_id,
                 scopes: stored.scopes.clone(),
+                // Rotation preserves the session: the new token descends from
+                // the same login, so it must carry the same `sid`.
+                session_id: stored.session_id,
                 expires_at: refresh_expires,
             })
             .await
@@ -1058,6 +1063,10 @@ where
                         Some(&user.username),
                         &stored.scopes,
                         &self.auth_config,
+                        // The same session the original login created: an RP
+                        // that only ever sees refreshed ID tokens must still
+                        // be able to match a logout token to its session.
+                        stored.session_id,
                     )
                     .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
                 )

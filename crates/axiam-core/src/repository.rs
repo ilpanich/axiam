@@ -28,8 +28,8 @@ use crate::models::{
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
-        CreatePushedAuthRequest, CreateRefreshToken, DeviceGrant, OAuth2Client, PushedAuthRequest,
-        RefreshToken, UpdateOAuth2Client,
+        CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient, DeviceGrant,
+        OAuth2Client, PushedAuthRequest, RefreshToken, SessionClient, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
@@ -895,6 +895,41 @@ pub trait DeviceGrantRepository: Send + Sync {
 
     /// Remove expired grants. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Storage for session/client participation (B5, back-channel logout).
+///
+/// One AXIAM session serves many relying parties — that is what SSO is — so
+/// participation is a set, not a field on the session.
+pub trait SessionClientRepository: Send + Sync {
+    /// Record that a client participated in a session.
+    ///
+    /// Idempotence is NOT promised: a client legitimately re-authorizes within
+    /// one session (a second tab, a refreshed consent), and making that a
+    /// constraint violation would turn a normal flow into an error. Callers
+    /// deduplicate at fan-out time instead, where the cost is a small
+    /// in-memory set rather than a failed write.
+    fn record(
+        &self,
+        input: CreateSessionClient,
+    ) -> impl Future<Output = AxiamResult<SessionClient>> + Send;
+
+    /// Every participation record for a session, in insertion order.
+    fn list_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SessionClient>>> + Send;
+
+    /// Drop a session's participation records. Returns the number deleted.
+    ///
+    /// Called after the logout fan-out has been dispatched, not before: the
+    /// list is what the fan-out iterates.
+    fn delete_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for RFC 9126 pushed authorization requests (B5).

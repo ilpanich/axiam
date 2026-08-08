@@ -26,6 +26,9 @@ pub struct AuthorizeRequest {
     /// OIDC nonce — passed through to the authorization code for
     /// inclusion in the ID token.
     pub nonce: Option<String>,
+    /// B5 — the AXIAM session this authorization is happening within, stored
+    /// on the code so the ID token minted from it can assert `sid`.
+    pub session_id: Option<Uuid>,
     /// B5 — whether these parameters arrived via `/oauth2/par` rather than on
     /// the query string.
     ///
@@ -186,6 +189,7 @@ where
                 code_challenge: req.code_challenge,
                 code_challenge_method: req.code_challenge_method,
                 nonce: req.nonce,
+                session_id: req.session_id,
                 expires_at,
             })
             .await
@@ -360,6 +364,7 @@ mod tests {
                 code_challenge: input.code_challenge,
                 code_challenge_method: input.code_challenge_method,
                 nonce: input.nonce,
+                session_id: None,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -512,6 +517,7 @@ mod tests {
             code_challenge: code_challenge.map(String::from),
             code_challenge_method: code_challenge.map(|_| "S256".into()),
             nonce: None,
+            session_id: None,
             via_par: false,
         }
     }

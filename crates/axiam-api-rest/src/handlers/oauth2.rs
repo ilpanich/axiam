@@ -157,6 +157,11 @@ pub async fn authorize<C: Connection + Clone>(
                 code_challenge: params.code_challenge,
                 code_challenge_method: params.code_challenge_method,
                 nonce: params.nonce,
+                // B5: the browser session this authorization happens within.
+                // It reaches the ID token as `sid`, which is what lets a
+                // back-channel logout token name one session rather than the
+                // subject's every session.
+                session_id: Some(user.session_id),
                 via_par: true,
             }
         }
@@ -180,6 +185,7 @@ pub async fn authorize<C: Connection + Clone>(
                 code_challenge: q.code_challenge,
                 code_challenge_method: q.code_challenge_method,
                 nonce: q.nonce,
+                session_id: Some(user.session_id),
                 via_par: false,
             }
         }

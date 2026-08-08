@@ -10,8 +10,24 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+
 use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
+
+/// Parse an optional stored UUID.
+///
+/// Empty string and absent both mean "no session": SurrealDB writes `NONE` as
+/// absent, but a row migrated in from an earlier shape can carry `""`, and
+/// treating that as a parse failure would make an old authorization code
+/// unreadable rather than merely session-less.
+fn parse_opt_uuid(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some(v) => Uuid::parse_str(v)
+            .map(Some)
+            .map_err(|e| DbError::Migration(format!("invalid session UUID: {e}"))),
+    }
+}
 
 #[derive(Debug, SurrealValue)]
 struct AuthCodeRow {
@@ -24,6 +40,8 @@ struct AuthCodeRow {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
+    #[surreal(default)]
+    session_id: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -41,6 +59,8 @@ struct AuthCodeRowWithId {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
+    #[surreal(default)]
+    session_id: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -65,6 +85,7 @@ impl AuthCodeRowWithId {
             code_challenge: self.code_challenge,
             code_challenge_method: self.code_challenge_method,
             nonce: self.nonce,
+            session_id: parse_opt_uuid(self.session_id.as_deref())?,
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -104,6 +125,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  code_challenge = $code_challenge, \
                  code_challenge_method = $code_challenge_method, \
                  nonce = $nonce, \
+                 session_id = $session_id, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -117,6 +139,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("code_challenge", input.code_challenge))
             .bind(("code_challenge_method", input.code_challenge_method))
             .bind(("nonce", input.nonce))
+            .bind(("session_id", input.session_id.map(|id| id.to_string())))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -144,6 +167,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             code_challenge: row.code_challenge,
             code_challenge_method: row.code_challenge_method,
             nonce: row.nonce,
+            session_id: parse_opt_uuid(row.session_id.as_deref())?,
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,

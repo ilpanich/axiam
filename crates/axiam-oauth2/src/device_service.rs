@@ -280,6 +280,10 @@ where
                 user_id: Some(user.id),
                 token_hash: axiam_auth::token::hash_refresh_token(&refresh_token),
                 scopes: redeemed.scopes.clone(),
+                // RFC 8628 has no browser session behind it: the device polls
+                // and the approval happened elsewhere, so there is no AXIAM
+                // session for a back-channel logout to name.
+                session_id: None,
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await

@@ -450,6 +450,15 @@ pub struct IdTokenClaims {
     /// Nonce echoed from the authorization request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// Session identifier (B5).
+    ///
+    /// Carried so that RP-initiated logout can end *one* session rather than
+    /// every session the subject holds, and so that a back-channel logout
+    /// token can name the session precisely. An ID token that identifies only
+    /// the user forces both to be all-or-nothing, which is not what a user
+    /// logging out on their laptop asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
     /// Tenant ID (UUID string).
     pub tenant_id: String,
     /// Organization ID (UUID string).
@@ -478,6 +487,7 @@ pub fn issue_id_token(
     username: Option<&str>,
     scopes: &[String],
     config: &AuthConfig,
+    session_id: Option<Uuid>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
@@ -489,6 +499,7 @@ pub fn issue_id_token(
         exp: now + config.access_token_lifetime_secs as i64,
         iat: now,
         nonce: nonce.map(str::to_owned),
+        sid: session_id.map(|s| s.to_string()),
         tenant_id: tenant_id.to_string(),
         org_id: org_id.to_string(),
         email: if has_scope("email") {
@@ -884,6 +895,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Some("jdoe"),
             &scopes,
             &config,
+            None,
         )
         .unwrap();
 
@@ -914,6 +926,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             &scopes,
             &config,
+            None,
         )
         .unwrap();
 
@@ -927,6 +940,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             &scopes,
             &config,
+            None,
         )
         .unwrap();
 
@@ -955,6 +969,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             &["openid".to_owned(), "email".to_owned()],
             &config,
+            None,
         )
         .unwrap();
         let c = decode_id_token(&token_with, &config);
@@ -971,6 +986,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             &["openid".to_owned()],
             &config,
+            None,
         )
         .unwrap();
         let c = decode_id_token(&token_without, &config);
@@ -995,6 +1011,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Some("jdoe"),
             &["openid".to_owned(), "profile".to_owned()],
             &config,
+            None,
         )
         .unwrap();
         let c = decode_id_token(&token_with, &config);
@@ -1011,6 +1028,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Some("jdoe"),
             &["openid".to_owned()],
             &config,
+            None,
         )
         .unwrap();
         let c = decode_id_token(&token_without, &config);

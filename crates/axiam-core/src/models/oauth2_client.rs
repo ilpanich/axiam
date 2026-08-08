@@ -91,6 +91,13 @@ pub struct AuthorizationCode {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce — echoed back in the ID token.
     pub nonce: Option<String>,
+    /// B5 — the AXIAM session this code was issued from, carried through to
+    /// the token endpoint so the ID token can assert `sid`.
+    ///
+    /// `Option` because codes predating schema v28 have none, and because the
+    /// value is genuinely absent on paths with no browser session behind them.
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -109,6 +116,8 @@ pub struct CreateAuthorizationCode {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce — stored with the code so it can be echoed in the ID token.
     pub nonce: Option<String>,
+    /// B5 — the AXIAM session this code was issued from.
+    pub session_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -121,6 +130,14 @@ pub struct RefreshToken {
     pub client_id: String,
     pub user_id: Option<Uuid>,
     pub scopes: Vec<String>,
+    /// B5 — the AXIAM session this token descends from.
+    ///
+    /// Carried so that an ID token minted on refresh asserts the *same* `sid`
+    /// the RP stored at login. Dropping it on refresh would leave an RP that
+    /// only ever sees refreshed ID tokens unable to match a back-channel
+    /// logout token to the session it holds.
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
     pub created_at: DateTime<Utc>,
@@ -134,6 +151,8 @@ pub struct CreateRefreshToken {
     pub client_id: String,
     pub user_id: Option<Uuid>,
     pub scopes: Vec<String>,
+    /// B5 — see [`RefreshToken::session_id`].
+    pub session_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -272,4 +291,34 @@ pub struct CreatePushedAuthRequest {
     pub request_uri_hash: String,
     pub params: PushedAuthParams,
     pub expires_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Session/client participation — back-channel logout (B5)
+// ---------------------------------------------------------------------------
+
+/// A record that `client_id` participated in `session_id`.
+///
+/// Written when an authorization code is issued, which is the moment a client
+/// actually joins the session. Back-channel logout iterates these rather than
+/// every client in the tenant: broadcasting to clients that were never part of
+/// the session would tell them a session they had no involvement in just
+/// ended.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionClient {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub session_id: Uuid,
+    pub client_id: String,
+    pub user_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for recording participation.
+#[derive(Debug, Clone)]
+pub struct CreateSessionClient {
+    pub tenant_id: Uuid,
+    pub session_id: Uuid,
+    pub client_id: String,
+    pub user_id: Uuid,
 }

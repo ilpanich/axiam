@@ -177,6 +177,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oidc_logout_and_par",
         sql: SCHEMA_V27,
     },
+    Migration {
+        version: 28,
+        name: "session_client_participation",
+        sql: SCHEMA_V28,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1380,6 +1385,52 @@ DEFINE FIELD IF NOT EXISTS expires_at ON TABLE pushed_auth_request TYPE datetime
 DEFINE FIELD IF NOT EXISTS created_at ON TABLE pushed_auth_request TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_pushed_auth_request_uri_hash
     ON TABLE pushed_auth_request FIELDS request_uri_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v28 — session/client participation for back-channel logout (B5)
+// -----------------------------------------------------------------------
+//
+// Back-channel logout notifies "every client that participated in the session
+// that just ended". Two things have to exist for that sentence to be
+// implementable, and neither did.
+//
+// **`session_client` is a table, not a column on `session`.** One AXIAM
+// session serves many relying parties — that is what SSO *is* — so a single
+// `client_id` on the session would record only whichever RP happened to log
+// in last, and back-channel logout would silently skip every other RP the
+// user was signed into. The row is written when an authorization code is
+// issued, which is the moment a client actually joins the session.
+//
+// The index is on `(tenant_id, session_id)` rather than UNIQUE across the
+// triple: a client legitimately re-authorizes within one session (a second
+// tab, a refreshed consent), and making that a constraint violation would
+// turn a normal flow into an error. Duplicates are deduplicated at fan-out
+// time, where the cost is a small in-memory set rather than a write failure.
+//
+// **`authorization_code.session_id`** carries the session through to the
+// token endpoint so the ID token can assert `sid`. Without it the ID token
+// names a user but not a session, and both halves of B5 need session
+// precision: RP-initiated logout must end *one* session (a user with a phone
+// and a laptop expects the other to survive), and a logout token carrying
+// only `sub` tells an RP to end every session it holds for that user, which
+// is not what happened.
+//
+// `option<string>` rather than a required field: codes issued before this
+// migration have no session, and a device-grant or client-credentials path
+// legitimately has none either.
+const SCHEMA_V28: &str = "\
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE authorization_code TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE refresh_token TYPE option<string>;
+
+DEFINE TABLE IF NOT EXISTS session_client SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE session_client TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE session_client TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_session_client_session
+    ON TABLE session_client FIELDS tenant_id, session_id;
 ";
 
 // -----------------------------------------------------------------------

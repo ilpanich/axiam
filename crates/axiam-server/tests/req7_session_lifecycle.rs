@@ -304,6 +304,7 @@ async fn password_change_revokes_oauth2_refresh_tokens() {
             client_id: "test-oauth2-client".into(),
             user_id: Some(user_id),
             scopes: vec!["openid".into(), "profile".into()],
+            session_id: None,
             expires_at: Utc::now() + Duration::hours(24),
         })
         .await
@@ -412,6 +413,7 @@ async fn password_reset_confirm_revokes_oauth2_refresh_tokens() {
             client_id: "test-client".into(),
             user_id: Some(user_id),
             scopes: vec!["openid".into()],
+            session_id: None,
             expires_at: Utc::now() + Duration::hours(24),
         })
         .await

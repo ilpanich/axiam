@@ -11,6 +11,21 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+
+/// Parse an optional stored session id.
+///
+/// Absent and empty both mean "no session": SurrealDB writes `NONE` as absent,
+/// and a row migrated from the pre-v28 shape can carry `""`. Treating that as a
+/// parse failure would make an old refresh token unreadable rather than merely
+/// session-less.
+fn parse_opt_session(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some(v) => Uuid::parse_str(v)
+            .map(Some)
+            .map_err(|e| DbError::Migration(format!("invalid session UUID: {e}"))),
+    }
+}
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -20,6 +35,8 @@ struct RefreshTokenRow {
     client_id: String,
     user_id: Option<String>,
     scopes: Vec<String>,
+    #[surreal(default)]
+    session_id: Option<String>,
     expires_at: DateTime<Utc>,
     revoked: bool,
     created_at: DateTime<Utc>,
@@ -33,6 +50,8 @@ struct RefreshTokenRowWithId {
     client_id: String,
     user_id: Option<String>,
     scopes: Vec<String>,
+    #[surreal(default)]
+    session_id: Option<String>,
     expires_at: DateTime<Utc>,
     revoked: bool,
     created_at: DateTime<Utc>,
@@ -59,6 +78,7 @@ impl RefreshTokenRowWithId {
             client_id: self.client_id,
             user_id,
             scopes: self.scopes,
+            session_id: parse_opt_session(self.session_id.as_deref())?,
             expires_at: self.expires_at,
             revoked: self.revoked,
             created_at: self.created_at,
@@ -105,6 +125,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  client_id = $client_id, \
                  user_id = $user_id, \
                  scopes = $scopes, \
+                 session_id = $session_id, \
                  expires_at = $expires_at, \
                  revoked = false",
             )
@@ -114,6 +135,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .bind(("client_id", input.client_id.clone()))
             .bind(("user_id", user_id_str))
             .bind(("scopes", input.scopes))
+            .bind(("session_id", input.session_id.map(|id| id.to_string())))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -142,6 +164,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             client_id: row.client_id,
             user_id,
             scopes: row.scopes,
+            session_id: parse_opt_session(row.session_id.as_deref())?,
             expires_at: row.expires_at,
             revoked: row.revoked,
             created_at: row.created_at,

@@ -71,6 +71,11 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
             // (`device_service::DEVICE_CODE_GRANT_TYPE`) is asserted against
             // it in this module's tests.
             "urn:ietf:params:oauth:grant-type:device_code".into(),
+            // B3 / RFC 8693. Advertised so a mesh service can discover that
+            // narrowing a token is possible here rather than being told out
+            // of band; whether a given client MAY exchange is still its own
+            // registration's business.
+            "urn:ietf:params:oauth:grant-type:token-exchange".into(),
         ],
     }
 }

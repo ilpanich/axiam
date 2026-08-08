@@ -66,6 +66,43 @@ pub struct TokenRequest {
     /// to [`crate::device_service::DeviceAuthorizationService`] rather than
     /// to [`TokenService::exchange`], which never sees it.
     pub device_code: Option<String>,
+
+    // --- B3 / RFC 8693 token exchange -----------------------------------
+    //
+    // Carried here rather than in a second form type because actix
+    // deserializes one body once, and the token endpoint cannot know which
+    // grant it is serving until it has read `grant_type` out of that body.
+    // `exchange_request()` below projects them into the shape the exchange
+    // service takes, so the grant's own module never sees these Options.
+    pub subject_token: Option<String>,
+    pub subject_token_type: Option<String>,
+    pub actor_token: Option<String>,
+    pub actor_token_type: Option<String>,
+    pub audience: Option<String>,
+    pub resource: Option<String>,
+}
+
+impl TokenRequest {
+    /// Project the RFC 8693 parameters, or `None` when the two mandatory ones
+    /// are absent.
+    ///
+    /// Returning `None` rather than a half-populated request means the caller
+    /// answers `invalid_request` naming what is missing, instead of the
+    /// exchange service reporting a confusing downstream failure about a
+    /// token it was handed as an empty string.
+    pub fn exchange_request(&self) -> Option<crate::token_exchange::TokenExchangeRequest> {
+        let subject_token = self.subject_token.clone().filter(|t| !t.is_empty())?;
+        let subject_token_type = self.subject_token_type.clone().filter(|t| !t.is_empty())?;
+        Some(crate::token_exchange::TokenExchangeRequest {
+            subject_token,
+            subject_token_type,
+            actor_token: self.actor_token.clone().filter(|t| !t.is_empty()),
+            actor_token_type: self.actor_token_type.clone().filter(|t| !t.is_empty()),
+            scope: self.scope.clone(),
+            audience: self.audience.clone().filter(|t| !t.is_empty()),
+            resource: self.resource.clone().filter(|t| !t.is_empty()),
+        })
+    }
 }
 
 /// Token response per RFC 6749.
@@ -192,6 +229,54 @@ where
     /// — strictly less than the `String` the previous `hash_client_secret`
     /// allocated per request. The DB write happens at most once per legacy
     /// client, on its first authentication after the upgrade.
+    /// Authenticate a confidential client and return its registration row
+    /// (B3).
+    ///
+    /// Every grant this service implements authenticates its client inline and
+    /// keeps the row private, which is right for them — they need nothing else
+    /// from it. Token exchange does: the client's registered scopes bound what
+    /// an exchange may grant, and its registered URIs bound what audiences it
+    /// may address. Rather than give the exchange service its own copy of the
+    /// client repository and its own secret-verification path — two places to
+    /// keep the OBS-1 hash-upgrade behaviour correct — it borrows this one.
+    ///
+    /// The error taxonomy is deliberately the same as the client-credentials
+    /// branch's: an unknown client and a wrong secret are both
+    /// `invalid_client` with the identical `CLIENT_AUTH_FAILED` description,
+    /// so an unauthenticated caller cannot use this endpoint to learn which
+    /// client ids exist (SEC-086), and a datastore outage is `server_error`
+    /// rather than masquerading as bad credentials (QUAL-03/D-11).
+    pub async fn authenticate_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<OAuth2Client, OAuth2Error> {
+        let client = self
+            .client_repo
+            .get_by_client_id(tenant_id, client_id)
+            .await
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
+
+        // Defence in depth: the lookup above is tenant-scoped in SQL, so this
+        // can only fire if that predicate is dropped or a repository ignores
+        // `tenant_id` — which is exactly the regression worth catching, since
+        // otherwise the cross-tenant property lives entirely in a WHERE clause
+        // two crates away.
+        if client.tenant_id != tenant_id {
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        }
+
+        self.verify_client_secret(tenant_id, &client, client_secret)
+            .await?;
+        Ok(client)
+    }
+
     async fn verify_client_secret(
         &self,
         tenant_id: Uuid,

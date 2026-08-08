@@ -193,6 +193,8 @@ pub const ENV_INTROSPECT_PER_MIN: &str = "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN"
 pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN`.
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
+/// `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` — B3.
+pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` — B2, never preset.
 pub const ENV_DEVICE_AUTHORIZATION_PER_MIN: &str =
     "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN";
@@ -340,6 +342,15 @@ pub struct RateLimitConfig {
     /// magnitude of margin — and the endpoint is one a human drives by hand,
     /// so a tight limit costs legitimate users nothing.
     pub device_verify_per_min: u32,
+    /// Max token-exchange requests per minute per bucket (default: 120 — B3).
+    ///
+    /// Sized alongside `token_per_min` because an exchange IS a token
+    /// request, but kept separate because it is strictly more expensive —
+    /// it verifies an inbound JWT, consults the client registration and
+    /// writes an audit record — and because it is the endpoint an attacker
+    /// holding one stolen token would hammer looking for a widening path.
+    /// A shared bucket would let ordinary token traffic hide that.
+    pub token_exchange_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -393,6 +404,7 @@ impl Default for RateLimitConfig {
             // Neither is sized from capacity, for the reasons on each field.
             device_authorization_per_min: 12,
             device_verify_per_min: 10,
+            token_exchange_per_min: 120,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -563,6 +575,10 @@ impl RateLimitConfig {
         assert!(
             self.device_verify_per_min >= 1,
             "device_verify_per_min must be >= 1"
+        );
+        assert!(
+            self.token_exchange_per_min >= 1,
+            "token_exchange_per_min must be >= 1"
         );
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates

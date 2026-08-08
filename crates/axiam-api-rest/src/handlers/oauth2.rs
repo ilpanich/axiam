@@ -15,6 +15,9 @@ use axiam_oauth2::oidc::{
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
 };
+use axiam_oauth2::token_exchange::{
+    TOKEN_EXCHANGE_GRANT_TYPE, TokenExchangeRequest, TokenExchangeResponse,
+};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -237,6 +240,14 @@ pub async fn token<C: Connection + Clone>(
             // ones under it.
             Err(e) => build_oauth2_error_response(&e),
         };
+    }
+
+    // B3 / RFC 8693. Like the device grant, its own service behind one match
+    // arm. Unlike the device grant, the exchanging client DOES authenticate —
+    // it is a confidential service, not a television, and an exchange is
+    // precisely the operation that should be attributable.
+    if grant_type == TOKEN_EXCHANGE_GRANT_TYPE {
+        return handle_token_exchange(tenant_id, form, &state).await;
     }
 
     match state.token_service.exchange(tenant_id, form).await {
@@ -781,6 +792,112 @@ pub async fn device_authorization<C: Connection + Clone>(
             .append_header(("Pragma", "no-cache"))
             .json(resp),
         Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
+/// The `urn:ietf:params:oauth:grant-type:token-exchange` arm of the token
+/// endpoint (B3).
+///
+/// The form is re-read rather than typed at the route because RFC 8693's
+/// parameters are disjoint from RFC 6749's and actix deserializes one body
+/// once — so `TokenRequest` carries the shared fields and the
+/// exchange-specific ones are pulled from the raw form here.
+async fn handle_token_exchange<C: Connection + Clone>(
+    tenant_id: Uuid,
+    form: TokenRequest,
+    state: &web::Data<AppState<C>>,
+) -> HttpResponse {
+    let (Some(client_id), Some(client_secret)) =
+        (form.client_id.as_deref(), form.client_secret.as_deref())
+    else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidClient(
+            "the token-exchange grant requires client authentication".into(),
+        ));
+    };
+
+    let client = match state
+        .token_service
+        .authenticate_client(tenant_id, client_id, client_secret)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // B3: the exchange's own bucket, applied here rather than as route
+    // middleware because `/oauth2/token` serves every grant and actix
+    // deserializes the body once — the grant is not knowable until the form
+    // has been read, which is after the middleware chain has run.
+    //
+    // Keyed by the authenticated client, deliberately: an exchange always
+    // carries client credentials, so unlike the device endpoints there is a
+    // real identity to key on, and per-IP would collapse a whole mesh behind
+    // one NAT into a single bucket. Counted AFTER authentication so an
+    // unauthenticated caller cannot consume a real client's allowance.
+    let window_start = chrono::Utc::now().duration_trunc(chrono::TimeDelta::minutes(1));
+    if let Ok(window_start) = window_start
+        && !state.shared_rate_limit.check(
+            &format!("oauth2_token_exchange:{}:{}", tenant_id, client.client_id),
+            window_start,
+            state.rate_limit_cfg.token_exchange_per_min,
+        )
+    {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .json(OAuth2ErrorResponse {
+                error: "slow_down".into(),
+                error_description: "token-exchange rate limit exceeded for this client".into(),
+            });
+    }
+
+    let Some(exchange_req) = form.exchange_request() else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "subject_token and subject_token_type are required for the \
+             token-exchange grant"
+                .into(),
+        ));
+    };
+
+    match state
+        .token_exchange_service
+        .exchange(tenant_id, &client, exchange_req)
+        .await
+    {
+        Ok(outcome) => {
+            // Audited BEFORE the token is returned, not after. For an
+            // impersonation this record is the only surviving evidence that
+            // the acting party was not the subject — the token deliberately
+            // carries no `act` claim — so it must not be lost to a crash
+            // between issuing and logging.
+            tracing::info!(
+                target: "axiam::audit",
+                event = "oauth2.token_exchange",
+                tenant_id = %tenant_id,
+                client_id = %client.client_id,
+                kind = outcome.kind.as_str(),
+                subject = %outcome.subject,
+                actor = outcome.actor.as_deref().unwrap_or("-"),
+                granted_scopes = %outcome.granted_scopes.join(" "),
+                audience = %outcome.audience,
+                "token exchange"
+            );
+            HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(outcome.response)
+        }
+        Err(e) => {
+            tracing::info!(
+                target: "axiam::audit",
+                event = "oauth2.token_exchange",
+                tenant_id = %tenant_id,
+                client_id = %client.client_id,
+                outcome = "refused",
+                error = e.error_code(),
+                "token exchange refused"
+            );
+            build_oauth2_error_response(&e)
+        }
     }
 }
 

@@ -580,6 +580,12 @@ fn base_req(grant: &str) -> TokenRequest {
         refresh_token: None,
         scope: None,
         device_code: None,
+        subject_token: None,
+        subject_token_type: None,
+        actor_token: None,
+        actor_token_type: None,
+        audience: None,
+        resource: None,
     }
 }
 

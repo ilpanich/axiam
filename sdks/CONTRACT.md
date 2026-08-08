@@ -1486,6 +1486,128 @@ decisions are recorded as open rather than resolved here: a server-side-Swift (V
 cloned from the Kotlin shape, and adding `login_client_credentials` alone to C/C++ for
 machine-to-machine use.
 
+### §12.7 Logout helpers (B5)
+
+**Requirement level: SHOULD, and only where the SDK already ships §12.** The
+RP-side of OIDC RP-Initiated Logout 1.0 and Back-Channel Logout 1.0. An SDK
+that ships §12 without these stays conformant to §12; one that ships them
+states §12.7 alongside (see [Closing Notes](#conformance-statement)).
+
+Server documentation: [`docs/api/logout.md`](../docs/api/logout.md).
+
+#### §12.7.1 Canonical operation set
+
+Two operations, and they sit on opposite sides of the flow: one builds a URL
+for the browser, the other verifies something the *server* pushed to the RP.
+
+| Canonical operation | Wire call | Semantics |
+|---|---|---|
+| `logout_url` | **none — pure local computation, no network I/O** | Build the `end_session_endpoint` URL to redirect the user agent to. Mirrors `oidc_begin`. |
+| `verify_logout_token` | **none — local verification against cached JWKS** | Validate a back-channel logout token the OP POSTed to the RP's own endpoint. Returns the `sid`/`sub` it names. |
+
+`logout_url` takes `(id_token, post_logout_redirect_uri=None, state=None)` and
+returns a URL string. The ID token is passed whole and placed in
+`id_token_hint`.
+
+**`logout_url` MUST NOT be given an `id_token_hint`-less mode that names the
+user some other way.** There is no such parameter on the wire, and an SDK that
+invented one (a `sub`, a session cookie value) would be encouraging exactly the
+request the server refuses to act on.
+
+#### §12.7.2 `logout_url` rules (normative)
+
+1. **`end_session_endpoint` comes from discovery**, not from string
+   concatenation onto the issuer. An SDK that builds `{issuer}/oauth2/end_session`
+   works against AXIAM and breaks against any other OP the same code is pointed
+   at, which is the whole reason discovery exists.
+2. **`state` is the caller's to generate and the caller's to check.** The SDK
+   passes it through and MUST NOT invent one, because the value only means
+   something to the application that will receive it back.
+3. **The SDK MUST NOT pre-validate `post_logout_redirect_uri` against a local
+   list.** The allow-list lives in the client's registration, server-side; a
+   client-side copy would drift and would reject a URI an operator had just
+   registered.
+4. **`logout_url` performs no network I/O** (beyond a discovery fetch the SDK
+   would cache anyway) and does not clear the SDK client's own session. Whether
+   the local session ends is the application's call — a backend that holds a
+   service-account session must not lose it because a *user* logged out. An SDK
+   MAY offer that as a separate explicit call.
+
+#### §12.7.3 `verify_logout_token` rules (normative)
+
+This is the half that carries security weight: the input arrives unsolicited,
+from the network, and instructs the RP to terminate a session. Every check
+below is required, and each exists because skipping it has a name:
+
+1. **Signature verified against the OP's JWKS**, through the SDK's existing
+   §12.4 verifier. No second key-fetching path.
+2. **`iss` matches the configured issuer; `aud` matches this client's
+   `client_id`.** A token minted for another RP must not be accepted here.
+3. **`events` MUST contain the key
+   `http://schemas.openid.net/event/backchannel-logout`**, with an object
+   value. This is what distinguishes a logout token from an ID token; an SDK
+   that skips it will accept a replayed ID token as a logout instruction.
+4. **`nonce` MUST be absent.** Back-Channel Logout 1.0 §2.4 forbids it, and its
+   presence is the documented signature of an ID token being replayed. Reject,
+   do not ignore.
+5. **At least one of `sid` and `sub` MUST be present.** A token naming neither
+   identifies nothing.
+6. **`exp` MUST be in the future** and `iat` recent (AXIAM issues a 120 s
+   lifetime); an SDK SHOULD apply the same freshness tolerance as §13.
+7. **`jti` MUST be surfaced so the RP can dedup.** Delivery is at-least-once
+   with retry, so a valid token legitimately arrives twice; the SDK MUST NOT
+   dedup internally (it has no durable store and would silently drop a real
+   second logout after a restart) but MUST make the key available.
+8. **Failure is a typed error or `false`, never a partial result**, and the
+   error MUST NOT echo the token.
+
+Return type carries `sid`, `sub` and `jti`. **An SDK MUST NOT collapse the
+result to a bare boolean**: the RP has to know *which* session to end, and a
+verifier that only says "valid" forces the caller to re-parse the token
+themselves — with none of the checks above.
+
+**When `sid` is present, the RP MUST end that session only.** Falling back to
+"every session for `sub`" when `sid` was supplied is the same over-reach the
+server refuses to make, and SDK documentation MUST say so.
+
+#### §12.7.4 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go |
+|---|---|---|---|---|---|---|---|---|
+| `logout_url` | `logout_url` | `logoutUrl` | `logout_url` | `logoutUrl` | `logoutUrl` | `LogoutUrl` | `logoutUrl` | `LogoutURL` |
+| `verify_logout_token` | `verify_logout_token` | `verifyLogoutToken` | `verify_logout_token` | `verifyLogoutToken` | `verifyLogoutToken` | `VerifyLogoutToken` | `verifyLogoutToken` | `VerifyLogoutToken` |
+
+Both are synchronous where the language has the distinction (as `oidc_begin`
+is): neither performs network I/O of its own, so C# takes no `Async` suffix
+here. The three §12.6 deferrals (Swift, C, C++) defer §12.7 with it.
+
+#### §12.7.5 `Sensitive<T>` applicability
+
+The `id_token` passed to `logout_url` and the raw logout token passed to
+`verify_logout_token` are both bearer-shaped and MUST NOT be logged at any
+level. They are **not** wrapped in `Sensitive<T>`: `logout_url` embeds the ID
+token in a URL the application is about to hand to a browser, and a wrapper
+whose whole purpose is to resist stringification is the wrong type for a value
+that must be stringified. The returned `sid`/`sub`/`jti` are identifiers, not
+credentials, and are not wrapped.
+
+#### §12.7.6 Required tests
+
+`logout_url` uses the discovered `end_session_endpoint` (assert it is not
+built by concatenation); `id_token_hint`, `post_logout_redirect_uri` and
+`state` are present when supplied and absent when not; a caller-supplied
+`state` is passed through unmodified.
+
+`verify_logout_token`: a valid token verifies and surfaces `sid`, `sub` and
+`jti`; wrong `aud` rejected; wrong `iss` rejected; bad signature rejected;
+expired rejected; **missing `events` key rejected**; **`nonce` present
+rejected** (assert with an otherwise-valid ID token, which is the actual
+attack); neither `sid` nor `sub` rejected; and the same token verifying twice
+does **not** raise — dedup is the RP's job, and an SDK that failed the second
+delivery would break a legitimate retry.
+
+---
+
 ## §13 Webhook Signature Verification
 
 Every SDK MUST ship a webhook-signature verifier. AXIAM signs each webhook
@@ -1800,6 +1922,16 @@ An SDK that additionally ships the §12 OIDC/SSO relying-party helpers updates i
 An SDK that additionally ships the §13 webhook-signature verifier updates its statement to:
 
 > "This SDK conforms to CONTRACT.md §1–§13."
+
+An SDK that additionally ships the §12.7 logout helpers states them by name
+alongside its §12 claim, e.g.:
+
+> "This SDK conforms to CONTRACT.md §1–§13 and §12.7."
+
+§12.7 is named rather than folded into the §1–§12 range because it landed after
+several SDKs had already stated §12: an SDK claiming §1–§12 today means what it
+meant when it was written, and silently widening that range would turn a true
+statement into a false one without anyone editing it.
 
 §14 (device authorization grant) and §15 (token exchange) are **independent** SHOULD-level
 sections, not a continuation of the §1–§13 run: an SDK may ship either, both, or neither.

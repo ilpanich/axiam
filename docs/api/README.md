@@ -64,6 +64,13 @@ service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
 
+## Logout — RP-initiated and back-channel
+
+Ending a session at AXIAM and telling every relying party that shared it.
+The redirect allow-list, why an unverifiable `id_token_hint` ends nothing,
+the logout-token shape and the delivery model are in
+[`logout.md`](logout.md).
+
 ## AMQP — AsyncAPI
 
 [`asyncapi.yml`](./asyncapi.yml) is an AsyncAPI 2.6 document describing

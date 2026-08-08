@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OIDC logout: RP-initiated and back-channel (B5).**
+  `GET`/`POST /oauth2/end_session` ends the session named by a signed
+  `id_token_hint`, and every client that participated in that session and
+  registered a `backchannel_logout_uri` is POSTed a signed logout token.
+  Advertised in discovery as `end_session_endpoint`,
+  `backchannel_logout_supported` and `backchannel_logout_session_supported`.
+
+  Both halves operate on a **session**, not a user: a user with a phone and a
+  laptop who logs out on the laptop keeps the phone signed in. ID tokens now
+  carry `sid`, and it survives refresh-token rotation so an RP that stored it
+  at login can still match a logout token to its own session.
+
+  The endpoint is unauthenticated by necessity — a user whose session already
+  expired must still be able to complete a logout — so what identifies the
+  target is the *signature* on the hint. Expiry on the hint is deliberately
+  not checked (a logging-out user's ID token has usually expired already); the
+  signature is. An unverifiable hint ends **nothing**: there is no fallback to
+  "end every session for the named subject", which would be a
+  denial-of-service primitive for anyone who knows a user id.
+
+  `post_logout_redirect_uri` is honoured only on **exact match** against the
+  client's new `post_logout_redirect_uris` allow-list — a separate list from
+  `redirect_uris`, because one receives authorization codes and the other
+  receives a browser after logout. A non-matching URI still logs the user out
+  and renders AXIAM's own page: refusing to log someone out because their RP
+  sent a bad parameter is the wrong failure.
+
+  Logout tokens carry the mandatory `events` member, always name `sid`, live
+  120 s, and can never carry `nonce` (the issuer takes no such parameter, so
+  it cannot emit one by accident — its presence is how an ID token gets
+  replayed as a logout token). Delivery is best-effort with a bounded retry
+  and never blocks the logout.
+
+  New: `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` (30). See
+  [`docs/api/logout.md`](docs/api/logout.md) and CONTRACT.md §12.7.
+
+- **Pushed Authorization Requests (RFC 9126, B5).** `POST /oauth2/par` accepts
+  an authorization request over a direct, client-authenticated POST and returns
+  an opaque single-use `request_uri` to put in the browser redirect instead of
+  the parameters. `/oauth2/authorize` accepts it, refuses to mix it with inline
+  parameters (where parameter confusion lives), and a client registered
+  `require_par` may not send its parameters through the browser at all. New:
+  `AXIAM__RATE_LIMIT__PAR_PER_MIN` (120). Required by FAPI 2.0.
+
 - **OAuth2 Token Exchange (RFC 8693, B3).** A service holding a user's access
   token can exchange it for a *narrower* one —
   `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` on

@@ -1933,11 +1933,31 @@ with no attempt to refine it.
 Two earlier clauses — [§11.2](#§112-semantics-normative-identical-in-all-sdks) rule 5 and
 [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) — instruct SDKs to retry
 "under the SDK's existing bounded read-only retry policy". **No such policy was ever defined
-here.** In practice two SDKs had one and they disagreed (Java: 3 attempts, 200 ms base, 5 s
-cap, full jitter, `Retry-After` honored; Rust: 3 attempts, library-default backoff, no jitter,
-no `Retry-After`), and the other nine had none at all — only §9's refresh-then-retry-once,
-which is a different mechanism entirely. This section is that missing policy, so the two
-forward references resolve to one table instead of eleven guesses.
+here.** In practice **three** SDKs had one and all three disagreed; the other eight had none
+at all — only §9's refresh-then-retry-once, which is a different mechanism entirely.
+
+| SDK | Attempts | Base | Cap | Jitter | `Retry-After` |
+|---|---|---|---|---|---|
+| Java | 3 | 200 ms | 5 s | full | honored as a floor |
+| Rust | 3 | library default | — | none | ignored |
+| TypeScript | 3 | 1000 ms | 8 s | partial (`base + 0–20%`) | **replaced** the backoff |
+
+Two things about the TypeScript row.
+
+It is why "floor, never a ceiling" is stated so bluntly in §16.1: `retryAfterMs ??
+backoffDelayMs(attempt)` means a `Retry-After: 0` retries **immediately**, defeating the
+backoff entirely. That clause was written on principle and then found to describe a defect
+one of these SDKs already shipped.
+
+And its helper was **exported and unit-tested but never called by any production path** —
+`check_access` did not route through it — so that SDK performed no read-only retries at
+all while appearing to. A tested helper nobody calls is worse than an absent one: the tests
+report green and the gap stays invisible. **An SDK claiming §16 conformance MUST assert the
+policy through its public `check_access` surface, not only against the helper in isolation**
+(see §16.7's required non-idempotent test, which asserts the request count *on the wire*).
+
+This section is the missing policy, so the two forward references resolve to one table
+instead of eleven guesses.
 
 ### §16.1 The policy (normative — every value here is binding)
 
@@ -2530,6 +2550,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.8 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8)*
+*Contract version: 1.8.1 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata — three SDKs had a divergent retry policy, not two 2026-08 (contract 1.8.1)*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

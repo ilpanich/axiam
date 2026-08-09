@@ -2235,6 +2235,7 @@ costs nothing to anyone who does not want it.
 | `request_end` | After it completes, success or failure | the `request_start` fields, plus status code (or `None`), duration, outcome |
 | `retry` | Before each §16 retry wait | operation name, attempt number, the delay about to be taken, the failure that triggered it |
 | `refresh` | Around a §9 single-flight refresh | whether this caller performed the refresh or waited on another's |
+| `config_clamped` | At client construction, once per clamped setting | the setting's name, the value the caller asked for, the value in force, and the §-reference for the limit |
 
 `path template` means `/api/v1/authz/check`, not the URL with ids substituted in — a metric
 label with a UUID in it is a cardinality bomb.
@@ -2258,6 +2259,23 @@ label with a UUID in it is a cardinality bomb.
    `request_start`/`request_end` pair **per attempt**, with the attempt number distinguishing
    them, plus one `retry` between consecutive pairs. A caller must be able to count real wire
    calls from these events, so one pair per logical operation would be wrong.
+
+6. **A clamped setting MUST be reported, not swallowed.** Wherever this contract requires an
+   SDK to clamp a caller-supplied value rather than reject it — §16.1's attempt cap, base
+   delay and delay cap; §17.1 rule 2's memo TTL — the SDK MUST emit one `config_clamped`
+   event per clamped setting at construction.
+
+   Clamping is the right behaviour: rejecting would break a caller whose configuration was
+   merely optimistic, and honoring would let one client become the herd §16 exists to
+   prevent. But *silently* clamping means an operator who set a 60-second memo TTL believes
+   they have one, and their staleness reasoning is wrong by a factor of twelve with nothing
+   anywhere to say so. The event is what makes the clamp discoverable at the only moment it
+   can be acted on.
+
+   `config_clamped` is exempt from §19.1's "no cost when uninstalled" framing only in the
+   sense that it fires at construction rather than per request; with no hook installed it is
+   still a null check and nothing more. It MUST NOT be emitted for a value that was already
+   within the limit — an event that fires when nothing happened trains its reader to ignore it.
 
 ### §19.3 Per-language naming map
 
@@ -2564,6 +2582,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.8.3 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata 2026-08 (contract 1.8.3) — the divergence table rewritten from wire-counting conformance tests rather than greps; three SDKs actually retried, two had a surface that did nothing*
+*Contract version: 1.9 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

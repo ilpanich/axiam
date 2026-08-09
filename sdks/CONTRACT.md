@@ -950,10 +950,12 @@ macro over an `axiam_require_access(...)` guard function. All compose strictly o
    - unresolvable resource id → 400 `invalid_request`
    - `NetworkError` while calling the authz endpoint → **fail closed** with 503
      `authz_unavailable` (deny; never allow on transport failure; never retry beyond the
-     SDK's existing bounded read-only retry policy)
-6. **No decision caching.** Helpers MUST NOT cache allow/deny decisions (consistent with
-   §10's TTL rule). Batch/page-level optimization stays the application's job via
-   `batch_check`.
+     bounded read-only retry policy of [§16](#§16-retry-policy-d5))
+6. **No decision caching by default.** Helpers MUST NOT cache allow/deny decisions (consistent
+   with §10's TTL rule). Batch/page-level optimization stays the application's job via
+   `batch_check`. The **single** exception is the explicitly opt-in, TTL-clamped decision memo
+   of [§17](#§17-client-side-decision-memo-d5), which is disabled by default and which
+   §17.1 rule 10 forbids from serving the fail-closed path above.
 7. **Transport.** Helpers call the SDK's existing `check_access` surface (REST by default;
    gRPC where the SDK's dispatcher already prefers it, e.g. PHP). No new transport code.
 8. **Redaction.** Deny/error paths MUST NOT log or echo the token, and SHOULD log the
@@ -1745,8 +1747,11 @@ operations — same rule, same client-side error, same remedy.
    dispatch on the `error` field first. A `400` whose `error` is none of the five falls back
    to the §2 mapping.
 6. **`5xx` and transport failures remain §2 `NetworkError`** and are **not** terminal —
-   they are retried under the SDK's existing bounded read-only retry policy, then surfaced.
-   A server restart mid-flow must not lose a grant the user has already approved.
+   they are retried under the bounded read-only retry policy of
+   [§16](#§16-retry-policy-d5), then surfaced. A server restart mid-flow must not lose a
+   grant the user has already approved. Per §16.2 that budget is **per poll attempt** and is
+   separate from this grant's own `expires_in` polling loop: an exhausted retry budget ends
+   that one poll, not the flow.
 
 ### §14.3 `device_login` — the composed helper
 
@@ -1921,6 +1926,323 @@ with no attempt to refine it.
 
 ---
 
+## §16 Retry Policy (D5)
+
+**Requirement level: MUST (v1.0).**
+
+Two earlier clauses — [§11.2](#§112-semantics-normative-identical-in-all-sdks) rule 5 and
+[§14.2](#§142-polling-normative--the-part-implementations-get-wrong) — instruct SDKs to retry
+"under the SDK's existing bounded read-only retry policy". **No such policy was ever defined
+here.** In practice two SDKs had one and they disagreed (Java: 3 attempts, 200 ms base, 5 s
+cap, full jitter, `Retry-After` honored; Rust: 3 attempts, library-default backoff, no jitter,
+no `Retry-After`), and the other nine had none at all — only §9's refresh-then-retry-once,
+which is a different mechanism entirely. This section is that missing policy, so the two
+forward references resolve to one table instead of eleven guesses.
+
+### §16.1 The policy (normative — every value here is binding)
+
+| Parameter | Value | Why this value |
+|---|---|---|
+| Attempt cap | **3 total** (1 initial + 2 retries) | Bounds worst-case added latency at ~10 s. A caller who needs more can retry at their own layer, where they know the deadline. |
+| Base delay | **200 ms** | Long enough that a retry is not simply re-entering the same overload; short enough to be invisible on a recovery from a single dropped packet. |
+| Delay cap | **5 s** | The ceiling on any single wait. |
+| Backoff | `min(cap, base × 2^(attempt−1))` | attempt 1 → 200 ms, attempt 2 → 400 ms, both under the cap. |
+| Jitter | **full jitter** — the actual wait is uniform random in `[0, backoff]` | Not "backoff ± 10%". Full jitter is what stops a thundering herd: partial jitter keeps every client's retries clustered around the same instant, which is the failure mode retries cause rather than fix. |
+| `Retry-After` | **honored, as a floor**: wait = `max(jittered_backoff, retry_after)` | The server is telling you when it will be ready. Retrying sooner is not permitted; the value never *shortens* a wait either, so a `Retry-After: 0` cannot defeat the backoff. |
+| Randomness source | Any uniform PRNG. It need not be cryptographic. | The jitter is a load-spreading device, not a secret. |
+
+An SDK MUST NOT make the attempt cap, base, or cap configurable upward beyond these values in
+v1.0. It MAY expose a switch that disables retrying entirely — some callers own their own
+retry layer and want exactly one attempt — and MUST default that switch to **on**.
+
+### §16.2 What is eligible (normative)
+
+Retry applies **only to operations that change no server state**, and "idempotent" here means
+exactly that. It does **not** mean "HTTP GET": AXIAM's authorization check is a `POST` with a
+request body and is the single most important operation in this section. An SDK that gates
+retry on the HTTP verb will retry nothing that matters.
+
+**Eligible:**
+
+| Operation | Note |
+|---|---|
+| `check_access`, `can`, `batch_check` | `POST`, side-effect-free. The reason this section exists. |
+| JWKS fetch (§10.1) | Cache fill; pure read. |
+| OIDC discovery fetch (§12) | Pure read. |
+| `oidc_userinfo`, `get_user_info` (§1.1) | Pure reads. |
+| `oidc_introspect` | A read *about* a token; mints nothing. |
+| `device_poll` on a 5xx or transport failure (§14.2) | The clause that referenced this policy. The retry budget here is **per poll attempt**, and is separate from — and does not consume — the device grant's own `expires_in` polling loop. |
+
+**Not eligible, and an SDK MUST NOT retry them automatically:**
+
+`login`, `verify_mfa`, `logout`, `refresh`, `oidc_exchange`, `device_authorize`,
+`device_login`, `token_exchange`, `oidc_revoke`, and every mutation. Two distinct reasons,
+both disqualifying on their own:
+
+1. **They change state.** A transient failure after the server committed but before the
+   response arrived is indistinguishable, at the client, from one before it committed. A
+   silent retry then duplicates a side effect the caller never asked for twice.
+2. **Their credentials are single-use.** An authorization code, a device code at the moment
+   it is redeemed, and a rotating refresh token are each consumed by the attempt. Retrying
+   replays a spent credential, which the server correctly refuses — turning a recoverable
+   blip into a hard `invalid_grant` the caller cannot interpret.
+
+`refresh` is additionally out of scope because [§9](#§9-single-flight-refresh-guard) rule 3
+already forbids it by name ("no retry loop"). **§16 does not amend §9.** The two mechanisms
+compose in one direction only: the operation *inside* a §9 refresh-then-retry may itself be
+retried per §16 if it is eligible, but a §9 refresh MUST NOT be re-attempted under §16, and
+§16's budget MUST NOT be reset by a §9 refresh occurring mid-operation. One §9 refresh, one
+§16 budget, per logical call.
+
+Revocation deserves its own note because §12.1 records that the server treats it idempotently
+per RFC 7009. That is a statement about **server** behaviour — revoking an already-revoked
+token returns `200` rather than an error. It is not licence for the client to retry a
+mutation, and an SDK MUST NOT read it as one.
+
+### §16.3 Which failures retry (normative)
+
+| Condition | Retry? |
+|---|---|
+| Transport failure — connection refused, DNS, TLS handshake, read timeout | **Yes** |
+| `408`, `429` | **Yes** (`429` is exactly where `Retry-After` usually arrives) |
+| `5xx` | **Yes** |
+| `401` / `AuthError` | **No** — decisive, not transient. §9 owns the refresh path. |
+| `403` / `AuthzError` | **No** — the server has decided. |
+| `400`, `404`, `409`, and every other `4xx` | **No** — retrying an unacceptable request produces an identical rejection. |
+| `OAuthProtocolError` (§12.3 rule 3) | **No**, at any status. It is a protocol answer, not a transport failure. |
+
+The §2 taxonomy maps `408`/`429`/`5xx`/transport all to `NetworkError`, so "retry
+`NetworkError` only" is a correct and sufficient implementation of this table in an SDK whose
+errors carry no status. An SDK whose errors *do* carry the status MUST NOT retry a
+`NetworkError` that came from a row marked **No**.
+
+### §16.4 Interaction with the fail-closed rule
+
+[§11.2](#§112-semantics-normative-identical-in-all-sdks) rule 5 requires the route guard to
+**fail closed** — deny with `503 authz_unavailable` — when the authz endpoint is unreachable.
+§16 does not soften that. The retry budget is spent *first*; when it is exhausted the guard
+denies. An SDK MUST NOT extend the budget because the caller is a guard, and MUST NOT admit a
+request because retries were attempted.
+
+### §16.5 Observability
+
+Every retry MUST emit the `retry` telemetry event of [§19](#§19-telemetry-hooks-d5) when the
+caller has installed a hook. A retried-then-succeeded operation is otherwise **invisible** —
+the caller sees a slow success and no signal at all that the server is failing. That silence
+is the standing objection to automatic retry, and the hook is what answers it.
+
+Retries MUST NOT be logged at `info` or above by default. Redaction rules (§2, §11.2 rule 8)
+apply unchanged: a retry log line carries the operation and attempt number, never the token.
+
+### §16.6 Per-language naming map
+
+The policy is internal machinery; only the disable switch and the parameters are public
+surface, and only where the language's client builder already has a place for them.
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `retry_enabled` | `retry_enabled` | `retryEnabled` | `retry_enabled` | `retryEnabled` | `retryEnabled` | `RetryEnabled` | `retryEnabled` | `RetryEnabled` | `retryEnabled` | `axiam_client_config_set_retry_enabled` | `retry_enabled` |
+
+### §16.7 Required tests
+
+Backoff and jitter MUST be tested with an **injected clock and an injected PRNG** — never by
+sleeping. A test that really waits 200 ms is a test nobody runs.
+
+Required: the attempt cap is honored exactly (a permanently failing eligible operation makes
+exactly 3 attempts, not 2, not 4); the delay sequence with jitter pinned to its maximum is
+`200 ms, 400 ms`; full jitter with the PRNG pinned to `0` waits `0` and with it pinned to `1`
+waits the full backoff — proving the range is `[0, backoff]` and not `backoff ± something`; a
+`Retry-After` longer than the backoff wins, and one shorter than the backoff does **not**
+shorten it; a `403` and a `401` each make exactly one attempt; a **non-idempotent operation
+makes exactly one attempt even when the failure is a `503`** (assert the request count on the
+wire, not just the raised error — this is the test that catches a retry wired at the transport
+layer instead of the operation layer); the guard still denies `503 authz_unavailable` after
+the budget is exhausted; a `retry` telemetry event is emitted per retry.
+
+---
+
+## §17 Client-Side Decision Memo (D5)
+
+**Requirement level: MAY (v1.0). Disabled by default.**
+
+[§11.2](#§112-semantics-normative-identical-in-all-sdks) rule 6 says helpers MUST NOT cache
+allow/deny decisions. **That rule stands as the default.** This section defines the single
+exception: an explicitly opt-in, TTL-bounded memo that a caller must switch on, having read
+what it costs them.
+
+The server already ships the same trade with the same shape — `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`
+(default 5 s) and `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (default `0`, off) — where
+the documented bound is that a revoked grant can still be served for up to the TTL. The SDK
+memo mirrors that bound rather than inventing a second staleness story.
+
+### §17.1 Semantics (normative)
+
+1. **Off by default.** The default TTL is `0`, which means disabled — not "cache for zero
+   seconds". An SDK MUST NOT enable it because it looks like an easy win.
+2. **Ceiling of 5 seconds, clamped.** A configured TTL above 5 s MUST be clamped to 5 s, and
+   the SDK MUST document that it clamps. This deliberately differs from the server, whose
+   equivalent setting is an unclamped `u64` — a known residual that lets an operator
+   configure a multi-hour staleness window. The client has no reason to repeat it.
+3. **Key.** `(subject_id, resource_id, action, scope)`, all four, with absent `scope` and
+   absent `subject_id` each forming a distinct key from any present value. A memo that
+   ignores `scope` answers a narrower question with a broader answer.
+4. **Allows and denies are cached identically.** Not "cache allows only", and not "cache
+   denies only". Asymmetric caching changes the *timing* of the two outcomes and so leaks
+   which one occurred to anyone who can observe latency, and it surprises every reader who
+   assumed a cache is a cache. Uniform is both safer to reason about and simpler to
+   implement.
+5. **`reason_code` is cached with the decision** (§11 rule 9) and MUST be returned from the
+   memo unchanged. A memo that returns `allowed` but drops the code would make the field
+   intermittently absent, which is worse than never having it.
+6. **The staleness bound is the TTL, in both directions.** A grant revoked on the server can
+   still read as `allowed` for up to the TTL, and a grant just *added* can still read as
+   denied for up to the TTL. **Read-your-own-writes is not guaranteed**, and every SDK
+   enabling this MUST say so in its documentation in those words. An admin UI that grants a
+   role and immediately re-checks is the case that breaks, and it breaks silently.
+7. **Never negative-cache a failure.** Only a decision the server actually returned is
+   memoized. A `NetworkError`, a `503`, an exhausted §16 retry budget — none of them are
+   entries. Caching a transport failure as a deny would turn a blip into a TTL-long outage,
+   and caching it as an allow is unthinkable.
+8. **Bounded, and safe to drop.** The memo MUST have an entry cap and MUST evict rather than
+   grow. It is a latency optimisation; dropping an entry is always correct, so eviction needs
+   no coordination.
+9. **Invalidated by identity change.** `login`, `logout`, `refresh` and any credential change
+   MUST clear the memo entirely. Entries are keyed by subject, not by session, so a
+   re-authentication as a different principal would otherwise read the previous principal's
+   decisions.
+10. **Not consulted by the guard's fail-closed path.** When the authz endpoint is unreachable
+    §11.2 rule 5 denies. An SDK MUST NOT serve a stale allow from the memo to paper over an
+    outage — that inverts fail-closed into fail-open at exactly the moment it matters.
+
+### §17.2 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `decision_memo_ttl` | `decision_memo_ttl` | `decisionMemoTtl` | `decision_memo_ttl` | `decisionMemoTtl` | `decisionMemoTtl` | `DecisionMemoTtl` | `decisionMemoTtl` | `DecisionMemoTTL` | `decisionMemoTtl` | `axiam_client_config_set_decision_memo_ttl` | `decision_memo_ttl` |
+
+### §17.3 Required tests
+
+With an injected clock: a repeat check inside the TTL makes **no second wire call** and
+returns an equal decision including its `reason_code`; the same check after the TTL makes a
+fresh call; a deny is memoized exactly as an allow is (assert the wire-call count for both,
+not just the outcome); a TTL configured above 5 s is clamped to 5 s; differing `scope`,
+`action`, `resource_id` or `subject_id` each miss rather than collide, and absent-`scope`
+does not hit a present-`scope` entry; a `NetworkError` is not memoized (the next call reaches
+the wire); `logout` clears the memo; with the memo enabled and the endpoint unreachable the
+guard still denies `503 authz_unavailable` rather than serving a stale allow; and with the
+default configuration **every** repeat check reaches the wire, proving off-by-default.
+
+---
+
+## §18 Deterministic Shutdown (D5)
+
+**Requirement level: MUST (v1.0).**
+
+Every SDK client owns things the runtime will not reclaim promptly on its own: a connection
+pool, a cookie jar, a JWKS refresh timer, an AMQP consumer thread, a gRPC channel. Without an
+explicit shutdown the caller has no way to know when those are released, which shows up as
+sockets held open past the end of a test, a process that will not exit, and — in the C++ SDK's
+D2 investigation — lifecycle gaps that were only visible under load.
+
+### §18.1 Semantics (normative)
+
+1. **Every SDK MUST expose a deterministic shutdown** in whatever form its language already
+   uses. Not a new invented spelling: `Drop` plus an explicit `close()` in Rust, a context
+   manager in Python, `AutoCloseable` in Java, `IDisposable`/`IAsyncDisposable` in C#, a
+   `Closeable` in Kotlin, `Close() error` in Go, `close()` in TypeScript and PHP, a `deinit`
+   plus explicit `close()` in Swift, `axiam_client_free` in C, a destructor plus `close()` in
+   C++.
+2. **Idempotent.** Closing twice MUST NOT raise, double-free, or double-release. Cleanup code
+   runs from error paths, and an error path that itself throws hides the original failure.
+3. **Releases everything.** Connections closed, pools drained, background threads and timers
+   joined or cancelled, the cookie jar cleared. After `close()` returns, the client holds no
+   OS handle.
+4. **Use after close is an error, not undefined.** A call on a closed client MUST raise the
+   SDK's own error type with a message naming the cause. It MUST NOT silently reopen, and MUST
+   NOT be undefined behaviour in the manual-memory languages.
+5. **Close does not log out.** Shutting down a client releases *local* resources; it MUST NOT
+   issue a `logout`, revoke a token, or otherwise reach the network. The session outlives the
+   client object, which is what lets a process restart and resume. An SDK that logged out on
+   close would silently end sessions on every deploy.
+6. **`Sensitive<T>` material is zeroed where the language allows it** (§7), on the same path.
+
+### §18.2 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `close` | `close` (+ `Drop`) | `close` | `close` / `__exit__` | `close` (`AutoCloseable`) | `close` (`Closeable`) | `Dispose` / `DisposeAsync` | `close` | `Close` | `close` (+ `deinit`) | `axiam_client_free` | `close` (+ destructor) |
+
+### §18.3 Required tests
+
+Close is idempotent (twice, no raise); a call after close raises the SDK's error type rather
+than reconnecting; the language's scope-based form releases on both the normal and the
+exception path (a context manager on a raised exception, a `try`-with-resources on a throw, a
+`defer Close()` on an early return); **no network request is issued by close** (assert against
+the transport, which is what catches a `logout` accidentally wired in); and — where the
+language can observe it — no thread or timer outlives the call.
+
+---
+
+## §19 Telemetry Hooks (D5)
+
+**Requirement level: SHOULD (v1.0).**
+
+A caller who wants metrics currently has to wrap every SDK method or monkey-patch the
+transport. This section defines an optional callback surface so they can wire OpenTelemetry,
+Prometheus, or a log line **without this SDK taking a dependency on any of them**. No SDK
+ships an OTel dependency in v1.0; each ships an OTel adapter as an `examples/` entry, where it
+costs nothing to anyone who does not want it.
+
+### §19.1 Events (normative)
+
+| Event | Fired | Carries |
+|---|---|---|
+| `request_start` | Before an outbound call leaves the SDK | operation name, HTTP method, path template, attempt number |
+| `request_end` | After it completes, success or failure | the `request_start` fields, plus status code (or `None`), duration, outcome |
+| `retry` | Before each §16 retry wait | operation name, attempt number, the delay about to be taken, the failure that triggered it |
+| `refresh` | Around a §9 single-flight refresh | whether this caller performed the refresh or waited on another's |
+
+`path template` means `/api/v1/authz/check`, not the URL with ids substituted in — a metric
+label with a UUID in it is a cardinality bomb.
+
+### §19.2 Rules (normative)
+
+1. **Off unless installed.** No hook, no cost beyond a null check.
+2. **A hook MUST NOT be able to break the SDK.** An exception thrown by a caller's hook MUST
+   be caught and swallowed by the SDK. Telemetry is not permitted to fail an authorization
+   check. An SDK MAY report the swallowed error through its own debug log; it MUST NOT
+   propagate it.
+3. **No secrets, ever.** Hook payloads MUST NOT carry tokens, credentials, `Sensitive<T>`
+   contents, request bodies, or `Authorization` headers. This surface exists to be shipped to
+   a metrics backend, which is the last place a bearer token should land. What a hook carries
+   is the fixed list in §19.1 and nothing else.
+4. **Synchronous and fast, by contract.** Hooks are invoked on the calling path. The SDK MUST
+   document that a hook must not block, and MUST NOT introduce a queue or thread to defend
+   against one — a caller who needs async delivery buffers on their side, where they can pick
+   the policy.
+5. **Ordering.** `request_start` precedes its `request_end`. A retried operation emits one
+   `request_start`/`request_end` pair **per attempt**, with the attempt number distinguishing
+   them, plus one `retry` between consecutive pairs. A caller must be able to count real wire
+   calls from these events, so one pair per logical operation would be wrong.
+
+### §19.3 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `telemetry_hook` | `telemetry_hook` | `telemetryHook` | `telemetry_hook` | `telemetryHook` | `telemetryHook` | `TelemetryHook` | `telemetryHook` | `TelemetryHook` | `telemetryHook` | `axiam_client_config_set_telemetry_hook` | `telemetry_hook` |
+
+### §19.4 Required tests
+
+Events fire in order for a successful call; a failing call still emits `request_end` carrying
+the failure; a retried call emits one `request_start`/`request_end` pair per attempt with
+distinct attempt numbers and a `retry` between them; **a hook that throws does not fail the
+operation** and does not escape; no event payload contains the access token, the refresh
+token, or any `Sensitive<T>` content (assert by scanning the serialized payload for the
+fixture token value, the same discipline §12/§14/§15 use for error paths); and a client with
+no hook installed behaves identically to one before this section existed.
+
+---
+
 ## Closing Notes
 
 ### Conformance Statement
@@ -1964,6 +2286,21 @@ other section by implication, which is the failure mode a range invites.
 
 The three SDKs that defer §12 ([§12.6](#§126-deferred-sdks-swift-c-c)) keep their existing
 statement and MUST NOT claim §12.
+
+§16 (retry policy) and §18 (deterministic shutdown) are **MUST**-level and land with contract
+1.8, so unlike §14/§15 they are not optional and are not named in the statement — an SDK is
+either conformant or it is not. Neither was implemented anywhere when 1.8 was written: §16
+formalizes a policy §11.2 rule 5 and §14.2 had been *requiring by reference* since before it
+existed (two SDKs had improvised one and disagreed; nine had none), and §18 was absent
+everywhere except the TypeScript and Python gRPC clients and C's `axiam_client_free`. Both
+reach conformance through the D6 re-sync fan-out, one repo at a time, exactly as §12.7, §14
+and §15 did. Until a given SDK lands them it is non-conformant on those two sections, and
+its README MUST NOT imply otherwise.
+
+§17 (decision memo, MAY) and §19 (telemetry hooks, SHOULD) are optional and, like §14/§15, are
+stated by name when shipped:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17 and §19."
 
 Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
@@ -2193,6 +2530,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.7 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7)*
+*Contract version: 1.8 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8)*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

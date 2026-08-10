@@ -20,6 +20,7 @@ pub mod password_history;
 pub mod password_reset;
 pub mod permission;
 pub mod pgp_key;
+pub mod reactor;
 pub mod resource;
 pub mod role;
 pub mod scope;

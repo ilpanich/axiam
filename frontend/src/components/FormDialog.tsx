@@ -115,11 +115,21 @@ export function FormDialog({
         </div>
 
         {/* Body + Footer */}
-        <form onSubmit={onSubmit}>
-          <div className="overflow-y-auto py-4 space-y-4 -mx-6 px-6">
+        {/* Body + Footer
+         *
+         * The form must be a flex column that is allowed to shrink, and the
+         * body must be the thing that shrinks. Without `min-h-0` the form
+         * takes its content height, the body's `overflow-y-auto` never has a
+         * constraint to overflow against, and a form taller than the panel's
+         * `max-h-[90dvh]` pushes this footer past the bottom of the viewport —
+         * where nothing scrolls, so Cancel and the submit button cannot be
+         * reached or clicked at all. `shrink-0` keeps the footer at its
+         * natural height while the body absorbs the shortfall. */}
+        <form onSubmit={onSubmit} className="flex flex-col min-h-0">
+          <div className="overflow-y-auto min-h-0 py-4 space-y-4 -mx-6 px-6">
             {children}
           </div>
-          <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
+          <div className="shrink-0 flex justify-end gap-3 pt-4 border-t border-primary/10">
             <Button
               type="button"
               variant="ghost"

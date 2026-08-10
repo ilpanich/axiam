@@ -17,6 +17,7 @@ import { PermissionsPage } from "@/pages/permissions/PermissionsPage";
 import { ResourcesPage } from "@/pages/resources/ResourcesPage";
 import { CertificatesPage } from "@/pages/certificates/CertificatesPage";
 import { WebhooksPage } from "@/pages/webhooks/WebhooksPage";
+import { ReactorsPage } from "@/pages/reactors/ReactorsPage";
 import { PgpKeysPage } from "@/pages/pgp/PgpKeysPage";
 import { AuditLogsPage } from "@/pages/audit/AuditLogsPage";
 import { OAuth2ClientsPage } from "@/pages/oauth2/OAuth2ClientsPage";
@@ -153,6 +154,11 @@ export const router = createBrowserRouter([
         path: "webhooks",
         element: <WebhooksPage />,
         handle: { crumb: "Webhooks" },
+      },
+      {
+        path: "reactors",
+        element: <ReactorsPage />,
+        handle: { crumb: "Reactors" },
       },
       {
         path: "pgp-keys",

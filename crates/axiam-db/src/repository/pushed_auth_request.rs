@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::is_transaction_conflict;
 
 /// Projected explicitly rather than `SELECT *` so that `meta::id(id)` lands in
 /// `record_id`; a bare `*` yields SurrealDB's `Thing`, which does not
@@ -165,22 +166,43 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
         // sees nothing. Marking `consumed` rather than deleting keeps
         // "already used" distinguishable from "never existed" in an audit
         // trail, even though both answer `invalid_request` on the wire.
-        let mut result = self
+        // The BEGIN/COMMIT is load-bearing, not decoration. A multi-statement
+        // query is not atomic in SurrealDB — each statement runs in its own
+        // transaction — so the `consumed = false` guard alone does not
+        // serialise concurrent callers, and this consume was measured letting
+        // 2 of 8 concurrent redemptions win. RFC 9126 §2.2 makes `request_uri`
+        // one-time-use precisely because a replayable one is a replayable
+        // authorization request.
+        let result = self
             .db
             .current()
             .query(format!(
-                "LET $before = (UPDATE pushed_auth_request SET consumed = true \
+                "BEGIN TRANSACTION; \
+                 LET $before = (UPDATE pushed_auth_request SET consumed = true \
                      WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
                      AND consumed = false AND expires_at > time::now() \
                      RETURN BEFORE); \
-                 SELECT {SELECT_FIELDS} FROM $before"
+                 SELECT {SELECT_FIELDS} FROM $before; \
+                 COMMIT TRANSACTION"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", request_uri_hash.to_string()))
-            .await
-            .map_err(DbError::from)?;
+            .await;
 
-        let rows: Vec<PushedAuthRequestRow> = result.take(1).map_err(DbError::from)?;
+        // A loser's transaction is aborted by the conflict. That is this
+        // method's "someone else consumed it" answer, not a server fault.
+        let mut result = match result {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<PushedAuthRequestRow> = match result.take::<Vec<PushedAuthRequestRow>>(2) {
+            Ok(rows) => rows,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
         rows.into_iter()
             .next()
             .map(PushedAuthRequestRow::try_into_request)

@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::is_transaction_conflict;
 
 /// Projected explicitly rather than `SELECT *` so that `meta::id(id)` lands in
 /// `record_id`; a bare `*` yields SurrealDB's `Thing`, which does not
@@ -107,17 +108,6 @@ impl PermissionTicketRow {
             created_at: self.created_at,
         })
     }
-}
-
-/// Whether a SurrealDB error is a write-write transaction conflict.
-///
-/// Matched on the message because the driver surfaces it as an opaque `Db`
-/// error rather than a typed variant. Narrow by design: only a conflict is
-/// swallowed, and only into "someone else won the race" — every other failure
-/// still propagates.
-fn is_transaction_conflict(e: &surrealdb::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("failed transaction") || msg.contains("Failed to commit transaction")
 }
 
 /// SurrealDB implementation of the permission-ticket repository.

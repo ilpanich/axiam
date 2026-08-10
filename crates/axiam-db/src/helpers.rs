@@ -82,6 +82,31 @@ pub fn classify_write_error<E: std::fmt::Display>(err: E, entity: &str) -> DbErr
 ///
 /// Replaces the `into_iter().next().ok_or_else(|| DbError::NotFound{…})`
 /// pattern repeated in every `get_by_id` / find method.
+/// Whether a SurrealDB error is a write-write transaction conflict.
+///
+/// # Why this exists
+///
+/// A multi-statement query (`LET $x = (UPDATE ...); SELECT ... FROM $x`) is
+/// **not** atomic in SurrealDB — each statement runs in its own transaction —
+/// so a single-use `UPDATE ... WHERE consumed = false` guard does not
+/// serialise concurrent callers on its own. Measured: eight concurrent
+/// redemptions of one row, up to four of them "winning".
+///
+/// Wrapping the statements in `BEGIN`/`COMMIT` makes the datastore detect the
+/// conflict and abort every loser with this error. For a single-use consume
+/// that abort is not a fault — it is the datastore reporting that someone else
+/// got there first, which is the answer the caller wanted. Callers translate
+/// it to "no row consumed"; propagating it would turn a correctly-refused
+/// replay into a 500.
+///
+/// Matched on the message because the driver surfaces it as an opaque error
+/// rather than a typed variant. Deliberately narrow: only a conflict is
+/// swallowed, and only into "lost the race" — every other failure propagates.
+pub fn is_transaction_conflict<E: std::fmt::Display>(err: &E) -> bool {
+    let msg = err.to_string();
+    msg.contains("failed transaction") || msg.contains("Failed to commit transaction")
+}
+
 pub fn take_first_or_not_found<T>(items: Vec<T>, entity: &str, id: &str) -> Result<T, DbError> {
     items.into_iter().next().ok_or_else(|| DbError::NotFound {
         entity: entity.to_string(),

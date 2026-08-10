@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::is_transaction_conflict;
 
 /// Ceiling on the poll interval `slow_down` may raise a grant to.
 ///
@@ -244,26 +245,47 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         tenant_id: Uuid,
         device_code_hash: &str,
     ) -> AxiamResult<Option<DeviceGrant>> {
-        // Single-use, in one statement. `RETURN BEFORE` yields the
+        // Single-use, in one TRANSACTION. `RETURN BEFORE` yields the
         // pre-transition row, so exactly one concurrent poll sees a non-empty
-        // result and the others see nothing — the same mechanism refresh
-        // rotation uses, for the same reason.
-        let mut result = self
+        // result and the others see nothing.
+        //
+        // The BEGIN/COMMIT is what makes that true. A multi-statement query is
+        // not atomic in SurrealDB — each statement runs in its own transaction
+        // — so the `status = 'approved'` guard alone does not serialise
+        // concurrent polls: this redeem was measured letting 4 of 8 win, which
+        // is one user approval minting four token sets. A device that polls on
+        // a short interval and retries is not an exotic case; it is the normal
+        // shape of RFC 8628 §3.4.
+        let result = self
             .db
             .current()
             .query(format!(
-                "LET $before = (UPDATE device_grant SET status = 'redeemed' \
+                "BEGIN TRANSACTION; \
+                 LET $before = (UPDATE device_grant SET status = 'redeemed' \
                      WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
                      AND status = 'approved' AND expires_at > time::now() \
                      RETURN BEFORE); \
-                 SELECT {SELECT_FIELDS} FROM $before"
+                 SELECT {SELECT_FIELDS} FROM $before; \
+                 COMMIT TRANSACTION"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", device_code_hash.to_string()))
-            .await
-            .map_err(DbError::from)?;
+            .await;
 
-        let rows: Vec<DeviceGrantRow> = result.take(1).map_err(DbError::from)?;
+        // A loser's transaction is aborted by the conflict — that is this
+        // method's "already redeemed" answer, not a server fault.
+        let mut result = match result {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(2) {
+            Ok(rows) => rows,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
         rows.into_iter()
             .next()
             .map(DeviceGrantRow::try_into_grant)

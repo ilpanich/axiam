@@ -28,6 +28,7 @@ pub mod service_account;
 pub mod session;
 pub mod settings;
 pub mod tenant;
+pub mod uma;
 pub mod user;
 pub mod webauthn_credential;
 pub mod webhook;

@@ -187,6 +187,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "reactor_registrations",
         sql: SCHEMA_V29,
     },
+    Migration {
+        version: 30,
+        name: "uma_permission_tickets",
+        sql: SCHEMA_V30,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1489,6 +1494,52 @@ DEFINE INDEX IF NOT EXISTS idx_reactor_tenant_enabled
 -- than silently doubling the interceptor chain for an event.
 DEFINE INDEX IF NOT EXISTS idx_reactor_tenant_name
     ON TABLE reactor FIELDS tenant_id, name UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v30 — UMA 2.0 permission tickets (X2)
+// -----------------------------------------------------------------------
+//
+// A permission ticket is a short-lived, single-use bearer credential, so the
+// table mirrors `pushed_auth_request` rather than inventing a shape: only the
+// SHA-256 of the handle is stored, `consumed` marks redemption instead of
+// deleting the row, and expiry is a column the consuming statement can test.
+//
+// `consumed` is marked rather than the row deleted for the same reason PAR
+// does it: "already used" and "never existed" both answer `invalid_grant` on
+// the wire, and the audit trail is the only place the difference survives.
+//
+// The unique index is on `ticket_hash` alone, not (tenant, hash). The handle
+// carries 256 bits of entropy, so a collision across tenants is not a
+// practical event — but if one ever occurred, a per-tenant index would let the
+// same handle exist twice and the `consume` statement would then depend on
+// which row the planner reached first. A global unique makes that
+// unrepresentable.
+//
+// `permissions` is FLEXIBLE for the same reason PAR's `params` is: it is an
+// array of `(resource_id, resource_scopes)` objects whose shape belongs to the
+// domain model, and pinning it here would mean a migration to add a field the
+// engine already validates on write.
+//
+// No ASSERT constrains the scope names. Which names are legal is a property of
+// the resource's declared `scope` rows, which change at runtime; an ASSERT
+// would freeze that into the schema and be resolved in favour of whichever was
+// edited last.
+const SCHEMA_V30: &str = "\
+DEFINE TABLE IF NOT EXISTS permission_ticket SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE permission_ticket TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE permission_ticket TYPE string;
+DEFINE FIELD IF NOT EXISTS ticket_hash ON TABLE permission_ticket TYPE string;
+DEFINE FIELD IF NOT EXISTS permissions ON TABLE permission_ticket TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD IF NOT EXISTS consumed ON TABLE permission_ticket TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE permission_ticket TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE permission_ticket TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_permission_ticket_hash
+    ON TABLE permission_ticket FIELDS ticket_hash UNIQUE;
+-- The sweeper deletes by (tenant, expiry); without this it is a table scan on
+-- the one table that turns over fastest.
+DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
+    ON TABLE permission_ticket FIELDS tenant_id, expires_at;
 ";
 
 // -----------------------------------------------------------------------

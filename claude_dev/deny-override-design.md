@@ -183,6 +183,26 @@ it is the test that would catch a future "most-specific-wins" refactor.
 projected column, never a filter, so it cannot make the predicate opaque to the
 planner (which is exactly how I7(a) went wrong before).
 
+### 5.1 Where each test actually lives (added by the F4 precedence pass)
+
+The plan above was implemented in two places, and the split matters:
+
+| Layer | File | What it can prove |
+|---|---|---|
+| Pure evaluator | `crates/axiam-authz/src/engine.rs` (`mod tests`) | precedence *given* a set of applicable roles |
+| End to end | `crates/axiam-authz/tests/authz_engine_test.rs` | that the deny **reaches** the evaluator |
+
+Rows 3, 4, 7 and 8 are claims about the second layer — a deny arriving through
+the hierarchy, through a group, or through a global role — and for the first
+months of B1 they were asserted only in the first, where the test hands the
+evaluator two role IDs that are applicable by construction.
+
+That gap is not theoretical. Deleting the ancestor clause from
+`applicable_role_ids` (so an inherited deny is silently dropped) leaves **all 72
+unit tests passing** while row 4 inverts from deny to allow. Only the
+end-to-end tests fail. Anything asserting a row of §2.2 belongs in the second
+file, or in both.
+
 ## 6. Explicitly out of scope
 
 - **Deny on a permission itself** (as opposed to on a grant). A permission is a

@@ -272,7 +272,101 @@ step** and is recorded here as outstanding rather than quietly counted as done.
 | SEC-089 | Audience allow-list reuses `redirect_uris` | Low-medium | **Decide** — separate column, or document loudly |
 | SEC-090 | Impersonation resets the actor-chain bound | Low | Document in the design doc |
 | SEC-091 | Exchange does not consult revocation | Accepted | Document the bound in `security-profiles.md` |
-| — | Deny-override engine (B1) | — | **Outstanding**: dedicated pass against the precedence table |
+| SEC-092 | Unrecognised grant `effect` read back as `allow` | Low | **Fixed** — the grant is dropped; see §8 |
+| — | Deny-override engine (B1) | — | **Closed** by the §8 precedence pass |
 
 None of these block the already-merged B-track. SEC-088 should be fixed while
 the surface it corrupts is still unused, which is the only reason it is cheap.
+
+---
+
+## 8. Addendum — the deny-override precedence pass (2026-08-10)
+
+§6 recorded the B1 engine as *sampled, not exhausted*, and said a dedicated pass
+against the precedence table — not another read-through — was the right next
+step. This is that pass. It is recorded here rather than in a new document
+because it closes an item this review opened.
+
+### 8.1 The table is enforced. The tests for it were in the wrong place.
+
+Every row of `deny-override-design.md` §2.2 is correctly implemented, and
+`evaluate_grants` is a clean one-pass deny-short-circuit whose result provably
+does not depend on scan order. No precedence defect was found.
+
+But the *tests* for rows 3, 4, 7 and 8 all lived in `engine.rs`'s unit module,
+against `evaluate_grants` — a function that takes the applicable role IDs as an
+argument. Those four rows are claims about a layer that function never runs:
+that a deny arriving through the hierarchy, through a group, or through a global
+role is *applicable* and reaches the evaluator at all. The unit test for row 4
+even says so in its own comment ("the ancestor-scoped role carries the deny"),
+then constructs two role IDs that are applicable by construction.
+
+**Demonstration, not argument.** Delete the ancestor clause from
+`applicable_role_ids` — a one-line change that silently drops every inherited
+deny:
+
+```
+--- integration ---   3 failed  (2 of them the new deny-override rows)
+--- unit ---         72 passed
+```
+
+Row 4 inverts from `DeniedByRule` to `Allow` — a privilege escalation — and the
+entire unit suite stays green. That is the shape of gap §6 predicted, found by
+attacking the tests rather than the code.
+
+**Closed by** seven end-to-end tests in
+`crates/axiam-authz/tests/authz_engine_test.rs` covering rows 3, 4, 5, 7, 8,
+§2.3's scope interaction, and batch-vs-single equivalence. All seven fail when
+the deny short-circuit is disabled; two fail under the applicability mutation
+above.
+
+The batch case is worth naming separately: `evaluate_batch` re-derives
+applicability from its own coalesced lookups rather than calling `check_access`,
+so it is a genuinely independent traversal of the same table. It asserts
+equality against the single path rather than against a literal, so the two
+cannot drift even if both change.
+
+### 8.2 SEC-092 — an uninterpretable grant read back as permission
+
+`PermissionGrantRow::try_into_grant` mapped an **unrecognised** `effect` to
+`PermissionEffect::Allow`. The comment defending that choice weighed exactly two
+options — fail the read, or default to allow — and picked the second because the
+first takes authorization down over one bad row. Both are worse than the third
+option it did not consider.
+
+`from_wire` trims and lowercases, so casing is *not* how this happens; the
+realistic paths are a truncated write, a row edited outside the API, and — the
+one worth planning for — a **rolling upgrade in which a newer node writes a
+third effect** an older node cannot parse. Under the old default every such
+grant read back as an allow on the old node: deny-override defeated by version
+skew.
+
+Defaulting to `Deny` is not the fix either. In this engine `Deny` is not "ignore
+this grant", it is an active override that masks the action for every holder of
+the role — one malformed row would revoke access tenant-wide.
+
+**Fixed** by dropping the grant (`Ok(None)`): it contributes neither an allow nor
+a deny, the decision falls through to the remaining grants and ultimately to
+default-deny, and the row is logged at `error` rather than `warn`, because
+reaching that branch means the datastore was written outside both the API
+validator and the v25 schema `ASSERT`.
+
+Severity is **low**: the write path and the schema constraint both reject these
+values, so no supported path produces one today. It is recorded because the
+*direction* of the old default was wrong, and because the version-skew case is a
+future this design should not have to be lucky about.
+
+### 8.3 Two things deliberately left alone
+
+- **`unwrap_or(&empty_ancestors)` in `evaluate_batch`.** If the coalesced
+  ancestors lookup ever missed, an ancestor-scoped deny would be silently
+  dropped — a widening fallback. It is unreachable today (the same `has_roles`
+  filter gates both the population loop and the consumer), so changing it would
+  be an untestable edit to a live authorization path. Named here so the next
+  person to touch that filter knows what it is holding up.
+- **`grants_by_role` is keyed by bare `role_id` across tenants** in the batch
+  path, while the dedup set is keyed by `(tenant_id, role_id)`. A cross-tenant
+  batch therefore rests on UUIDv4 uniqueness rather than on the key. Not a
+  finding — a collision is not a thing that happens — but the isolation
+  invariant is stated in the wrong place, and a future non-random ID scheme
+  would make it a real one.

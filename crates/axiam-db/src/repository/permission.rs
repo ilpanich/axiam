@@ -82,7 +82,9 @@ struct RolePermissionGrantRow {
 }
 
 impl RolePermissionGrantRow {
-    fn try_into_role_grant(self) -> Result<(Uuid, PermissionGrant), DbError> {
+    /// `Ok(None)` when the row's `effect` is unrecognised — see
+    /// [`PermissionGrantRow::try_into_grant`] (SEC-092).
+    fn try_into_role_grant(self) -> Result<Option<(Uuid, PermissionGrant)>, DbError> {
         let role_id = Uuid::parse_str(&self.role_id)
             .map_err(|e| DbError::Migration(format!("invalid role UUID: {e}")))?;
         let grant = PermissionGrantRow {
@@ -96,12 +98,15 @@ impl RolePermissionGrantRow {
             effect: self.effect,
         }
         .try_into_grant()?;
-        Ok((role_id, grant))
+        Ok(grant.map(|g| (role_id, g)))
     }
 }
 
 impl PermissionGrantRow {
-    fn try_into_grant(self) -> Result<PermissionGrant, DbError> {
+    /// `Ok(None)` means "this grant edge is malformed and contributes nothing"
+    /// — not an error, and deliberately not an allow. See the `effect` match
+    /// below (SEC-092).
+    fn try_into_grant(self) -> Result<Option<PermissionGrant>, DbError> {
         let id = Uuid::parse_str(&self.record_id)
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let tenant_id = Uuid::parse_str(&self.tenant_id)
@@ -117,33 +122,57 @@ impl PermissionGrantRow {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // B1: an absent or unrecognised `effect` reads back as Allow.
+        // B1: an ABSENT `effect` reads back as Allow; an UNRECOGNISED one
+        // drops the grant entirely (`Ok(None)`).
         //
         // Absent is the backward-compatibility case and is simply correct:
         // every edge written before deny-override existed means "allow".
         //
-        // *Unrecognised* is the interesting one. Defaulting a garbage value to
-        // Allow looks like the wrong direction for a security decision — but
-        // the write path validates `effect` before it ever reaches the
-        // database (`PermissionEffect::from_wire` rejects anything that is not
-        // exactly "allow" or "deny"), so a value that is neither can only come
-        // from someone editing rows by hand. Failing the read would take the
-        // whole authorization path down for that tenant; defaulting to Allow
-        // reproduces exactly the pre-B1 behaviour of a row that has no effect
-        // at all. It is logged so it is not silent.
+        // Unrecognised is the security-relevant one, and it has three possible
+        // answers, not two:
+        //
+        // 1. **Fail the read.** Takes the whole authorization path down for the
+        //    tenant over a single malformed row. Rejected.
+        // 2. **Default to Allow** — what this did until SEC-092. A grant edge
+        //    nobody can interpret became a *permissive* one. `from_wire` trims
+        //    and lowercases, so casing and whitespace are not how this happens;
+        //    the realistic paths are a truncated or partially-written value, a
+        //    row edited outside the API, and — the one worth planning for — a
+        //    **rolling upgrade in which a newer node writes a third effect** a
+        //    node still on this version does not know. Under the old default,
+        //    every one of those grants read back as allow on the old node,
+        //    which is deny-override defeated by a version skew.
+        // 3. **Default to Deny.** Tempting, and wrong for a different reason:
+        //    `PermissionEffect::Deny` is not "ignore this grant", it is an
+        //    active override that masks the action for *everyone* holding the
+        //    role. One malformed row would revoke access tenant-wide.
+        //
+        // Dropping the grant is the only answer that fails closed without
+        // being weaponisable: the row contributes neither an allow nor a deny,
+        // so the decision falls through to the other grants and ultimately to
+        // default-deny. It is logged at `error` — the write path validates
+        // `effect` (`PermissionEffect::from_wire`) and the v25 schema ASSERT
+        // rejects anything else, so reaching this branch means either a
+        // datastore modified outside both, or exactly the version skew above.
         let effect = match self.effect.as_deref() {
             None => PermissionEffect::Allow,
-            Some(raw) => PermissionEffect::from_wire(raw).unwrap_or_else(|| {
-                tracing::warn!(
-                    effect = %raw,
-                    "grant edge carries an unrecognised effect; treating it as \
-                     'allow' (the pre-deny-override meaning of an absent effect)"
-                );
-                PermissionEffect::Allow
-            }),
+            Some(raw) => match PermissionEffect::from_wire(raw) {
+                Some(effect) => effect,
+                None => {
+                    tracing::error!(
+                        effect = %raw,
+                        permission_id = %id,
+                        "grant edge carries an unrecognised effect; DROPPING the \
+                         grant (SEC-092). It contributes neither an allow nor a \
+                         deny — treating it as 'allow' would let a malformed \
+                         value defeat deny-override"
+                    );
+                    return Ok(None);
+                }
+            },
         };
 
-        Ok(PermissionGrant {
+        Ok(Some(PermissionGrant {
             permission: Permission {
                 id,
                 tenant_id,
@@ -154,7 +183,7 @@ impl PermissionGrantRow {
             },
             scope_ids,
             effect,
-        })
+        }))
     }
 }
 
@@ -649,7 +678,10 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         let grants = rows
             .into_iter()
             .map(|row| row.try_into_grant())
-            .collect::<Result<Vec<_>, DbError>>()?;
+            .collect::<Result<Vec<_>, DbError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
 
         Ok(grants)
     }
@@ -713,10 +745,122 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut grouped: HashMap<Uuid, Vec<PermissionGrant>> = HashMap::new();
         for row in rows {
-            let (role_id, grant) = row.try_into_role_grant()?;
+            // A dropped grant (SEC-092) contributes no entry at all, so a role
+            // whose ONLY grant is malformed is absent from the map rather than
+            // present-and-empty. The engine's `grants_by_role.get(role_id)`
+            // miss and an empty Vec are already equivalent, so both spellings
+            // reach the same decision.
+            let Some((role_id, grant)) = row.try_into_role_grant()? else {
+                continue;
+            };
             grouped.entry(role_id).or_default().push(grant);
         }
 
         Ok(grouped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn row(effect: Option<&str>) -> PermissionGrantRow {
+        PermissionGrantRow {
+            record_id: Uuid::new_v4().to_string(),
+            tenant_id: Uuid::new_v4().to_string(),
+            action: "read".into(),
+            description: "read".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            scope_ids: None,
+            effect: effect.map(str::to_string),
+        }
+    }
+
+    /// The backward-compatibility case: every grant edge written before B1 has
+    /// no `effect` at all, and every one of them means allow.
+    #[test]
+    fn an_absent_effect_reads_back_as_allow() {
+        let grant = row(None).try_into_grant().unwrap().expect("kept");
+        assert_eq!(grant.effect, PermissionEffect::Allow);
+    }
+
+    #[test]
+    fn the_two_valid_effects_round_trip() {
+        assert_eq!(
+            row(Some("allow")).try_into_grant().unwrap().unwrap().effect,
+            PermissionEffect::Allow
+        );
+        assert_eq!(
+            row(Some("deny")).try_into_grant().unwrap().unwrap().effect,
+            PermissionEffect::Deny
+        );
+    }
+
+    /// Casing and surrounding whitespace are *not* malformed — `from_wire`
+    /// trims and lowercases. Pinned here so the SEC-092 drop below is not
+    /// mistaken for strictness it does not have.
+    #[test]
+    fn casing_and_whitespace_still_parse() {
+        for raw in ["DENY", "Deny", " deny ", "ALLOW"] {
+            assert!(
+                row(Some(raw)).try_into_grant().unwrap().is_some(),
+                "effect {raw:?} is well-formed and must not be dropped"
+            );
+        }
+    }
+
+    /// **SEC-092.** An unrecognised effect drops the grant. It must be neither
+    /// an allow (which would let an uninterpretable value read back as
+    /// permission) nor a deny (which would let one malformed row mask the
+    /// action for every holder of the role), and it must not be an error
+    /// (which would take the whole authorization path down for the tenant).
+    ///
+    /// `"restrict"` stands in for the case worth planning for: a **third
+    /// effect written by a newer node** during a rolling upgrade. Before
+    /// SEC-092 every such grant read back as **allow** on the old node.
+    #[test]
+    fn an_unrecognised_effect_drops_the_grant() {
+        for raw in ["restrict", "audit", "den", "", "true"] {
+            let outcome = row(Some(raw)).try_into_grant().unwrap();
+            assert!(
+                outcome.is_none(),
+                "effect {raw:?} must drop the grant, not resolve to an effect"
+            );
+        }
+    }
+
+    /// The batched shape drops the same rows, and drops them *without* losing
+    /// the role id of the rows that survive — a bug here would silently empty a
+    /// role that has perfectly good grants alongside a malformed one.
+    #[test]
+    fn the_batched_row_drops_malformed_grants_and_keeps_the_rest() {
+        let role_id = Uuid::new_v4();
+        let batched = |effect: Option<&str>| RolePermissionGrantRow {
+            role_id: role_id.to_string(),
+            record_id: Uuid::new_v4().to_string(),
+            tenant_id: Uuid::new_v4().to_string(),
+            action: "read".into(),
+            description: "read".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            scope_ids: None,
+            effect: effect.map(str::to_string),
+        };
+
+        assert!(
+            batched(Some("nonsense"))
+                .try_into_role_grant()
+                .unwrap()
+                .is_none()
+        );
+
+        let (kept_role, kept) = batched(Some("deny"))
+            .try_into_role_grant()
+            .unwrap()
+            .expect("kept");
+        assert_eq!(kept_role, role_id);
+        assert_eq!(kept.effect, PermissionEffect::Deny);
     }
 }

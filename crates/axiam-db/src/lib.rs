@@ -47,7 +47,7 @@ pub use repository::{
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,

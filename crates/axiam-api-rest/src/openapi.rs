@@ -121,6 +121,12 @@ use crate::handlers;
         handlers::pgp_keys::sign_audit_batch,
         handlers::pgp_keys::encrypt,
         // Webhooks
+        handlers::reactors::list_events,
+        handlers::reactors::create,
+        handlers::reactors::list,
+        handlers::reactors::get,
+        handlers::reactors::update,
+        handlers::reactors::delete,
         handlers::webhooks::create,
         handlers::webhooks::list,
         handlers::webhooks::get,

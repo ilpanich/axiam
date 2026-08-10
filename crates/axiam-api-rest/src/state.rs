@@ -60,7 +60,7 @@ use axiam_db::{
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
@@ -291,6 +291,7 @@ pub struct AppState<C: Connection + Clone> {
     pub cert_repo: SurrealCertificateRepository<C>,
     pub device_auth_service: DeviceAuthServiceT<C>,
     pub pgp_service: PgpServiceT<C>,
+    pub reactor_repo: SurrealReactorRepository<C>,
     pub webhook_repo: SurrealWebhookRepository<C>,
     pub webhook_delivery: WebhookDeliveryServiceT<C>,
     /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
@@ -431,6 +432,7 @@ impl<C: Connection + Clone> AppState<C> {
         let cert_repo = SurrealCertificateRepository::new(db.clone());
         let ca_cert_repo = axiam_db::SurrealCaCertificateRepository::new(db.clone());
         let pgp_repo = axiam_db::SurrealPgpKeyRepository::new(db.clone());
+        let reactor_repo = SurrealReactorRepository::new(db.clone());
         let webhook_repo = SurrealWebhookRepository::new(db.clone());
         let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.clone());
         let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.clone());
@@ -571,6 +573,7 @@ impl<C: Connection + Clone> AppState<C> {
             cert_repo,
             device_auth_service,
             pgp_service,
+            reactor_repo,
             webhook_repo,
             webhook_delivery,
             webhook_publisher: None,

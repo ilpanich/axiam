@@ -110,6 +110,21 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "pgp_keys:sign_audit_batch",
         "Sign an audit log batch with a PGP key",
     ),
+    // Reactors (X1)
+    //
+    // Deliberately the same five verbs as every other admin surface rather
+    // than a bespoke set. A reactor registration can veto a login or add a
+    // claim to a token, so it is emphatically not a low-privilege object —
+    // but the privilege lives in `reactors:create`/`update` being admin-only,
+    // not in inventing a permission vocabulary an operator has to learn.
+    (
+        "reactors:list",
+        "List reactors and the hookable event registry",
+    ),
+    ("reactors:get", "Retrieve a single reactor"),
+    ("reactors:create", "Register a reactor"),
+    ("reactors:update", "Update a reactor registration"),
+    ("reactors:delete", "Delete a reactor registration"),
     // Webhooks
     ("webhooks:list", "List webhooks"),
     ("webhooks:get", "Retrieve a single webhook"),
@@ -574,6 +589,18 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/notification-rules/{id}",
         "notification_rules:delete",
     ),
+    // Reactors (X1)
+    //
+    // `/reactors/events` returns the hookable-event registry. It is gated by
+    // `reactors:list` rather than left public: the registry names every hook
+    // that exists and what each may mutate, which is a map of the extension
+    // surface and not something to hand to an unauthenticated caller.
+    ("GET", "/api/v1/reactors/events", "reactors:list"),
+    ("GET", "/api/v1/reactors", "reactors:list"),
+    ("POST", "/api/v1/reactors", "reactors:create"),
+    ("GET", "/api/v1/reactors/{id}", "reactors:get"),
+    ("PUT", "/api/v1/reactors/{id}", "reactors:update"),
+    ("DELETE", "/api/v1/reactors/{id}", "reactors:delete"),
     // Webhooks
     ("GET", "/api/v1/webhooks", "webhooks:list"),
     ("POST", "/api/v1/webhooks", "webhooks:create"),

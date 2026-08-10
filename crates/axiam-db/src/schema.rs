@@ -182,6 +182,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_client_participation",
         sql: SCHEMA_V28,
     },
+    Migration {
+        version: 29,
+        name: "reactor_registrations",
+        sql: SCHEMA_V29,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1431,6 +1436,59 @@ DEFINE FIELD IF NOT EXISTS user_id ON TABLE session_client TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON TABLE session_client TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_session_client_session
     ON TABLE session_client FIELDS tenant_id, session_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v29 — reactor registrations (X1)
+// -----------------------------------------------------------------------
+//
+// A `reactor` row is a registration, not a secret: it says which events an
+// external actor subscribes to and what happens when it does not answer. The
+// signing key it authenticates with is the tenant's existing AMQP subkey
+// (HKDF-derived per §8), so nothing key-shaped is stored here.
+//
+// Two ASSERTs are load-bearing, for the same reason the v25 `effect` ASSERT
+// is. `mode` and `failure_policy` both decide behaviour on the security path —
+// whether a reply can veto, and whether an unreachable veto passes — and the
+// read path defaults an unparseable value to the *safe* side rather than
+// erroring (it must not take token issuance down over one bad row). That makes
+// the write path the only place the column can be kept honest.
+//
+// `timeout_ms` is asserted at the same 5000 ms ceiling `MAX_TIMEOUT_MS`
+// enforces in `axiam-core`, so a row written outside the API cannot make the
+// dispatcher wait longer than the API would ever allow. The two constants have
+// to move together; the repository tests pin that.
+//
+// `events` is NOT constrained here. The valid set lives in `EVENT_REGISTRY`
+// and grows with the code; encoding it in an ASSERT would mean a schema
+// migration every time a hook is added, and a mismatch between the two would
+// be resolved in favour of whichever was edited last. The registry validates
+// on write and the dispatcher ignores an unknown name on read.
+const SCHEMA_V29: &str = "\
+DEFINE TABLE IF NOT EXISTS reactor SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE reactor TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE reactor TYPE string;
+DEFINE FIELD IF NOT EXISTS description ON TABLE reactor TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS events ON TABLE reactor TYPE array<string>;
+DEFINE FIELD IF NOT EXISTS mode ON TABLE reactor TYPE string
+    ASSERT $value IN ['intercept', 'listen'];
+DEFINE FIELD IF NOT EXISTS priority ON TABLE reactor TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS timeout_ms ON TABLE reactor TYPE int
+    ASSERT $value > 0 AND $value <= 5000;
+DEFINE FIELD IF NOT EXISTS failure_policy ON TABLE reactor TYPE string
+    ASSERT $value IN ['fail_open', 'fail_closed'];
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE reactor TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE reactor TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE reactor TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS last_seen_at ON TABLE reactor TYPE option<datetime>;
+-- The dispatcher's hot lookup is 'the enabled reactors for this tenant',
+-- resolved once per interceptable event and then held in the routing table.
+DEFINE INDEX IF NOT EXISTS idx_reactor_tenant_enabled
+    ON TABLE reactor FIELDS tenant_id, enabled;
+-- A tenant's reactor names are unique, so a re-registration updates rather
+-- than silently doubling the interceptor chain for an event.
+DEFINE INDEX IF NOT EXISTS idx_reactor_tenant_name
+    ON TABLE reactor FIELDS tenant_id, name UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

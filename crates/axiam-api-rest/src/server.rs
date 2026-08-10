@@ -741,6 +741,26 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         ),
                     ),
             )
+            // --- Reactors (X1) ---
+            //
+            // `/reactors/events` is registered BEFORE `/reactors/{id}`:
+            // actix matches in registration order, and `{id}` would otherwise
+            // swallow `events` and fail as an invalid UUID.
+            .service(
+                web::resource("/reactors/events")
+                    .route(web::get().to(handlers::reactors::list_events::<C>)),
+            )
+            .service(
+                web::resource("/reactors")
+                    .route(web::post().to(handlers::reactors::create::<C>))
+                    .route(web::get().to(handlers::reactors::list::<C>)),
+            )
+            .service(
+                web::resource("/reactors/{id}")
+                    .route(web::get().to(handlers::reactors::get::<C>))
+                    .route(web::put().to(handlers::reactors::update::<C>))
+                    .route(web::delete().to(handlers::reactors::delete::<C>)),
+            )
             // --- Webhooks ---
             .service(
                 web::resource("/webhooks")

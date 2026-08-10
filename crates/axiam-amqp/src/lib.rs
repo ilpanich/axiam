@@ -10,6 +10,7 @@ pub mod mail_consumer;
 pub mod mail_publisher;
 pub mod messages;
 pub mod notification_publisher;
+pub mod reactor;
 pub mod webhook_publisher;
 
 pub use cache_invalidation::{
@@ -24,4 +25,8 @@ pub use mail_consumer::start_mail_consumer;
 pub use mail_publisher::MailOutboundPublisher;
 pub use messages::{MailType, OutboundMailMessage, WebhookMessage};
 pub use notification_publisher::NotificationPublisher;
+pub use reactor::{
+    ChainResult, DispatchFailure, InFlightLimiter, NoopReactorGate, ReactorEventMessage,
+    ReactorReply, ReactorTransport, ReplyDecision, ReplyRejection, run_chain,
+};
 pub use webhook_publisher::WebhookPublisher;

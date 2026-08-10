@@ -38,6 +38,7 @@ use crate::models::{
         CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
     },
     pgp_key::{PgpKey, StorePgpKey},
+    reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
     scope::{CreateScope, Scope, UpdateScope},
@@ -1298,6 +1299,56 @@ pub trait CertificateRepository: Send + Sync {
         &self,
         cert_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<Uuid>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Reactors (tenant-scoped) — X1
+// ---------------------------------------------------------------------------
+
+pub trait ReactorRepository: Send + Sync {
+    fn create(&self, input: CreateReactor) -> impl Future<Output = AxiamResult<Reactor>> + Send;
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Reactor>> + Send;
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateReactor,
+    ) -> impl Future<Output = AxiamResult<Reactor>> + Send;
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<Reactor>>> + Send;
+
+    /// Every ENABLED reactor in the tenant subscribed to `event`, ordered by
+    /// `priority` ascending then `id`, which is the order interceptors run in.
+    ///
+    /// The secondary sort on `id` is not cosmetic: two reactors at the same
+    /// priority would otherwise chain in whatever order the storage engine
+    /// returned them, so the same rule set could produce different tokens on
+    /// different replicas. A total order makes the chain reproducible.
+    fn get_enabled_by_event(
+        &self,
+        tenant_id: Uuid,
+        event: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<Reactor>>> + Send;
+
+    /// Record that a reactor consumed from its queue.
+    ///
+    /// Separated from `update` because it is written on the *consumer's*
+    /// heartbeat rather than by an administrator, and it must not bump
+    /// `updated_at` — an operator reading "last modified" wants the last
+    /// configuration change, not the last heartbeat.
+    fn touch_last_seen(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------

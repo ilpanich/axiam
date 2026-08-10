@@ -79,6 +79,18 @@ chains nest the claim (`act.act`), and the chain is **capped at depth 3** —
 beyond that nobody is reading it, and an uncapped chain is an unbounded field
 in a signed token.
 
+**The cap is per unbroken delegation chain, and impersonation starts a new one**
+(SEC-090). An impersonation exchange deliberately emits no `act` claim, so the
+subject's existing chain is dropped rather than extended — which is the correct
+behaviour for impersonation, whose entire point is a token indistinguishable
+from one the user obtained directly. The side effect is that the depth counter
+resets: three delegations, one impersonation, three more delegations. That is
+recorded here so the next reader meets it as a stated property rather than a
+surprise. It buys nothing — impersonation needs the `may_impersonate` grant,
+and the lifetime cap applies at every hop regardless of depth — but the audit
+linkage back through the chain is lost at the impersonation step, which is the
+same fact the impersonation section below is already built around.
+
 **Impersonation** (no `actor_token`) — "service S is now U, and nothing in the
 token records that." The issued token is indistinguishable from one the user
 obtained directly. This is genuinely useful (support tooling, admin

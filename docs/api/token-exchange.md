@@ -120,10 +120,23 @@ narrowing, it is a mistake best diagnosed here.
 
 ## Audience
 
-`audience` and `resource` both narrow the issued token's `aud`, and when
-supplied must match one of the exchanging client's registered audiences.
-An unconstrained `aud` would let a service mint tokens addressed at systems it
-has no relationship with. When both are supplied they must agree.
+`audience` and `resource` both narrow the issued token's `aud`. An
+unconstrained `aud` would let a service mint tokens addressed at systems it has
+no relationship with. When both are supplied they must agree.
+
+**The allow-list is the client's `redirect_uris`** (SEC-089). There is no
+separate audience field in v1: a target is accepted if it appears in the
+client's registered redirect URIs, or is one of AXIAM's own audiences below.
+
+> **Operators:** this means **adding a redirect URI also authorises it as a
+> token audience.** A redirect URI is normally reviewed as *"where may this
+> client send a user's browser"* — a routine, low-privilege edit. Here it also
+> answers *"for whom may this client mint tokens"*. The two lists also drift
+> for ordinary reasons: prune the redirect URIs of a client that stopped using
+> the browser flow and it silently loses exchange targets. Review redirect-URI
+> changes on clients holding the exchange grant with that second question in
+> mind. A dedicated `allowed_token_targets` registration field is the intended
+> fix and is not in v1.
 
 AXIAM's own audiences (`axiam:user`, `axiam:m2m`) are always addressable.
 When neither parameter is supplied the issued token keeps the subject token's
@@ -142,6 +155,29 @@ hold the result for a further 15 minutes.
 Revoking the subject's session does **not** retroactively revoke tokens
 exchanged from it — they are separate tokens. That is why the cap matters and
 why it is documented rather than left to be discovered.
+
+### Revocation is not consulted at exchange time (SEC-091)
+
+The subject token is validated for signature, issuer, audience and expiry. It
+is **not** checked against session revocation, which is the standing posture
+for access tokens across AXIAM (see
+[Session-revocation posture](../security-profiles.md#session-revocation-posture-rest-vs-grpc-a4j10)).
+A logged-out-but-unexpired access token can therefore still be exchanged.
+
+Two properties bound what that costs, and both are enforced in code rather than
+by convention:
+
+- **Lifetime cannot be laundered** — the cap above means the exchanged token
+  dies no later than its subject would have.
+- **Privilege cannot be widened** — the scope intersection refuses anything the
+  subject or the client does not already hold.
+
+So the window is *at most the subject's remaining lifetime, at no more than the
+subject's privilege* — the same window a revoked access token already has
+everywhere else in the product. This is not a new exposure introduced by token
+exchange; it is the existing one, unchanged. If you need sign-out to be
+immediate, shorten `AXIAM__AUTH__ACCESS_TOKEN_LIFETIME_SECS` — that is the knob
+that bounds this posture, here as elsewhere.
 
 ## Response
 

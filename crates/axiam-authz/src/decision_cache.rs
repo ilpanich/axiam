@@ -18,22 +18,48 @@
 //!
 //! # Security property (CRITICAL — read before changing invalidation)
 //!
-//! AXIAM's RBAC is **additive, allow-wins, default-deny** (CLAUDE.md /
-//! SEC-040). There is no deny-override. That asymmetry means the two staleness
-//! directions are NOT equally dangerous:
+//! AXIAM's RBAC is **default-deny with deny-override**: an absent grant
+//! refuses, an `effect: Allow` grant permits, and an `effect: Deny` grant
+//! refuses and **beats every allow**, at any depth of the hierarchy (CLAUDE.md;
+//! SEC-040 closed by B1; precedence table in
+//! `claude_dev/deny-override-design.md`).
 //!
-//! - A **stale DENY** is *safe*: it only costs a redundant re-evaluation; the
-//!   subject is momentarily under-privileged, never over-privileged.
-//! - A **stale ALLOW after a revocation** is *dangerous*: a subject keeps
-//!   access they no longer have. This is the only direction we must protect
-//!   against, and TTL alone is not enough.
+//! The two staleness directions are still NOT equally dangerous, but note *why*
+//! — the reason changed when B1 landed and the distinction matters below:
 //!
-//! Therefore every mutation that can *narrow* access (role unassignment, grant
-//! removal, role/permission deletion, group membership removal, resource
-//! reparent/delete) MUST invalidate the affected entries **immediately** via
+//! - A **stale DENY** is *safe* because a deny is the restrictive outcome: the
+//!   subject is momentarily under-privileged, never over-privileged. (Before
+//!   B1 this was phrased as a consequence of the engine being allow-wins. It is
+//!   not — it follows from deny being restrictive, which is why it survived
+//!   the change.)
+//! - A **stale ALLOW** is *dangerous*: a subject keeps access they no longer
+//!   have. This is the direction we must protect against, and TTL alone is not
+//!   enough.
+//!
+//! ## What B1 changed about which mutations need a hook
+//!
+//! Under the pre-B1 additive model, "narrowing" and "removing" were the same
+//! set: **adding** a grant could only ever widen, so an addition was safe to
+//! leave stale. That is no longer true. Granting a role an `effect: Deny`
+//! permission is an *addition* that **narrows**, and a cached allow that
+//! outlives it is a subject exercising access an administrator has explicitly
+//! forbidden.
+//!
+//! **Do not reintroduce the "additions are safe, skip the flush" optimisation.**
+//! It was sound under allow-wins and is a privilege bug under deny-override.
+//! `permissions::grant_to_role` flushes the tenant for exactly this reason and
+//! says so at the call site.
+//!
+//! Every mutation that can narrow access — role unassignment, grant removal,
+//! role/permission deletion, group membership removal, resource
+//! reparent/delete, **and any grant whose effect is `Deny`** — MUST invalidate
+//! the affected entries **immediately** via
 //! [`DecisionCache::invalidate_subject`] or [`DecisionCache::invalidate_tenant`]
 //! — wired to the mutation path, not left to TTL. The REST handlers in
-//! `axiam-api-rest` do exactly this through the `AuthzChecker` trait.
+//! `axiam-api-rest` do exactly this through the `AuthzChecker` trait, and in
+//! practice they invalidate on widening mutations too, which is what keeps the
+//! deny case covered rather than depending on every author classifying their
+//! mutation correctly.
 //!
 //! # Bounded staleness fallback
 //!

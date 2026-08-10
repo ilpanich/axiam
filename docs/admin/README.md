@@ -11,9 +11,11 @@ and permissions, and assigning roles. See also:
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,
 obtained via `POST /api/v1/auth/login`) except the bootstrap endpoint itself.
-AXIAM's RBAC engine is **additive-only** (allow-wins, default-deny) — there is
-no explicit deny-override in v1.0-beta; a caller needs an explicit permission
-grant (directly or via role/group) to perform any action.
+AXIAM's RBAC engine is **default-deny with deny-override**: a caller needs an
+explicit permission grant (directly or via role/group) to perform any action,
+and an explicit `effect: "deny"` grant refuses regardless of what else allows
+it — at any depth of the resource hierarchy, and at equal specificity. See
+[Deny grants](#deny-grants-effect-deny) below.
 
 ## First-run admin bootstrap
 
@@ -147,6 +149,37 @@ A role's `is_global` flag controls whether it applies tenant-wide or must be
 assigned per-resource; resource-scoped roles cascade to child resources in
 the hierarchy unless overridden.
 
+### Deny grants (`effect: "deny"`)
+
+A grant carries an `effect`, which is `"allow"` when omitted. Every grant
+written before this existed, and every request that sends no `effect`, means
+allow — so nothing changed for existing configurations.
+
+```
+POST /api/v1/roles/{role_id}/permissions
+{ "permission_id": "<uuid>", "scope_ids": [], "effect": "deny" }
+```
+
+**A deny beats every allow.** Not "the most specific rule wins", not "the
+nearest ancestor wins" — a matching deny refuses at any depth of the resource
+hierarchy and at equal specificity. The precedence table and the reasoning for
+choosing deny-override over most-specific-wins are in
+[`claude_dev/deny-override-design.md`](../../claude_dev/deny-override-design.md).
+
+Two consequences worth planning around before you write one:
+
+- **A deny cannot be out-granted.** Adding an allow at a deeper resource, a
+  more specific scope, or a higher-privileged role will *not* restore access.
+  The only way back is to remove the deny. This is the property that makes a
+  deny useful for "this contractor may never touch payroll, whatever else they
+  are given" — and the same property makes an over-broad deny quietly
+  unfixable from the direction most admins will try first.
+- **The refusal is distinguishable.** A denied caller gets
+  `reason_code: "denied_by_rule"` rather than `"no_grant"`. Both are a 403, but
+  they mean opposite things to the person on the other end — *an admin already
+  decided* versus *ask an admin for access* — so a UI that collapses them sends
+  people to raise tickets that will be refused.
+
 ## Assigning roles
 
 To assign a role directly to a user (optionally scoped to a specific
@@ -191,13 +224,17 @@ hit is indistinguishable from a fresh evaluation.
 
 ### Why it is safe: immediate invalidation on revocation
 
-AXIAM's RBAC is **additive, allow-wins, default-deny** (no deny-override). That
-makes the two staleness directions asymmetric:
+AXIAM's RBAC is **default-deny with deny-override**. The two staleness
+directions are asymmetric:
 
 - A **stale deny** is harmless — it only forces a redundant re-check; the
   subject is briefly under-privileged, never over-privileged.
-- A **stale allow after a revocation** is the *only* dangerous case — a subject
-  keeping access they no longer have.
+- A **stale allow** is the dangerous case — a subject keeping access they no
+  longer have. Two mutations produce it: revoking something that allowed, and
+  **adding a grant whose effect is `deny`**. The second only became possible
+  when deny-override shipped, and it is an *addition* — so "additions widen,
+  and widening is safe to leave stale" is no longer a valid shortcut. Every
+  grant mutation flushes the tenant regardless of its effect.
 
 So the cache is not left to expire on its own for security. Every mutation that
 can narrow access **invalidates the affected cache entries immediately**, wired

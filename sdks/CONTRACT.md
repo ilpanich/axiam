@@ -1933,41 +1933,42 @@ with no attempt to refine it.
 Two earlier clauses — [§11.2](#§112-semantics-normative-identical-in-all-sdks) rule 5 and
 [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) — instruct SDKs to retry
 "under the SDK's existing bounded read-only retry policy". **No such policy was ever defined
-here.** In practice **five** SDKs had one and all five disagreed; the other six had none at
-all — only §9's refresh-then-retry-once, which is a different mechanism entirely.
+here.** The survey behind this section was wrong three times before it was right, and the
+way it was wrong is itself the argument for §16.7's wire-count requirement.
 
-| SDK | Attempts | Base | Cap | Jitter | `Retry-After` | Wired in? |
+**Only three SDKs actually retried a read-only failure: Java, Rust, Go.** Two more had a
+retry *surface* that no production path invoked, so they retried nothing while appearing to.
+The remaining six had neither — only §9's refresh-then-retry-once, a different mechanism.
+
+| SDK | Attempts | Base | Cap | Jitter | `Retry-After` | Actually retried? |
 |---|---|---|---|---|---|---|
-| Java | 3 | 200 ms | 5 s | full | floor | yes |
-| C# | 3 | 200 ms | 5 s | yes | — | yes |
-| Rust | 3 | library default | — | none | ignored | yes |
-| Go | 3 | 100 ms | **none** | **none** | ignored | yes |
-| TypeScript | 3 | 1000 ms | 8 s | partial | **replaced** the backoff | **no** |
+| Java | 3 | 200 ms | 5 s | full | floor | **yes** |
+| Rust | 3 | library default | — | none | ignored | **yes** |
+| Go | 3 | 100 ms | **none** | **none** | ignored | **yes** |
+| TypeScript | 3 | 1000 ms | 8 s | partial | **replaced** the backoff | **no** — helper never called |
+| C# | 3 | 200 ms | 5 s | yes | — | **no** — config never read |
 
-Three of those cells are worth stating plainly, because each is a distinct way the same
-clause gets got wrong.
+Four things in that table, each a different way the same clause goes wrong.
 
-*The TypeScript row, `Retry-After`.* `retryAfterMs ?? backoffDelayMs(attempt)` means the
-server's hint **replaces** the computed backoff instead of flooring it, so a `Retry-After: 0`
-retries **immediately**, defeating the backoff entirely. §16.1's "floor, never a ceiling" was
-written on principle and then found to describe a defect already shipped.
+*Go's row.* An uncapped, unjittered `backoff *= 2` is the shape this section most wants to
+eliminate: without a cap the wait is bounded by nothing but the attempt count, and without
+jitter every client retries in lockstep — the herd a backoff exists to prevent.
 
-*The TypeScript row, "wired in".* Its helper was exported and unit-tested but **never called
-by any production path** — `check_access` did not route through it — so that SDK performed no
-read-only retries at all while appearing to. A tested helper nobody calls is worse than an
-absent one: the tests report green and the gap stays invisible. **An SDK claiming §16
-conformance MUST assert the policy through its public `check_access` surface, not only
-against the helper in isolation** (see §16.7's required non-idempotent test, which asserts the
-request count *on the wire*).
+*TypeScript's `Retry-After`.* `retryAfterMs ?? backoff(n)` means the hint **replaces** the
+computed backoff instead of flooring it, so a `Retry-After: 0` retries immediately. §16.1's
+"floor, never a ceiling" was written on principle and then found to describe shipped code.
 
-*The Go row.* An uncapped, unjittered `backoff *= 2` is the shape this section most wants to
-eliminate: without a cap the third wait is unbounded by anything but the attempt count, and
-without jitter every client retries in lockstep.
+*The two "no" rows.* TypeScript's helper was exported and unit-tested; C#'s three settings
+were defaulted, documented and asserted in tests. Both suites were green. Neither SDK
+retried anything. **A tested surface nobody calls is worse than an absent one: the passing
+tests are exactly what stop anyone from looking.** Hence §16.7 — an SDK claiming §16
+conformance MUST assert the policy through its public `check_access` surface by counting
+requests **on the wire**, not against a helper in isolation.
 
-One further non-conformance, of a different kind: **C# exposes `MaxRetryAttempts`,
-`RetryBaseDelay` and `RetryMaxDelay` as public settable options.** Its *defaults* match this
-table exactly, but §16.1 permits only *lowering* the attempt cap or disabling retry outright —
-a caller able to raise them can turn one client into the herd this policy exists to prevent.
+*C#'s configurability.* Its defaults matched this table, but `MaxRetryAttempts`,
+`RetryBaseDelay` and `RetryMaxDelay` were publicly settable upward. §16.1 permits *lowering*
+the cap or disabling retry, never raising either — a caller who can raise them turns one
+client into the herd. (Fixed by clamping, in that SDK's D5 change.)
 
 This section is the missing policy, so the two forward references resolve to one table
 instead of eleven guesses.
@@ -2234,6 +2235,7 @@ costs nothing to anyone who does not want it.
 | `request_end` | After it completes, success or failure | the `request_start` fields, plus status code (or `None`), duration, outcome |
 | `retry` | Before each §16 retry wait | operation name, attempt number, the delay about to be taken, the failure that triggered it |
 | `refresh` | Around a §9 single-flight refresh | whether this caller performed the refresh or waited on another's |
+| `config_clamped` | At client construction, once per clamped setting | the setting's name, the value the caller asked for, the value in force, and the §-reference for the limit |
 
 `path template` means `/api/v1/authz/check`, not the URL with ids substituted in — a metric
 label with a UUID in it is a cardinality bomb.
@@ -2257,6 +2259,23 @@ label with a UUID in it is a cardinality bomb.
    `request_start`/`request_end` pair **per attempt**, with the attempt number distinguishing
    them, plus one `retry` between consecutive pairs. A caller must be able to count real wire
    calls from these events, so one pair per logical operation would be wrong.
+
+6. **A clamped setting MUST be reported, not swallowed.** Wherever this contract requires an
+   SDK to clamp a caller-supplied value rather than reject it — §16.1's attempt cap, base
+   delay and delay cap; §17.1 rule 2's memo TTL — the SDK MUST emit one `config_clamped`
+   event per clamped setting at construction.
+
+   Clamping is the right behaviour: rejecting would break a caller whose configuration was
+   merely optimistic, and honoring would let one client become the herd §16 exists to
+   prevent. But *silently* clamping means an operator who set a 60-second memo TTL believes
+   they have one, and their staleness reasoning is wrong by a factor of twelve with nothing
+   anywhere to say so. The event is what makes the clamp discoverable at the only moment it
+   can be acted on.
+
+   `config_clamped` is exempt from §19.1's "no cost when uninstalled" framing only in the
+   sense that it fires at construction rather than per request; with no hook installed it is
+   still a null check and nothing more. It MUST NOT be emitted for a value that was already
+   within the limit — an event that fires when nothing happened trains its reader to ignore it.
 
 ### §19.3 Per-language naming map
 
@@ -2563,6 +2582,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.8.2 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata 2026-08 (contract 1.8.2) — five SDKs had a divergent retry policy, not two (1.8.1 said three; both earlier counts came from partial greps, see the commit message)*
+*Contract version: 1.9 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

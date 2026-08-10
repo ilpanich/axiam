@@ -17,8 +17,7 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    AUD_M2M, AUD_USER, ActClaim, MAX_ACT_CHAIN_DEPTH, SubjectKind, decode_access_token,
-    issue_exchanged_token,
+    AUD_M2M, AUD_USER, ActClaim, MAX_ACT_CHAIN_DEPTH, decode_access_token, issue_exchanged_token,
 };
 use axiam_core::models::oauth2_client::OAuth2Client;
 use axiam_core::repository::TenantRepository;
@@ -366,15 +365,27 @@ where
             act: subject.act.clone().map(Box::new),
         });
 
-        let sub_kind = if audience == AUD_M2M {
-            SubjectKind::OAuth2Client
-        } else {
-            subject.sub_kind
-        };
-
+        // The subject kind is carried through UNCHANGED, including when the
+        // target is the machine audience (SEC-088).
+        //
+        // An earlier revision rewrote it to `OAuth2Client` whenever
+        // `audience == AUD_M2M`, while `sub` stayed the subject's own id. That
+        // produced the one combination the extractor contract says cannot
+        // occur — see `AuthenticatedServiceAccount::subject` in
+        // `axiam-api-rest`, which documents `sub_kind = oauth2_client` as
+        // meaning `sub` IS an OAuth2 client id (`oa_…`). A user UUID wearing
+        // that label is a type confusion aimed squarely at whoever writes the
+        // first consumer of that extractor.
+        //
+        // The audience change is the real and intended effect of narrowing a
+        // user token for a machine API. Relabelling the *subject* to match the
+        // audience answers a different question, and answers it wrongly: who
+        // the principal is did not change. A consumer that needs to know the
+        // token arrived by exchange has `act` and the audit record, which the
+        // impersonation path already relies on as its only evidence.
         let access_token = issue_exchanged_token(
             &subject.sub,
-            sub_kind,
+            subject.sub_kind,
             tenant_id,
             tenant.organization_id,
             &granted,

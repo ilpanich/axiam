@@ -177,6 +177,20 @@ fn subject_token(f: &Fixture, scopes: &[&str]) -> String {
     .unwrap()
 }
 
+/// The claims of a JWT, without verifying it.
+///
+/// Deliberately not `decode_access_token`: that helper accepts only AXIAM's own
+/// two audiences, so it cannot read a token minted for a third-party target —
+/// and a test that could only inspect the tokens the server is willing to
+/// re-accept would be blind to exactly the ones worth checking.
+fn decode_claims(token: &str) -> Value {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let payload = token.split('.').nth(1).expect("a JWT has three parts");
+    let bytes = URL_SAFE_NO_PAD.decode(payload).expect("base64url payload");
+    serde_json::from_slice(&bytes).expect("claims are JSON")
+}
+
 macro_rules! test_app {
     ($f:expr) => {
         test::init_service(
@@ -484,6 +498,44 @@ async fn axiams_own_audiences_are_always_addressable() {
     );
     let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
     assert_eq!(status, 200, "exchange returned {body:?}");
+}
+
+#[actix_web::test]
+async fn narrowing_to_the_machine_audience_keeps_sub_and_sub_kind_consistent() {
+    // SEC-088. The `sub_kind` claim is the instruction for how to read `sub`:
+    // `AuthenticatedServiceAccount` documents `oauth2_client` as meaning `sub`
+    // IS an OAuth2 client id (`oa_…`). An earlier revision rewrote `sub_kind`
+    // to `oauth2_client` whenever the target audience was `axiam:m2m` while
+    // leaving `sub` as the user's UUID — the one pairing the contract says
+    // cannot occur, aimed at whoever writes the first consumer.
+    //
+    // Asserted as a PAIR rather than on `sub_kind` alone: the property that
+    // matters is that the two claims still agree, not that either has some
+    // particular value.
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let extra = format!(
+        "{}&audience={}",
+        subject_params(&f, &["read"]),
+        enc(AUD_M2M)
+    );
+    let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
+    assert_eq!(status, 200, "exchange returned {body:?}");
+
+    let token = body["access_token"].as_str().expect("access_token");
+    let claims = decode_claims(token);
+    assert_eq!(
+        claims["sub"].as_str().unwrap(),
+        f.user_id.to_string(),
+        "the subject is still the user"
+    );
+    assert_eq!(
+        claims["sub_kind"].as_str().unwrap(),
+        "user",
+        "the subject kind must still describe the subject, not the audience"
+    );
+    assert_eq!(claims["aud"].as_str().unwrap(), AUD_M2M);
 }
 
 #[actix_web::test]

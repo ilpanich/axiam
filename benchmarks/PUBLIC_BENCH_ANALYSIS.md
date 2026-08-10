@@ -641,12 +641,23 @@ regression and a gRPC flood-behavior bug in public view. We think an IAM
 vendor that measures itself adversarially and publishes the misses is
 itself a security feature.
 
+**4. Protocol surface has grown since this run, and is not yet in these
+numbers.** Deny-override RBAC (an explicit `effect: deny` that beats every
+allow, at any hierarchy depth), the OAuth2 Device Authorization Grant
+(RFC 8628), Token Exchange (RFC 8693), and the RP-initiated / back-channel
+logout and PAR triad have all landed since the run-5 measurements below.
+Two of those were in this document's own cons list until now. They are
+listed here as **shipped and unmeasured**: the deny-ratio seeding that
+exercises the deny path exists in the harness (`--deny-ratio`, default
+`0.05`), but the labelled cells are a run-6 deliverable, and every number
+in §§1–9 is from the pre-B-track build. A feature we have not measured is
+a feature we will not claim a cost for.
+
 **And the honest cons, in the same breath.** AXIAM is alpha: it has a
 fraction of Keycloak's protocol surface, extension ecosystem, hosting
 options and community; Zitadel's resting stack is smaller than ours
 (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak
-wins one whole-stack efficiency cell outright (§5); our RBAC engine is
-additive-only in v1.0-beta (no deny-override); SurrealDB is a younger
+wins one whole-stack efficiency cell outright (§5); SurrealDB is a younger
 storage engine than Postgres by a decade; and every number in this
 document comes from one consumer laptop until the server-class re-run
 lands. Choosing AXIAM today means choosing a young system whose

@@ -99,11 +99,14 @@ pub struct AuthzConfig {
     ///
     /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` (default `false`).
     ///
-    /// SECURITY: the cache is safe under AXIAM's additive allow-wins /
-    /// default-deny model *only because* every access-narrowing mutation
+    /// SECURITY: the cache is safe under AXIAM's default-deny /
+    /// **deny-override** model *only because* every access-narrowing mutation
     /// invalidates the affected entries immediately (see
-    /// `decision_cache` module docs). A stale allow can outlive a revocation
-    /// by at most `decision_cache_ttl_secs` even if an invalidation is missed.
+    /// `decision_cache` module docs). Since B1 that set includes *adding* a
+    /// grant whose effect is `Deny` — an addition that narrows, which the
+    /// pre-B1 additive model had no way to express. A stale allow can outlive
+    /// a revocation by at most `decision_cache_ttl_secs` even if an
+    /// invalidation is missed.
     ///
     /// SECURITY — **multi-replica caveat, read before enabling**: on its own
     /// the cache and its invalidation are **process-local**. "Revocation is

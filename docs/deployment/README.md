@@ -257,11 +257,13 @@ performance only, never the decision an endpoint returns.
 | `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | Cross-replica invalidation over RabbitMQ. Default `false`. See [below](#cross-replica-invalidation-42). Requires the cache to be enabled. |
 | `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_SKEW_SECS` | Freshness window for an inbound invalidation broadcast (default `30`). Only used when the broadcast channel is on. |
 
-**Security posture (safe under AXIAM's additive allow-wins / default-deny
-model):** every access-*narrowing* mutation (role/grant/group/resource change)
-invalidates the affected cache entries immediately, wired into the mutation
-handlers — so on the replica that handled the mutation **no revocation leaves a
-stale allow**. The TTL is the bounded-staleness backstop: a missed invalidation
+**Security posture (safe under AXIAM's default-deny / deny-override model):**
+every access-*narrowing* mutation (role/grant/group/resource change) invalidates
+the affected cache entries immediately, wired into the mutation handlers — so on
+the replica that handled the mutation **no revocation leaves a stale allow**.
+Since deny-override shipped, "narrowing" includes *adding* a grant whose effect
+is `deny`; grant mutations flush the tenant regardless of effect, so that case
+is covered on the same path. The TTL is the bounded-staleness backstop: a missed invalidation
 self-heals within `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and
 the per-mutation invalidation table are in the
 [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).

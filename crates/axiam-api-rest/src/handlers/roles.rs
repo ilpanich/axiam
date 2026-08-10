@@ -307,8 +307,13 @@ pub async fn unassign_from_user<C: Connection + Clone>(
         .await?;
     // D7 (REVOCATION — security critical): unassigning a role removes access
     // for exactly this subject. Invalidate immediately so a cached allow cannot
-    // survive; the additive allow-wins model makes this stale-allow the only
-    // dangerous staleness direction.
+    // survive — a stale allow is the dangerous staleness direction, because a
+    // deny is the restrictive outcome and costs only a redundant re-check.
+    //
+    // (Pre-B1 this was justified by the engine being allow-wins. Under
+    // deny-override that premise no longer holds, but the conclusion does:
+    // see the decision_cache module docs for why, and for the addition that
+    // *can* narrow.)
     authz
         .get_ref()
         .as_ref()

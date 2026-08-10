@@ -105,13 +105,15 @@ group repositories used by `AuthorizationEngine::evaluate` are read-only on
 that path and could be constructed against a replica pool, while every
 write-carrying repository keeps the primary.
 
-**The blocking problem is not plumbing, it is staleness semantics.** AXIAM's
-RBAC is additive/allow-wins/default-deny, so the dangerous direction is a
-*stale allow after a revocation* — exactly the property the decision cache's
-invalidation hooks exist to protect. A read replica reintroduces that window at
-the storage layer, where the invalidation hooks cannot reach it: unassigning a
-role commits to the primary and the replica serves the pre-unassign row until
-it catches up. Unlike the caches, that window is **not** bounded by a
+**The blocking problem is not plumbing, it is staleness semantics.** A deny is
+the restrictive outcome, so the dangerous direction is a *stale allow* —
+exactly the property the decision cache's invalidation hooks exist to protect.
+Under deny-override that covers two mutations, not one: revoking something that
+allowed, and **adding an `effect: deny` grant**. A read replica reintroduces the
+window for both at the storage layer, where the invalidation hooks cannot reach
+it: the write commits to the primary and the replica serves the pre-mutation
+rows until it catches up — so a freshly-written deny is simply not there yet,
+and the engine evaluates as though an administrator had never written it. Unlike the caches, that window is **not** bounded by a
 configured TTL; it is bounded by replication lag, which is an operational
 property that can degrade without any signal in AXIAM.
 

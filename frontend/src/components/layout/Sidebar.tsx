@@ -22,6 +22,7 @@ import {
   KeyRound,
   Globe,
   BellRing,
+  Zap,
 } from "lucide-react";
 
 interface NavItem {
@@ -132,6 +133,12 @@ const navSections: NavSection[] = [
         label: "Webhooks",
         icon: <Webhook size={18} />,
         requiredPermission: "webhooks:list",
+      },
+      {
+        to: "/reactors",
+        label: "Reactors",
+        icon: <Zap size={18} />,
+        requiredPermission: "reactors:list",
       },
     ],
   },

@@ -60,11 +60,11 @@ use axiam_db::{
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealPushedAuthRequestRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealPushedAuthRequestRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -607,6 +607,7 @@ async fn main() -> std::io::Result<()> {
         cert_repo.clone(),
         SurrealCaCertificateRepository::new(pool.handle_for_repo()),
     );
+    let reactor_repo = SurrealReactorRepository::new(pool.handle_for_repo());
     let webhook_repo = SurrealWebhookRepository::new(pool.handle_for_repo());
     // SEC-031/SEC-059: Webhook secrets stored AES-256-GCM encrypted using the
     // same PKI encryption key. Absent key -> None (SEC-012 fail-closed
@@ -1513,6 +1514,7 @@ async fn main() -> std::io::Result<()> {
         cert_repo: cert_repo.clone(),
         device_auth_service: device_auth_service.clone(),
         pgp_service: pgp_service.clone(),
+        reactor_repo: reactor_repo.clone(),
         webhook_repo: webhook_repo.clone(),
         webhook_delivery: webhook_delivery.clone(),
         // CQ-B22: hand the delivery publisher to AppState so handlers can

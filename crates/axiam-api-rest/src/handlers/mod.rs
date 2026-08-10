@@ -18,6 +18,7 @@ pub mod organizations;
 pub mod password_reset;
 pub mod permissions;
 pub mod pgp_keys;
+pub mod reactors;
 pub mod resources;
 pub mod roles;
 pub mod scopes;

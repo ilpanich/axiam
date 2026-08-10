@@ -4642,6 +4642,337 @@
         ]
       }
     },
+    "/api/v1/reactors": {
+      "get": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`GET /api/v1/reactors`",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered reactors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "name",
+                          "description",
+                          "events",
+                          "mode",
+                          "priority",
+                          "timeout_ms",
+                          "failure_policy",
+                          "enabled",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "events": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "failure_policy": {
+                            "$ref": "#/components/schemas/FailurePolicy"
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "last_seen_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "date-time",
+                            "description": "When this reactor last consumed from its queue. `null` means it has\nnever connected — which the admin UI shows differently from \"connected\nonce, silent since\"."
+                          },
+                          "mode": {
+                            "$ref": "#/components/schemas/ReactorMode"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "priority": {
+                            "type": "integer",
+                            "format": "int32"
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "timeout_ms": {
+                            "type": "integer",
+                            "format": "int32",
+                            "minimum": 0
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`POST /api/v1/reactors`",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReactorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Reactor registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReactorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown event, non-interceptable event, or out-of-range timeout"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reactors/events": {
+      "get": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`GET /api/v1/reactors/events` — the registry, verbatim.",
+        "description": "Served rather than documented so an admin UI, an SDK generator and an\noperator all read the same list the dispatcher enforces. A hand-maintained\ncopy in the docs is a copy that goes stale on the next hook added.",
+        "operationId": "list_events",
+        "responses": {
+          "200": {
+            "description": "Hookable events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReactorEventDescriptor"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reactors/{id}": {
+      "get": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`GET /api/v1/reactors/{id}`",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reactor ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reactor found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReactorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`PUT /api/v1/reactors/{id}`",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reactor ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateReactorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reactor updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReactorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The merged registration is invalid"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "reactors"
+        ],
+        "summary": "`DELETE /api/v1/reactors/{id}`",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reactor ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reactor deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/resources": {
       "get": {
         "tags": [
@@ -8661,6 +8992,59 @@
           }
         }
       },
+      "CreateReactorRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "events",
+          "mode"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Event names from the registry (`GET /api/v1/reactors/events`)."
+          },
+          "failure_policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FailurePolicy",
+                "description": "Omit to take the strictest default among `events`."
+              }
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReactorMode"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Omit to take the 500 ms default. Capped at 5 000 ms.",
+            "minimum": 0
+          }
+        }
+      },
       "CreateResource": {
         "type": "object",
         "required": [
@@ -9256,6 +9640,14 @@
             "format": "uuid"
           }
         }
+      },
+      "FailurePolicy": {
+        "type": "string",
+        "description": "What the server does when an interceptor does not produce a usable reply —\ntimeout, transport failure, bad signature, stale nonce, or a patch the\nallow-list rejects.",
+        "enum": [
+          "fail_closed",
+          "fail_open"
+        ]
       },
       "FederationConfigResponse": {
         "type": "object",
@@ -10955,6 +11347,123 @@
           }
         }
       },
+      "ReactorEventDescriptor": {
+        "type": "object",
+        "description": "One hookable event, as the registry describes it.",
+        "required": [
+          "name",
+          "interceptable",
+          "mutable",
+          "mutable_fields",
+          "default_failure_policy",
+          "description"
+        ],
+        "properties": {
+          "default_failure_policy": {
+            "$ref": "#/components/schemas/FailurePolicy"
+          },
+          "description": {
+            "type": "string"
+          },
+          "interceptable": {
+            "type": "boolean"
+          },
+          "mutable": {
+            "type": "boolean"
+          },
+          "mutable_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Exact field names, or a namespace prefix ending in `.` — `ext.` admits\n`ext.department` and nothing outside the namespace."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ReactorMode": {
+        "type": "string",
+        "description": "How a reactor participates in an event.",
+        "enum": [
+          "intercept",
+          "listen"
+        ]
+      },
+      "ReactorResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "description",
+          "events",
+          "mode",
+          "priority",
+          "timeout_ms",
+          "failure_policy",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failure_policy": {
+            "$ref": "#/components/schemas/FailurePolicy"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this reactor last consumed from its queue. `null` means it has\nnever connected — which the admin UI shows differently from \"connected\nonce, silent since\"."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReactorMode"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "ReadyResponse": {
         "type": "object",
         "required": [
@@ -12471,6 +12980,73 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateReactorRequest": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "failure_policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FailurePolicy"
+              }
+            ]
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReactorMode"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

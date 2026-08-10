@@ -3,7 +3,7 @@
 use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
@@ -844,4 +844,504 @@ async fn one_of_two_applicable_roles_has_no_grants_still_allows() {
         .unwrap();
 
     assert_eq!(decision, AccessDecision::Allow);
+}
+
+// -----------------------------------------------------------------------
+// B1 deny-override — the precedence table, END TO END
+// (claude_dev/deny-override-design.md §2.2)
+//
+// The unit tests in `engine.rs` assert this table against `evaluate_grants`,
+// which takes the applicable role IDs as an argument. That is the right place
+// to pin the precedence rule, but it assumes away the layer the table's most
+// important rows are actually *about*: rows 3, 4, 7 and 8 are claims that a
+// deny arriving through the hierarchy, through a group, or through a global
+// role survives `applicable_role_ids` and reaches the evaluator at all. A
+// regression there would silently invert row 4 from deny to allow — a
+// privilege escalation — while every unit test stayed green, because each one
+// hands the evaluator two role IDs that are applicable by construction.
+//
+// These go through the real repositories, the real hierarchy walk and the real
+// group/global applicability filter. They are the tests that would fail.
+// -----------------------------------------------------------------------
+
+/// Create the permission for `action`, or return the existing one.
+///
+/// Permissions are unique per (tenant, action), and every one of these tests
+/// needs two *grants* of the same action with opposite effects — which is the
+/// whole point of the table. So the permission is shared and the two grant
+/// edges differ, which is also how a real tenant would express it.
+async fn ensure_permission(db: &Surreal<TestDb>, tenant_id: Uuid, action: &str) -> Uuid {
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    match perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: action.into(),
+            description: format!("Can {action}"),
+        })
+        .await
+    {
+        Ok(perm) => perm.id,
+        Err(_) => {
+            perm_repo
+                .list(tenant_id, Default::default())
+                .await
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|p| p.action == action)
+                .expect("permission exists after AlreadyExists")
+                .id
+        }
+    }
+}
+
+/// One role's worth of grant: what it permits or refuses, and where it applies.
+struct RoleSpec<'a> {
+    name: &'a str,
+    action: &'a str,
+    effect: PermissionEffect,
+    /// Empty means wildcard — see `deny-override-design.md` §2.3.
+    scope_ids: Vec<Uuid>,
+    /// `None` assigns the role globally (§2.2 row 8).
+    resource_id: Option<Uuid>,
+}
+
+impl<'a> RoleSpec<'a> {
+    fn allow(name: &'a str, action: &'a str, resource_id: Uuid) -> Self {
+        Self {
+            name,
+            action,
+            effect: PermissionEffect::Allow,
+            scope_ids: Vec::new(),
+            resource_id: Some(resource_id),
+        }
+    }
+
+    fn deny(name: &'a str, action: &'a str, resource_id: Uuid) -> Self {
+        Self {
+            name,
+            action,
+            effect: PermissionEffect::Deny,
+            scope_ids: Vec::new(),
+            resource_id: Some(resource_id),
+        }
+    }
+
+    fn global(mut self) -> Self {
+        self.resource_id = None;
+        self
+    }
+
+    fn scoped(mut self, scope_ids: Vec<Uuid>) -> Self {
+        self.scope_ids = scope_ids;
+        self
+    }
+}
+
+/// Create a role carrying a single grant with an explicit effect, and assign it
+/// to `user_id` where `spec` says.
+async fn assign_role_with_effect(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    spec: RoleSpec<'_>,
+) -> Uuid {
+    let RoleSpec {
+        name: role_name,
+        action,
+        effect,
+        scope_ids,
+        resource_id,
+    } = spec;
+    let is_global = resource_id.is_none();
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: role_name.into(),
+            description: format!("Role: {role_name}"),
+            is_global,
+        })
+        .await
+        .unwrap();
+
+    let permission_id = ensure_permission(db, tenant_id, action).await;
+
+    perm_repo
+        .grant_to_role_with_effect(tenant_id, role.id, permission_id, scope_ids, effect)
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_user(tenant_id, user_id, role.id, resource_id)
+        .await
+        .unwrap();
+
+    role.id
+}
+
+async fn check(
+    engine: &TestEngine,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    action: &str,
+    resource_id: Uuid,
+    scope: Option<&str>,
+) -> AccessDecision {
+    engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: action.into(),
+            resource_id,
+            scope: scope.map(Into::into),
+        })
+        .await
+        .unwrap()
+}
+
+/// Row 3: allow on `/fleet`, deny on `/fleet/decommissioned`. The deny cascades
+/// down to `unit-7` and beats the ancestor allow.
+#[tokio::test]
+async fn deny_on_an_ancestor_cascades_down_and_beats_a_higher_allow() {
+    let (db, tenant_id, user_id) = setup().await;
+    let fleet = create_resource(&db, tenant_id, "fleet", None).await;
+    let decommissioned = create_resource(&db, tenant_id, "decommissioned", Some(fleet)).await;
+    let unit7 = create_resource(&db, tenant_id, "unit-7", Some(decommissioned)).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", fleet),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("decom-blocked", "read", decommissioned),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    // The allow alone still works one level up, which is what makes the deny
+    // below a *change* rather than an absence.
+    assert_eq!(
+        check(&engine, tenant_id, user_id, "read", fleet, None).await,
+        AccessDecision::Allow
+    );
+    assert!(matches!(
+        check(&engine, tenant_id, user_id, "read", unit7, None).await,
+        AccessDecision::DeniedByRule(_)
+    ));
+}
+
+/// Row 4 — **the row to read twice.** Deny on `/fleet`, allow on
+/// `/fleet/decommissioned`. A child allow does NOT override an inherited deny.
+///
+/// This is the row that distinguishes deny-override from most-specific-wins:
+/// under most-specific-wins the nearer allow would win and the check would
+/// return Allow. If this test ever goes green with `AccessDecision::Allow`, the
+/// engine has silently switched semantics.
+#[tokio::test]
+async fn a_child_allow_does_not_override_an_inherited_deny_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let fleet = create_resource(&db, tenant_id, "fleet", None).await;
+    let decommissioned = create_resource(&db, tenant_id, "decommissioned", Some(fleet)).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("fleet-blocked", "read", fleet),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("decom-reader", "read", decommissioned),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    assert!(
+        matches!(
+            check(&engine, tenant_id, user_id, "read", decommissioned, None).await,
+            AccessDecision::DeniedByRule(_)
+        ),
+        "a nearer allow must not overturn an inherited deny — that is \
+         most-specific-wins, which this engine deliberately does not implement"
+    );
+}
+
+/// Row 7: the deny arrives through a group-inherited role while the allow is
+/// assigned directly. Denies inherit through groups exactly as allows do.
+#[tokio::test]
+async fn a_group_inherited_deny_beats_a_directly_assigned_allow() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-a", None).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("direct-reader", "read", resource_id),
+    )
+    .await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "quarantined".into(),
+            description: "membership refuses read".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "quarantine".into(),
+            description: "deny read".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let perm_id = ensure_permission(&db, tenant_id, "read").await;
+    perm_repo
+        .grant_to_role_with_effect(tenant_id, role.id, perm_id, vec![], PermissionEffect::Deny)
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_group(tenant_id, group.id, role.id, Some(resource_id))
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+
+    assert!(matches!(
+        check(&engine, tenant_id, user_id, "read", resource_id, None).await,
+        AccessDecision::DeniedByRule(_)
+    ));
+}
+
+/// Row 8: a global deny against a resource-scoped allow. Global vs
+/// resource-scoped changes applicability, not precedence — and a global role is
+/// applicable to *every* resource, so the deny reaches a resource the allow was
+/// scoped to.
+#[tokio::test]
+async fn a_global_deny_beats_a_resource_scoped_allow() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-a", None).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("svc-a-reader", "read", resource_id),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("org-wide-block", "read", Uuid::nil()).global(),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    assert!(matches!(
+        check(&engine, tenant_id, user_id, "read", resource_id, None).await,
+        AccessDecision::DeniedByRule(_)
+    ));
+}
+
+/// Row 5, end to end: denies are per action. A deny on `write` says nothing
+/// about `read`, even when it sits on the same node.
+#[tokio::test]
+async fn a_deny_on_one_action_does_not_mask_another_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-a", None).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("reader", "read", resource_id),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("no-write", "write", resource_id),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    assert_eq!(
+        check(&engine, tenant_id, user_id, "read", resource_id, None).await,
+        AccessDecision::Allow
+    );
+    assert!(matches!(
+        check(&engine, tenant_id, user_id, "write", resource_id, None).await,
+        AccessDecision::DeniedByRule(_)
+    ));
+}
+
+/// §2.3, end to end: an unscoped deny is a wildcard that masks the action for
+/// every scope, while a scoped deny masks only the scope it names.
+///
+/// Both halves run against real `Scope` rows, so the scope-name → scope-id
+/// resolution the engine does before evaluating is exercised rather than
+/// assumed.
+#[tokio::test]
+async fn scope_interaction_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "api", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let pii = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "pii".into(),
+            description: "personal data".into(),
+        })
+        .await
+        .unwrap();
+    let billing = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "billing".into(),
+            description: "billing data".into(),
+        })
+        .await
+        .unwrap();
+
+    // Wildcard allow (no scopes) + a deny scoped to `pii` only.
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("reader", "read", resource_id),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("no-pii", "read", resource_id).scoped(vec![pii.id]),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    assert!(matches!(
+        check(
+            &engine,
+            tenant_id,
+            user_id,
+            "read",
+            resource_id,
+            Some("pii")
+        )
+        .await,
+        AccessDecision::DeniedByRule(_)
+    ));
+    assert_eq!(
+        check(
+            &engine,
+            tenant_id,
+            user_id,
+            "read",
+            resource_id,
+            Some("billing")
+        )
+        .await,
+        AccessDecision::Allow,
+        "a deny scoped to `pii` must not touch `billing`"
+    );
+    // An unscoped request against a scoped deny still matches it: the request
+    // names no scope, so the grant applies. Getting this wrong in the deny
+    // direction is a silent privilege escalation.
+    assert!(matches!(
+        check(&engine, tenant_id, user_id, "read", resource_id, None).await,
+        AccessDecision::DeniedByRule(_)
+    ));
+
+    let _ = billing;
+}
+
+/// The batch path must produce byte-identical decisions to the single path,
+/// including deny-override and its reason. `evaluate_batch` re-derives
+/// applicability from its own coalesced lookups rather than calling
+/// `check_access`, so this is a genuinely separate code path through the same
+/// precedence table — the one place the two could drift.
+#[tokio::test]
+async fn the_batch_path_applies_deny_override_identically() {
+    let (db, tenant_id, user_id) = setup().await;
+    let fleet = create_resource(&db, tenant_id, "fleet", None).await;
+    let unit7 = create_resource(&db, tenant_id, "unit-7", Some(fleet)).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", fleet),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("unit7-blocked", "read", unit7),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    let requests = vec![
+        AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id: fleet,
+            scope: None,
+        },
+        AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id: unit7,
+            scope: None,
+        },
+    ];
+
+    let batched = engine.check_access_batch(&requests).await.unwrap();
+    let mut singly = Vec::new();
+    for req in &requests {
+        singly.push(engine.check_access(req).await.unwrap());
+    }
+
+    assert_eq!(batched, singly, "batch and single paths must not diverge");
+    assert_eq!(batched[0], AccessDecision::Allow);
+    assert!(matches!(batched[1], AccessDecision::DeniedByRule(_)));
 }

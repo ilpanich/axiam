@@ -48,9 +48,9 @@ dependencies = [
 
 [[package]]
 name = "actix-http"
-version = "3.13.1"
+version = "3.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e2faa3e7418ed780cca54829d32782a4008a077230f67457caa063415e99c2"
+checksum = "11004b0e9b44b4eb3d15e0c3132b96fb178c7e50a74758b2f17bb9cc9a7fb4f6"
 dependencies = [
  "actix-codec",
  "actix-rt",
@@ -891,7 +891,7 @@ dependencies = [
  "axiam-oauth2",
  "axiam-pki",
  "axiam-test-support",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "futures-lite",
@@ -951,7 +951,7 @@ dependencies = [
  "axiam-core",
  "axiam-db",
  "axiam-test-support",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "criterion",
  "hex",
@@ -1019,7 +1019,7 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-test-support",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "rand 0.10.2",
@@ -1060,7 +1060,7 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-db",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "flate2",
  "jsonwebtoken 11.0.0",
@@ -1088,7 +1088,7 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-db",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "jsonwebtoken 11.0.0",
@@ -1111,7 +1111,7 @@ dependencies = [
  "aes-gcm 0.11.0",
  "axiam-core",
  "axiam-db",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "criterion",
  "hex",
@@ -1153,7 +1153,7 @@ dependencies = [
  "axiam-oauth2",
  "axiam-pki",
  "axiam-test-support",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "config",
  "hex",
@@ -1275,9 +1275,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -3732,7 +3732,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4209,12 +4209,12 @@ dependencies = [
 
 [[package]]
 name = "lettre"
-version = "0.11.22"
+version = "0.11.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
+checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "email-encoding",
  "email_address",
  "fastrand",
@@ -5013,7 +5013,7 @@ version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
- "base64 0.23.0",
+ "base64 0.23.1",
  "serde_core",
 ]
 
@@ -5096,7 +5096,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "aes-kw",
  "argon2",
- "base64 0.22.1",
+ "base64 0.21.7",
  "bitfields",
  "block-padding",
  "blowfish",
@@ -5603,7 +5603,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -5642,7 +5642,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -7002,9 +7002,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d1d636f9a9104f4446943111e0703e6d6668bfaba6c4415a31d0450dc46630b"
+checksum = "01fef5cc04dd6cb042391d48c0f78a586c56042e999f8cb17f0b97b0a147e2c0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7040,9 +7040,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-collections"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6222572dc7354295ba8017603d0a5a3e493935a8ec2d7314b9c09152184cd2f"
+checksum = "ca3472955f9692427583e78476d5b03c6f750bf11dc8a04383e0d365d7bd5d99"
 dependencies = [
  "revision",
  "storekey",
@@ -7050,9 +7050,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-core"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6add99c7f91bda7acb5d3b9a1b7c0db81a1adebdaedd4b9145f9ccf65fa2a25"
+checksum = "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c"
 dependencies = [
  "addr",
  "affinitypool",
@@ -7170,9 +7170,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-strand"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ebb973d3547dbd2384f841d2fefd8a65c57a6cba02759e82c65de248da28b65"
+checksum = "a86f53e307b6b8275b15eaff2b718add63605cb804395d156589770c3bf38e56"
 dependencies = [
  "revision",
  "serde",
@@ -7181,9 +7181,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-types"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac180b3201dbd6f809d3f07fa20ff953a03e06f92e051117e60f326a46160d1"
+checksum = "e0d70c7f4dbf1198521282a171a03f2f77f38a1225a149f7c0175e758f773b8a"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7212,9 +7212,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-types-derive"
-version = "3.2.3"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f204a3bd68ba7e1822b86091df5b184f6a674acb4d537f5480f3b7192b08b5"
+checksum = "dc11310bfc0ae3e546cd14788f8d36e7616dbe41fa68b4b265b29fea34a7d7e1"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",

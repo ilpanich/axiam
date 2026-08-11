@@ -197,6 +197,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "uma_permission_ticket_redemption_nonce",
         sql: SCHEMA_V31,
     },
+    Migration {
+        version: 32,
+        name: "single_use_redemption_nonce_device_grant_and_par",
+        sql: SCHEMA_V32,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1594,6 +1599,39 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 // undisturbed.
 const SCHEMA_V31: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v32 — the same nonce for the other two single-use consumes
+// -----------------------------------------------------------------------
+//
+// v31 fixed `permission_ticket.consume`. `device_grant.redeem` and
+// `pushed_auth_request.consume` were written in the same shape, at the same
+// time, on the same understanding — that `BEGIN`/`COMMIT` makes SurrealDB
+// detect the write-write conflict and abort every loser. It does not, so those
+// two carry the same defect, and their doc comments carry the same false
+// claim.
+//
+// They were not measured failing. That is not evidence they are sound: the
+// permission-ticket race needed coverage instrumentation *plus* a saturated
+// machine to show up at roughly 1 in 320, and these two are tested exactly the
+// same way the ticket was when its own test was passing. "Not yet observed" and
+// "cannot happen" are different statements, and the mechanism is shared.
+//
+// What each protects, if it does fail:
+//
+//   device_grant.redeem          — one user approval minting two token sets
+//                                  (RFC 8628 §3.4 polls on a short interval and
+//                                  retries, so concurrency here is the normal
+//                                  shape of the flow, not an exotic case)
+//   pushed_auth_request.consume  — a replayable RFC 9126 `request_uri`, which
+//                                  is a replayable authorization request
+//
+// See `SCHEMA_V31` for the mechanism and the measurements behind choosing it,
+// including the two repairs that turned out worse than the defect.
+const SCHEMA_V32: &str = "\
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE device_grant TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

@@ -168,6 +168,11 @@ use crate::handlers;
         // UMA 2.0 (X2)
         handlers::uma::permission_request,
         handlers::uma::uma2_configuration,
+        handlers::uma::register_resource_set,
+        handlers::uma::read_resource_set,
+        handlers::uma::update_resource_set,
+        handlers::uma::delete_resource_set,
+        handlers::uma::list_resource_sets,
         // Settings
         handlers::settings::get_org_settings,
         handlers::settings::set_org_settings,
@@ -376,6 +381,7 @@ use crate::handlers;
         handlers::uma::PermissionRequestBody,
         handlers::uma::PermissionTicketResponse,
         handlers::uma::Uma2Configuration,
+        handlers::uma::ResourceSet,
         // OIDC
         axiam_oauth2::oidc::OidcDiscoveryDocument,
         axiam_oauth2::oidc::JwksDocument,

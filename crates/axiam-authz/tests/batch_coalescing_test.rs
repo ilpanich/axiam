@@ -79,6 +79,7 @@ fn resource(id: Uuid, tenant: Uuid) -> Resource {
         resource_type: "service".into(),
         parent_id: None,
         metadata: serde_json::Value::Null,
+        uma_registered_by: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

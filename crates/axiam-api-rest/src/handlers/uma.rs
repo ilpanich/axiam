@@ -9,10 +9,13 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::SubjectKind;
 use axiam_core::error::AxiamError;
+use axiam_core::models::resource::{CreateResource, UpdateResource};
+use axiam_core::models::scope::CreateScope;
 use axiam_core::models::uma::{
     RequestedPermission, TICKET_TTL_SECS, UMA_CLAIM_TOKEN_FORMAT, UMA_PROTECTION_SCOPE,
     UMA_TICKET_GRANT_TYPE,
 };
+use axiam_core::repository::{Pagination, ResourceRepository, ScopeRepository};
 use axiam_oauth2::uma::UmaError;
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -115,6 +118,7 @@ pub struct Uma2Configuration {
     pub token_endpoint: String,
     pub introspection_endpoint: String,
     pub permission_endpoint: String,
+    pub resource_registration_endpoint: String,
     pub jwks_uri: String,
     pub grant_types_supported: Vec<String>,
     pub uma_profiles_supported: Vec<String>,
@@ -183,10 +187,9 @@ pub async fn permission_request<C: Connection + Clone>(
 /// `GET /.well-known/uma2-configuration` — UMA 2.0 discovery (§2).
 ///
 /// Advertises only what v1 actually serves. Claims-gathering
-/// (`claims_interaction_endpoint`) and the resource registration endpoint are
-/// absent because they are not implemented; advertising an endpoint that 404s
-/// is worse than not advertising it, since a conforming client would route to
-/// it on the strength of this document.
+/// (`claims_interaction_endpoint`) is absent because it is not implemented;
+/// advertising an endpoint that 404s is worse than not advertising it, since a
+/// conforming client would route to it on the strength of this document.
 #[utoipa::path(
     get,
     path = "/.well-known/uma2-configuration",
@@ -203,12 +206,316 @@ pub async fn uma2_configuration(auth_config: web::Data<AuthConfig>) -> HttpRespo
         token_endpoint: format!("{issuer}/oauth2/token"),
         introspection_endpoint: format!("{issuer}/oauth2/introspect"),
         permission_endpoint: format!("{issuer}/uma2/perm"),
+        resource_registration_endpoint: format!("{issuer}/uma2/rreg/resource_set"),
         jwks_uri: format!("{issuer}/.well-known/jwks.json"),
         issuer,
         grant_types_supported: vec![UMA_TICKET_GRANT_TYPE.to_string()],
         uma_profiles_supported: vec![],
         permission_ticket_lifetime: TICKET_TTL_SECS,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Resource registration API (UMA 2.0 FedAuthz §2)
+// ---------------------------------------------------------------------------
+
+/// A resource set as UMA describes it, mapped onto an AXIAM resource.
+///
+/// # The mapping, in one place
+///
+/// | UMA | AXIAM |
+/// |---|---|
+/// | `_id` | the resource id — **not** a parallel identifier |
+/// | `name` | `resource.name` |
+/// | `type` | `resource.resource_type` |
+/// | `resource_scopes` | the `Scope` rows on that resource |
+///
+/// There is no second resource store. A resource registered here is an
+/// ordinary AXIAM resource that the admin UI lists, that role assignments
+/// cascade through, and that the authorization engine already understands —
+/// which is the entire reason UMA `_id` is the AXIAM id rather than a
+/// translation key.
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ResourceSet {
+    /// Present on responses, absent on registration — the server assigns it.
+    #[serde(rename = "_id", default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub resource_type: String,
+    #[serde(default)]
+    pub resource_scopes: Vec<String>,
+}
+
+/// `POST /uma2/rreg/resource_set` — register a resource set (FedAuthz §2.2.1).
+///
+/// Creates the resource **and** its declared scopes. The scope set is what the
+/// permission endpoint later validates ticket requests against, so registering
+/// a resource with no scopes produces one that can never appear in a ticket —
+/// legal, and worth knowing.
+#[utoipa::path(
+    post,
+    path = "/uma2/rreg/resource_set",
+    tag = "uma",
+    request_body = ResourceSet,
+    responses(
+        (status = 201, description = "Resource set registered", body = ResourceSet),
+        (status = 401, description = "Missing or invalid PAT"),
+        (status = 403, description = "Token lacks the uma_protection scope"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn register_resource_set<C: Connection + Clone>(
+    pat: ProtectionApiToken,
+    state: web::Data<AppState<C>>,
+    body: web::Json<ResourceSet>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let body = body.into_inner();
+
+    let resource = state
+        .resource_repo
+        .create_uma_registered(
+            CreateResource {
+                tenant_id: pat.tenant_id,
+                name: body.name,
+                // UMA's `type` is a free-form string and AXIAM's is too, but a
+                // resource server that omits it should not end up with an
+                // empty-string type that sorts oddly in the admin UI.
+                resource_type: if body.resource_type.is_empty() {
+                    "uma_resource".to_string()
+                } else {
+                    body.resource_type
+                },
+                parent_id: None,
+                metadata: None,
+            },
+            &pat.client_id,
+        )
+        .await?;
+
+    let scopes = sync_scopes(&state, pat.tenant_id, resource.id, &body.resource_scopes).await?;
+
+    tracing::info!(
+        target: "axiam::audit",
+        event = "uma.resource_registered",
+        tenant_id = %pat.tenant_id,
+        client_id = %pat.client_id,
+        resource_id = %resource.id,
+        "resource set registered"
+    );
+
+    Ok(HttpResponse::Created().json(ResourceSet {
+        id: Some(resource.id),
+        name: resource.name,
+        resource_type: resource.resource_type,
+        resource_scopes: scopes,
+    }))
+}
+
+/// `GET /uma2/rreg/resource_set/{id}` — read a resource set (FedAuthz §2.2.2).
+#[utoipa::path(
+    get,
+    path = "/uma2/rreg/resource_set/{id}",
+    tag = "uma",
+    params(("id" = Uuid, Path, description = "Resource set id")),
+    responses(
+        (status = 200, description = "Resource set", body = ResourceSet),
+        (status = 404, description = "No such resource set"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn read_resource_set<C: Connection + Clone>(
+    pat: ProtectionApiToken,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let id = path.into_inner();
+    let resource = state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    let scopes = declared_scope_names(&state, pat.tenant_id, id).await?;
+
+    Ok(HttpResponse::Ok().json(ResourceSet {
+        id: Some(resource.id),
+        name: resource.name,
+        resource_type: resource.resource_type,
+        resource_scopes: scopes,
+    }))
+}
+
+/// `PUT /uma2/rreg/resource_set/{id}` — update a resource set (FedAuthz §2.2.3).
+///
+/// The scope list is **replaced**, not merged: FedAuthz defines the update as
+/// putting the resource set's new state, and a merge would make it impossible
+/// to remove a scope. Removing a scope narrows what tickets may be requested,
+/// so a silent merge would keep an authority the resource server tried to drop.
+#[utoipa::path(
+    put,
+    path = "/uma2/rreg/resource_set/{id}",
+    tag = "uma",
+    params(("id" = Uuid, Path, description = "Resource set id")),
+    request_body = ResourceSet,
+    responses(
+        (status = 200, description = "Resource set updated", body = ResourceSet),
+        (status = 404, description = "No such resource set"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_resource_set<C: Connection + Clone>(
+    pat: ProtectionApiToken,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+    body: web::Json<ResourceSet>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let id = path.into_inner();
+    let body = body.into_inner();
+
+    // Read first so an unknown id answers 404 before anything is written.
+    state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+
+    let resource = state
+        .resource_repo
+        .update(
+            pat.tenant_id,
+            id,
+            UpdateResource {
+                name: Some(body.name),
+                resource_type: if body.resource_type.is_empty() {
+                    None
+                } else {
+                    Some(body.resource_type)
+                },
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let scopes = sync_scopes(&state, pat.tenant_id, id, &body.resource_scopes).await?;
+
+    Ok(HttpResponse::Ok().json(ResourceSet {
+        id: Some(resource.id),
+        name: resource.name,
+        resource_type: resource.resource_type,
+        resource_scopes: scopes,
+    }))
+}
+
+/// `DELETE /uma2/rreg/resource_set/{id}` — deregister (FedAuthz §2.2.4).
+#[utoipa::path(
+    delete,
+    path = "/uma2/rreg/resource_set/{id}",
+    tag = "uma",
+    params(("id" = Uuid, Path, description = "Resource set id")),
+    responses(
+        (status = 204, description = "Resource set deleted"),
+        (status = 404, description = "No such resource set"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_resource_set<C: Connection + Clone>(
+    pat: ProtectionApiToken,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let id = path.into_inner();
+    state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    state.resource_repo.delete(pat.tenant_id, id).await?;
+
+    tracing::info!(
+        target: "axiam::audit",
+        event = "uma.resource_deregistered",
+        tenant_id = %pat.tenant_id,
+        client_id = %pat.client_id,
+        resource_id = %id,
+        "resource set deregistered"
+    );
+
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `GET /uma2/rreg/resource_set` — list registered ids (FedAuthz §2.2.5).
+///
+/// Lists only the resources **this client** registered. FedAuthz says the
+/// listing is of the resource sets the PAT's owner registered, and a resource
+/// server has no business enumerating the tenant's whole resource tree through
+/// an endpoint whose only credential is a protection scope.
+#[utoipa::path(
+    get,
+    path = "/uma2/rreg/resource_set",
+    tag = "uma",
+    responses((status = 200, description = "Registered resource set ids", body = Vec<Uuid>)),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_resource_sets<C: Connection + Clone>(
+    pat: ProtectionApiToken,
+    state: web::Data<AppState<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let page = state
+        .resource_repo
+        .list(pat.tenant_id, Pagination::default())
+        .await?;
+
+    let ids: Vec<Uuid> = page
+        .items
+        .into_iter()
+        .filter(|r| r.uma_registered_by.as_deref() == Some(pat.client_id.as_str()))
+        .map(|r| r.id)
+        .collect();
+
+    Ok(HttpResponse::Ok().json(ids))
+}
+
+/// Replace a resource's declared scopes with `wanted`, returning the result.
+///
+/// Adds what is missing and removes what is no longer named. Scopes that are
+/// already correct are left alone rather than deleted and recreated, because
+/// their ids are referenced by permission grants — recreating a scope would
+/// silently detach every grant that named it.
+async fn sync_scopes<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    tenant_id: Uuid,
+    resource_id: Uuid,
+    wanted: &[String],
+) -> Result<Vec<String>, AxiamApiError> {
+    let existing = state
+        .scope_repo
+        .list_by_resource(tenant_id, resource_id)
+        .await?;
+
+    for scope in &existing {
+        if !wanted.contains(&scope.name) {
+            state.scope_repo.delete(tenant_id, scope.id).await?;
+        }
+    }
+
+    for name in wanted {
+        if existing.iter().any(|s| &s.name == name) {
+            continue;
+        }
+        state
+            .scope_repo
+            .create(CreateScope {
+                tenant_id,
+                resource_id,
+                name: name.clone(),
+                description: String::new(),
+            })
+            .await?;
+    }
+
+    Ok(wanted.to_vec())
+}
+
+async fn declared_scope_names<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    tenant_id: Uuid,
+    resource_id: Uuid,
+) -> Result<Vec<String>, AxiamApiError> {
+    Ok(state
+        .scope_repo
+        .list_by_resource(tenant_id, resource_id)
+        .await?
+        .into_iter()
+        .map(|s| s.name)
+        .collect())
 }
 
 /// A 403 with no `action`/`resource_id` hints.

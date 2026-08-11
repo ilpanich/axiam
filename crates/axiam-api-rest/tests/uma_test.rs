@@ -392,13 +392,13 @@ async fn discovery_advertises_only_the_endpoints_v1_actually_serves() {
         doc["grant_types_supported"][0], UMA_TICKET_GRANT_TYPE,
         "the ticket grant must be advertised"
     );
+    assert_eq!(
+        doc["resource_registration_endpoint"],
+        "https://id.test.example/uma2/rreg/resource_set"
+    );
     assert!(
         doc.get("claims_interaction_endpoint").is_none(),
         "claims-gathering is deferred to v2 and must not be advertised"
-    );
-    assert!(
-        doc.get("resource_registration_endpoint").is_none(),
-        "the rreg API is not implemented yet and must not be advertised"
     );
 }
 
@@ -785,4 +785,422 @@ async fn a_pat_is_a_machine_token() {
     assert_eq!(claims.aud.as_deref(), Some(AUD_M2M));
     assert_eq!(claims.sub, f.rs_client_id);
     assert_eq!(claims.sub_kind, SubjectKind::OAuth2Client);
+}
+
+// ---------------------------------------------------------------------------
+// Resource registration (FedAuthz §2.2)
+// ---------------------------------------------------------------------------
+
+/// Register a resource set.
+macro_rules! rreg_create {
+    ($app:expr, $f:expr, $body:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/uma2/rreg/resource_set")
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", pat(&$f, &$f.rs_client_id)),
+            ))
+            .set_json($body)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let json: Value = test::read_body_json(resp).await;
+        (status, json)
+    }};
+}
+
+/// A registered resource set is an ordinary AXIAM resource: the `_id` the
+/// Protection API hands back is the resource id, not a parallel identifier, and
+/// the declared scopes are real `Scope` rows the permission endpoint validates
+/// against.
+#[actix_web::test]
+async fn a_registered_resource_set_is_an_ordinary_axiam_resource() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (status, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "invoice-7", "type": "document", "resource_scopes": ["view", "pay"] })
+    );
+    assert_eq!(status, 201, "registration failed: {body}");
+
+    let id: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    // The id resolves in the ordinary resource store — no translation layer.
+    let resource = SurrealResourceRepository::new(f.db.clone())
+        .get_by_id(f.tenant_id, id)
+        .await
+        .expect("the UMA _id must BE the AXIAM resource id");
+    assert_eq!(resource.name, "invoice-7");
+
+    // The declared scopes are real scope rows.
+    let scopes: Vec<String> = SurrealScopeRepository::new(f.db.clone())
+        .list_by_resource(f.tenant_id, id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(scopes.contains(&"view".to_string()));
+    assert!(scopes.contains(&"pay".to_string()));
+}
+
+/// Registration is what makes a scope askable. A resource registered through
+/// the Protection API must be immediately usable at `/uma2/perm` — the two
+/// endpoints share one scope store, and this is the test that would fail if a
+/// parallel one were ever introduced.
+#[actix_web::test]
+async fn a_scope_declared_through_rreg_is_immediately_askable_at_the_permission_endpoint() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "invoice-8", "type": "document", "resource_scopes": ["pay"] })
+    );
+    let id: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    let (status, body) = perm!(
+        app,
+        f,
+        pat(&f, &f.rs_client_id),
+        json!([{ "resource_id": id, "resource_scopes": ["pay"] }])
+    );
+    assert_eq!(
+        status, 201,
+        "a freshly declared scope must be askable: {body}"
+    );
+
+    // And one that was never declared still is not.
+    let (status, _) = perm!(
+        app,
+        f,
+        pat(&f, &f.rs_client_id),
+        json!([{ "resource_id": id, "resource_scopes": ["shred"] }])
+    );
+    assert_eq!(status, 400);
+}
+
+/// An update **replaces** the scope list. A merge would make removal
+/// impossible, which would keep an authority the resource server tried to drop.
+#[actix_web::test]
+async fn updating_a_resource_set_removes_scopes_it_no_longer_names() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "invoice-9", "type": "document", "resource_scopes": ["view", "pay"] })
+    );
+    let id: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/uma2/rreg/resource_set/{id}"))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", pat(&f, &f.rs_client_id)),
+        ))
+        .set_json(json!({ "name": "invoice-9", "type": "document", "resource_scopes": ["view"] }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let scopes: Vec<String> = SurrealScopeRepository::new(f.db.clone())
+        .list_by_resource(f.tenant_id, id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(scopes, vec!["view".to_string()], "`pay` should be gone");
+
+    // And the dropped scope is no longer askable.
+    let (status, _) = perm!(
+        app,
+        f,
+        pat(&f, &f.rs_client_id),
+        json!([{ "resource_id": id, "resource_scopes": ["pay"] }])
+    );
+    assert_eq!(status, 400, "a removed scope must stop being askable");
+}
+
+/// A scope that survives an update keeps its id, because permission grants
+/// reference scope ids — recreating it would silently detach every grant that
+/// named it.
+#[actix_web::test]
+async fn an_unchanged_scope_keeps_its_id_across_an_update() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "invoice-10", "type": "document", "resource_scopes": ["view", "pay"] })
+    );
+    let id: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    let scope_repo = SurrealScopeRepository::new(f.db.clone());
+    let before = scope_repo
+        .list_by_resource(f.tenant_id, id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "view")
+        .unwrap()
+        .id;
+
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/uma2/rreg/resource_set/{id}"))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", pat(&f, &f.rs_client_id)),
+        ))
+        .set_json(json!({ "name": "invoice-10", "type": "document", "resource_scopes": ["view", "refund"] }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    let after = scope_repo
+        .list_by_resource(f.tenant_id, id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "view")
+        .unwrap()
+        .id;
+
+    assert_eq!(
+        before, after,
+        "an untouched scope must not be deleted and recreated"
+    );
+}
+
+/// The listing is scoped to the calling client. A resource server holding only
+/// a protection scope must not be able to enumerate the tenant's whole resource
+/// tree through it.
+#[actix_web::test]
+async fn the_listing_shows_only_what_this_client_registered() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "mine", "type": "document", "resource_scopes": [] })
+    );
+    let mine: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/uma2/rreg/resource_set")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", pat(&f, &f.rs_client_id)),
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let ids: Vec<Uuid> = test::read_body_json(resp).await;
+
+    assert!(ids.contains(&mine));
+    assert!(
+        !ids.contains(&f.resource_id),
+        "the fixture's hand-made resource was not registered through UMA and \
+         must not appear"
+    );
+
+    // The other resource server sees none of it.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/uma2/rreg/resource_set")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", pat(&f, &f.other_client_id)),
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let other_ids: Vec<Uuid> = test::read_body_json(resp).await;
+    assert!(!other_ids.contains(&mine));
+}
+
+/// Provenance must be unforgeable through the ordinary resource API — the
+/// badge asserts that the Protection API registered the resource, so a marker
+/// any admin could write would be decoration that reads like evidence.
+#[actix_web::test]
+async fn provenance_cannot_be_forged_through_the_ordinary_resource_api() {
+    let f = setup().await;
+
+    let repo = SurrealResourceRepository::new(f.db.clone());
+
+    // A hand-made resource carries no provenance...
+    let plain = repo
+        .create(CreateResource {
+            tenant_id: f.tenant_id,
+            name: "hand-made".into(),
+            resource_type: "document".into(),
+            parent_id: None,
+            metadata: Some(json!({ "uma_registered_by": "resource-server-1" })),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        plain.uma_registered_by, None,
+        "metadata must not be able to spoof the provenance field"
+    );
+
+    // ...and `UpdateResource` has no way to set one: the struct has no such
+    // field, so this is enforced by the type, not by a runtime check.
+    let updated = repo
+        .update(
+            f.tenant_id,
+            plain.id,
+            axiam_core::models::resource::UpdateResource {
+                name: Some("renamed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.uma_registered_by, None);
+}
+
+/// Deregistration removes the resource.
+#[actix_web::test]
+async fn deregistering_a_resource_set_removes_it() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "temporary", "type": "document", "resource_scopes": [] })
+    );
+    let id: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+
+    let req = test::TestRequest::delete()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/uma2/rreg/resource_set/{id}"))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", pat(&f, &f.rs_client_id)),
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 204);
+
+    assert!(
+        SurrealResourceRepository::new(f.db.clone())
+            .get_by_id(f.tenant_id, id)
+            .await
+            .is_err(),
+        "the resource should be gone"
+    );
+}
+
+/// The rreg endpoints are behind the same PAT gate as the permission endpoint.
+#[actix_web::test]
+async fn rreg_refuses_a_token_without_the_protection_scope() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/uma2/rreg/resource_set")
+        .insert_header((
+            "Authorization",
+            format!(
+                "Bearer {}",
+                client_token(&f, &f.rs_client_id, &["openid".to_string()])
+            ),
+        ))
+        .set_json(json!({ "name": "nope", "type": "document", "resource_scopes": [] }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+// ---------------------------------------------------------------------------
+// RPT introspection
+// ---------------------------------------------------------------------------
+
+/// Introspecting an RPT returns the `permissions` array in the Keycloak-
+/// compatible shape, so a resource server migrating from Keycloak reads it
+/// without a translation layer.
+#[actix_web::test]
+async fn introspecting_an_rpt_returns_its_permissions() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = perm!(
+        app,
+        f,
+        pat(&f, &f.rs_client_id),
+        json!([{ "resource_id": f.resource_id, "resource_scopes": ["view"] }])
+    );
+    let ticket = body["ticket"].as_str().unwrap().to_string();
+    let (_, body) = redeem!(
+        app,
+        f,
+        f.rs_client_id,
+        f.rs_client_secret,
+        ticket,
+        user_token(&f)
+    );
+    let rpt = body["access_token"].as_str().unwrap().to_string();
+
+    let form = format!(
+        "token={}&client_id={}&client_secret={}",
+        rpt, f.rs_client_id, f.rs_client_secret
+    );
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/introspect?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let json: Value = test::read_body_json(resp).await;
+
+    assert_eq!(json["active"], true);
+    let permissions = json["permissions"]
+        .as_array()
+        .expect("an RPT's introspection must carry the permissions array");
+    assert_eq!(permissions.len(), 1);
+    assert_eq!(permissions[0]["resource_id"], f.resource_id.to_string());
+    assert_eq!(permissions[0]["resource_scopes"][0], "view");
+}
+
+/// An ordinary access token is not an RPT, so introspecting one must omit the
+/// key entirely rather than returning an empty array — a resource server tells
+/// "no permissions" from "not an RPT" by its absence.
+#[actix_web::test]
+async fn introspecting_a_plain_access_token_omits_the_permissions_key() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let form = format!(
+        "token={}&client_id={}&client_secret={}",
+        user_token(&f),
+        f.rs_client_id,
+        f.rs_client_secret
+    );
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/introspect?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let json: Value = test::read_body_json(resp).await;
+
+    assert_eq!(json["active"], true);
+    assert!(
+        json.get("permissions").is_none(),
+        "a non-RPT must not carry the key at all"
+    );
 }

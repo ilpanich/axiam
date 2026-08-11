@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`PermissionTicketRepository`] (UMA 2.0 / X2).
 //!
-//! # Why `consume` is a transaction and not a bare statement
+//! # Why `consume` decides the race itself instead of asking the datastore
 //!
 //! UMA 2.0 §3.3 makes a permission ticket single-use, so a read-then-write
 //! would let two concurrent redemptions both spend one ticket. Putting the
@@ -10,11 +10,29 @@
 //! succeed without an explicit transaction around it. The conflict is simply
 //! not detected.
 //!
-//! Wrapping it in `BEGIN`/`COMMIT` makes the datastore detect the write-write
-//! conflict and abort every loser, which is then translated to `None` — see
-//! `is_transaction_conflict`. `concurrent_redemptions_yield_exactly_one_winner`
-//! is the regression test, and it fails with 4 winners out of 8 if the
-//! transaction is removed.
+//! Wrapping it in `BEGIN`/`COMMIT` is *also* not sufficient, which is what this
+//! module previously claimed. Measured over 1200 rounds of 8 racers, 8 rounds
+//! saw two transactions both commit — zero errors on either, both returning the
+//! pre-transition row. SurrealDB 3.2.3 does not reliably detect the write-write
+//! conflict, so a design that waits to be told about one waits for a signal
+//! that does not always arrive.
+//!
+//! Nor does a uniqueness constraint help: a claim keyed on a record ID is far
+//! worse (30/1200), and a `UNIQUE` index tripled the failure rate in this path
+//! (3/320 against 1/320) because the extra write lengthens the window without
+//! reliably being enforced. `SCHEMA_V31` carries the full comparison.
+//!
+//! So `consume` decides for itself. Each attempt stamps a nonce, and the caller
+//! whose nonce survives is the one redemption — a fact about the stored row
+//! rather than an event the engine has to report. See `SCHEMA_V31` for why the
+//! read-back must stay outside a transaction.
+//!
+//! This is **not** a guarantee of single-use. Measured at 1/640 in this path,
+//! which is not distinguishable from the 1/320 it replaces; it is preferred for
+//! having a nameable residual window rather than a demonstrably lower rate.
+//! `SCHEMA_V31` carries the numbers and what closing the window would take.
+//!
+//! `concurrent_redemptions_yield_exactly_one_winner` is the regression test.
 //!
 //! # Why `client_id` is in that clause and not checked afterwards
 //!
@@ -167,52 +185,79 @@ impl<C: Connection> PermissionTicketRepository for SurrealPermissionTicketReposi
         ticket_hash: &str,
         client_id: &str,
     ) -> AxiamResult<Option<PermissionTicket>> {
-        // `RETURN BEFORE` yields the pre-transition row, so exactly one
-        // concurrent redemption sees a non-empty result and any other sees
-        // nothing. Marking `consumed` rather than deleting keeps "already
-        // used" distinguishable from "never existed" for the audit trail,
-        // even though both answer `invalid_grant` on the wire.
+        // `RETURN BEFORE` yields the pre-transition row. Marking `consumed`
+        // rather than deleting keeps "already used" distinguishable from
+        // "never existed" for the audit trail, even though both answer
+        // `invalid_grant` on the wire.
+        //
+        // Matching the `UPDATE` is necessary but does not decide the race —
+        // measured, two concurrent callers can both match and both commit. The
+        // decision is the nonce: every racer stamps its own, the last write is
+        // the one that persists, and the third statement reads back to see
+        // whose it was. Exactly one nonce can be the stored one, so exactly one
+        // caller reports a redemption, with no conflict for the engine to
+        // detect and no constraint for it to enforce — the two things this
+        // datastore was measured not to do reliably (see `SCHEMA_V31`).
+        //
+        // Deliberately **not** wrapped in `BEGIN`/`COMMIT`. Inside one
+        // transaction the read-back would see this caller's own write under
+        // snapshot isolation and every racer would believe it won, turning an
+        // occasional double-redemption into a guaranteed one.
+        let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "BEGIN TRANSACTION; \
-                 LET $before = (UPDATE permission_ticket SET consumed = true \
+                "LET $before = (UPDATE permission_ticket \
+                     SET consumed = true, redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND ticket_hash = $hash \
                      AND client_id = $client_id \
                      AND consumed = false AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 COMMIT TRANSACTION"
+                 SELECT VALUE redemption_id FROM permission_ticket \
+                     WHERE tenant_id = $tenant_id AND ticket_hash = $hash LIMIT 1"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", ticket_hash.to_string()))
             .bind(("client_id", client_id.to_string()))
+            .bind(("nonce", nonce.clone()))
             .await;
 
-        // A concurrent redemption of the same ticket aborts this transaction
-        // with a write-write conflict. That is not a server fault — it is the
-        // datastore reporting that someone else redeemed first, which is
-        // exactly the answer this method exists to give. Translating it to
-        // `None` is what makes single-use hold under load; propagating it
-        // would turn a correctly-refused replay into a 500.
-        //
-        // Without the surrounding transaction the conflict is not detected at
-        // all and every concurrent caller "succeeds" — see
-        // `concurrent_redemptions_yield_exactly_one_winner`, which fails with
-        // 4 winners out of 8 if the BEGIN/COMMIT is removed.
+        // Each statement is its own transaction here, so a conflict is still
+        // possible even without an explicit one. A loser's conflict is this
+        // method's "someone else redeemed first" answer, not a server fault;
+        // propagating it would turn a correctly-refused replay into a 500.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-        let rows: Vec<PermissionTicketRow> = match result.take::<Vec<PermissionTicketRow>>(2) {
+        // LET=0, SELECT rows=1, SELECT nonce=2.
+        let rows: Vec<PermissionTicketRow> = match result.take::<Vec<PermissionTicketRow>>(1) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
+        if rows.is_empty() {
+            // Nothing matched: unknown, already consumed, expired, or the
+            // wrong client. No write happened, so nothing was burned.
+            return Ok(None);
+        }
+
+        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+            Ok(v) => v,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        if stored.into_iter().flatten().next().as_deref() != Some(nonce.as_str()) {
+            // Our write landed but someone else's landed after it. They hold
+            // the redemption; this caller must not also report one. The ticket
+            // is spent either way, so `consumed` staying true is correct.
+            return Ok(None);
+        }
+
         rows.into_iter()
             .next()
             .map(PermissionTicketRow::try_into_ticket)

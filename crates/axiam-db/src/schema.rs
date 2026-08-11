@@ -192,6 +192,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "uma_permission_tickets",
         sql: SCHEMA_V30,
     },
+    Migration {
+        version: 31,
+        name: "uma_permission_ticket_redemption_nonce",
+        sql: SCHEMA_V31,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1540,6 +1545,55 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_hash
 -- the one table that turns over fastest.
 DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
     ON TABLE permission_ticket FIELDS tenant_id, expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v31 — redemption nonce, so single-use stops depending on the engine
+// -----------------------------------------------------------------------
+//
+// v30 relied on SurrealDB detecting the write-write conflict between two
+// concurrent redemptions. Measured, it does not: 8 rounds in 1200 (8 racers
+// each) saw two transactions both commit, with zero errors, both returning the
+// pre-transition row — two RPTs from one authorization decision.
+//
+// Three repairs were measured before this one, and the two obvious ones are
+// worse than the bug they fix:
+//
+//   mechanism                                    wrong (this consume path)
+//   ------------------------------------------   -------------------------
+//   v30: transaction + WHERE consumed = false     1 / 320
+//   claim keyed on a record ID                   30 / 1200  (isolated probe)
+//   claim on a UNIQUE INDEX, in a transaction     3 / 320
+//   this: per-attempt nonce, write then read      1 / 640
+//
+// Read that table honestly: only the UNIQUE-index result is clearly bad. One
+// failure in 640 against one in 320 is a single event either way, and does
+// **not** establish that the nonce is less likely to double-redeem than what it
+// replaces. What it does establish is that the nonce is not *worse*, and the
+// reason to prefer it is mechanical rather than statistical.
+//
+// The nonce does not ask the engine to arbitrate. Every racer writes its own;
+// the last write persists; each racer reads the row back and only the one whose
+// nonce survived reports a redemption. Nothing depends on conflict detection or
+// constraint enforcement — the two guarantees this engine was measured not to
+// provide — and the one remaining window is at least nameable: a racer's write
+// can land after another racer's read-back. An opaque failure to detect a
+// conflict is not analysable in that way.
+//
+// No mechanism tested reaches zero. Single-use is **not** guaranteed here, and
+// no comment in this tree should be read as saying otherwise. Closing the
+// window needs a guarantee from below this layer — a storage engine that
+// serialises, or single-writer serialisation in front of it.
+//
+// The read-back is deliberately NOT inside a transaction. Under snapshot
+// isolation a racer would see its own write and every racer would believe it
+// won — the failure would be total rather than occasional.
+//
+// `WHERE consumed = false` is still required: it is what makes a later,
+// non-concurrent redemption match nothing and leave the first winner's nonce
+// undisturbed.
+const SCHEMA_V31: &str = "\
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

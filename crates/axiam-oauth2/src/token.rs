@@ -81,6 +81,22 @@ pub struct TokenRequest {
     pub actor_token_type: Option<String>,
     pub audience: Option<String>,
     pub resource: Option<String>,
+
+    // --- X2 / UMA 2.0 ticket grant --------------------------------------
+    /// The permission ticket minted by `/uma2/perm`, for
+    /// `grant_type=urn:ietf:params:oauth:grant-type:uma-ticket`.
+    pub ticket: Option<String>,
+    /// The requesting party's identity, as an AXIAM access token.
+    ///
+    /// UMA 2.0 §3.3.1 makes this optional because a client may instead present
+    /// its own RPT for incremental authorization, which v1 does not implement.
+    /// With claims-gathering also deferred, this is the only channel through
+    /// which a requesting party can be named — so the grant requires it and
+    /// says so, rather than resolving to some default subject.
+    pub claim_token: Option<String>,
+    /// Declared format of `claim_token`. Only the AXIAM access-token URN is
+    /// accepted in v1; anything else is refused rather than guessed at.
+    pub claim_token_format: Option<String>,
 }
 
 impl TokenRequest {

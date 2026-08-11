@@ -157,9 +157,9 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
 // Shared token extraction
 // ---------------------------------------------------------------------------
 
-/// Decode and validate the JWT from the request — shared between both
+/// Decode and validate the JWT from the request — shared between the
 /// extractors. Does not apply audience narrowing.
-fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaims, AxiamApiError> {
+pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaims, AxiamApiError> {
     let config = req
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
@@ -605,6 +605,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             scope: None,
             sub_kind: SubjectKind::User,
             act: None,
+            permissions: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
         let header = Header::new(Algorithm::EdDSA);

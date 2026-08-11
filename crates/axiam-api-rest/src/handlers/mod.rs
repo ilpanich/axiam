@@ -25,6 +25,7 @@ pub mod scopes;
 pub mod service_accounts;
 pub mod settings;
 pub mod tenants;
+pub mod uma;
 pub mod users;
 pub mod webauthn;
 pub mod webhooks;

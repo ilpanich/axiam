@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use axiam_core::models::uma::RptPermission;
+
 use crate::config::AuthConfig;
 use crate::error::AuthError;
 
@@ -97,6 +99,20 @@ pub struct AccessTokenClaims {
     /// inside a signed token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<ActClaim>,
+    /// UMA 2.0 `permissions` claim (X2) — present **only** on an RPT.
+    ///
+    /// Its presence is what makes a token an RPT; there is no separate token
+    /// type, because an RPT is an ordinary AXIAM access token that additionally
+    /// says which `(resource, scopes)` pairs were allowed when it was issued.
+    ///
+    /// These are a **record of a decision already made**, not an input to a
+    /// future one. Nothing in the authorization path reads this claim to grant
+    /// anything: a live check re-evaluates against the engine. That matters
+    /// because a grant revoked after issuance does not retroactively empty a
+    /// live RPT — which is why RPT lifetime is bounded to the minimum of the
+    /// subject token's remaining life, the configured maximum, and 300 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<RptPermission>>,
 }
 
 /// RFC 8693 §4.1 `act` claim: who is acting on the subject's behalf.
@@ -163,6 +179,7 @@ pub fn issue_access_token(
         scope,
         sub_kind: SubjectKind::User,
         act: None,
+        permissions: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -231,6 +248,11 @@ pub fn issue_exchanged_token(
         scope,
         sub_kind,
         act,
+        // An exchanged token is not an RPT. A UMA permission set is minted by
+        // the uma-ticket grant against a consumed ticket, and re-stamping it
+        // through an exchange would carry a decision past the ticket that
+        // authorised it.
+        permissions: None,
     };
 
     let owned;
@@ -282,9 +304,70 @@ pub fn issue_client_credentials_token(
         scope,
         sub_kind: SubjectKind::OAuth2Client,
         act: None,
+        permissions: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Issue an RPT — the requesting party token of the UMA 2.0 grant (X2).
+///
+/// An RPT is an ordinary AXIAM access token for `subject_id` that additionally
+/// carries the [`AccessTokenClaims::permissions`] claim. It is deliberately not
+/// a distinct token type: every existing validator, audience check and
+/// revocation path applies to it unchanged, which is what stops the RPT from
+/// becoming a second credential format with its own gaps.
+///
+/// `lifetime_secs` is decided by the caller — `axiam_oauth2::uma` computes it
+/// as the minimum of the subject token's remaining life, the deployment
+/// ceiling, and the protocol default. It is **not** re-derived from
+/// `config.access_token_lifetime_secs`, because an RPT must never outlive the
+/// token that authorised it.
+///
+/// `aud` is [`AUD_USER`]: the subject is the requesting party, a user, and the
+/// RPT authenticates as that user.
+pub fn issue_rpt(
+    subject_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    permissions: Vec<RptPermission>,
+    lifetime_secs: i64,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+
+    let claims = AccessTokenClaims {
+        sub: subject_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        iss: config.effective_issuer().to_owned(),
+        iat: now,
+        exp: now + lifetime_secs,
+        // No session row backs an RPT — it is minted from a ticket, not a
+        // login — so `jti` is a plain uniqueness marker, as it is for M2M.
+        jti: Uuid::new_v4().to_string(),
+        aud: Some(AUD_USER.to_string()),
+        // The `permissions` claim carries the authority. Stamping an OAuth2
+        // `scope` too would give a resource server two disagreeing places to
+        // read authority from, and only one of them was evaluated.
+        scope: None,
+        sub_kind: SubjectKind::User,
+        act: None,
+        permissions: Some(permissions),
+    };
+
     let owned;
     let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
         cached.as_ref()
@@ -349,6 +432,7 @@ pub fn issue_service_account_token(
         scope: None,
         sub_kind: SubjectKind::ServiceAccount,
         act: None,
+        permissions: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -418,6 +502,7 @@ pub fn issue_service_account_client_credentials_token(
         scope,
         sub_kind: SubjectKind::ServiceAccount,
         act: None,
+        permissions: None,
     };
 
     let owned;

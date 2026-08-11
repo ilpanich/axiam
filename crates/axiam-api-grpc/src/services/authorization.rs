@@ -387,6 +387,7 @@ mod tests {
             // B3: this fixture is a directly-issued token, not one obtained
             // through a token exchange, so it carries no actor chain.
             act: None,
+            permissions: None,
         });
 
         let svc = AuthorizationServiceImpl::new(make_engine(&db), 2);

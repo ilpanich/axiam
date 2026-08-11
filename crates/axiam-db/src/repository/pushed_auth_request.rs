@@ -161,48 +161,79 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
         tenant_id: Uuid,
         request_uri_hash: &str,
     ) -> AxiamResult<Option<PushedAuthRequest>> {
-        // `RETURN BEFORE` yields the pre-transition row, so exactly one
-        // concurrent authorize request sees a non-empty result and any other
-        // sees nothing. Marking `consumed` rather than deleting keeps
-        // "already used" distinguishable from "never existed" in an audit
-        // trail, even though both answer `invalid_request` on the wire.
-        // The BEGIN/COMMIT is load-bearing, not decoration. A multi-statement
-        // query is not atomic in SurrealDB — each statement runs in its own
-        // transaction — so the `consumed = false` guard alone does not
-        // serialise concurrent callers, and this consume was measured letting
-        // 2 of 8 concurrent redemptions win. RFC 9126 §2.2 makes `request_uri`
-        // one-time-use precisely because a replayable one is a replayable
-        // authorization request.
+        // `RETURN BEFORE` yields the pre-transition row. Marking `consumed`
+        // rather than deleting keeps "already used" distinguishable from
+        // "never existed" in an audit trail, even though both answer
+        // `invalid_request` on the wire.
+        //
+        // The `consumed = false` guard is what makes a later, non-concurrent
+        // authorize request match nothing. It does not decide a *concurrent*
+        // one, and neither did the `BEGIN`/`COMMIT` this used to rely on:
+        // SurrealDB 3.2.3 does not reliably detect the write-write conflict —
+        // measured on the permission-ticket consume, which is this same shape,
+        // two transactions both commit with zero errors and both return the
+        // pre-transition row. RFC 9126 §2.2 makes `request_uri` one-time-use
+        // precisely because a replayable one is a replayable authorization
+        // request.
+        //
+        // So the race is decided here: each attempt stamps a nonce, the last
+        // write persists, and the third statement reads back to see whose it
+        // was. See `SCHEMA_V31` for the measurements and for why this narrows
+        // the window rather than closing it.
+        //
+        // Deliberately **not** in a transaction: inside one the read-back would
+        // see this caller's own write under snapshot isolation and every racer
+        // would believe it won.
+        let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "BEGIN TRANSACTION; \
-                 LET $before = (UPDATE pushed_auth_request SET consumed = true \
+                "LET $before = (UPDATE pushed_auth_request \
+                     SET consumed = true, redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
                      AND consumed = false AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 COMMIT TRANSACTION"
+                 SELECT VALUE redemption_id FROM pushed_auth_request \
+                     WHERE tenant_id = $tenant_id AND request_uri_hash = $hash LIMIT 1"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", request_uri_hash.to_string()))
+            .bind(("nonce", nonce.clone()))
             .await;
 
-        // A loser's transaction is aborted by the conflict. That is this
-        // method's "someone else consumed it" answer, not a server fault.
+        // Each statement is its own transaction, so a conflict is still
+        // possible. A loser's conflict is this method's "someone else consumed
+        // it" answer, not a server fault.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-        let rows: Vec<PushedAuthRequestRow> = match result.take::<Vec<PushedAuthRequestRow>>(2) {
+        // LET=0, SELECT rows=1, SELECT nonce=2.
+        let rows: Vec<PushedAuthRequestRow> = match result.take::<Vec<PushedAuthRequestRow>>(1) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
+        if rows.is_empty() {
+            // Unknown, already consumed, or expired. Nothing was written.
+            return Ok(None);
+        }
+
+        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+            Ok(v) => v,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        if stored.into_iter().flatten().next().as_deref() != Some(nonce.as_str()) {
+            // Our write landed but another authorize request's landed after it.
+            // That one holds the consumption; this one must not replay it.
+            return Ok(None);
+        }
+
         rows.into_iter()
             .next()
             .map(PushedAuthRequestRow::try_into_request)

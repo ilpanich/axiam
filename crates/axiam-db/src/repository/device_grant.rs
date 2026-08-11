@@ -245,47 +245,79 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         tenant_id: Uuid,
         device_code_hash: &str,
     ) -> AxiamResult<Option<DeviceGrant>> {
-        // Single-use, in one TRANSACTION. `RETURN BEFORE` yields the
-        // pre-transition row, so exactly one concurrent poll sees a non-empty
-        // result and the others see nothing.
+        // Single-use. `RETURN BEFORE` yields the pre-transition row, and the
+        // `status = 'approved'` guard is what makes a later, non-concurrent
+        // poll match nothing.
         //
-        // The BEGIN/COMMIT is what makes that true. A multi-statement query is
-        // not atomic in SurrealDB — each statement runs in its own transaction
-        // — so the `status = 'approved'` guard alone does not serialise
-        // concurrent polls: this redeem was measured letting 4 of 8 win, which
-        // is one user approval minting four token sets. A device that polls on
-        // a short interval and retries is not an exotic case; it is the normal
-        // shape of RFC 8628 §3.4.
+        // The guard does not decide a *concurrent* race, and neither does the
+        // `BEGIN`/`COMMIT` this used to rely on. SurrealDB 3.2.3 does not
+        // reliably detect the write-write conflict — measured on the
+        // permission-ticket consume, which is this same shape, two transactions
+        // both commit with zero errors and both return the pre-transition row.
+        // Here that is one user approval minting two token sets, and a device
+        // polling on a short interval and retrying is the normal shape of
+        // RFC 8628 §3.4, not an exotic case.
+        //
+        // So the race is decided here instead: each attempt stamps a nonce, the
+        // last write persists, and the third statement reads back to see whose
+        // it was. Exactly one nonce can be the stored one. See `SCHEMA_V31` for
+        // the measurements, including two repairs that proved worse than the
+        // defect, and for why this is a narrower window rather than a guarantee.
+        //
+        // Deliberately **not** in a transaction: inside one the read-back would
+        // see this caller's own write under snapshot isolation and every racer
+        // would believe it won.
+        let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "BEGIN TRANSACTION; \
-                 LET $before = (UPDATE device_grant SET status = 'redeemed' \
+                "LET $before = (UPDATE device_grant \
+                     SET status = 'redeemed', redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
                      AND status = 'approved' AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 COMMIT TRANSACTION"
+                 SELECT VALUE redemption_id FROM device_grant \
+                     WHERE tenant_id = $tenant_id AND device_code_hash = $hash LIMIT 1"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", device_code_hash.to_string()))
+            .bind(("nonce", nonce.clone()))
             .await;
 
-        // A loser's transaction is aborted by the conflict — that is this
-        // method's "already redeemed" answer, not a server fault.
+        // Each statement is its own transaction, so a conflict is still
+        // possible. A loser's conflict is this method's "already redeemed"
+        // answer, not a server fault.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(2) {
+        // LET=0, SELECT rows=1, SELECT nonce=2.
+        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(1) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
+        if rows.is_empty() {
+            // Unknown, not approved, already redeemed, or expired. Nothing was
+            // written, so nothing was burned.
+            return Ok(None);
+        }
+
+        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+            Ok(v) => v,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        if stored.into_iter().flatten().next().as_deref() != Some(nonce.as_str()) {
+            // Our write landed but another poll's landed after it. That poll
+            // holds the redemption; this one must not also mint a token set.
+            return Ok(None);
+        }
+
         rows.into_iter()
             .next()
             .map(DeviceGrantRow::try_into_grant)

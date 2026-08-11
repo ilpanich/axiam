@@ -46,6 +46,7 @@ use crate::models::{
     session::{CreateSession, Session},
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
+    uma::{CreatePermissionTicket, PermissionTicket},
     user::{CreateUser, UpdateUser, User},
     webauthn_credential::{CreateWebauthnCredential, WebauthnCredential},
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
@@ -931,6 +932,57 @@ pub trait SessionClientRepository: Send + Sync {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Storage for UMA 2.0 permission tickets (X2).
+///
+/// A resource server posts the `(resource, scopes)` tuples it requires to
+/// `/uma2/perm` and gets back an opaque ticket; the client redeems it at the
+/// token endpoint for an RPT. The ticket is a server-side row rather than a
+/// signed JWT because UMA 2.0 §3.3 makes it single-use, and single-use is not
+/// a property a stateless token can have — see `models::uma`.
+pub trait PermissionTicketRepository: Send + Sync {
+    /// Store a newly minted ticket.
+    fn create(
+        &self,
+        input: CreatePermissionTicket,
+    ) -> impl Future<Output = AxiamResult<PermissionTicket>> + Send;
+
+    /// Atomically consume an unexpired, unconsumed ticket **belonging to
+    /// `client_id`**, returning it as it was immediately before being marked
+    /// consumed (`None` when nothing matched).
+    ///
+    /// Single-use lives here in one statement for the same reason PAR's does:
+    /// a read-then-write would let two concurrent redemptions both spend one
+    /// ticket, and a replayable ticket is a replayable authorization.
+    ///
+    /// `client_id` is part of the WHERE clause rather than a check the service
+    /// makes on the returned row. If it were checked afterwards, a ticket
+    /// leaked to another client would be *burned* by that client's failed
+    /// attempt — a denial of service against the resource server that owns it.
+    /// Matching it in the statement means a wrong-client attempt changes
+    /// nothing and the rightful holder can still redeem.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        ticket_hash: &str,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<PermissionTicket>>> + Send;
+
+    /// Read a ticket without consuming it, to classify why a redemption
+    /// failed for the audit trail.
+    ///
+    /// Every rejection is `invalid_grant` on the wire, so this exists only so
+    /// the audit record can say *which* — expired, replayed, or presented by
+    /// the wrong client. It must never be used to shape the client's response.
+    fn find_by_hash(
+        &self,
+        tenant_id: Uuid,
+        ticket_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<PermissionTicket>>> + Send;
+
+    /// Remove expired tickets. Returns the number deleted.
+    fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for RFC 9126 pushed authorization requests (B5).

@@ -252,6 +252,18 @@ jobs:
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
       AXIAM__AMQP__URL: "amqp://localhost:5672"
+      # target/ for the workspace test build plus the two feature-gated relinks
+      # at the end of this job no longer fits on an ubuntu-latest runner. It
+      # failed as `ld terminated with signal 7 [Bus error]` while linking the
+      # last test binary — an out-of-disk write, not a compiler bug — with the
+      # RabbitMQ service container logging "Free bytes: 0" in the same second.
+      # Both knobs shrink target/ rather than buying time: incremental artifacts
+      # are pure waste on a one-shot runner that never rebuilds, and debuginfo
+      # is the largest single contributor to test-binary size. line-tables-only
+      # rather than 0 so panic backtraces keep file and line numbers.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Free up disk space
@@ -279,6 +291,12 @@ jobs:
       # pass (the suite only began running once libxmlsec1 was installed, so
       # surfacing the whole picture at once is far cheaper than one-per-run).
       - run: cargo test --workspace --no-fail-fast
+      # The two steps below relink axiam-api-grpc under a different feature set
+      # and are where the job ran out of disk. Report free space here so the
+      # next capacity failure is diagnosable from the log directly, instead of
+      # only from a linker signal and the service container's disk alarm.
+      - name: Disk usage before feature-gated gRPC tests
+        run: df -h && du -sh target 2>/dev/null || true
       # gRPC authz integration tests require the `client` feature (generated
       # client stubs). `cargo test --workspace` above skips them via
       # required-features; run them explicitly here so they execute as

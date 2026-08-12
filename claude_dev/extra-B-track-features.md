@@ -163,8 +163,9 @@ immediately (documented as back-pressure semantics).
   (`fn(event) -> Allow | Deny(reason) | Mutate(patch)`), signs and
   publishes the reply, and handles reconnect/heartbeat
   (`last_seen_at`). Graceful shutdown drains in-flight events.
-- **Deferred runtimes** (swift, c, cpp — extend the contract §12.6
-  carve-out): no bundled runtime in v1 (no maintained AMQP client we
+- **Deferred runtimes** (swift, c, cpp — a §8 AMQP carve-out of their own;
+  the §12.6 deferral this once rode alongside was lifted in contract 1.11):
+  no bundled runtime in v1 (no maintained AMQP client we
   are willing to vendor on embedded targets); they get the **normative
   wire-protocol chapter** so integrators can hand-roll, plus a C++
   example against a commonly-used AMQP library as a non-normative

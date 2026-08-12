@@ -37,6 +37,16 @@ export interface Resource {
   parent_id?: string;
   /** Backend has no `description` column — it lives under `metadata.description`. */
   metadata?: ResourceMetadata;
+  /**
+   * The OAuth2 `client_id` that registered this resource through the UMA
+   * Protection API (X2), absent for a resource created any other way.
+   *
+   * Read-only: the backend accepts it on no create or update payload, so the
+   * badge this drives cannot be set by editing a resource. Do not add it to
+   * `CreateResourcePayload` or `UpdateResourcePayload` — a provenance marker
+   * the UI can write is decoration that reads like evidence.
+   */
+  uma_registered_by?: string;
   created_at: string;
 }
 

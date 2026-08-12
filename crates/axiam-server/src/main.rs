@@ -735,6 +735,10 @@ async fn main() -> std::io::Result<()> {
     // that only the test builder populates is exactly the gap that left B2's
     // grant unreachable in a real deployment.
     let session_client_repo = SurrealSessionClientRepository::new(pool.handle_for_repo());
+    // X2 — UMA 2.0 permission tickets. Built here with the other repositories
+    // because `pool` is moved before the `AppState` literal is assembled.
+    let permission_ticket_repo =
+        axiam_db::repository::SurrealPermissionTicketRepository::new(pool.handle_for_repo());
     let par_service = ParService::new(
         oauth2_client_repo.clone(),
         SurrealPushedAuthRequestRepository::new(pool.handle_for_repo()),
@@ -1527,6 +1531,12 @@ async fn main() -> std::io::Result<()> {
         device_authorization_service: device_authorization_service.clone(),
         token_exchange_service: token_exchange_service.clone(),
         par_service: par_service.clone(),
+        // X2 — UMA 2.0. The repository rather than an assembled service,
+        // because the service also needs the `AuthzChecker`, which is
+        // registered as its own `web::Data`; handlers compose the two with
+        // `AppState::uma_service`.
+        permission_ticket_repo: permission_ticket_repo.clone(),
+        rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
         session_client_repo: session_client_repo.clone(),
         device_grant_repo: device_grant_repo.clone(),
         // The device endpoints size their own governors from this (see

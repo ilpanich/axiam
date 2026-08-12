@@ -274,6 +274,55 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
         "/.well-known/openid-configuration",
         web::get().to(handlers::oauth2::discovery),
     );
+    // X2 / UMA 2.0 §2. Outside the `/oauth2` scope for the same reason as OIDC
+    // discovery: the spec fixes the path at the host root.
+    cfg.route(
+        "/.well-known/uma2-configuration",
+        web::get().to(handlers::uma::uma2_configuration),
+    );
+    // X2 — the UMA Protection API. Its own scope rather than a route under
+    // `/oauth2`, because UMA 2.0 §3.2 fixes the path and because these
+    // endpoints are PAT-protected bearer routes, not client-credential form
+    // posts like the token endpoint family.
+    cfg.service(
+        web::scope("/uma2")
+            .wrap(AuthzMiddleware)
+            .service(
+                web::resource("/perm")
+                    .wrap(build_governor(rate_limit_cfg.uma_perm_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "uma_perm",
+                        rate_limit_cfg.uma_perm_per_min,
+                    ))
+                    .route(web::post().to(handlers::uma::permission_request::<C>)),
+            )
+            // FedAuthz §2.2. Shares the `uma_perm` bucket sizing but gets its
+            // own counter name: registration is administrative traffic (a
+            // resource server registers at deploy time, not per request), so
+            // letting it consume the permission endpoint's allowance would let
+            // a registration loop starve live authorization.
+            .service(
+                web::resource("/rreg/resource_set")
+                    .wrap(build_governor(rate_limit_cfg.uma_perm_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "uma_rreg",
+                        rate_limit_cfg.uma_perm_per_min,
+                    ))
+                    .route(web::post().to(handlers::uma::register_resource_set::<C>))
+                    .route(web::get().to(handlers::uma::list_resource_sets::<C>)),
+            )
+            .service(
+                web::resource("/rreg/resource_set/{id}")
+                    .wrap(build_governor(rate_limit_cfg.uma_perm_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "uma_rreg",
+                        rate_limit_cfg.uma_perm_per_min,
+                    ))
+                    .route(web::get().to(handlers::uma::read_resource_set::<C>))
+                    .route(web::put().to(handlers::uma::update_resource_set::<C>))
+                    .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
+            ),
+    );
     cfg.service(
         web::scope("/oauth2")
             .wrap(AuthzMiddleware)

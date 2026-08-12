@@ -202,6 +202,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "single_use_redemption_nonce_device_grant_and_par",
         sql: SCHEMA_V32,
     },
+    Migration {
+        version: 33,
+        name: "uma_resource_registration_provenance",
+        sql: SCHEMA_V33,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1632,6 +1637,30 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<
 const SCHEMA_V32: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE device_grant TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v33 — which client registered a resource through the UMA
+// Protection API (X2)
+// -----------------------------------------------------------------------
+//
+// X2 asks for a read-only "UMA" badge on resources registered via the
+// Protection API. The obvious place to put that is `metadata`, which already
+// exists on `resource` and is already returned by the API — no migration, no
+// new field.
+//
+// It is the wrong place. `metadata` is writable through the ordinary resource
+// endpoints, so any caller who may edit a resource could set the marker on a
+// resource the Protection API never touched. A badge that asserts provenance
+// and can be written by anyone is not a provenance record; it is decoration
+// that reads like evidence.
+//
+// So it is its own field, written only by the resource-registration handler
+// and never by `UpdateResource`. `None` means "not registered through UMA",
+// which is also what every pre-existing row means — the migration adds a field
+// rather than backfilling a claim about resources nobody registered.
+const SCHEMA_V33: &str = "\
+DEFINE FIELD IF NOT EXISTS uma_registered_by ON TABLE resource TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

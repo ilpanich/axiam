@@ -2,6 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
+use axiam_core::models::uma::{UMA_CLAIM_TOKEN_FORMAT, UMA_TICKET_GRANT_TYPE};
 use axiam_core::repository::{OAuth2ClientRepository, SessionClientRepository, UserRepository};
 use axiam_oauth2::authorize::AuthorizeRequest;
 use axiam_oauth2::device_service::{
@@ -16,6 +17,7 @@ use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
 };
 use axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE;
+use axiam_oauth2::uma::UmaError;
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -349,6 +351,25 @@ pub async fn token<C: Connection + Clone>(
     // precisely the operation that should be attributable.
     if grant_type == TOKEN_EXCHANGE_GRANT_TYPE {
         return handle_token_exchange(tenant_id, form, &state).await;
+    }
+
+    // X2 / UMA 2.0 §3.3.1. Third grant dispatched here for the same structural
+    // reason as the other two: the body is deserialized once, so the grant is
+    // only knowable after `grant_type` has been read out of it.
+    if grant_type == UMA_TICKET_GRANT_TYPE {
+        // The authz checker is pulled from the request here rather than taken
+        // as a handler parameter on purpose. `/oauth2/token` serves five
+        // grants, and only this one evaluates anything against the RBAC
+        // engine; making it an extractor would make the checker a hard
+        // requirement of the whole endpoint, so a deployment (or a test
+        // harness) that never uses UMA would start answering 500 to ordinary
+        // token requests because of a dependency none of them use.
+        let Some(authz) = req.app_data::<crate::authz::AuthzData>().cloned() else {
+            return build_oauth2_error_response(&OAuth2Error::ServerError(
+                "the uma-ticket grant requires an authorization checker".into(),
+            ));
+        };
+        return handle_uma_ticket(tenant_id, form, &state, &authz).await;
     }
 
     match state.token_service.exchange(tenant_id, form).await {
@@ -903,6 +924,242 @@ pub async fn device_authorization<C: Connection + Clone>(
 /// parameters are disjoint from RFC 6749's and actix deserializes one body
 /// once — so `TokenRequest` carries the shared fields and the
 /// exchange-specific ones are pulled from the raw form here.
+/// X2 — `grant_type=urn:ietf:params:oauth:grant-type:uma-ticket`.
+///
+/// Redeems a permission ticket for an RPT. Four things are worth naming.
+///
+/// **The client authenticates, and the ticket is bound to it.** A ticket is
+/// minted by a resource server through the Protection API and redeemed by that
+/// same resource server; `consume` matches on `client_id`, so a ticket leaked
+/// to another client is not a usable credential — and a wrong-client attempt
+/// changes nothing rather than burning the rightful holder's ticket.
+///
+/// **`claim_token` is required, though UMA 2.0 calls it optional.** The spec's
+/// other two ways to name a requesting party — an RPT presented for
+/// incremental authorization, and interactive claims-gathering — are both
+/// deferred to v2, so this is the only channel that exists. Requiring it and
+/// saying so beats resolving to some default subject, which would mint an RPT
+/// for a party nobody named.
+///
+/// **The subject token is validated, not trusted.** It is a signed AXIAM access
+/// token; its remaining life bounds the RPT's, which is what stops an RPT from
+/// outliving the authorization it rests on.
+///
+/// **Refusals are uniform.** Every ticket rejection — unknown, consumed,
+/// expired, wrong client — answers `invalid_grant` with one message, because a
+/// caller that could tell them apart could probe for live ticket handles.
+async fn handle_uma_ticket<C: Connection + Clone>(
+    tenant_id: Uuid,
+    form: TokenRequest,
+    state: &web::Data<AppState<C>>,
+    authz: &crate::authz::AuthzData,
+) -> HttpResponse {
+    let (Some(client_id), Some(client_secret)) =
+        (form.client_id.as_deref(), form.client_secret.as_deref())
+    else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidClient(
+            "the uma-ticket grant requires client authentication".into(),
+        ));
+    };
+
+    let client = match state
+        .token_service
+        .authenticate_client(tenant_id, client_id, client_secret)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // Counted after authentication, keyed by the authenticated client — the
+    // same reasoning as the token-exchange bucket: an unauthenticated caller
+    // must not be able to consume a real client's allowance, and per-IP would
+    // collapse a whole mesh behind one NAT into a single bucket.
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_uma_ticket:{}:{}", tenant_id, client.client_id),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.uma_ticket_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .json(OAuth2ErrorResponse {
+                error: "slow_down".into(),
+                error_description: "uma-ticket rate limit exceeded for this client".into(),
+            });
+    }
+
+    let Some(ticket) = form.ticket.as_deref().filter(|t| !t.is_empty()) else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "ticket is required for the uma-ticket grant".into(),
+        ));
+    };
+
+    let Some(claim_token) = form.claim_token.as_deref().filter(|t| !t.is_empty()) else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "claim_token is required for the uma-ticket grant: it names the \
+             requesting party, and v1 implements neither incremental \
+             authorization nor claims-gathering"
+                .into(),
+        ));
+    };
+
+    // An unrecognised format is refused rather than assumed. Guessing would
+    // mean validating a foreign token with the wrong verifier.
+    if let Some(format) = form.claim_token_format.as_deref().filter(|f| !f.is_empty())
+        && format != UMA_CLAIM_TOKEN_FORMAT
+    {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(format!(
+            "unsupported claim_token_format '{format}'; v1 accepts only \
+             '{UMA_CLAIM_TOKEN_FORMAT}'"
+        )));
+    }
+
+    let claims = match axiam_auth::token::validate_access_token(claim_token, &state.auth_config) {
+        Ok(validated) => validated.0,
+        Err(_) => {
+            return build_oauth2_error_response(&OAuth2Error::InvalidGrant(
+                "claim_token is not a valid access token".into(),
+            ));
+        }
+    };
+
+    let Ok(subject_id) = claims.sub.parse::<Uuid>() else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidGrant(
+            "claim_token does not name a user as its subject".into(),
+        ));
+    };
+
+    // The requesting party must belong to the tenant the ticket was minted in.
+    // Without this a token from tenant A could redeem a ticket in tenant B and
+    // be evaluated against B's grants under A's subject id.
+    if claims.tenant_id != tenant_id.to_string() {
+        return build_oauth2_error_response(&OAuth2Error::InvalidGrant(
+            "claim_token belongs to a different tenant".into(),
+        ));
+    }
+
+    let subject_remaining_secs = claims.exp - chrono::Utc::now().timestamp();
+
+    let granted = match state
+        .uma_service(authz.get_ref().clone())
+        .exchange_ticket(
+            tenant_id,
+            &client.client_id,
+            ticket,
+            subject_id,
+            subject_remaining_secs,
+        )
+        .await
+    {
+        Ok(granted) => granted,
+        Err(e) => {
+            tracing::info!(
+                target: "axiam::audit",
+                event = "uma.rpt_refused",
+                tenant_id = %tenant_id,
+                client_id = %client.client_id,
+                subject = %subject_id,
+                error = e.wire_error(),
+                "uma-ticket grant refused"
+            );
+            return uma_refusal_response(e);
+        }
+    };
+
+    let org_id = match claims.org_id.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return build_oauth2_error_response(&OAuth2Error::ServerError(
+                "claim_token carries an unparseable org_id".into(),
+            ));
+        }
+    };
+
+    let rpt = match axiam_auth::token::issue_rpt(
+        subject_id,
+        tenant_id,
+        org_id,
+        granted.permissions.clone(),
+        granted.lifetime_secs,
+        &state.auth_config,
+    ) {
+        Ok(token) => token,
+        Err(e) => return build_oauth2_error_response(&OAuth2Error::ServerError(e.to_string())),
+    };
+
+    // Audited before the token is returned: the ticket is already consumed at
+    // this point, so a crash between issuing and logging would leave a spent
+    // ticket with no record of what it bought.
+    tracing::info!(
+        target: "axiam::audit",
+        event = "uma.rpt_issued",
+        tenant_id = %tenant_id,
+        client_id = %client.client_id,
+        subject = %subject_id,
+        pairs = granted.permissions.len(),
+        lifetime_secs = granted.lifetime_secs,
+        "RPT issued"
+    );
+
+    HttpResponse::Ok()
+        .append_header(("Cache-Control", "no-store"))
+        .append_header(("Pragma", "no-cache"))
+        .json(TokenResponse {
+            access_token: rpt,
+            token_type: "Bearer".into(),
+            expires_in: granted.lifetime_secs as u64,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        })
+}
+
+/// Render a [`UmaError`] as the token endpoint's error response.
+///
+/// # Why `access_denied` does not go through `build_oauth2_error_response`
+///
+/// That helper maps everything except `invalid_client` and `server_error` to
+/// **400**, which is right for RFC 6749 and right for RFC 8628 — the device
+/// grant's `access_denied` (the user said no) is a 400 and must stay one.
+///
+/// UMA 2.0 §3.3.6 specifies **403** for a request the authorization server
+/// refuses on the merits, and a UMA-conforming resource server distinguishes
+/// "you may not have this" from "your request was malformed" by exactly that
+/// status. Routing the UMA refusal through the shared helper would answer 400
+/// and quietly fail conformance, so this one status is built here. Every other
+/// UMA error keeps the shared mapping.
+fn uma_refusal_response(e: UmaError) -> HttpResponse {
+    if matches!(e, UmaError::AccessDenied) {
+        return HttpResponse::Forbidden()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(OAuth2ErrorResponse {
+                // v1 sends no `need_info` alongside it: that field exists to
+                // steer a client into claims-gathering, which is deferred, so
+                // sending it would point at a flow that does not run.
+                error: "access_denied".into(),
+                error_description:
+                    "the requesting party is not authorized for every requested permission".into(),
+            });
+    }
+    build_oauth2_error_response(&uma_error_to_oauth2(e))
+}
+
+/// Map a [`UmaError`] onto the OAuth2 error shape the token endpoint answers.
+fn uma_error_to_oauth2(e: UmaError) -> OAuth2Error {
+    match e {
+        UmaError::InvalidRequest(m) => OAuth2Error::InvalidRequest(m),
+        UmaError::InvalidGrant(m) => OAuth2Error::InvalidGrant(m),
+        UmaError::AccessDenied => OAuth2Error::AccessDenied(
+            "the requesting party is not authorized for every requested permission".into(),
+        ),
+        UmaError::ExpiredSubjectToken => {
+            OAuth2Error::InvalidGrant("the presented claim_token has expired".into())
+        }
+        UmaError::Server(m) => OAuth2Error::ServerError(m),
+    }
+}
+
 async fn handle_token_exchange<C: Connection + Clone>(
     tenant_id: Uuid,
     form: TokenRequest,

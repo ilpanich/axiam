@@ -20,6 +20,10 @@ struct ResourceRow {
     resource_type: String,
     parent_id: Option<String>,
     metadata: serde_json::Value,
+    /// X2 provenance. `Option` at the row level too, because rows written
+    /// before schema v33 simply do not carry the field.
+    #[surreal(default)]
+    uma_registered_by: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -32,6 +36,8 @@ struct ResourceRowWithId {
     resource_type: String,
     parent_id: Option<String>,
     metadata: serde_json::Value,
+    #[surreal(default)]
+    uma_registered_by: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -54,6 +60,7 @@ impl ResourceRowWithId {
             resource_type: self.resource_type,
             parent_id,
             metadata: self.metadata,
+            uma_registered_by: self.uma_registered_by,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -75,6 +82,7 @@ fn row_to_resource(row: ResourceRow, id: Uuid) -> Result<Resource, DbError> {
         resource_type: row.resource_type,
         parent_id,
         metadata: row.metadata,
+        uma_registered_by: row.uma_registered_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -93,6 +101,71 @@ impl<C: Connection> SurrealResourceRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
         Self { db }
+    }
+
+    /// Create a resource and stamp the UMA client that registered it (X2).
+    ///
+    /// # Why this is an inherent method and not on `ResourceRepository`
+    ///
+    /// Provenance has exactly one writer — the resource-registration handler —
+    /// and putting it on the trait would offer it to every caller that holds
+    /// any `impl ResourceRepository`, which is the opposite of the point. The
+    /// handler reaches this repository concretely through `AppState`, so the
+    /// narrower home costs nothing and keeps `uma_registered_by` unreachable
+    /// from `create`/`update`.
+    ///
+    /// One statement rather than create-then-mark: a crash between two writes
+    /// would leave a resource that the Protection API registered but that
+    /// claims it did not, and an unmarked resource is indistinguishable from
+    /// one an administrator made by hand.
+    pub async fn create_uma_registered(
+        &self,
+        input: CreateResource,
+        client_id: &str,
+    ) -> AxiamResult<Resource> {
+        let id = new_id();
+        let id_str = id.to_string();
+        let tenant_id_str = input.tenant_id.to_string();
+        let parent_id_str = input.parent_id.map(|p| p.to_string());
+        let metadata = input
+            .metadata
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let base = "CREATE type::record('resource', $id) SET \
+                    tenant_id = $tenant_id, \
+                    name = $name, resource_type = $resource_type, \
+                    parent_id = $parent_id, \
+                    metadata = $metadata, \
+                    uma_registered_by = $uma_registered_by";
+
+        let query = if let Some(ref pid) = parent_id_str {
+            format!("{base}; RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`;")
+        } else {
+            base.to_string()
+        };
+
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("name", input.name))
+            .bind(("resource_type", input.resource_type))
+            .bind(("parent_id", parent_id_str))
+            .bind(("metadata", metadata))
+            .bind(("uma_registered_by", client_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
+
+        row_to_resource(row, id).map_err(Into::into)
     }
 }
 

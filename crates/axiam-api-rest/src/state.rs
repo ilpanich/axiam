@@ -52,6 +52,7 @@ use axiam_auth::{
 };
 use axiam_authz::AuthzConfig;
 use axiam_db::DbHandle;
+use axiam_db::repository::SurrealPermissionTicketRepository;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
@@ -309,6 +310,17 @@ pub struct AppState<C: Connection + Clone> {
     pub token_exchange_service: TokenExchangeServiceT<C>,
     /// B5 — pushed authorization requests (RFC 9126).
     pub par_service: ParServiceT<C>,
+    /// X2 — UMA 2.0 permission tickets.
+    ///
+    /// The repository rather than an assembled `UmaService`, because the
+    /// service also needs the [`crate::authz::AuthzChecker`], which is a
+    /// separate `web::Data` and not part of this state. Handlers assemble the
+    /// service with [`AppState::uma_service`].
+    pub permission_ticket_repo: SurrealPermissionTicketRepository<C>,
+    /// X2 — deployment ceiling on RPT lifetime, in seconds. The effective
+    /// lifetime is the minimum of this, the protocol default (300 s), and the
+    /// subject token's own remaining life.
+    pub rpt_max_lifetime_secs: i64,
     /// B5 — which clients joined which session, for the back-channel logout
     /// fan-out.
     pub session_client_repo: SurrealSessionClientRepository<C>,
@@ -383,6 +395,30 @@ pub struct AppState<C: Connection + Clone> {
 }
 
 impl<C: Connection + Clone> AppState<C> {
+    /// Assemble the X2 UMA service for one request.
+    ///
+    /// Built per call rather than stored, because it needs the
+    /// [`crate::authz::AuthzChecker`] — which arrives as its own `web::Data`
+    /// so that deployments can swap the checker without rebuilding this state.
+    /// The three parts it composes are all cheap handles (two repository
+    /// structs wrapping a cloned connection, and an `Arc`), so this is a
+    /// handful of refcount bumps, not a connection or a query.
+    pub fn uma_service(
+        &self,
+        authz: std::sync::Arc<dyn crate::authz::AuthzChecker>,
+    ) -> axiam_oauth2::uma::UmaService<
+        SurrealPermissionTicketRepository<C>,
+        crate::uma::EngineEvaluator,
+        crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>>,
+    > {
+        axiam_oauth2::uma::UmaService::new(
+            self.permission_ticket_repo.clone(),
+            crate::uma::EngineEvaluator::new(authz),
+            crate::uma::ResourceScopeCatalog::new(self.scope_repo.clone()),
+            self.rpt_max_lifetime_secs,
+        )
+    }
+
     /// Dispatch a domain event to any webhooks subscribed to `event_type` in
     /// `tenant_id` (CQ-B22). Best-effort: if no AMQP publisher is wired
     /// (`webhook_publisher` is `None`, e.g. tests or AMQP disabled) this is a
@@ -583,6 +619,11 @@ impl<C: Connection + Clone> AppState<C> {
             token_service,
             device_authorization_service,
             par_service,
+            permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
+            // X2: the protocol default is the ceiling until an operator lowers
+            // it. Raising it past `DEFAULT_RPT_MAX_LIFETIME_SECS` buys nothing
+            // — the effective lifetime is a minimum over all three bounds.
+            rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
             session_client_repo,
             token_exchange_service,
             device_grant_repo,

@@ -242,6 +242,10 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/ready",
     // OIDC discovery and token endpoints
     "/.well-known/openid-configuration",
+    // UMA 2.0 discovery (X2). Public for the same reason as OIDC discovery:
+    // §2 makes it the document a resource server fetches *before* it holds any
+    // credential, and it carries only endpoint URLs the deployment publishes.
+    "/.well-known/uma2-configuration",
     "/oauth2/jwks",
     "/oauth2/authorize",
     "/oauth2/token",

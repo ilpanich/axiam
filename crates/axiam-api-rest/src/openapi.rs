@@ -165,6 +165,14 @@ use crate::handlers;
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
         handlers::oauth2::userinfo,
+        // UMA 2.0 (X2)
+        handlers::uma::permission_request,
+        handlers::uma::uma2_configuration,
+        handlers::uma::register_resource_set,
+        handlers::uma::read_resource_set,
+        handlers::uma::update_resource_set,
+        handlers::uma::delete_resource_set,
+        handlers::uma::list_resource_sets,
         // Settings
         handlers::settings::get_org_settings,
         handlers::settings::set_org_settings,
@@ -364,6 +372,16 @@ use crate::handlers;
         // distinct response body, both of which an SDK generator needs.
         axiam_oauth2::token_exchange::TokenExchangeRequest,
         axiam_oauth2::token_exchange::TokenExchangeResponse,
+        // UMA 2.0 (X2). The ticket grant's request rides on `TokenRequest` at
+        // `POST /oauth2/token` — the `ticket` / `claim_token` fields — so only
+        // the Protection API's own bodies and the discovery document are
+        // distinct shapes an SDK generator needs.
+        axiam_core::models::uma::RequestedPermission,
+        axiam_core::models::uma::RptPermission,
+        handlers::uma::PermissionRequestBody,
+        handlers::uma::PermissionTicketResponse,
+        handlers::uma::Uma2Configuration,
+        handlers::uma::ResourceSet,
         // OIDC
         axiam_oauth2::oidc::OidcDiscoveryDocument,
         axiam_oauth2::oidc::JwksDocument,

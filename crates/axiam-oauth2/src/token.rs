@@ -11,6 +11,7 @@ use axiam_auth::token::{
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
+use axiam_core::models::uma::RptPermission;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
     AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository,
@@ -81,6 +82,22 @@ pub struct TokenRequest {
     pub actor_token_type: Option<String>,
     pub audience: Option<String>,
     pub resource: Option<String>,
+
+    // --- X2 / UMA 2.0 ticket grant --------------------------------------
+    /// The permission ticket minted by `/uma2/perm`, for
+    /// `grant_type=urn:ietf:params:oauth:grant-type:uma-ticket`.
+    pub ticket: Option<String>,
+    /// The requesting party's identity, as an AXIAM access token.
+    ///
+    /// UMA 2.0 §3.3.1 makes this optional because a client may instead present
+    /// its own RPT for incremental authorization, which v1 does not implement.
+    /// With claims-gathering also deferred, this is the only channel through
+    /// which a requesting party can be named — so the grant requires it and
+    /// says so, rather than resolving to some default subject.
+    pub claim_token: Option<String>,
+    /// Declared format of `claim_token`. Only the AXIAM access-token URN is
+    /// accepted in v1; anything else is refused rather than guessed at.
+    pub claim_token_format: Option<String>,
 }
 
 impl TokenRequest {
@@ -155,6 +172,20 @@ pub struct IntrospectionResponse {
     pub iat: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_type: Option<String>,
+    /// UMA 2.0 `permissions` (X2) — present only when the introspected token
+    /// is an RPT.
+    ///
+    /// Keycloak's authorization services put the same array under the same key
+    /// in an introspection response, so a resource server migrating from
+    /// Keycloak reads an AXIAM RPT without a translation layer.
+    ///
+    /// This is **echoed from the token, not re-evaluated**. Introspection
+    /// answers "what does this token say", and the permissions claim is a
+    /// record of a decision made when the RPT was minted. A resource server
+    /// that needs a live answer must ask the authorization endpoints — which is
+    /// why RPT lifetime is bounded rather than long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<RptPermission>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1194,7 @@ where
                 exp: Some(claims.exp),
                 iat: Some(claims.iat),
                 token_type: Some("Bearer".into()),
+                permissions: claims.permissions.clone(),
             });
         }
 
@@ -1195,6 +1227,10 @@ where
                 exp: Some(stored.expires_at.timestamp()),
                 iat: Some(stored.created_at.timestamp()),
                 token_type: Some("refresh_token".into()),
+                // A refresh token is never an RPT: the uma-ticket grant issues
+                // no refresh token, precisely so that an RPT cannot be renewed
+                // past the ticket that authorised it.
+                permissions: None,
             });
         }
 

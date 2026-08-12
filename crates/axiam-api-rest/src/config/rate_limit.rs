@@ -199,6 +199,10 @@ pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
+/// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
+pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
+/// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
+pub const ENV_UMA_TICKET_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` — B2, never preset.
 pub const ENV_DEVICE_AUTHORIZATION_PER_MIN: &str =
     "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN";
@@ -355,6 +359,24 @@ pub struct RateLimitConfig {
     /// holding one stolen token would hammer looking for a widening path.
     /// A shared bucket would let ordinary token traffic hide that.
     pub token_exchange_per_min: u32,
+    /// Max `/uma2/perm` requests per minute per authenticated resource server
+    /// (default: 120 — X2).
+    ///
+    /// Sized like the other machine endpoints, and kept in its own bucket for
+    /// the same reason as PAR: the endpoint **allocates state** — one stored
+    /// ticket row per call, each with a 60 s TTL — so a flood here costs
+    /// storage rather than just CPU. Sharing the token bucket would let
+    /// ordinary token traffic pay for that, or mask it.
+    pub uma_perm_per_min: u32,
+    /// Max uma-ticket grant redemptions per minute per authenticated client
+    /// (default: 120 — X2).
+    ///
+    /// Separate from `uma_perm_per_min` because minting and redeeming are
+    /// different costs against different pressure: a redemption runs one
+    /// authorization check per requested `(resource, scope)` pair, so a ticket
+    /// naming many pairs is the expensive direction, and it is the one an
+    /// attacker holding a stolen ticket would retry.
+    pub uma_ticket_per_min: u32,
     /// Max `/oauth2/par` requests per minute per authenticated client
     /// (default: 120 — B5).
     ///
@@ -436,6 +458,8 @@ impl Default for RateLimitConfig {
             device_authorization_per_min: 12,
             device_verify_per_min: 10,
             token_exchange_per_min: 120,
+            uma_perm_per_min: 120,
+            uma_ticket_per_min: 120,
             par_per_min: 120,
             end_session_per_min: 30,
             key: RateLimitKeyMode::Ip,
@@ -612,6 +636,11 @@ impl RateLimitConfig {
         assert!(
             self.token_exchange_per_min >= 1,
             "token_exchange_per_min must be >= 1"
+        );
+        assert!(self.uma_perm_per_min >= 1, "uma_perm_per_min must be >= 1");
+        assert!(
+            self.uma_ticket_per_min >= 1,
+            "uma_ticket_per_min must be >= 1"
         );
         assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
         assert!(

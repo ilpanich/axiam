@@ -357,7 +357,21 @@ export function ResourcesPage() {
       key: "name",
       header: "Name",
       render: (row) => (
-        <span className="font-medium text-foreground/90">{row.name}</span>
+        <span className="flex items-center gap-2">
+          <span className="font-medium text-foreground/90">{row.name}</span>
+          {/* X2: read-only provenance. The backend sets `uma_registered_by`
+              only in the UMA resource-registration handler and accepts it on
+              no create/update payload, so this badge reports a fact rather
+              than echoing something an editor could have typed. */}
+          {row.uma_registered_by && (
+            <span
+              title={`Registered through the UMA Protection API by ${row.uma_registered_by}`}
+              className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-violet-500/15 text-violet-300 border border-violet-400/30"
+            >
+              UMA
+            </span>
+          )}
+        </span>
       ),
     },
     {

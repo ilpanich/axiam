@@ -29,6 +29,13 @@ const resources = [
     resource_type: "widget",
     created_at: "2026-01-03T00:00:00Z",
   },
+  {
+    id: "r4",
+    name: "Invoice",
+    resource_type: "document",
+    uma_registered_by: "resource-server-1",
+    created_at: "2026-01-04T00:00:00Z",
+  },
 ];
 
 beforeEach(() => {
@@ -210,5 +217,22 @@ describe("ResourcesPage", () => {
     await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: "List view" }));
     expect(await screen.findByText("No resources defined yet.")).toBeInTheDocument();
+  });
+
+  it("badges only resources registered through the UMA Protection API", async () => {
+    // The badge asserts provenance, so it must appear exactly where the
+    // backend recorded one and nowhere else — a badge on a hand-made resource
+    // would be a claim the server never made.
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: "List view" }));
+
+    const badges = await screen.findAllByText("UMA");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveAttribute(
+      "title",
+      "Registered through the UMA Protection API by resource-server-1",
+    );
   });
 });

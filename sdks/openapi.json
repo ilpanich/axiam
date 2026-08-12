@@ -34,6 +34,28 @@
         }
       }
     },
+    "/.well-known/uma2-configuration": {
+      "get": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`GET /.well-known/uma2-configuration` — UMA 2.0 discovery (§2).",
+        "description": "Advertises only what v1 actually serves. Claims-gathering\n(`claims_interaction_endpoint`) is absent because it is not implemented;\nadvertising an endpoint that 404s is worse than not advertising it, since a\nconforming client would route to it on the strength of this document.",
+        "operationId": "uma2_configuration",
+        "responses": {
+          "200": {
+            "description": "UMA 2.0 configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Uma2Configuration"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit-logs": {
       "get": {
         "tags": [
@@ -5059,6 +5081,13 @@
                             "type": "string",
                             "format": "uuid"
                           },
+                          "uma_registered_by": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The `client_id` that registered this resource through the UMA\nProtection API (X2), or `None` for a resource created any other way.\n\nRead-only from every ordinary path: [`UpdateResource`] cannot set it and\n[`CreateResource`] cannot either, so the only writer is the\nresource-registration handler. That is deliberate — the field backs a\nprovenance badge in the admin UI, and a provenance marker anyone can\nwrite is decoration that reads like evidence."
+                          },
                           "updated_at": {
                             "type": "string",
                             "format": "date-time"
@@ -8120,6 +8149,247 @@
           }
         }
       }
+    },
+    "/uma2/perm": {
+      "post": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`POST /uma2/perm` — mint a permission ticket (UMA 2.0 §3.2).",
+        "description": "# Who may call this\n\nA **Protection API Token**: an ordinary AXIAM access token carrying the\n`uma_protection` scope. Two further conditions, both deliberate:\n\n1. **The token must be an OAuth2 client token** (`sub_kind` =\n   `OAuth2Client`). A ticket is bound to the `client_id` that minted it, and\n   for a client-credentials token `sub` *is* the `client_id`. A user token\n   has no client identity in it, so binding one would mean inventing a\n   value and calling it a binding.\n2. **The scope is checked here, not by a route guard.** The `uma_protection`\n   scope is what makes an access token a PAT; nothing else about the token\n   distinguishes it.",
+        "operationId": "permission_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PermissionRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Ticket minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionTicketResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or undeclared scope"
+          },
+          "401": {
+            "description": "Missing or invalid PAT"
+          },
+          "403": {
+            "description": "Token lacks the uma_protection scope"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/uma2/rreg/resource_set": {
+      "get": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`GET /uma2/rreg/resource_set` — list registered ids (FedAuthz §2.2.5).",
+        "description": "Lists only the resources **this client** registered. FedAuthz says the\nlisting is of the resource sets the PAT's owner registered, and a resource\nserver has no business enumerating the tenant's whole resource tree through\nan endpoint whose only credential is a protection scope.",
+        "operationId": "list_resource_sets",
+        "responses": {
+          "200": {
+            "description": "Registered resource set ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`POST /uma2/rreg/resource_set` — register a resource set (FedAuthz §2.2.1).",
+        "description": "Creates the resource **and** its declared scopes. The scope set is what the\npermission endpoint later validates ticket requests against, so registering\na resource with no scopes produces one that can never appear in a ticket —\nlegal, and worth knowing.",
+        "operationId": "register_resource_set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourceSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Resource set registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceSet"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid PAT"
+          },
+          "403": {
+            "description": "Token lacks the uma_protection scope"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/uma2/rreg/resource_set/{id}": {
+      "get": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`GET /uma2/rreg/resource_set/{id}` — read a resource set (FedAuthz §2.2.2).",
+        "operationId": "read_resource_set",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Resource set id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceSet"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource set"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`PUT /uma2/rreg/resource_set/{id}` — update a resource set (FedAuthz §2.2.3).",
+        "description": "The scope list is **replaced**, not merged: FedAuthz defines the update as\nputting the resource set's new state, and a merge would make it impossible\nto remove a scope. Removing a scope narrows what tickets may be requested,\nso a silent merge would keep an authority the resource server tried to drop.",
+        "operationId": "update_resource_set",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Resource set id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourceSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resource set updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceSet"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource set"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "uma"
+        ],
+        "summary": "`DELETE /uma2/rreg/resource_set/{id}` — deregister (FedAuthz §2.2.4).",
+        "operationId": "delete_resource_set",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Resource set id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Resource set deleted"
+          },
+          "404": {
+            "description": "No such resource set"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -9977,6 +10247,16 @@
             ],
             "format": "int64"
           },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RptPermission"
+            },
+            "description": "UMA 2.0 `permissions` (X2) — present only when the introspected token\nis an RPT.\n\nKeycloak's authorization services put the same array under the same key\nin an introspection response, so a resource server migrating from\nKeycloak reads an AXIAM RPT without a translation layer.\n\nThis is **echoed from the token, not re-evaluated**. Introspection\nanswers \"what does this token say\", and the permissions claim is a\nrecord of a decision made when the RPT was minted. A resource server\nthat needs a live answer must ask the authorization endpoints — which is\nwhy RPT lifetime is bounded rather than long."
+          },
           "scope": {
             "type": [
               "string",
@@ -11092,6 +11372,26 @@
           }
         }
       },
+      "PermissionRequestBody": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/RequestedPermission"
+        },
+        "description": "Body of `POST /uma2/perm` — what the resource server requires.\n\nUMA 2.0 §3.2 allows either a single object or an array; AXIAM accepts the\narray form only, because a resource server that needs one pair can send an\narray of one, and accepting both shapes means two parsers for one meaning."
+      },
+      "PermissionTicketResponse": {
+        "type": "object",
+        "description": "`201 Created` body of the permission endpoint (UMA 2.0 §3.2).",
+        "required": [
+          "ticket"
+        ],
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "description": "The opaque handle. Returned exactly once — only its hash is stored."
+          }
+        }
+      },
       "PgpKey": {
         "type": "object",
         "description": "An OpenPGP key stored by AXIAM.",
@@ -11541,6 +11841,28 @@
           }
         }
       },
+      "RequestedPermission": {
+        "type": "object",
+        "description": "One `(resource, scopes)` pair a resource server requires, as posted to\n`/uma2/perm`.",
+        "required": [
+          "resource_id",
+          "resource_scopes"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The AXIAM resource id. UMA's `_id` **is** the AXIAM resource id — there\nis no parallel resource store to translate through."
+          },
+          "resource_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Scope names, each of which must be declared by the resource. Matched\nexactly: no prefix or wildcard semantics in either direction."
+          }
+        }
+      },
       "ResendVerificationRequest": {
         "type": "object",
         "description": "Body for the resend-verification endpoint.",
@@ -11598,9 +11920,45 @@
             "type": "string",
             "format": "uuid"
           },
+          "uma_registered_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `client_id` that registered this resource through the UMA\nProtection API (X2), or `None` for a resource created any other way.\n\nRead-only from every ordinary path: [`UpdateResource`] cannot set it and\n[`CreateResource`] cannot either, so the only writer is the\nresource-registration handler. That is deliberate — the field backs a\nprovenance badge in the admin UI, and a provenance marker anyone can\nwrite is decoration that reads like evidence."
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "ResourceSet": {
+        "type": "object",
+        "description": "A resource set as UMA describes it, mapped onto an AXIAM resource.\n\n# The mapping, in one place\n\n| UMA | AXIAM |\n|---|---|\n| `_id` | the resource id — **not** a parallel identifier |\n| `name` | `resource.name` |\n| `type` | `resource.resource_type` |\n| `resource_scopes` | the `Scope` rows on that resource |\n\nThere is no second resource store. A resource registered here is an\nordinary AXIAM resource that the admin UI lists, that role assignments\ncascade through, and that the authorization engine already understands —\nwhich is the entire reason UMA `_id` is the AXIAM id rather than a\ntranslation key.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Present on responses, absent on registration — the server assigns it."
+          },
+          "name": {
+            "type": "string"
+          },
+          "resource_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "string"
           }
         }
       },
@@ -11727,6 +12085,32 @@
         "properties": {
           "client_secret": {
             "type": "string"
+          }
+        }
+      },
+      "RptPermission": {
+        "type": "object",
+        "description": "One entry of an RPT's `permissions` claim.\n\nField names are Keycloak's (`rsid`/`rsname` aliases aside) so that a\nresource server migrating from Keycloak can read an AXIAM RPT without a\ntranslation layer — the compatibility the §X2 introspection test pins.",
+        "required": [
+          "resource_id",
+          "resource_scopes",
+          "exp"
+        ],
+        "properties": {
+          "exp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Absolute expiry, seconds since the epoch. Carried per-permission\nbecause UMA allows an RPT to accumulate permissions with different\nlifetimes; AXIAM issues them uniformly in v1 but the shape must not\nforeclose that."
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resource_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -12620,6 +13004,20 @@
               "null"
             ]
           },
+          "claim_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The requesting party's identity, as an AXIAM access token.\n\nUMA 2.0 §3.3.1 makes this optional because a client may instead present\nits own RPT for incremental authorization, which v1 does not implement.\nWith claims-gathering also deferred, this is the only channel through\nwhich a requesting party can be named — so the grant requires it and\nsays so, rather than resolving to some default subject."
+          },
+          "claim_token_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Declared format of `claim_token`. Only the AXIAM access-token URN is\naccepted in v1; anything else is refused rather than guessed at."
+          },
           "client_id": {
             "type": [
               "string",
@@ -12695,6 +13093,13 @@
               "string",
               "null"
             ]
+          },
+          "ticket": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The permission ticket minted by `/uma2/perm`, for\n`grant_type=urn:ietf:params:oauth:grant-type:uma-ticket`."
           }
         }
       },
@@ -12735,6 +13140,58 @@
           },
           "token_type": {
             "type": "string"
+          }
+        }
+      },
+      "Uma2Configuration": {
+        "type": "object",
+        "description": "The UMA 2.0 discovery document (§2).",
+        "required": [
+          "issuer",
+          "token_endpoint",
+          "introspection_endpoint",
+          "permission_endpoint",
+          "resource_registration_endpoint",
+          "jwks_uri",
+          "grant_types_supported",
+          "uma_profiles_supported",
+          "permission_ticket_lifetime"
+        ],
+        "properties": {
+          "grant_types_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "introspection_endpoint": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "jwks_uri": {
+            "type": "string"
+          },
+          "permission_endpoint": {
+            "type": "string"
+          },
+          "permission_ticket_lifetime": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Advertised so a resource server can size its retry window against the\nticket TTL instead of discovering it by having a ticket expire."
+          },
+          "resource_registration_endpoint": {
+            "type": "string"
+          },
+          "token_endpoint": {
+            "type": "string"
+          },
+          "uma_profiles_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

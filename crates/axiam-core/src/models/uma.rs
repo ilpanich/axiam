@@ -45,6 +45,15 @@ pub const UMA_PROTECTION_SCOPE: &str = "uma_protection";
 /// The grant type that exchanges a ticket for an RPT (UMA 2.0 §3.3.1).
 pub const UMA_TICKET_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:uma-ticket";
 
+/// The only `claim_token_format` v1 accepts: an ordinary AXIAM access token.
+///
+/// UMA 2.0 leaves the format open so a deployment can accept foreign claim
+/// tokens. Accepting one would mean trusting an external issuer's statement of
+/// who the requesting party is, and the RPT minted from it authorises real
+/// access — so v1 accepts exactly one format, and an unrecognised value is
+/// refused rather than treated as this one.
+pub const UMA_CLAIM_TOKEN_FORMAT: &str = "urn:ietf:params:oauth:token-type:access_token";
+
 // ---------------------------------------------------------------------------
 // Requested and granted permissions
 // ---------------------------------------------------------------------------

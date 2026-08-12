@@ -65,6 +65,17 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // authorised here is the caller acting on their own behalf.
     "/api/v1/device/verify",
     "/api/v1/device/decide",
+    // UMA 2.0 Protection API (X2). Authenticated by the `ProtectionApiToken`
+    // extractor — a client-credentials token carrying `uma_protection` — and
+    // deliberately not permission-gated. The scope IS the gate: it is what an
+    // operator grants to make a client a resource server, and a second named
+    // permission on top would be a different answer to the same question.
+    "/uma2/perm",
+    // UMA 2.0 resource registration (FedAuthz §2.2), same PAT gate as
+    // `/uma2/perm`. Not in ROUTE_PERMISSION_MAP for the same reason: the
+    // `uma_protection` scope is the gate.
+    "/uma2/rreg/resource_set",
+    "/uma2/rreg/resource_set/{id}",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

@@ -102,6 +102,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
             scope: None,
             sub_kind: SubjectKind::User,
             act: None,
+            permissions: None,
         }),
     }
 }

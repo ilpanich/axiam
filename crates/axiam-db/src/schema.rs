@@ -207,6 +207,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "uma_resource_registration_provenance",
         sql: SCHEMA_V33,
     },
+    Migration {
+        version: 34,
+        name: "resource_child_epoch_delete_race",
+        sql: SCHEMA_V34,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1715,6 +1720,58 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE optio
 // rather than backfilling a claim about resources nobody registered.
 const SCHEMA_V33: &str = "\
 DEFINE FIELD IF NOT EXISTS uma_registered_by ON TABLE resource TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v34 — a key for resource-delete and child-create to collide on (#308)
+// -----------------------------------------------------------------------
+//
+// `resource.delete` refuses to delete a resource that has children, and folds
+// the check into its own transaction:
+//
+//     BEGIN;
+//     LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:<id>);
+//     IF array::len($children) > 0 { THROW ... };
+//     DELETE ...; DELETE type::record('resource', $id) ...;
+//     COMMIT;
+//
+// D-13/CQ-B46 introduced that shape to close a TOCTOU window and described it
+// as making the read-then-decide-then-delete atomic. It does make the
+// statements atomic. That is not the property the guard needs, and #308 is the
+// proof: on `surrealkv` a concurrent child-create beats it on trial 0 of every
+// run, leaving a deleted parent with a live `child_of` edge pointing at it.
+//
+// The guard is a RANGE READ — every edge whose `out` is this parent — and the
+// racing create INSERTS INTO THAT RANGE. Excluding that is the definition of a
+// phantom, and preventing phantoms takes serialisable isolation. These engines
+// give snapshot isolation: they detect write-write conflicts on the same key
+// (measured doing exactly that, 21613 aborts in 40000 contended attempts — see
+// `tools/surreal-race-probe`), and they let this through because the two
+// transactions have no key in common. The delete writes the parent row and the
+// edges it could see; the create writes a NEW edge the delete never saw.
+//
+// No query can fix that, because the guard cannot read a row that does not
+// exist yet. What fixes it is giving the two transactions a shared key, so the
+// conflict the engine already detects reliably is the one that decides the
+// race. That is what this field is for:
+//
+//   * `resource.delete` already writes the parent row — it deletes it.
+//   * Every path that adds a child edge now also writes the parent row, by
+//     bumping `child_epoch`, inside the same transaction as the RELATE.
+//
+// One of the two must now lose. If the create commits first, the delete's write
+// to the parent conflicts and it aborts, leaving parent and child intact. If
+// the delete commits first, the create's bump matches no row, its guard throws,
+// and no edge is written. Neither order produces an orphan.
+//
+// The counter's VALUE is not used for anything and deliberately so — reading it
+// would be a second way to get this wrong. Its only job is to be a write to the
+// parent's key. It is `option<int>` rather than `int DEFAULT 0` so that rows
+// predating this migration need no backfill: `child_epoch ?? 0` treats absent
+// and zero alike, and nothing distinguishes "never had a child" from "has had
+// exactly zero".
+const SCHEMA_V34: &str = "\
+DEFINE FIELD IF NOT EXISTS child_epoch ON TABLE resource TYPE option<int>;
 ";
 
 // -----------------------------------------------------------------------

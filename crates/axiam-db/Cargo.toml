@@ -29,5 +29,15 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 axiam-test-support = { workspace = true }
-surrealdb = { workspace = true, features = ["kv-mem"] }
+# `kv-surrealkv` alongside `kv-mem` is not redundancy. `kv-mem` is fast and is
+# right for the ~40 test binaries that assert behaviour rather than isolation,
+# but it does NOT reliably serialise concurrent read-modify-writes: measured on
+# SurrealDB 3.2.3 with `tools/surreal-race-probe`, it admits two winners to a
+# guarded single-use `UPDATE` in ~1% of contended rounds, where `surrealkv`
+# (what `docker-compose.prod.yml` and the k8s StatefulSet run) admits none in
+# 40 000 attempts. Tests that assert "exactly one winner" therefore open a
+# surrealkv datastore via `tests/common`, so they are measuring the engine we
+# actually ship.
+surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
+tempfile = "3"
 tokio-test = { workspace = true }

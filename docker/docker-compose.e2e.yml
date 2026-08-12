@@ -1,11 +1,36 @@
 services:
-  # E2E-only: SurrealDB in memory mode — no persistence, no volume chown needed.
+  # One-shot init: chown /data for the non-root SurrealDB user (65532), exactly
+  # as `docker-compose.dev.yml` does. Named volumes are root-owned by default.
+  surrealdb-init:
+    image: busybox
+    container_name: axiam-e2e-surrealdb-init
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - e2e-surrealdb-data:/data
+    restart: "no"
+
+  # E2E runs the SAME storage engine as production, and this is load-bearing
+  # rather than tidiness. This service said `memory` until 2026-08. Measured on
+  # SurrealDB 3.2.3 with `tools/surreal-race-probe`, `kv-mem` lets TWO callers
+  # win a guarded single-use `UPDATE` in ~1% of contended rounds, while
+  # `surrealkv` and `rocksdb` let none — so an E2E suite on `memory` exercises
+  # weaker single-use guarantees than anything it is meant to give confidence
+  # about, and would go green on a race that production does not have (or hide
+  # one it does).
+  #
+  # The volume costs an init container and is discarded with the stack; that is
+  # the price of testing the engine we ship.
   surrealdb:
     image: surrealdb/surrealdb:v3
     container_name: axiam-e2e-surrealdb
-    command: start --user root --pass root --log info memory
+    depends_on:
+      surrealdb-init:
+        condition: service_completed_successfully
+    command: start --user root --pass root --log info surrealkv:/data/axiam.db
     ports:
       - "8000:8000"
+    volumes:
+      - e2e-surrealdb-data:/data
     healthcheck:
       test: ["CMD", "/surreal", "isready"]
       interval: 10s
@@ -103,3 +128,9 @@ services:
       retries: 10
       start_period: 30s
     restart: "no"
+
+volumes:
+  # Discarded with the stack (`docker compose down -v`); it exists only so the
+  # surrealkv engine has somewhere to write. See the surrealdb service comment
+  # for why E2E does not run `memory`.
+  e2e-surrealdb-data:

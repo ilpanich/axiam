@@ -168,18 +168,21 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
         //
         // The `consumed = false` guard is what makes a later, non-concurrent
         // authorize request match nothing. It does not decide a *concurrent*
-        // one, and neither did the `BEGIN`/`COMMIT` this used to rely on:
-        // SurrealDB 3.2.3 does not reliably detect the write-write conflict —
-        // measured on the permission-ticket consume, which is this same shape,
-        // two transactions both commit with zero errors and both return the
-        // pre-transition row. RFC 9126 §2.2 makes `request_uri` one-time-use
-        // precisely because a replayable one is a replayable authorization
-        // request.
+        // one. The `BEGIN`/`COMMIT` this used to rely on was measured not to
+        // either — but on `kv-mem`, the engine this crate's tests opened and
+        // one AXIAM does not deploy. Re-measured in 2026-08
+        // (`tools/surreal-race-probe`), `surrealkv` and `rocksdb` both admit
+        // exactly one winner in every contended round; `kv-mem` does not. The
+        // addendum in `SCHEMA_V31` has the table.
         //
-        // So the race is decided here: each attempt stamps a nonce, the last
-        // write persists, and the third statement reads back to see whose it
-        // was. See `SCHEMA_V31` for the measurements and for why this narrows
-        // the window rather than closing it.
+        // RFC 9126 §2.2 makes `request_uri` one-time-use precisely because a
+        // replayable one is a replayable authorization request, which is why
+        // the nonce stays even now that the engine looks sufficient on its own.
+        //
+        // So the race is decided here as well: each attempt stamps a nonce, the
+        // last write persists, and the third statement reads back to see whose
+        // it was. See `SCHEMA_V31` for the measurements and for what the engine
+        // rather than this code contributes.
         //
         // Deliberately **not** in a transaction: inside one the read-back would
         // see this caller's own write under snapshot isolation and every racer

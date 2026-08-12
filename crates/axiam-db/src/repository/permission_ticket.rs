@@ -27,12 +27,28 @@
 //! rather than an event the engine has to report. See `SCHEMA_V31` for why the
 //! read-back must stay outside a transaction.
 //!
-//! This is **not** a guarantee of single-use. Measured at 1/640 in this path,
-//! which is not distinguishable from the 1/320 it replaces; it is preferred for
-//! having a nameable residual window rather than a demonstrably lower rate.
-//! `SCHEMA_V31` carries the numbers and what closing the window would take.
+//! # What the engine turned out to contribute (2026-08)
 //!
-//! `concurrent_redemptions_yield_exactly_one_winner` is the regression test.
+//! Everything above was measured on `kv-mem` — the engine this crate's tests
+//! open, and one AXIAM never deploys. Re-measured with
+//! `tools/surreal-race-probe` on the engines that are deployed, the v30 shape
+//! this module abandoned admits ZERO double redemptions: 0 in 5000 rounds on
+//! `surrealkv` (what compose and the k8s StatefulSet run) and 0 in 1200 on
+//! `rocksdb`, against 23 in 1200 on `kv-mem`. The conflict IS detected on the
+//! engines that matter; `kv-mem` detects it 54% of the time and then misses,
+//! silently, which is the behaviour every measurement above was reading.
+//!
+//! The nonce stays — see the addendum in `SCHEMA_V31` for why keeping it is the
+//! better trade — but its role is smaller than this module used to claim. It is
+//! defence in depth behind an engine that serialises, not the thing doing the
+//! serialising. Read "this is not a guarantee of single-use" as: 0 in 40 000 is
+//! strong evidence rather than proof, and nothing here excuses running `memory`
+//! in a deployment, where the nonce leaks too (6 rounds in 1200).
+//!
+//! `concurrent_redemptions_yield_exactly_one_winner` is the regression test. It
+//! runs on `surrealkv` and over many rounds as of 2026-08; before that it ran
+//! one unsynchronised round against `kv-mem`, which is why the residual it was
+//! meant to guard went unobserved in CI for as long as it did.
 //!
 //! # Why `client_id` is in that clause and not checked afterwards
 //!

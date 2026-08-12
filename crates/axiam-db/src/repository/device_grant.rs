@@ -249,20 +249,24 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         // `status = 'approved'` guard is what makes a later, non-concurrent
         // poll match nothing.
         //
-        // The guard does not decide a *concurrent* race, and neither does the
-        // `BEGIN`/`COMMIT` this used to rely on. SurrealDB 3.2.3 does not
-        // reliably detect the write-write conflict — measured on the
-        // permission-ticket consume, which is this same shape, two transactions
-        // both commit with zero errors and both return the pre-transition row.
-        // Here that is one user approval minting two token sets, and a device
-        // polling on a short interval and retrying is the normal shape of
-        // RFC 8628 §3.4, not an exotic case.
+        // The guard does not decide a *concurrent* race. The `BEGIN`/`COMMIT`
+        // this used to rely on was measured not to either — but on `kv-mem`,
+        // which is what this crate's tests opened and not an engine AXIAM
+        // deploys. Re-measured in 2026-08 (`tools/surreal-race-probe`), the
+        // deployed engines DO detect that conflict: 0 double redemptions in
+        // 5000 rounds on `surrealkv` and 1200 on `rocksdb`, against 23 in 1200
+        // on `kv-mem`. See the addendum in `SCHEMA_V31`.
         //
-        // So the race is decided here instead: each attempt stamps a nonce, the
+        // What is at stake if it is ever wrong: one user approval minting two
+        // token sets, with a device polling on a short interval and retrying —
+        // the normal shape of RFC 8628 §3.4, not an exotic case. That is why
+        // the nonce below stays even though the engine now looks sufficient.
+        //
+        // So the race is decided here as well: each attempt stamps a nonce, the
         // last write persists, and the third statement reads back to see whose
         // it was. Exactly one nonce can be the stored one. See `SCHEMA_V31` for
         // the measurements, including two repairs that proved worse than the
-        // defect, and for why this is a narrower window rather than a guarantee.
+        // defect, and for what the engine rather than this code contributes.
         //
         // Deliberately **not** in a transaction: inside one the read-back would
         // see this caller's own write under snapshot isolation and every racer

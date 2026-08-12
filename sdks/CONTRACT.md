@@ -155,9 +155,8 @@ Sub-types added by later sections of this contract:
 | HTTP Status | Error Type    | Notes                                         |
 |-------------|---------------|-----------------------------------------------|
 | 400         | `NetworkError`| Malformed request (SDK programming error)     |
-| 400 from `/oauth2/*` with an `OAuth2ErrorResponse` body | `OAuthProtocolError` | RFC 6749 protocol error (e.g. `invalid_grant` from `POST /oauth2/token`). MUST NOT collapse into the generic `400` → `NetworkError` row above ([§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 3) |
+| **Any status** from `/oauth2/*` with an `OAuth2ErrorResponse` body | `OAuthProtocolError` | RFC 6749 protocol error. Dispatch on the `error` field, NOT on the status ([§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 3). Rewritten in contract 1.12 — see the note below |
 | 401         | `AuthError`   | Unauthenticated; triggers refresh if tokens present |
-| 401 from `/oauth2/*` with an `OAuth2ErrorResponse` body | `OAuthProtocolError` | Client authentication failed at `POST /oauth2/introspect` / `POST /oauth2/revoke`. MUST NOT trigger the §9 single-flight refresh guard |
 | 403         | `AuthzError`  | Authenticated but not authorized              |
 | 408, 429    | `NetworkError`| Timeout / rate-limited                        |
 | 409         | `AuthzError`  | Conflict (resource-level access denied)       |
@@ -166,6 +165,32 @@ Sub-types added by later sections of this contract:
 
 Where two rows match the same response, the more specific (endpoint- and body-qualified) row
 wins.
+
+**The `/oauth2/*` row was two rows until contract 1.12, gated to `400` and `401`.** That
+enumeration was a description of which statuses the endpoints happened to use, written before
+[§20](#§20-uma-20--protection-api-and-ticket-grant-x2) existed. §20.4's `access_denied` answers
+`403`, so a status-gated mapper dropped it through to the `AuthzError` row and lost the one
+field a caller can act on — and **nine of the eleven SDKs grew a near-identical private mapper
+for that single grant** rather than widen a shared one that other endpoints depend on. (PHP
+needed none: its mapper already dispatched on the `error` field, which is what §20.4 asks for in
+the abstract and what this row now says outright.)
+
+Three things this rewrite does **not** do, each load-bearing:
+
+1. **It is scoped to `/oauth2/*` paths only.** An ordinary REST `403` — including from
+   `/api/v1/authz/check` and from the §20 Protection API at `/uma2/perm` and `/uma2/rreg/*`,
+   whose refusals §20.4 maps by status precisely because they are not OAuth2 protocol errors —
+   still maps to `AuthzError`. An SDK MUST keep a test for that; the assertion to make is that
+   an ordinary REST `403` maps to `AuthzError`, not the older and now-false "the OAuth2 rows
+   apply to no status but 400 and 401".
+2. **It requires a well-formed body.** A `403` from `/oauth2/*` whose body is not an
+   `OAuth2ErrorResponse` — a proxy's HTML error page, an empty body — falls back to the status
+   mapping. "Has an `error` member that is a non-empty string" is the test; a body that merely
+   parses as JSON is not enough.
+3. **It does not change what happens next.** A `401` carrying an `OAuth2ErrorResponse` still
+   MUST NOT enter the §9 single-flight refresh guard ([§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks)
+   rule 3): client-authentication failure is not a session expiry, and retrying cannot fix a
+   wrong client secret.
 
 ### gRPC Status → Error Type Mapping
 
@@ -1324,11 +1349,25 @@ NOT split the nine across two hosts.
    as plain strings. See [§12.5](#§125-sensitivet-applicability) for the per-language wrapper.
 3. **Error taxonomy (§2).** An `OAuth2ErrorResponse` body MUST surface as `OAuthProtocolError`
    — a language-idiomatic sub-type of `AuthError` — carrying `error` and `error_description` as
-   publicly accessible fields, with `message` set to `"<error>: <error_description>"`. A `400`
-   from `POST /oauth2/token` MUST NOT surface as the generic `NetworkError` the §2 `400` row
-   otherwise prescribes, and a `401` from `POST /oauth2/introspect` or `POST /oauth2/revoke`
-   MUST NOT enter the §9 single-flight refresh guard (client-credential failure is not a
-   session expiry, and retrying cannot help). ID-token validation failures MUST raise
+   publicly accessible fields, with `message` set to `"<error>: <error_description>"`.
+
+   **Dispatch on the `error` field, at any status** (rewritten in contract 1.12; it enumerated
+   `400` and `401` before). An SDK's `/oauth2/*` mapper MUST check for a well-formed
+   `OAuth2ErrorResponse` body **first**, and fall back to the §2 status mapping only when there
+   is none. Concretely: a `400` from `POST /oauth2/token` MUST NOT surface as the generic
+   `NetworkError` the §2 `400` row otherwise prescribes; a `403` from the §20 ticket grant MUST
+   NOT surface as `AuthzError` and lose its `access_denied` code; and a `401` from
+   `POST /oauth2/introspect` or `POST /oauth2/revoke` MUST NOT enter the §9 single-flight
+   refresh guard (client-credential failure is not a session expiry, and retrying cannot help).
+
+   **One mapper, not one per grant.** The status enumeration this replaces forced nine of the
+   eleven SDKs to grow a private mapper for the §20 ticket grant alone, because widening the
+   shared one would have changed every other endpoint's behaviour. Dispatching on the field
+   removes that: the shared mapper is correct for every `/oauth2/*` grant, present and future,
+   and a section that introduces a new status needs no SDK change at all. The scoping that makes
+   this safe is in the §2 note — `/oauth2/*` only, well-formed body only, §9 behaviour unchanged.
+
+   ID-token validation failures MUST raise
    `AuthError` (or an `AuthError` sub-type) carrying a stable machine-readable reason code —
    `invalid_alg`, `unknown_kid`, `invalid_signature`, `invalid_issuer`, `invalid_audience`,
    `token_expired`, or `nonce_mismatch` — matching the [§12.4](#§124-id-token-validation-checklist-normative-for-oidc_exchange)
@@ -2463,6 +2502,21 @@ conforming resource server tells "you may not have this" from "your request was 
 An SDK MUST map on the `error` field rather than the status, so this stays correct if either
 moves.
 
+**No grant-local mapper is needed for this, as of contract 1.12.** The shared `/oauth2/*`
+mapper §2 and [§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 3 now
+describe already dispatches on the `error` field at any status, which is exactly what the
+paragraph above asks for — so the ticket grant uses the same mapper as every other
+token-endpoint grant. It did not, between contracts 1.10 and 1.11: §12.3 rule 3 enumerated
+`400` and `401`, and nine of the eleven SDKs answered by writing a private mapper for this one
+grant rather than widening a shared one every other endpoint depended on. Those private mappers
+are now removable, and an SDK that still carries one is carrying dead weight rather than a
+divergence.
+
+Note the boundary this does not cross. The `/uma2/perm` and `/uma2/rreg/*` rows above are mapped
+**by status**, and stay that way: those are Protection API refusals rather than OAuth2 protocol
+errors, they carry no `OAuth2ErrorResponse` body, and a `403` there means "this token is not a
+PAT" — an authorization failure, which is what `AuthzError` is for.
+
 **The four ticket refusals are one error, deliberately.** Unknown, expired, consumed and
 wrong-client all answer `invalid_grant` with one message. An SDK MUST NOT attempt to
 re-derive which one occurred or report a guess: the server collapses them because telling
@@ -2847,6 +2901,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.11 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor*
+*Contract version: 1.12 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

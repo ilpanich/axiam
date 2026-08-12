@@ -2295,6 +2295,193 @@ no hook installed behaves identically to one before this section existed.
 
 ---
 
+## §20 UMA 2.0 — Protection API and Ticket Grant (X2)
+
+**Requirement level: SHOULD (v1.0).** For the **resource-server** side of a
+User-Managed Access deployment: a service that guards resources on someone else's behalf
+registers them, asks the authorization server what a caller would need, and exchanges the
+resulting ticket for a Requesting Party Token.
+
+Server documentation: [`docs/api/uma.md`](../docs/api/uma.md). Wire reference:
+`/.well-known/uma2-configuration`.
+
+**The rule an SDK must not paper over: a permission ticket is single-use and is not
+retryable.** Every other refusal in this contract can be re-sent after the caller fixes
+something. This one cannot — the ticket is spent whether or not the exchange succeeded, and
+re-sending it is not a retry but a second, different request. See §20.2 rule 6.
+
+### §20.1 Canonical operations and endpoint map
+
+| Canonical operation | Wire call | Request | Success response |
+|---|---|---|---|
+| `uma_register_resource` | `POST /uma2/rreg/resource_set` | `application/json` / `ResourceSet` | `201` `ResourceSet` (carries `_id`) |
+| `uma_read_resource` | `GET /uma2/rreg/resource_set/{id}` | — | `200` `ResourceSet` |
+| `uma_update_resource` | `PUT /uma2/rreg/resource_set/{id}` | `application/json` / `ResourceSet` | `200` `ResourceSet` |
+| `uma_delete_resource` | `DELETE /uma2/rreg/resource_set/{id}` | — | `204` |
+| `uma_list_resources` | `GET /uma2/rreg/resource_set` | — | `200` array of ids |
+| `uma_request_ticket` | `POST /uma2/perm` | `application/json` / array of `RequestedPermission` | `201` `{ "ticket": "…" }` |
+| `uma_exchange_ticket` | `POST /oauth2/token?tenant_id=<uuid>` with `grant_type=urn:ietf:params:oauth:grant-type:uma-ticket` | `application/x-www-form-urlencoded` | `200` `TokenResponse` (the RPT) |
+
+Signatures (canonical order; each language's §1 casing applies):
+
+```
+uma_register_resource(name, *, type=None, resource_scopes=[])
+uma_request_ticket(permissions)            # [(resource_id, [scope, …]), …]
+uma_exchange_ticket(ticket, claim_token)
+```
+
+**The Protection API is bearer-authenticated; the ticket grant is client-authenticated.**
+The five `rreg` operations and `uma_request_ticket` carry a **PAT** — an ordinary access
+token obtained through `login_client_credentials` with the `uma_protection` scope — in the
+`Authorization` header. `uma_exchange_ticket` instead authenticates the client at the token
+endpoint (`client_secret_post`, per §12.1 rule 3), because it is a token-endpoint grant.
+§12.1's `tenant_id`-as-query rule and its slug-only-client consequence apply to
+`uma_exchange_ticket` unchanged.
+
+### §20.2 Semantics (normative)
+
+1. **A PAT is a client-credentials token, not a user token.** The server requires the
+   subject to be an OAuth2 client, because a minted ticket is bound to the `client_id` that
+   minted it. An SDK MUST NOT offer a user access token as a PAT, and MUST NOT silently fall
+   back to the client's ordinary session token if that session is a user session.
+
+2. **`claim_token` is required, though UMA 2.0 §3.3.1 marks it optional.** AXIAM v1
+   implements neither incremental authorization nor claims-gathering, so it is the only
+   channel that names a requesting party. An SDK MUST make it a required parameter rather
+   than defaulting it — in particular MUST NOT default it to the resource server's own PAT,
+   which would mint an RPT for the resource server instead of for the user.
+
+3. **Partial grants are refused whole. An SDK MUST NOT auto-narrow and re-ask.** If a ticket
+   names three pairs and the requesting party may have two, the answer is `access_denied` for
+   the whole ticket. Re-requesting a smaller ticket is a decision for the calling application,
+   not for the SDK: the SDK cannot know whether two-of-three is useful or useless to it, and a
+   library that quietly obtains a lesser authority than was asked for has answered a question
+   nobody posed. Same shape as §15.2 rule 3.
+
+4. **The RPT is not the client's session.** As in §15.2 rule 5, `uma_exchange_ticket` MUST
+   NOT adopt the returned token as the SDK client's own credentials — not behind a flag. It
+   is the requesting party's token, to be handed onward or checked; adopting it would
+   re-privilege every later call the resource server makes as that user.
+
+5. **No refresh token comes back, ever.** The grant deliberately issues none, so an RPT
+   cannot outlive the ticket that authorised it. An SDK MUST NOT synthesise one, MUST NOT
+   feed the result into the §9 single-flight refresh guard, and MUST document that re-running
+   the grant is how you get a fresh RPT.
+
+6. **A permission ticket MUST NOT be retried.** This is an exception to §16, and it is the
+   one rule in this section whose violation is a security bug rather than a usability one.
+   The ticket is consumed *before* the request is evaluated, so a failed exchange has still
+   spent it. An SDK MUST exclude `uma_exchange_ticket` from any automatic retry — including
+   §16's idempotent-retry path, including on timeout, and including on `5xx` — and MUST
+   surface the failure so the caller can request a **new** ticket.
+
+   Two reasons, and the second matters more than the first. A retried ticket answers
+   `invalid_grant`, so the retry is useless. And single-use is enforced by a mechanism with a
+   **measured residual** (ilpanich/axiam#302): under concurrency the server can admit a
+   second redemption at roughly 1 in 640. An SDK that retries is deliberately generating the
+   concurrent redemption that residual describes. Do not retry.
+
+7. **The `permissions` claim is a record, not a capability.** An RPT carries the pairs the
+   engine allowed **at mint time**. An SDK that exposes them MUST NOT present them as a live
+   authorization answer, and MUST NOT cache them beyond the RPT's own `exp`: a grant revoked
+   after issuance does not empty a live RPT, which is exactly why its lifetime is bounded to
+   the minimum of the subject token's remaining life, the server's ceiling, and 300 s.
+
+8. **Registration replaces the scope list; it does not merge.** `uma_update_resource` sends
+   the resource set's new state. An SDK MUST NOT read-modify-write the existing scopes into
+   the payload as a convenience, because that would make removing a scope impossible through
+   the SDK.
+
+### §20.3 The `WWW-Authenticate: UMA` challenge
+
+A resource server that refuses a request SHOULD tell the caller how to obtain authority, per
+UMA 2.0 §3.2. Two halves, and an SDK may ship either:
+
+- **Emit (resource-server side).** A helper that, given the required `(resource, scopes)`,
+  calls `uma_request_ticket` and formats the header:
+  `WWW-Authenticate: UMA realm="<realm>", as_uri="<issuer>", ticket="<ticket>"`.
+- **Consume (client side).** A helper that parses that header into its three fields.
+
+**The consuming helper MUST NOT automatically exchange the ticket it parsed.** Parsing a
+challenge and acting on it are separate decisions: the `as_uri` names an authorization
+server the client has not necessarily chosen to trust, and auto-exchanging would send the
+user's `claim_token` to whatever host the 403 asked it to. Return the parsed challenge and
+let the caller decide.
+
+### §20.4 Error mapping
+
+Extends §2. As in §14.2 rule 5, dispatch on the `error` field of `OAuth2ErrorResponse`
+before falling back to the status-code mapping.
+
+| Where | `error` / status | Meaning |
+|---|---|---|
+| `/uma2/perm`, `/uma2/rreg/*` | `401` | PAT missing, malformed, or expired |
+| `/uma2/perm`, `/uma2/rreg/*` | `403` | the token is not a PAT — wrong subject kind, or missing the `uma_protection` scope |
+| `/uma2/perm` | `400` | a requested scope the resource has not declared |
+| ticket grant | `invalid_request` | `ticket` or `claim_token` absent, or an unsupported `claim_token_format` |
+| ticket grant | `invalid_grant` | ticket unknown, expired, already used, or presented by a client other than the one that minted it; or `claim_token` invalid, expired, or from another tenant |
+| ticket grant | `access_denied` (**HTTP 403**) | the requesting party is not authorized for every requested pair |
+| ticket grant | `invalid_client` | client authentication failed |
+
+**`access_denied` answers 403, not 400.** UMA 2.0 §3.3.6 specifies it, and it is how a
+conforming resource server tells "you may not have this" from "your request was malformed".
+An SDK MUST map on the `error` field rather than the status, so this stays correct if either
+moves.
+
+**The four ticket refusals are one error, deliberately.** Unknown, expired, consumed and
+wrong-client all answer `invalid_grant` with one message. An SDK MUST NOT attempt to
+re-derive which one occurred or report a guess: the server collapses them because telling
+them apart lets a caller probe for live ticket handles, and reconstructing the distinction
+client-side hands back exactly what the server withheld. Same discipline as §15.3's
+cross-tenant note.
+
+### §20.5 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `uma_register_resource` | `uma_register_resource` | `umaRegisterResource` | `uma_register_resource` | `umaRegisterResource` | `umaRegisterResource` | `UmaRegisterResourceAsync` | `umaRegisterResource` | `UmaRegisterResource` | `umaRegisterResource` | `axiam_uma_register_resource` | `uma_register_resource` |
+| `uma_read_resource` | `uma_read_resource` | `umaReadResource` | `uma_read_resource` | `umaReadResource` | `umaReadResource` | `UmaReadResourceAsync` | `umaReadResource` | `UmaReadResource` | `umaReadResource` | `axiam_uma_read_resource` | `uma_read_resource` |
+| `uma_update_resource` | `uma_update_resource` | `umaUpdateResource` | `uma_update_resource` | `umaUpdateResource` | `umaUpdateResource` | `UmaUpdateResourceAsync` | `umaUpdateResource` | `UmaUpdateResource` | `umaUpdateResource` | `axiam_uma_update_resource` | `uma_update_resource` |
+| `uma_delete_resource` | `uma_delete_resource` | `umaDeleteResource` | `uma_delete_resource` | `umaDeleteResource` | `umaDeleteResource` | `UmaDeleteResourceAsync` | `umaDeleteResource` | `UmaDeleteResource` | `umaDeleteResource` | `axiam_uma_delete_resource` | `uma_delete_resource` |
+| `uma_list_resources` | `uma_list_resources` | `umaListResources` | `uma_list_resources` | `umaListResources` | `umaListResources` | `UmaListResourcesAsync` | `umaListResources` | `UmaListResources` | `umaListResources` | `axiam_uma_list_resources` | `uma_list_resources` |
+| `uma_request_ticket` | `uma_request_ticket` | `umaRequestTicket` | `uma_request_ticket` | `umaRequestTicket` | `umaRequestTicket` | `UmaRequestTicketAsync` | `umaRequestTicket` | `UmaRequestTicket` | `umaRequestTicket` | `axiam_uma_request_ticket` | `uma_request_ticket` |
+| `uma_exchange_ticket` | `uma_exchange_ticket` | `umaExchangeTicket` | `uma_exchange_ticket` | `umaExchangeTicket` | `umaExchangeTicket` | `UmaExchangeTicketAsync` | `umaExchangeTicket` | `UmaExchangeTicket` | `umaExchangeTicket` | `axiam_uma_exchange_ticket` | `uma_exchange_ticket` |
+| `uma_parse_challenge` | `uma_parse_challenge` | `umaParseChallenge` | `uma_parse_challenge` | `umaParseChallenge` | `umaParseChallenge` | `UmaParseChallenge` | `umaParseChallenge` | `UmaParseChallenge` | `umaParseChallenge` | `axiam_uma_parse_challenge` | `uma_parse_challenge` |
+
+`uma_parse_challenge` is synchronous in every language — it parses a string — so it takes no
+`Async` suffix in C# and returns no future.
+
+### §20.6 `Sensitive<T>` applicability
+
+The **ticket**, the **`claim_token`**, the **PAT** and the returned **RPT** are all bearer
+credentials and MUST be wrapped in `Sensitive<T>` (§7) wherever the SDK has that type. None
+may be logged at any level, including in error paths.
+
+The ticket deserves explicit mention because its 60-second lifetime invites treating it as
+harmless. It is not: for those 60 seconds it is the credential that converts into an RPT, and
+a ticket in a log line is a live credential in a log line.
+
+`resource_scopes`, the resource `_id` and the `permissions` claim are **not** sensitive and
+MUST remain readable — an application cannot act on an RPT whose contents it may not inspect.
+
+### §20.7 Required tests
+
+Registration round-trips and the returned `_id` is usable as the `resource_id` of a
+subsequent `uma_request_ticket`; an update that omits a previously declared scope removes it
+(assert the SDK did not merge); a ticket request naming an undeclared scope surfaces the
+`400` unchanged; a happy-path exchange returns an RPT whose `permissions` carry the requested
+pairs; **a failed exchange is not retried** — assert exactly one outbound request for a
+`5xx`, for a timeout, and for `invalid_grant`, since this is the §16 exception; the RPT is
+not adopted as the client's credentials (assert the client's own token is unchanged after the
+call) and carries no refresh token; a `403 access_denied` is surfaced as such and not
+auto-narrowed into a smaller ticket request; a user token offered as a PAT is refused by the
+SDK or surfaces the server's `403` unchanged; `uma_parse_challenge` parses a well-formed
+header and does **not** perform an exchange (assert zero outbound requests); and no ticket,
+`claim_token`, PAT or RPT value appears in any log or error payload (scan the serialized
+payload for the fixture value, as §12/§14/§15 require).
+
+---
+
 ## Closing Notes
 
 ### Conformance Statement
@@ -2576,12 +2763,23 @@ recorded here until one exists.
   `check_access` could not already carry `subject_id` (Java `checkAccess` subjectId
   overload, Go `CheckAccessAs`), both additive alongside the unchanged existing signatures.
 
+- **2026-08 (§20 UMA 2.0)** — **non-breaking / additive.** Added §20 defining the
+  resource-server side of User-Managed Access: the Protection API (`uma_register_resource`
+  and the rest of the `rreg` family, `uma_request_ticket`), the `uma-ticket` grant
+  (`uma_exchange_ticket`), and the `WWW-Authenticate: UMA` challenge helpers. Purely
+  additive — no existing signature changes, and SDKs remain conformant to §1–§19 without it.
+  Two rules in it are load-bearing rather than stylistic: **§20.2 rule 6 makes the ticket
+  grant an explicit exception to §16's retry policy** (a permission ticket is spent even on
+  failure, and retrying it is the concurrent redemption that ilpanich/axiam#302's measured
+  residual describes), and **§20.3 forbids the challenge-parsing helper from auto-exchanging**
+  the ticket it parsed, since the `as_uri` names a host the client has not chosen to trust.
+
 ### OpenAPI Export Feature Flag
 
 `openapi.json` (kept in this directory, and mirrored into every SDK repo) is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
 
 ---
 
-*Contract version: 1.9 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently*
+*Contract version: 1.10 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

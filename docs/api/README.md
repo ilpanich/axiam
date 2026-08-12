@@ -64,6 +64,14 @@ service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
 
+## UMA 2.0 — Protection API and ticket grant
+
+A service that guards resources it does not own registers them, asks AXIAM what
+a caller would need, and exchanges the resulting permission ticket for a
+Requesting Party Token. What maps onto what, the ticket lifecycle, the
+`WWW-Authenticate: UMA` challenge, and the single-use limitation are in
+[`uma.md`](uma.md).
+
 ## Logout — RP-initiated and back-channel
 
 Ending a session at AXIAM and telling every relying party that shared it.

@@ -610,6 +610,9 @@ fn base_req(grant: &str) -> TokenRequest {
         actor_token_type: None,
         audience: None,
         resource: None,
+        ticket: None,
+        claim_token: None,
+        claim_token_format: None,
     }
 }
 

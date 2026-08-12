@@ -52,6 +52,7 @@
 | `service_accounts` | `service-accounts/ServiceAccountsPage` | covered | |
 | `settings` | `settings/SettingsPage` | covered | |
 | `tenants` | `tenants/TenantsPage`, `organizations/TenantDetailPage` | covered | |
+| `uma` | `resources/ResourcesPage` (UMA badge) | headless + badge | X2. The Protection API (`/uma2/perm`, `/uma2/rreg/*`) is machine-to-machine by construction: its caller is a **resource server** holding a client-credentials PAT, not a human at a screen, so there is nothing for an admin to do on those endpoints and a page would have no user. What an admin *does* need is to see the consequences, and those already have a home — a resource registered through UMA is an ordinary AXIAM resource, so it appears on the existing resources page, and its scopes on the existing scope surfaces. The one thing added is a read-only **UMA badge** on resources carrying `uma_registered_by`, so an admin can tell "a resource server created this" from "somebody made this by hand". Deliberately not editable: the badge asserts provenance, and a marker the UI could write would be decoration that reads like evidence |
 | `users` | `users/UsersPage`, `users/UserDetailPage` | covered | |
 | `webauthn` | `profile/MfaManagementPage`, `LoginPage` | covered | C1/C2 |
 | `webhooks` | `webhooks/WebhooksPage` | covered | |

@@ -32,8 +32,8 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::uma::UMA_TICKET_GRANT_TYPE;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    GroupRepository, OAuth2ClientRepository, OrganizationRepository, PermissionRepository,
-    ResourceRepository, RoleRepository, ScopeRepository, TenantRepository, UserRepository,
+    OAuth2ClientRepository, OrganizationRepository, PermissionRepository, ResourceRepository,
+    RoleRepository, ScopeRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOAuth2ClientRepository, SurrealOrganizationRepository,

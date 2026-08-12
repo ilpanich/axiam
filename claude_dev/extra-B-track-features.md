@@ -1,6 +1,8 @@
-# Extra B-Track Features — X1–X5 (formerly "deferred" B6 items, now scheduled)
+# Extra B-Track Features — X1–X6 (formerly "deferred" B6 items, now scheduled)
 
-> Prepared 2026-08-07. Extends
+> Prepared 2026-08-07; X6 added 2026-08-12 from issue
+> [#302](https://github.com/ilpanich/axiam/issues/302) per operator
+> decision. Extends
 > [`improvement-after-run5-benchmark.md`](improvement-after-run5-benchmark.md):
 > the five items its §B6 recorded as deferred are hereby activated as
 > tasks X1–X5, per operator decision. Same conventions as the parent
@@ -661,13 +663,154 @@ letter is delivered above (no further model spend).
 
 ---
 
+## X6 — Single-use redemption becomes a guarantee (final fix for issue #302)
+
+**Scope.** Close [#302](https://github.com/ilpanich/axiam/issues/302):
+under concurrency, the three single-use consume paths —
+`permission_ticket.consume`, `device_grant.redeem`,
+`pushed_auth_request.consume` (all in `crates/axiam-db/src/repository/`)
+— admit more than one redemption with residual probability. A double
+redemption respectively yields two RPTs from one authorization
+decision, two token sets from one user approval, or a replayable
+RFC 9126 `request_uri`. The issue's acceptance bar is the task's:
+*single-use becomes a guarantee rather than a high-probability
+behaviour, for all three paths.*
+
+### X6.1 What is already established — do NOT re-test any of it
+
+Everything below is measured and recorded; re-running these
+experiments is wasted spend. The record lives in #302, the
+`SCHEMA_V31`/`SCHEMA_V32` comments in `crates/axiam-db/src/schema.rs`
+(including the 2026-08 addendum), and `tools/surreal-race-probe/README.md`.
+
+1. **Four in-datastore mechanisms were tested; none reaches zero on
+   `kv-mem`** (per-path wrong-outcome rates: v30 transaction 1/320;
+   claim on a record ID 30/1200; claim on a `UNIQUE` index 3/320 —
+   *worse* than the defect; v31/v32 per-attempt nonce with read-back,
+   the current mechanism, 1/640). The issue's own conclusion stands:
+   no fifth query-layer mechanism will get there. Do not propose one.
+2. **The defect is engine-specific.** The probe re-measured the v30
+   shape on SurrealDB 3.2.3: `kv-mem` silently admits two winners
+   (23/1200 rounds) while aborting 54% of contended attempts — it
+   arbitrates, then occasionally misses, silently. The engines AXIAM
+   actually deploys did not miss once: **0/40 000 attempts on
+   `surrealkv`** (compose and the k8s StatefulSet), 0/9 600 on
+   `rocksdb`. With the nonce shape, `kv-mem` still leaks (6/1200);
+   the persistent engines are again at zero.
+3. **Contended regression tests already exist** for all three paths
+   (plus authorization-code consume and refresh-token revoke) in
+   `crates/axiam-db/tests/permission_ticket_test.rs`, running on
+   surrealkv via `tests/common`.
+4. **What is still open, precisely:** 0-in-40 000 is strong evidence,
+   not proof; SurrealDB documents no conflict-detection guarantee, so
+   a version bump could take the behaviour away silently; and nothing
+   *enforces* that a deployment runs a persistent engine. The
+   guarantee exists in practice and is enforced nowhere. X6's job is
+   to enforce it, not to rediscover it.
+
+### X6.2 Resolution (pinned)
+
+Convert the measured engine guarantee into an enforced, gated
+invariant, layered so a double redemption requires two independent
+engine failures rather than one:
+
+1. **Engine attestation at startup.** `axiam-server` connects over the
+   wire, so first determine whether the storage engine is detectable
+   from the client (system metadata / `INFO FOR ROOT` / version
+   surface — investigate, don't assume). If detectable: hard-fail
+   startup on a `memory` datastore unless an explicit dev-only
+   override (`AXIAM__DB__ALLOW_MEMORY_ENGINE=true`) is set, with the
+   refusal message naming #302. If not detectable over the wire:
+   enforcement moves wholly to the deployment layer — compose and the
+   k8s StatefulSet already pin `surrealkv:`; add a startup WARN that
+   the engine cannot be attested and a MUST-level operator requirement
+   in the deployment docs. Either way, "never run `memory` in a real
+   deployment" stops being a code comment and becomes a control.
+2. **Restore the explicit transaction around the guarded `UPDATE`, on
+   top of the nonce — layered, not either/or.** Today each statement
+   runs as its own auto-transaction: on surrealkv the nonce shape
+   measured 0 aborts, meaning the engine is not arbitrating at all and
+   correctness rests entirely on read-back ordering. The v30
+   transaction shape makes the deployed engine abort losers (54% of
+   contended attempts, 0 double winners); the nonce read-back —
+   which **must stay outside the transaction**, in a separate query
+   after commit (the snapshot-isolation trap in `SCHEMA_V31`: inside
+   the transaction every racer sees its own write and believes it
+   won) — then catches any silently missed conflict. Keep the
+   existing `is_transaction_conflict(...) → Ok(None)` mapping (a
+   loser's abort is "someone else redeemed first", not a 500), and
+   keep `WHERE consumed = false` (it is what makes a later,
+   non-concurrent replay match nothing). Apply identically to all
+   three repositories.
+3. **The probe becomes a version-bump gate.** Add a CI job (manually
+   triggerable, plus auto-required whenever `Cargo.lock` changes the
+   `surrealdb` / `surrealdb-core` / `surrealkv` version) that runs
+   `tools/surreal-race-probe` against surrealkv at the established
+   scale (≥ 5000×8, both `tx` and `nonce` shapes) and fails on any
+   double-winner round; record results in a version-pinned
+   `RESULTS.md` next to the probe. This converts "a bump could change
+   it silently" into "a bump cannot merge without re-measuring".
+4. **The test that fails the old mechanism reliably** (issue
+   acceptance) is the probe itself: `mem tx 1200 8` reproduces ≥ 1
+   double-winner round dependably, where the in-tree integration test
+   needed coverage instrumentation plus a saturated machine. Document
+   this in the probe README as the canonical falsifier; do not add a
+   flaky-by-design `kv-mem` test to CI. The three `_serialises` /
+   `_yield_exactly_one_winner` tests on surrealkv remain the
+   regression suite and must stay green with the layered mechanism.
+5. **Say the new truth.** Update the module headers of the three
+   repositories and the `SCHEMA_V31`/`SCHEMA_V32` comments: single-use
+   is guaranteed **conditional on an attested persistent engine**,
+   with the transaction as the arbitrating layer and the nonce as the
+   audited backstop; on `kv-mem` it remains explicitly not guaranteed
+   (which the startup guard now makes an operator's deliberate
+   choice). #302 requires the "not guaranteed" wording to stay until
+   the fix lands — this task is what finally changes it. Update the
+   triage note for intermittent CI reds accordingly.
+6. **Escalation path — recorded, NOT built.** If the probe gate ever
+   goes red on a future engine bump, the pinned fallback is
+   single-writer serialisation in front of the datastore via a
+   RabbitMQ single-active-consumer redemption queue (broker already in
+   every deployment; the three paths are rare, human-timescale
+   operations that tolerate one AMQP RTT; works across the server's
+   2 k8s replicas where in-process locking would not). It is
+   disproportionate today against 0/40 000 plus a layered mechanism
+   and the parent plan's low-footprint constraint — build it when the
+   measurement says to, not before.
+
+### X6.3 Tests, docs, acceptance
+
+**Tests.** Layered-mechanism contended suite green on surrealkv for
+all three paths (existing tests, re-pointed at the new shape, round
+counts unchanged or raised); startup-attestation unit tests (memory
+engine refused, override honored, persistent engine accepted — or, if
+attestation proves impossible over the wire, a test pinning the WARN);
+CI gate proven by a dry-run bump PR; probe `RESULTS.md` committed with
+version pins.
+
+**Docs.** Deployment guide: persistent-engine requirement (MUST) +
+attestation/override semantics; threat-model update; probe README
+gains the gate procedure and the canonical-falsifier note.
+
+**Acceptance.** All three paths carry transaction + nonce; attestation
+(or its documented impossibility + deployment-layer pinning) in place;
+probe gate wired into CI and green at ≥ 5000×8 on surrealkv; module
+comments updated to the conditional-guarantee wording; #302 referenced
+by the closing PR and closed after merge per repo guidelines.
+
+**Model: Opus 5** (operator-pinned; this is single-use credential
+arbitration — a plausible-but-wrong mechanism here mints a token it
+shouldn't, twice) · F4 security review mandatory.
+
+---
+
 ## Sequencing (extends the parent plan's wave table; X-waves start after parent wave 3)
 
 | Wave | Tasks | Gate |
 |---|---|---|
 | X-a | X1 design + protocol + dispatcher (Opus), X3 (full), X5.1 protocol work (Opus) | contract §16 merged; F4 review of X1/X3/X5.1 |
 | X-b | X1 SDK fan-out ×8 + examples, X2 (needs B1 merged), X5.2 conformance harness + iteration | X1 e2e green; conformance first full run |
-| X-c | X4 (needs B3 merged), X2 SDK helpers, X5.2 iterate-to-green | F4 review of X2/X4 |
+| X-c | X4 (needs B3 merged), X2 SDK helpers, X5.2 iterate-to-green, X6 (no cross-plan dependency — schedulable earlier if a slot opens) | F4 review of X2/X4/X6; X6 probe gate green |
 | X-d | X5.3 submission prep + §X5.4 letter sent (operator), bench cells (X1 hook cost, binding overhead), docs/examples sweep | conformance green on release image |
 
 ## Model recommendation summary
@@ -684,6 +827,7 @@ letter is delivered above (no further model spend).
 | X5 — client auth, mTLS/DPoP token binding | **Opus 5** | Token-security mechanisms; mistakes are CVEs |
 | X5 — conformance harness, iteration, docs | Sonnet 5 | Tooling + suite-driven fixes |
 | X5 — fee-waiver letter | — | Delivered in §X5.4 |
+| X6 single-use guarantee (#302 closure) | **Opus 5** | Redemption arbitration for single-use credentials; a wrong mechanism double-mints tokens |
 
 Same division of labor as the parent plan: Opus 5 owns every place
 where a plausible-but-wrong answer mints a token it shouldn't; Sonnet 5

@@ -822,9 +822,11 @@ pass).
 `axiam-<lang>-sdk` repo; implement the new contract sections; each SDK
 adds the required conformance tests + one runnable example per new
 feature (`examples/` dir convention); README feature-matrix row flips.
-Swift/C/C++ keep their §12.6 deferred-scope rules — extend that section
-to say which of §14/§15 they defer (recommend: C defers device-flow
-helper UI polling to the app, implements the raw endpoints).
+Swift/C/C++ no longer have a §12 deferral to work around: contract 1.11
+lifted it and ported §12 + §12.7 to all three, so they implement §14/§15
+on the same §12 discovery cache and token endpoint as everyone else
+(C still leaves device-flow *UI* polling cadence to the app and ships the
+raw endpoints plus the composed helper).
 Per-repo PRs on the designated branch, one repo at a time, kept small.
 
 **Model: Sonnet 5** per repo (mechanical against a pinned contract);

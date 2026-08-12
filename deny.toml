@@ -106,6 +106,27 @@ exceptions = [
     # Already in the allow list above; this exception is redundant but explicit for clarity.
     # Review date: 2026-06-04.
     { allow = ["0BSD"], name = "quoted_printable" },
+    # xxhash-rust: BSL-1.0 — the BOOST Software License 1.0.
+    #
+    # Read that twice. This is NOT BUSL-1.1, the Business Source License granted
+    # to the surrealdb crates a few lines above, despite the near-identical
+    # abbreviation. BSL-1.0 is a plain permissive licence — OSI approved and
+    # FSF Free/Libre (cargo-deny says so itself in the rejection), with no
+    # copyleft, no field-of-use restriction, and no attribution requirement for
+    # binary distribution. It is in the same class as MIT and ISC and would be
+    # uncontroversial in the allow list above.
+    #
+    # It is an exception rather than a blanket allow deliberately: a licence
+    # this easy to confuse with the one directly above it should be granted one
+    # crate at a time, so that a second BSL-1.0 dependency gets looked at by a
+    # human instead of being waved through by a policy line nobody re-reads.
+    #
+    # Reached via surrealkv -> surrealdb-core -> surrealdb, and surrealkv
+    # entered the lockfile when axiam-db added the `kv-surrealkv` dev-dependency
+    # feature so the serialisation tests could run on the engine production
+    # deploys (see tools/surreal-race-probe/README.md).
+    # Review date: 2026-08-12.
+    { allow = ["BSL-1.0"], name = "xxhash-rust" },
 ]
 
 [bans]

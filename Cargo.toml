@@ -15,6 +15,12 @@ members = [
     "crates/axiam-server",
     "crates/axiam-test-support",
 ]
+# `tools/surreal-race-probe` is a diagnostic, not part of the product: it pulls
+# three SurrealDB storage engines (one of which builds RocksDB from C++) to
+# measure whether a given engine serialises concurrent read-modify-writes. It is
+# run by hand on a SurrealDB bump or an engine change — see its README — and CI
+# should not pay for that dependency tree on every commit.
+exclude = ["tools/surreal-race-probe"]
 resolver = "3"
 
 [workspace.package]

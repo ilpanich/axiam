@@ -1,0 +1,22 @@
+[package]
+name = "surreal-race-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Measures whether a SurrealDB storage engine serialises concurrent read-modify-writes (see README.md)"
+
+# Pinned deliberately: the measurements in README.md are statements about one
+# version of one engine, and conflict detection is not a documented guarantee.
+# Bump this on purpose, re-run the probe, and update the table — do not let it
+# float.
+
+[dependencies]
+surrealdb = { version = "=3.2.3", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[features]
+rocksdb = ["surrealdb/kv-rocksdb"]
+
+[profile.release]
+debug = false

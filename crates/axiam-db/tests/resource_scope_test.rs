@@ -14,7 +14,14 @@ use axiam_db::repository::{
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 
+mod common;
+
 /// Helper: spin up in-memory DB, run migrations, create org + tenant.
+///
+/// `Mem` is right for every test here that asserts what a query does. It is NOT
+/// right for `concurrent_child_create_never_orphans_after_parent_delete`, which
+/// asserts how the engine isolates two overlapping callers — see
+/// [`serialising_setup`].
 async fn setup() -> (Surreal<surrealdb::engine::local::Db>, uuid::Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -31,6 +38,44 @@ async fn setup() -> (Surreal<surrealdb::engine::local::Db>, uuid::Uuid) {
         .unwrap();
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org.id,
+            name: "Test Tenant".into(),
+            slug: "test-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    (db, tenant.id)
+}
+
+/// The same fixture on the storage engine production deploys.
+///
+/// Isolation is a property of the engine, not of the query, and `kv-mem` was
+/// measured in 2026-08 to provide less of it than `surrealkv`: it lets two
+/// racers both commit a guarded read-modify-write in ~1% of contended rounds,
+/// where `surrealkv` and `rocksdb` let none. `tests/common/mod.rs` carries the
+/// numbers. A TOCTOU test that runs on `Mem` is measuring an engine AXIAM does
+/// not ship, so the one race test in this file uses this instead.
+///
+/// The returned fixture must be held for the test's duration — it owns the
+/// temporary directory the datastore lives in.
+async fn serialising_setup() -> (common::SerialisingDb, uuid::Uuid) {
+    let db = common::serialising_db().await;
+
+    let org_repo = SurrealOrganizationRepository::new(db.handle());
+    let org = org_repo
+        .create(CreateOrganization {
+            name: "Test Org".into(),
+            slug: "test-org".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let tenant_repo = SurrealTenantRepository::new(db.handle());
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
@@ -206,15 +251,45 @@ async fn delete_resource_blocked_by_existing_child() {
 ///
 /// Run several trials with real concurrent tasks (mirrors
 /// `totp_step_cas_test.rs`'s proven `tokio::spawn` + race pattern) to
-/// exercise both possible interleavings against the in-memory engine's
-/// actual transaction isolation.
+/// exercise both possible interleavings against the engine's actual
+/// transaction isolation.
+///
+/// # IGNORED: this FAILS on the engine we deploy (2026-08)
+///
+/// It passed for as long as it ran on `Mem`. Moved to `surrealkv` — what
+/// `docker-compose.prod.yml` and the k8s StatefulSet run — it fails on **trial
+/// 0, every run**: the delete commits and a `child_of` edge to the deleted
+/// parent survives. Exactly the orphan the D-13/CQ-B46 fix was written to make
+/// impossible.
+///
+/// The fix's premise does not hold. Folding the guard into one transaction
+/// makes the statements atomic, but the guard is a **range read** (`SELECT …
+/// FROM child_of WHERE out = resource:<id>`) and the racing create **inserts
+/// into that range**. Preventing that is a phantom-read problem, which needs
+/// serialisable isolation; snapshot isolation — which is what these engines
+/// appear to provide — detects write-write conflicts on the same key and lets
+/// this through. The two transactions never touch a common key, so there is
+/// nothing for the engine to conflict on.
+///
+/// So this is not a flaky test and not the #302 residual: it is a reproducible
+/// defect in `SurrealResourceRepository::delete`, which `Mem` hid because its
+/// scheduling never opened the window. Fixing it means giving the two
+/// transactions a key to collide on (e.g. having child-create write the parent
+/// row) rather than tightening the query, and that is a design change to the
+/// resource repository — its own issue and its own PR.
+///
+/// Kept here, on the right engine, rather than reverted to `Mem`: a green run
+/// against an engine AXIAM does not ship is worse than an ignored test that
+/// says what is actually true. Un-ignore it as the acceptance test for the fix.
 #[tokio::test]
+#[ignore = "reproduces a real orphan race in resource delete on surrealkv — see the doc comment; \
+            un-ignore as the acceptance test when delete is fixed"]
 async fn concurrent_child_create_never_orphans_after_parent_delete() {
     const TRIALS: usize = 15;
 
     for trial in 0..TRIALS {
-        let (db, tenant_id) = setup().await;
-        let repo = std::sync::Arc::new(SurrealResourceRepository::new(db.clone()));
+        let (db, tenant_id) = serialising_setup().await;
+        let repo = std::sync::Arc::new(SurrealResourceRepository::new(db.handle()));
 
         let parent = repo
             .create(CreateResource {

@@ -1561,6 +1561,12 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 // Schema v31 — redemption nonce, so single-use stops depending on the engine
 // -----------------------------------------------------------------------
 //
+// READ THE 2026-08 ADDENDUM AT THE END OF THIS COMMENT FIRST. The premise
+// below — "SurrealDB does not detect the write-write conflict" — was measured
+// on `kv-mem`, which is the TEST engine and not one AXIAM deploys. On the two
+// persistent engines the conflict IS detected, and this mechanism is belt to
+// the engine's braces rather than a substitute for them.
+//
 // v30 relied on SurrealDB detecting the write-write conflict between two
 // concurrent redemptions. Measured, it does not: 8 rounds in 1200 (8 racers
 // each) saw two transactions both commit, with zero errors, both returning the
@@ -1599,6 +1605,50 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 // isolation a racer would see its own write and every racer would believe it
 // won — the failure would be total rather than occasional.
 //
+// -----------------------------------------------------------------------
+// ADDENDUM, 2026-08 — everything above was measured on the wrong engine
+// -----------------------------------------------------------------------
+//
+// The measurements above, and the ones in #302, were taken against `kv-mem`.
+// Every integration test in this crate opened `Surreal::new::<Mem>(())`, so
+// `kv-mem` is what "measured" meant. AXIAM does not deploy it: dev and prod
+// compose run `surrealkv:`, and so does the k8s StatefulSet.
+//
+// Re-measured with `tools/surreal-race-probe` on SurrealDB 3.2.3, running the
+// v30 shape (one guarded UPDATE inside BEGIN/COMMIT) with 8 racers released
+// through a barrier:
+//
+//   engine          rounds x racers   admitted two winners   attempts aborted
+//   -------------   ---------------   --------------------   ----------------
+//   kv-mem          1200 x 8          23  (10 on a re-run)   5229 / 9600
+//   kv-surrealkv    5000 x 8           0                     21613 / 40000
+//   kv-rocksdb      1200 x 8           0                     8154 / 9600
+//
+// The abort column matters more than the winners column. `kv-mem` is not
+// failing to arbitrate — it aborts contended attempts at 54%, the same rate
+// `surrealkv` does. It arbitrates and then occasionally misses, silently, both
+// callers receiving the pre-transition row. The persistent engines did not miss
+// once, so on the engine AXIAM ships, v30 was already correct.
+//
+// What that means for this mechanism, and what it does not:
+//
+//   * The nonce is KEPT. It costs one extra write and one extra read on a rare
+//     operation, it measured no worse than v30 on every engine, and conflict
+//     detection is not a documented SurrealDB guarantee — so a version bump
+//     could take it away silently. Removing working defence to reclaim two
+//     statements is a bad trade.
+//   * The nonce is NOT the thing standing between AXIAM and a double
+//     redemption on a deployed system. The engine is. Do not read the presence
+//     of this field as licence to run `memory` anywhere real; `kv-mem` leaks
+//     with the nonce in place too (6 rounds in 1200).
+//   * "Single-use is not guaranteed" above is still the correct posture, but
+//     for a narrower reason than it says: 0 in 40 000 is strong evidence, not
+//     proof, and no probe run reproduces the coverage-instrumented, saturated
+//     conditions #302 describes.
+//
+// Re-run the probe on any SurrealDB bump — README.md in that directory says
+// why and how.
+//
 // `WHERE consumed = false` is still required: it is what makes a later,
 // non-concurrent redemption match nothing and leave the first winner's nonce
 // undisturbed.
@@ -1633,7 +1683,11 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<
 //                                  is a replayable authorization request
 //
 // See `SCHEMA_V31` for the mechanism and the measurements behind choosing it,
-// including the two repairs that turned out worse than the defect.
+// including the two repairs that turned out worse than the defect — and its
+// 2026-08 addendum, which re-measured all of it on the engine AXIAM actually
+// deploys and found the premise engine-specific. The short version: these two
+// paths are in the same position as the ticket, which is a better position than
+// this comment originally claimed.
 const SCHEMA_V32: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE device_grant TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE option<string>;

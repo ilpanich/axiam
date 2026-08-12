@@ -40,7 +40,19 @@ spec:
             - "$(SURREALDB_PASS)"
             - "--log"
             - "info"
-            - "file:/data/surreal.db"
+            # `surrealkv:`, not `file:`. SurrealDB 3 REMOVED the `file://`
+            # scheme and bails at startup with "The `file://` scheme is no
+            # longer supported" (surrealdb-core `kvs/ds.rs`), so this
+            # StatefulSet could not start at all while it said `file:`.
+            #
+            # The engine is also not a free choice. Measured on 3.2.3 with
+            # `tools/surreal-race-probe`, `kv-mem` admits two winners to a
+            # guarded single-use UPDATE in ~1% of contended rounds;
+            # `surrealkv` and `rocksdb` admit none. AXIAM's single-use
+            # credentials (permission tickets, device codes, PAR request_uris)
+            # depend on that guarantee, so `memory` must never be configured
+            # here. This matches `docker/docker-compose.prod.yml`.
+            - "surrealkv:/data/surreal.db"
           env:
             - name: SURREALDB_USER
               valueFrom:

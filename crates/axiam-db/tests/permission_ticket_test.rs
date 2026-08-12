@@ -19,11 +19,24 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
+mod common;
+
 async fn repo() -> SurrealPermissionTicketRepository<surrealdb::engine::local::Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
     SurrealPermissionTicketRepository::new(db)
+}
+
+/// The single-use tests need the engine production runs, not `Mem` — see
+/// `tests/common/mod.rs` for the measurements. Everything else in this file
+/// asserts what a query does rather than how it serialises, and stays on `Mem`.
+async fn serialising_repo() -> (
+    SurrealPermissionTicketRepository<surrealdb::engine::local::Db>,
+    common::SerialisingDb,
+) {
+    let db = common::serialising_db().await;
+    (SurrealPermissionTicketRepository::new(db.handle()), db)
 }
 
 fn ticket(
@@ -221,32 +234,86 @@ async fn find_by_hash_returns_none_for_an_unknown_handle() {
 }
 
 /// Concurrent redemptions of one ticket: exactly one may win. This is the race
-/// the single-statement `consume` exists to lose safely.
+/// the guarded `consume` exists to lose safely.
+///
+/// # Why this runs many rounds, and on surrealkv
+///
+/// Until 2026-08 this test fired 8 racers **once**, against `Mem`. Both halves
+/// of that were wrong for what it claims to prove.
+///
+/// A single round cannot distinguish "serialises" from "usually serialises":
+/// the defect it is looking for shows up in roughly 1–2% of contended rounds,
+/// so one round passes ~98 times in 100. That is exactly the shape #302
+/// describes — "intermittent on the `cargo-llvm-cov` job, passes routinely
+/// otherwise" — and an intermittently-passing test is not a regression guard,
+/// it is a coin toss that gets re-run until it agrees.
+///
+/// And `Mem` is not the engine AXIAM deploys. On the synthetic path in
+/// `tools/surreal-race-probe`, `Mem` admits two winners where `surrealkv` and
+/// `rocksdb` admit none, so a green run there was a statement about an engine
+/// this project does not ship.
+///
+/// # What ROUNDS does and does not buy
+///
+/// Be careful about what this test proves, because the honest answer is less
+/// than it looks. Running THIS path — the real `consume`, not the probe's
+/// synthetic one — against `Mem` for 2000 rounds × 8 racers produced **zero**
+/// violations in 16 000 attempts, on an idle machine without coverage
+/// instrumentation. The probe's simpler query on the same engine produced 6 in
+/// 9600. So the two are not measuring the same thing, and no round count
+/// derived from the probe's rate transfers here.
+///
+/// #302 is explicit that its own 1-in-640 needed `cargo-llvm-cov` **plus** a
+/// saturated machine to surface. This test has neither, so its silence is weak
+/// evidence and must not be read as proof that the path is sound.
+///
+/// 200 rounds is therefore a *regression guard*, not a proof: it costs a few
+/// seconds, it catches anything that breaks badly rather than rarely, and it is
+/// strictly better than the single unsynchronised round this test used to run —
+/// which could not even distinguish "serialises" from "never overlapped".
+/// For questions about an engine, run the probe; that is what it is for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_redemptions_yield_exactly_one_winner() {
-    let repo = repo().await;
+    const ROUNDS: usize = 200;
+    const RACERS: usize = 8;
+
+    let (repo, _db) = serialising_repo().await;
     let tenant = Uuid::new_v4();
 
-    repo.create(ticket(tenant, "hash-8", "rs-1", 60, Uuid::new_v4()))
-        .await
-        .unwrap();
+    for round in 0..ROUNDS {
+        let hash = format!("hash-8-{round}");
+        repo.create(ticket(tenant, &hash, "rs-1", 60, Uuid::new_v4()))
+            .await
+            .unwrap();
 
-    // Real threads, not interleaved polling on one: the property under test is
-    // that the datastore serialises the racers, and a single-threaded runtime
-    // could pass by never overlapping them.
-    let mut set = tokio::task::JoinSet::new();
-    for _ in 0..8 {
-        let repo = repo.clone();
-        set.spawn(async move { repo.consume(tenant, "hash-8", "rs-1").await.unwrap() });
-    }
-
-    let mut winners = 0;
-    while let Some(result) = set.join_next().await {
-        if result.unwrap().is_some() {
-            winners += 1;
+        // Real threads, not interleaved polling on one: the property under test
+        // is that the datastore serialises the racers, and a single-threaded
+        // runtime could pass by never overlapping them. The barrier is what
+        // makes them actually overlap — without it the first racer routinely
+        // finishes before the last one starts, and the window never opens.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..RACERS {
+            let repo = repo.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let hash = hash.clone();
+            set.spawn(async move {
+                barrier.wait().await;
+                repo.consume(tenant, &hash, "rs-1").await.unwrap()
+            });
         }
+
+        let mut winners = 0;
+        while let Some(result) = set.join_next().await {
+            if result.unwrap().is_some() {
+                winners += 1;
+            }
+        }
+        assert_eq!(
+            winners, 1,
+            "exactly one concurrent redemption may succeed (round {round})"
+        );
     }
-    assert_eq!(winners, 1, "exactly one concurrent redemption may succeed");
 }
 
 #[tokio::test]
@@ -307,6 +374,21 @@ mod single_use_serialisation {
     // The single-threaded tests that already cover these paths all passed against
     // the broken code, because they never overlap two callers. These do, on real
     // threads — a current-thread runtime could pass by never overlapping them.
+    //
+    // # Engine, 2026-08
+    //
+    // These opened `Mem` until the #302 investigation measured what `Mem`
+    // actually guarantees, which is less than production's `surrealkv`: it
+    // admits two winners to a guarded single-use UPDATE in ~1% of contended
+    // rounds, where `surrealkv` and `rocksdb` admit none. Details and numbers
+    // in `tests/common/mod.rs`. They now use the engine we deploy, so a green
+    // run here is a statement about the shipped system.
+    //
+    // They remain single-round: unlike the permission ticket above, these four
+    // paths have never been observed failing, and one barrier-synchronised
+    // round each is the cheap regression guard. The permission-ticket test is
+    // the instrument — it runs 200 rounds because it is the path whose defect
+    // was actually measured.
 
     use axiam_core::models::oauth2_client::{
         CreateAuthorizationCode, CreateDeviceGrant, CreatePushedAuthRequest, CreateRefreshToken,
@@ -321,23 +403,23 @@ mod single_use_serialisation {
         SurrealPushedAuthRequestRepository, SurrealRefreshTokenRepository,
     };
     use chrono::{Duration, Utc};
-    use surrealdb::Surreal;
-    use surrealdb::engine::local::Mem;
     use uuid::Uuid;
+
+    use super::common;
 
     const RACERS: usize = 8;
 
-    async fn db() -> Surreal<surrealdb::engine::local::Db> {
-        let db = Surreal::new::<Mem>(()).await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
-        axiam_db::run_migrations(&db).await.unwrap();
-        db
+    async fn db() -> common::SerialisingDb {
+        common::serialising_db().await
     }
 
     /// One approval must mint exactly one token set, however hard the device polls.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn device_grant_redeem_serialises() {
-        let repo = SurrealDeviceGrantRepository::new(db().await);
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealDeviceGrantRepository::new(_db.handle());
         let tenant = Uuid::new_v4();
 
         let grant = repo
@@ -356,10 +438,15 @@ mod single_use_serialisation {
             .await
             .unwrap();
 
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..RACERS {
             let repo = repo.clone();
-            set.spawn(async move { repo.redeem(tenant, "dc-hash").await.unwrap() });
+            let barrier = std::sync::Arc::clone(&barrier);
+            set.spawn(async move {
+                barrier.wait().await;
+                repo.redeem(tenant, "dc-hash").await.unwrap()
+            });
         }
 
         let mut winners = 0;
@@ -378,7 +465,10 @@ mod single_use_serialisation {
     /// a replayable authorization request.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pushed_auth_request_consume_serialises() {
-        let repo = SurrealPushedAuthRequestRepository::new(db().await);
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealPushedAuthRequestRepository::new(_db.handle());
         let tenant = Uuid::new_v4();
 
         repo.create(CreatePushedAuthRequest {
@@ -391,10 +481,15 @@ mod single_use_serialisation {
         .await
         .unwrap();
 
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..RACERS {
             let repo = repo.clone();
-            set.spawn(async move { repo.consume(tenant, "par-hash").await.unwrap() });
+            let barrier = std::sync::Arc::clone(&barrier);
+            set.spawn(async move {
+                barrier.wait().await;
+                repo.consume(tenant, "par-hash").await.unwrap()
+            });
         }
 
         let mut winners = 0;
@@ -415,7 +510,10 @@ mod single_use_serialisation {
     /// bug the other two had.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn authorization_code_consume_serialises() {
-        let repo = SurrealAuthorizationCodeRepository::new(db().await);
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealAuthorizationCodeRepository::new(_db.handle());
         let tenant = Uuid::new_v4();
 
         repo.create(CreateAuthorizationCode {
@@ -434,10 +532,13 @@ mod single_use_serialisation {
         .await
         .unwrap();
 
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..RACERS {
             let repo = repo.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
             set.spawn(async move {
+                barrier.wait().await;
                 repo.consume(tenant, "code-hash", "web-app", "https://app.example/cb")
                     .await
             });
@@ -467,7 +568,10 @@ mod single_use_serialisation {
     /// here: exactly one of N concurrent revocations of one token may succeed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn refresh_token_revoke_serialises() {
-        let repo = SurrealRefreshTokenRepository::new(db().await);
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealRefreshTokenRepository::new(_db.handle());
         let tenant = Uuid::new_v4();
 
         repo.create(CreateRefreshToken {
@@ -482,10 +586,15 @@ mod single_use_serialisation {
         .await
         .unwrap();
 
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..RACERS {
             let repo = repo.clone();
-            set.spawn(async move { repo.revoke(tenant, "rt-hash").await });
+            let barrier = std::sync::Arc::clone(&barrier);
+            set.spawn(async move {
+                barrier.wait().await;
+                repo.revoke(tenant, "rt-hash").await
+            });
         }
 
         let mut winners = 0;

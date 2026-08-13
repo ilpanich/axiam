@@ -71,6 +71,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
         sub_kind: SubjectKind::User,
         act: None,
         permissions: None,
+        ext_exchange: None,
     });
     AuthenticatedPrincipal {
         subject_id: user_id,
@@ -97,6 +98,7 @@ fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrinc
         sub_kind: axiam_auth::token::SubjectKind::ServiceAccount,
         act: None,
         permissions: None,
+        ext_exchange: None,
     });
 
     AuthenticatedPrincipal {

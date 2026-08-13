@@ -5,7 +5,8 @@
 
 use axiam_core::models::email_verification::CreateEmailVerificationToken;
 use axiam_core::models::federation::{
-    CreateFederationConfig, CreateFederationLink, FederationProtocol, UpdateFederationConfig,
+    CreateFederationConfig, CreateFederationLink, FederationProtocol, SubjectMapping,
+    TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, UpdateOAuth2Client};
 use axiam_core::models::organization::CreateOrganization;
@@ -248,6 +249,7 @@ async fn federation_config_crud_and_backfill() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            token_exchange: None,
         })
         .await
         .unwrap();
@@ -284,6 +286,222 @@ async fn federation_config_crud_and_backfill() {
 
     repo.delete(tenant_id, cfg.id).await.unwrap();
     assert!(repo.get_by_id(tenant_id, cfg.id).await.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// X4 — external token-exchange trust
+// ---------------------------------------------------------------------------
+
+/// A provider created without a trust block reads back as
+/// `TokenExchangeTrust::default()` — disabled, trusting nothing.
+///
+/// This is the "no backfill" claim of schema v36 stated as a test: the
+/// migration adds columns and nothing rewrites existing rows, so a pre-X4 row
+/// must hydrate to today's behaviour rather than to a partially-populated
+/// struct. `list_token_exchange_enabled` must also not see it.
+#[tokio::test]
+async fn a_provider_without_a_trust_block_reads_back_disabled() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let cfg = repo
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "legacy-idp".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: Some("https://idp.example.com/.well-known".into()),
+            client_id: "cid".into(),
+            client_secret: String::new(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
+            token_exchange: None,
+        })
+        .await
+        .unwrap();
+
+    let got = repo.get_by_id(tenant_id, cfg.id).await.unwrap();
+    assert_eq!(got.token_exchange, TokenExchangeTrust::default());
+    assert!(!got.token_exchange.enabled);
+
+    assert!(
+        repo.list_token_exchange_enabled(tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a provider with no trust block must not be a candidate issuer"
+    );
+}
+
+/// Every field survives a write/read round trip, including the nested scope
+/// map — which is stored as a JSON string, so it is the one field a naive
+/// column mapping would quietly lose.
+#[tokio::test]
+async fn a_trust_block_round_trips_through_the_datastore() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let mut scope_map = std::collections::BTreeMap::new();
+    scope_map.insert(
+        "partner.orders.read".to_string(),
+        vec!["read:orders".to_string(), "list:orders".to_string()],
+    );
+    let trust = TokenExchangeTrust {
+        enabled: true,
+        accepted_audiences: vec!["https://api.example.com".into()],
+        subject_mapping: SubjectMapping::JitProvision,
+        scope_map,
+        max_token_age_secs: 120,
+        max_lifetime_secs: Some(600),
+    };
+
+    let cfg = repo
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "partner".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: Some("https://partner.example/.well-known".into()),
+            client_id: "cid".into(),
+            client_secret: String::new(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: Some(vec!["RS256".into()]),
+            token_exchange: Some(trust.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.get_by_id(tenant_id, cfg.id)
+            .await
+            .unwrap()
+            .token_exchange,
+        trust
+    );
+
+    // The exchange path's own query must find it, and hydrate it fully —
+    // that query uses the narrowed list projection, which is a second place
+    // the columns have to be named.
+    let candidates = repo.list_token_exchange_enabled(tenant_id).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].token_exchange, trust);
+
+    // Disabling removes it from the candidate set. Wholesale replacement, so
+    // the rest of the block travels with the flag.
+    repo.update(
+        tenant_id,
+        cfg.id,
+        UpdateFederationConfig {
+            token_exchange: Some(TokenExchangeTrust {
+                enabled: false,
+                ..trust.clone()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo.list_token_exchange_enabled(tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after = repo.get_by_id(tenant_id, cfg.id).await.unwrap();
+    assert_eq!(
+        after.token_exchange.accepted_audiences,
+        trust.accepted_audiences
+    );
+    assert_eq!(after.token_exchange.scope_map, trust.scope_map);
+}
+
+/// A SAML row is never a candidate, whatever its columns say. It has no issuer
+/// to match and no JWKS to verify against, so the predicate lives in the query
+/// rather than in every caller.
+#[tokio::test]
+async fn a_saml_provider_is_never_a_token_exchange_candidate() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    repo.create(CreateFederationConfig {
+        tenant_id,
+        provider: "saml-idp".into(),
+        protocol: FederationProtocol::Saml,
+        metadata_url: Some("https://saml.example/metadata".into()),
+        client_id: "cid".into(),
+        client_secret: String::new(),
+        attribute_map: None,
+        idp_signing_cert_pem: None,
+        allowed_algorithms: None,
+        token_exchange: Some(TokenExchangeTrust {
+            enabled: true,
+            accepted_audiences: vec!["https://api.example.com".into()],
+            ..TokenExchangeTrust::default()
+        }),
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        repo.list_token_exchange_enabled(tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A provider that is globally disabled is not a candidate either. `enabled`
+/// and `token_exchange.enabled` are different statements — "this provider is
+/// live at all" and "…and its tokens may be exchanged" — and both must hold.
+#[tokio::test]
+async fn a_globally_disabled_provider_is_not_a_candidate() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let cfg = repo
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "paused".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: Some("https://paused.example/.well-known".into()),
+            client_id: "cid".into(),
+            client_secret: String::new(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
+            token_exchange: Some(TokenExchangeTrust {
+                enabled: true,
+                accepted_audiences: vec!["https://api.example.com".into()],
+                ..TokenExchangeTrust::default()
+            }),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.list_token_exchange_enabled(tenant_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    repo.update(
+        tenant_id,
+        cfg.id,
+        UpdateFederationConfig {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        repo.list_token_exchange_enabled(tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -323,6 +541,7 @@ async fn federation_config_list_excludes_secret_columns() {
         attribute_map: None,
         idp_signing_cert_pem: None,
         allowed_algorithms: None,
+        token_exchange: None,
     })
     .await
     .unwrap();
@@ -352,6 +571,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            token_exchange: None,
         })
         .await
         .unwrap();
@@ -367,6 +587,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            token_exchange: None,
         })
         .await
         .unwrap();

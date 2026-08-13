@@ -388,6 +388,7 @@ mod tests {
             // through a token exchange, so it carries no actor chain.
             act: None,
             permissions: None,
+            ext_exchange: None,
         });
 
         let svc = AuthorizationServiceImpl::new(make_engine(&db), 2);

@@ -1998,6 +1998,77 @@ the response carries no refresh token and the client's own session is unchanged 
 call; `issued_token_type` is surfaced; a cross-tenant subject token surfaces `invalid_grant`
 with no attempt to refine it.
 
+### §15.7 External-IdP subject tokens (X4)
+
+**No new per-language surface.** `token_exchange`'s existing parameters already carry
+everything an external exchange needs; what changes is *which* subject tokens the server
+will accept and *what the refusals mean*. Server documentation:
+[`docs/api/federated-token-exchange.md`](../docs/api/federated-token-exchange.md).
+
+**The use case:** a partner runs their own IdP (Entra, Okta, Keycloak). Their service calls
+yours carrying *their* token. You present it here and get back an AXIAM token scoped to what
+the resolved AXIAM user may actually do.
+
+#### What to pass
+
+| Parameter | External exchange |
+|---|---|
+| `subject_token` | the **partner's** access token (a JWT) |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` — or `…:access_token`; both are accepted for an external issuer |
+| `actor_token` | **MUST be omitted.** Delegation across a trust boundary is not supported in v1 and is refused with `invalid_request` |
+| `scope` | as always: omit to get everything the trust configuration and the user's permissions allow, or name scopes to be told about any you cannot have |
+
+An SDK MUST NOT inspect the subject token to decide which `subject_token_type` to send, and
+MUST NOT default `subject_token_type` on the caller's behalf. Which kind of token the caller
+holds is something only the caller knows, and a wrong guess here is the difference between a
+request that is refused and one that is silently reinterpreted.
+
+#### Which errors mean what
+
+`error` codes are unchanged (§15.3). One `error_description` is normative and an SDK MAY
+match on it:
+
+> `the subject token's issuer is not configured for token exchange`
+
+carried on `invalid_grant`. It is the **only** external failure that is distinguishable, and
+it means *fix the AXIAM trust configuration* (an operator must enable token exchange for
+that federation provider and list your audience) rather than *fix your token*. Every other
+external failure — bad signature, expired, too old, audience not accepted, wrong token kind,
+subject not linked — answers `invalid_grant` with a generic description, deliberately:
+which of a dozen checks refused a token is a map of the server's validation order, drawn one
+request at a time.
+
+Two refusals worth surfacing with their own guidance:
+
+- `invalid_request` naming a **refresh or ID token type**. A refresh token is a
+  re-authentication credential and an ID token is an assertion to a client about a login;
+  neither is a bearer credential for an API. An SDK MUST NOT retry as a different type.
+- `invalid_request` saying the subject token is **already the product of an exchange**.
+  Exchanges do not compose. An SDK MUST NOT attempt to re-exchange a token it obtained from
+  a previous `token_exchange` call, in either direction.
+
+#### The issued token
+
+Identical in shape to a same-domain exchange, with one additional claim:
+
+```json
+{ "ext_exchange": { "iss": "https://partner.example/" } }
+```
+
+A resource server MAY read it to tell a cross-domain token from a locally-issued one. An SDK
+MUST NOT treat its presence or absence as an authorization input — the `scope` claim and the
+server's own checks remain the authority — and MUST NOT strip it when forwarding.
+
+`§15.2` rules 4–7 apply verbatim: no refresh token, never adopted as the client's session,
+`issued_token_type` surfaced, and `scope` read as the granted set.
+
+#### Required tests (extends §15.6)
+
+An exchange with an external subject token and `subject_token_type=…:jwt` surfaces the
+result unchanged; passing an `actor_token` alongside an external subject token surfaces
+`invalid_request` with no retry and no rewriting; the `issuer is not configured` description
+reaches the caller intact; a token carrying `ext_exchange` is not re-exchanged by any helper.
+
 ---
 
 ## §16 Retry Policy (D5)

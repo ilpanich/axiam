@@ -1004,6 +1004,7 @@ mod tests {
             client_secret_ciphertext: None,
             client_secret_nonce: None,
             client_secret_key_version: None,
+            token_exchange: Default::default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1083,6 +1084,12 @@ mod tests {
             _: Pagination,
         ) -> axiam_core::error::AxiamResult<PaginatedResult<FederationConfig>> {
             unimplemented!()
+        }
+        async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
         }
         async fn list_with_legacy_plaintext_secret(
             &self,
@@ -1358,6 +1365,12 @@ mod tests {
             _: Pagination,
         ) -> axiam_core::error::AxiamResult<PaginatedResult<FederationConfig>> {
             unimplemented!()
+        }
+        async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
         }
         async fn list_with_legacy_plaintext_secret(
             &self,

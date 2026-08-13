@@ -573,6 +573,7 @@ mod tests {
                 attribute_map: None,
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
+                token_exchange: None,
             })
             .await
             .unwrap();
@@ -1250,6 +1251,7 @@ mod tests {
                 attribute_map: None,
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
+                token_exchange: None,
             })
             .await
             .unwrap();
@@ -1413,6 +1415,7 @@ mod tests {
                 attribute_map: None,
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
+                token_exchange: None,
             })
             .await
             .unwrap();

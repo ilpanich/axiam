@@ -113,6 +113,33 @@ pub struct AccessTokenClaims {
     /// subject token's remaining life, the configured maximum, and 300 s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<Vec<RptPermission>>,
+    /// Provenance of a cross-domain exchange (X4) — present **only** on a
+    /// token minted from an *external* IdP's subject token.
+    ///
+    /// Two jobs, and the second is the reason it is inside the signed token
+    /// rather than only in the audit log:
+    ///
+    /// 1. A resource server can tell a cross-domain token from a
+    ///    locally-issued one without asking us anything.
+    /// 2. **It makes the exchange non-transitive.** Both exchange paths refuse
+    ///    a subject token carrying this claim, so a token minted from a
+    ///    partner's token can never be exchanged again — ours or theirs.
+    ///    Without it, trust composes silently: A trusts B, B trusts C,
+    ///    therefore A trusts C, which nobody configured and nobody can see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_exchange: Option<ExtExchangeClaim>,
+}
+
+/// X4 provenance claim: which foreign issuer's token this one came from.
+///
+/// Deliberately just the issuer. The external `sub` is in the audit record,
+/// not here — a downstream service has no use for a partner-local identifier
+/// and every reason not to key anything on it, whereas the issuer is what a
+/// policy would actually branch on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtExchangeClaim {
+    /// The external IdP's `iss`, exactly as it appeared in the subject token.
+    pub iss: String,
 }
 
 /// RFC 8693 §4.1 `act` claim: who is acting on the subject's behalf.
@@ -180,6 +207,7 @@ pub fn issue_access_token(
         sub_kind: SubjectKind::User,
         act: None,
         permissions: None,
+        ext_exchange: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -197,6 +225,34 @@ pub fn issue_access_token(
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
 
+/// Read the `iss` claim of a JWT **without verifying anything** (X4).
+///
+/// This is a routing primitive, not a validation one. It answers "which key
+/// should this token be checked against" — never "is this token good". Both
+/// destinations verify: a token claiming AXIAM's issuer is checked against
+/// AXIAM's signing key, and a token claiming a partner's issuer is checked
+/// against that partner's JWKS. A forged `iss` therefore selects the branch in
+/// which it fails, which is why reading it unverified is safe here and would
+/// not be anywhere that acts on the answer.
+///
+/// Returns `None` for anything that is not a three-part JWT with a
+/// base64url-decodable JSON payload carrying a string `iss`.
+pub fn unverified_issuer_of(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let (_header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    // A two-part token is an unsigned JWT; there is no branch that would
+    // accept one, so refuse to route it at all rather than let it reach a
+    // signature check that reports a less specific failure.
+    if signature.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("iss")?.as_str().map(str::to_owned)
+}
+
 /// Issue an access token for an RFC 8693 token exchange (B3).
 ///
 /// Distinct from [`issue_access_token`] in exactly the two ways the exchange
@@ -208,6 +264,9 @@ pub fn issue_access_token(
 ///   seconds, exchange it, hold the result for fifteen minutes. The caller
 ///   computes `min(subject remaining, configured max)` and passes it here.
 /// * **`act` may be set**, naming the delegating party (§4.1).
+/// * **`ext_exchange` may be set** (X4), naming the foreign issuer whose token
+///   bought this one. Both exchange paths refuse a subject token that carries
+///   it, which is what makes the exchange non-transitive.
 ///
 /// Everything else — issuer, algorithm, key handling — is identical, so an
 /// exchanged token validates through exactly the same path as any other.
@@ -223,6 +282,7 @@ pub fn issue_exchanged_token(
     aud: &str,
     expires_at: i64,
     act: Option<ActClaim>,
+    ext_exchange: Option<ExtExchangeClaim>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     if expires_at <= now {
@@ -253,6 +313,7 @@ pub fn issue_exchanged_token(
         // through an exchange would carry a decision past the ticket that
         // authorised it.
         permissions: None,
+        ext_exchange,
     };
 
     let owned;
@@ -305,6 +366,7 @@ pub fn issue_client_credentials_token(
         sub_kind: SubjectKind::OAuth2Client,
         act: None,
         permissions: None,
+        ext_exchange: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -366,6 +428,11 @@ pub fn issue_rpt(
         sub_kind: SubjectKind::User,
         act: None,
         permissions: Some(permissions),
+        // An RPT is minted from a ticket, never from an exchange. If the
+        // subject token that bought the ticket was itself cross-domain, that
+        // fact belongs to *that* token and its audit record; re-stamping it
+        // here would attribute this decision to a provenance it does not have.
+        ext_exchange: None,
     };
 
     let owned;
@@ -433,6 +500,7 @@ pub fn issue_service_account_token(
         sub_kind: SubjectKind::ServiceAccount,
         act: None,
         permissions: None,
+        ext_exchange: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -503,6 +571,7 @@ pub fn issue_service_account_client_credentials_token(
         sub_kind: SubjectKind::ServiceAccount,
         act: None,
         permissions: None,
+        ext_exchange: None,
     };
 
     let owned;
@@ -1208,5 +1277,76 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
         let validated = validate_access_token(&token, &config).unwrap();
         assert_eq!(validated.0.sub_kind, SubjectKind::ServiceAccount);
+    }
+
+    // -----------------------------------------------------------------
+    // X4 — the ext_exchange provenance claim
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_ordinary_exchanged_token_carries_no_provenance_claim() {
+        let config = test_config();
+        let token = issue_exchanged_token(
+            &Uuid::new_v4().to_string(),
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &["read".to_string()],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Utc::now().timestamp() + 60,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert!(
+            claims.ext_exchange.is_none(),
+            "a same-domain B3 exchange must not claim a foreign provenance"
+        );
+        // And the key must be absent from the wire, not present-and-null: a
+        // resource server testing `\"ext_exchange\" in claims` is doing the
+        // documented thing.
+        let payload = token.split('.').nth(1).unwrap();
+        let json = String::from_utf8(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!json.contains("ext_exchange"), "wire payload: {json}");
+    }
+
+    #[test]
+    fn a_cross_domain_exchange_stamps_the_foreign_issuer_and_it_survives_a_round_trip() {
+        let config = test_config();
+        let token = issue_exchanged_token(
+            &Uuid::new_v4().to_string(),
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &["read".to_string()],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Utc::now().timestamp() + 60,
+            None,
+            Some(ExtExchangeClaim {
+                iss: "https://partner.example/".into(),
+            }),
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(
+            claims.ext_exchange,
+            Some(ExtExchangeClaim {
+                iss: "https://partner.example/".into()
+            }),
+            "the provenance claim is what makes the exchange non-transitive; \
+             a decode that loses it silently restores transitivity"
+        );
     }
 }

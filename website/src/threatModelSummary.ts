@@ -23,11 +23,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.5.0",
+ "version": "2.6.0",
  "diagramCount": 9,
- "total": 154,
- "open": 22,
- "mitigated": 132,
+ "total": 162,
+ "open": 23,
+ "mitigated": 139,
  "areas": [
   {
    "id": 0,
@@ -50,8 +50,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 15,
-   "open": 0
+   "total": 23,
+   "open": 1
   },
   {
    "id": 4,

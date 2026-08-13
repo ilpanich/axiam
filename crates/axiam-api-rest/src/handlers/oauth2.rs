@@ -1229,6 +1229,12 @@ async fn handle_token_exchange<C: Connection + Clone>(
             // the acting party was not the subject — the token deliberately
             // carries no `act` claim — so it must not be lost to a crash
             // between issuing and logging.
+            // X4: an external exchange's provenance is recorded in the same
+            // entry, not a second one. A reader correlating two lines by
+            // timestamp is a reader who can be made to correlate the wrong
+            // two, and for a JIT provision this is the only record that a
+            // partner's IdP created an AXIAM user.
+            let ext = outcome.external.as_ref();
             tracing::info!(
                 target: "axiam::audit",
                 event = "oauth2.token_exchange",
@@ -1239,6 +1245,13 @@ async fn handle_token_exchange<C: Connection + Clone>(
                 actor = outcome.actor.as_deref().unwrap_or("-"),
                 granted_scopes = %outcome.granted_scopes.join(" "),
                 audience = %outcome.audience,
+                external_issuer = ext.map(|e| e.issuer.as_str()).unwrap_or("-"),
+                external_subject = ext.map(|e| e.external_subject.as_str()).unwrap_or("-"),
+                federation_provider = ext.map(|e| e.provider_name.as_str()).unwrap_or("-"),
+                federation_config_id = ext
+                    .map(|e| e.provider_id.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                jit_provisioned = ext.is_some_and(|e| e.newly_provisioned),
                 "token exchange"
             );
             HttpResponse::Ok()

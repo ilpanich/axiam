@@ -217,6 +217,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "webauthn_attestation_policy_and_mds",
         sql: SCHEMA_V35,
     },
+    Migration {
+        version: 36,
+        name: "federation_external_token_exchange_trust",
+        sql: SCHEMA_V36,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1867,6 +1872,48 @@ DEFINE FIELD IF NOT EXISTS aaguid ON TABLE webauthn_credential TYPE option<strin
 DEFINE FIELD IF NOT EXISTS attestation_format ON TABLE webauthn_credential TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS attested ON TABLE webauthn_credential TYPE bool DEFAULT false;
 DEFINE FIELD IF NOT EXISTS authenticator_name ON TABLE webauthn_credential TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v36 — external-IdP token-exchange trust on federation providers (X4)
+// -----------------------------------------------------------------------
+//
+// Purely additive columns on the existing `federation_config` table. Every
+// pre-X4 row reads back as `TokenExchangeTrust::default()` — the repository
+// maps a missing/NONE column to the default rather than relying on a DB
+// DEFAULT, so there is no backfill and no window in which a row is half-X4.
+//
+// `token_exchange_enabled` DEFAULTs to **false**, which is the whole safety
+// story of this migration: turning on X4 for a provider is an explicit act,
+// never a consequence of upgrading. An operator who configured Okta for login
+// did not thereby agree to accept Okta tokens as API credentials.
+//
+// `token_exchange_scope_map` is a JSON string rather than a nested SurrealDB
+// object, for the same reason `mds_entry.status_reports_json` is (v35): it is
+// read and written whole, never queried by sub-field, and modelling a
+// map-of-arrays in DDL a second time buys nothing. `accepted_audiences` IS a
+// native array — it is a list of scalars, and an operator reading the row
+// should be able to see at a glance which audiences a provider trusts.
+//
+// `subject_mapping` follows v25/v35's `option<string> ASSERT $value = NONE OR
+// $value IN [...]` pattern for an optional enum-like column; NONE means
+// `linked_only`, the stricter of the two.
+const SCHEMA_V36: &str = "\
+DEFINE FIELD IF NOT EXISTS token_exchange_enabled ON TABLE federation_config
+    TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS token_exchange_accepted_audiences ON TABLE federation_config
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS token_exchange_subject_mapping ON TABLE federation_config
+    TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['linked_only', 'jit_provision'];
+DEFINE FIELD IF NOT EXISTS token_exchange_scope_map_json ON TABLE federation_config
+    TYPE string DEFAULT '{}';
+DEFINE FIELD IF NOT EXISTS token_exchange_max_token_age_secs ON TABLE federation_config
+    TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS token_exchange_max_lifetime_secs ON TABLE federation_config
+    TYPE option<int>;
+DEFINE INDEX IF NOT EXISTS idx_federation_config_tenant_tx ON TABLE federation_config
+    COLUMNS tenant_id, token_exchange_enabled;
 ";
 
 // -----------------------------------------------------------------------

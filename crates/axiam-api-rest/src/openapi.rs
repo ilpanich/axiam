@@ -353,6 +353,9 @@ use crate::handlers;
         handlers::federation::CreateFederationConfigRequest,
         handlers::federation::UpdateFederationConfigRequest,
         handlers::federation::FederationConfigResponse,
+        // X4 — external-IdP token-exchange trust.
+        handlers::federation::TokenExchangeTrustRequest,
+        handlers::federation::TokenExchangeTrustResponse,
         handlers::federation::OidcAuthorizeRequest,
         handlers::federation::OidcCallbackRequest,
         handlers::federation::OidcCallbackResponse,

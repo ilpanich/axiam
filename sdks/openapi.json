@@ -1571,6 +1571,7 @@
                           "client_id",
                           "attribute_map",
                           "enabled",
+                          "token_exchange",
                           "created_at",
                           "updated_at"
                         ],
@@ -1605,6 +1606,10 @@
                           "tenant_id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "token_exchange": {
+                            "$ref": "#/components/schemas/TokenExchangeTrustResponse",
+                            "description": "X4 external token-exchange trust."
                           },
                           "updated_at": {
                             "type": "string",
@@ -9289,6 +9294,17 @@
           "provider": {
             "type": "string",
             "description": "Display name for the identity provider (e.g., \"Google\", \"Okta\")."
+          },
+          "token_exchange": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TokenExchangeTrustRequest",
+                "description": "X4 external token-exchange trust. Omitted means disabled."
+              }
+            ]
           }
         }
       },
@@ -10205,6 +10221,7 @@
           "client_id",
           "attribute_map",
           "enabled",
+          "token_exchange",
           "created_at",
           "updated_at"
         ],
@@ -10239,6 +10256,10 @@
           "tenant_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "token_exchange": {
+            "$ref": "#/components/schemas/TokenExchangeTrustResponse",
+            "description": "X4 external token-exchange trust."
           },
           "updated_at": {
             "type": "string",
@@ -13392,6 +13413,107 @@
           }
         }
       },
+      "TokenExchangeTrustRequest": {
+        "type": "object",
+        "description": "X4 trust for exchanging this provider's tokens (RFC 8693, external issuer).\n\nMirrors [`TokenExchangeTrust`] on the wire rather than reusing it directly\nso the API surface can carry its own defaults: an admin PUTting a partial\nblock gets the documented default for anything they omitted, instead of a\ndeserialization error listing fields they have never heard of.",
+        "properties": {
+          "accepted_audiences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Audiences an incoming subject token may name. Required (non-empty)\nwhen `enabled`; there is deliberately no accept-all value."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Off unless explicitly enabled. Configuring a provider for *login* is\nnot agreement to accept its tokens as API credentials."
+          },
+          "max_lifetime_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Per-provider ceiling on the issued AXIAM token's lifetime."
+          },
+          "max_token_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bound on `now - iat`, independent of the token's own `exp`."
+          },
+          "scope_map": {
+            "type": "object",
+            "description": "External asserted value -> AXIAM scopes. Deny-by-default: an external\nvalue with no entry contributes nothing.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "subject_mapping": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`linked_only` (default) or `jit_provision`."
+          }
+        }
+      },
+      "TokenExchangeTrustResponse": {
+        "type": "object",
+        "description": "X4 trust as returned. Same shape as the request; nothing here is secret —\nan operator reading a provider needs to see exactly what it trusts.",
+        "required": [
+          "enabled",
+          "accepted_audiences",
+          "subject_mapping",
+          "scope_map",
+          "max_token_age_secs"
+        ],
+        "properties": {
+          "accepted_audiences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_lifetime_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "max_token_age_secs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scope_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "subject_mapping": {
+            "type": "string"
+          }
+        }
+      },
       "TokenPolicy": {
         "type": "object",
         "description": "Token lifetime configuration.",
@@ -13685,6 +13807,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "token_exchange": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TokenExchangeTrustRequest",
+                "description": "X4 external token-exchange trust. Replaced **wholesale** when present:\na partial merge of a trust configuration is how an operator ends up\nkeeping an `accepted_audiences` entry they believed they had removed."
+              }
             ]
           }
         }

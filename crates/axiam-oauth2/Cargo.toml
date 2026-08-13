@@ -25,3 +25,8 @@ base64 = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 subtle = { workspace = true }
+
+[dev-dependencies]
+# X4 external-exchange unit tests mint an Ed25519 keypair for the AuthConfig
+# under test, the same way every other crate's token tests do.
+rcgen = { workspace = true }

@@ -180,6 +180,7 @@ fn make_config(plaintext: &str) -> FederationConfig {
         client_secret_ciphertext: None,
         client_secret_nonce: None,
         client_secret_key_version: None,
+        token_exchange: Default::default(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -215,6 +216,12 @@ impl FederationConfigRepository for MockFedRepo {
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<FederationConfig>> {
         unimplemented!()
+    }
+    async fn list_token_exchange_enabled(
+        &self,
+        _tenant_id: Uuid,
+    ) -> AxiamResult<Vec<FederationConfig>> {
+        Ok(Vec::new())
     }
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
         Ok(self.rows.clone())

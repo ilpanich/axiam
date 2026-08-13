@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.5.0",
  "diagramCount": 9,
- "total": 149,
- "open": 21,
- "mitigated": 128,
+ "total": 154,
+ "open": 22,
+ "mitigated": 132,
  "diagrams": [
   {
    "id": 0,
@@ -3565,9 +3565,9 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "description": "Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption.",
+   "description": "Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
    "width": 1438,
-   "height": 808,
+   "height": 828,
    "boundaries": [
     {
      "id": "247fb050-0c6a-578e-a10f-536ea7baf860",
@@ -3912,6 +3912,90 @@ export const THREAT_MODEL: ThreatModel = {
      "outOfScope": false,
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "18ed2d20-aec6-5ddb-91e2-d348cb5405a2",
+     "kind": "process",
+     "x": 374,
+     "y": 664,
+     "w": 140,
+     "h": 140,
+     "name": "FIDO MDS3 ingestion (BLOB verify, X3)",
+     "lines": [
+      "FIDO MDS3",
+      "ingestion",
+      "(BLOB",
+      "verify, X3)"
+     ],
+     "description": "Fetches (or loads, air-gapped) the FIDO Alliance MDS3 BLOB, verifies its RS256 JWT signature chain against a digest-pinned vendored trust anchor, pins the leaf's SAN DNS identity, rejects a rollback to an older serial, and marks the result stale (never hard-fails) past nextUpdate.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 150,
+       "title": "Public-CA root proves \"a GlobalSign EV customer\", not \"FIDO Alliance\"",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "GlobalSign Root CA - R3 is a public CA root sitting above the entire public web, not just the FIDO Alliance. Chain-verifying x5c up to that root alone is satisfied by any genuine end-entity certificate an attacker can obtain under the same public root, spliced beneath a self-minted leaf.",
+       "mitigation": "The leaf must additionally carry the pinned hostname (mds.fidoalliance.org) as a SAN DNS entry (CN fallback only when no SAN extension exists), and every issuing position in the chain must be a real CA (basicConstraints CA=true, and keyCertSign when keyUsage is present) with pathLenConstraint enforced - closing the ordinary-end-entity-certificate splice that signature verification alone would miss (axiam-pki::mds::blob::assert_is_issuer)."
+      },
+      {
+       "number": 151,
+       "title": "Vendored trust anchor silently swapped for an attacker-controlled root",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "The vendored root certificate is the root of trust for every attestation decision the policy engine makes; a swapped file would convert \"only FIDO-certified authenticators may register\" into \"any authenticator an attacker can mint an attestation chain for\", with no test failure and no error - just a bad key.",
+       "mitigation": "The loader recomputes the SHA-256 of the vendored PEM's DER bytes against a pinned hex constant (FIDO_MDS_ROOT_SHA256_HEX) on every use and fails closed on any mismatch. Matching the digest is the check; the anchor is never re-fetched from anywhere at runtime. The documented update procedure requires updating the file and the pinned digest in the same reviewed commit."
+      },
+      {
+       "number": 152,
+       "title": "Older MDS BLOB replayed to reintroduce a since-revoked authenticator",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A validly-signed but older BLOB (a captured earlier serial, or a compromised/rolled-back distribution point) could overwrite newer entries and quietly re-admit an authenticator model FIDO has since revoked or decertified.",
+       "mitigation": "Ingestion compares the freshly-verified BLOB's serial (no) against the stored serial before replacing entries: a lower serial is rejected outright as a rollback, an equal serial only bumps last_refreshed_at, and only a strictly higher serial replaces stored entries (axiam_pki::mds::decide_ingest_outcome, applied by the axiam-db ingestion orchestrator)."
+      },
+      {
+       "number": 153,
+       "title": "Stale MDS metadata leaves a newly-revoked authenticator treated as compliant",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "A BLOB past its own nextUpdate date is deliberately not treated as a hard failure - ingestion still succeeds so a transient FIDO Alliance outage cannot brick registration - but this means an authenticator model FIDO has revoked or decertified since the last successful refresh keeps passing block_revoked_status / require_fido_certified / min_certification until the next successful refresh. Air-gapped deployments on AXIAM__PKI__MDS_BLOB_PATH have no automatic refresh path at all.",
+       "mitigation": "Staleness is logged at WARN with the nextUpdate/now delta and surfaced on GET /api/v1/mds/status (stale: true); the weekly background job and the admin-triggered POST /api/v1/mds/refresh both re-attempt ingestion. No automated alert on sustained staleness ships yet, and air-gapped operators must re-supply the local BLOB file themselves - accepted as an operational responsibility rather than closed in-product; monitor stale and the refresh audit actions (mds.refreshed / mds.refresh_failed)."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "65a3b482-ded2-5ac6-9daf-0f2a8cdf3b51",
+     "kind": "store",
+     "x": 1059,
+     "y": 584,
+     "w": 170,
+     "h": 80,
+     "name": "mds_entry / mds_blob_meta (global, X3)",
+     "lines": [
+      "mds_entry /",
+      "mds_blob_meta",
+      "(global, X3)"
+     ],
+     "description": "Server-global (not tenant-scoped) tables holding parsed FIDO MDS3 entries keyed by AAGUID and the last-ingested BLOB's serial/nextUpdate/staleness - written only by the verified ingestion path, never directly.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 154,
+       "title": "MDS entry status edited directly in the datastore to hide a revocation",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Flipping a stored entry's status reports directly in the datastore would let an authenticator model FIDO has revoked keep passing block_revoked_status / require_fido_certified indefinitely, bypassing the policy engine entirely.",
+       "mitigation": "Same posture as the certificate store (T-104): these tables are written only by the verified ingestion path (weekly refresh job or the admin-triggered refresh endpoint), which always re-derives entries from a BLOB that passed the full digest-pinned trust-chain verification. Direct datastore write access is restricted to the service credentials on the private data tier and is treated as full administrative compromise."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -4162,14 +4246,32 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "HTTPS",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "e86be81e-0435-5173-8f0c-c4dab7566d7d",
+     "path": "M513.2,723.1 L1059,637.4",
+     "name": "replace verified entries",
+     "description": "",
+     "label": "replace verified entries (SurrealQL)",
+     "labelLines": [
+      "replace verified entries (SurrealQL)"
+     ],
+     "lx": 786.1,
+     "ly": 680.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 13,
-   "open": 1,
+   "total": 18,
+   "open": 2,
    "bySeverity": {
-    "Critical": 5,
-    "High": 6,
-    "Medium": 2
+    "Critical": 6,
+    "High": 9,
+    "Medium": 3
    }
   },
   {

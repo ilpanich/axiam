@@ -25,6 +25,17 @@ struct WebauthnCredentialRow {
     passkey_json: String,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
+    // D6 (X3, wave 2): additive attestation metadata. `#[serde(default)]`-style
+    // absence handling isn't applicable to `SurrealValue` the way it is to
+    // `serde`, but the column itself is `option<..>`/`DEFAULT false` (schema
+    // v35), so a row written before this column existed reads back as
+    // `None`/`false` here regardless — the same "additive, no migration"
+    // guarantee D6 requires, just enforced by the schema default rather than
+    // a derive attribute.
+    aaguid: Option<String>,
+    attestation_format: Option<String>,
+    attested: bool,
+    authenticator_name: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -38,6 +49,11 @@ struct WebauthnCredentialRowWithId {
     passkey_json: String,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
+    // D6 (X3, wave 2): see `WebauthnCredentialRow` above.
+    aaguid: Option<String>,
+    attestation_format: Option<String>,
+    attested: bool,
+    authenticator_name: Option<String>,
 }
 
 fn parse_credential_type(s: &str) -> Result<WebauthnCredentialType, DbError> {
@@ -50,12 +66,21 @@ fn parse_credential_type(s: &str) -> Result<WebauthnCredentialType, DbError> {
     }
 }
 
+/// Parse an optional stored AAGUID string. A `None` column reads back as
+/// `None`; a corrupt (non-UUID) value is reported rather than silently
+/// dropped, matching `parse_uuid`'s D-10 rationale for other UUID columns.
+fn parse_optional_aaguid(s: Option<String>) -> Result<Option<Uuid>, DbError> {
+    s.map(|s| crate::helpers::parse_uuid(&s, "aaguid"))
+        .transpose()
+}
+
 fn row_to_credential(row: WebauthnCredentialRow, id: Uuid) -> Result<WebauthnCredential, DbError> {
     let tenant_id = Uuid::parse_str(&row.tenant_id)
         .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
     let user_id = Uuid::parse_str(&row.user_id)
         .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
     let credential_type = parse_credential_type(&row.credential_type)?;
+    let aaguid = parse_optional_aaguid(row.aaguid)?;
     Ok(WebauthnCredential {
         id,
         tenant_id,
@@ -66,6 +91,14 @@ fn row_to_credential(row: WebauthnCredentialRow, id: Uuid) -> Result<WebauthnCre
         passkey_json: row.passkey_json,
         created_at: row.created_at,
         last_used_at: row.last_used_at,
+        // D6 (X3, wave 2): read back whatever was recorded at registration
+        // time. A pre-X3 row has no column value at all, which the schema
+        // (v35) reads as None/false — the same "today's behavior unchanged"
+        // guarantee the wave-1 model already documents.
+        aaguid,
+        attestation_format: row.attestation_format,
+        attested: row.attested,
+        authenticator_name: row.authenticator_name,
     })
 }
 
@@ -78,6 +111,7 @@ impl WebauthnCredentialRowWithId {
         let user_id = Uuid::parse_str(&self.user_id)
             .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
         let credential_type = parse_credential_type(&self.credential_type)?;
+        let aaguid = parse_optional_aaguid(self.aaguid)?;
         Ok(WebauthnCredential {
             id,
             tenant_id,
@@ -88,6 +122,11 @@ impl WebauthnCredentialRowWithId {
             passkey_json: self.passkey_json,
             created_at: self.created_at,
             last_used_at: self.last_used_at,
+            // D6 (X3, wave 2): see the equivalent comment in `row_to_credential`.
+            aaguid,
+            attestation_format: self.attestation_format,
+            attested: self.attested,
+            authenticator_name: self.authenticator_name,
         })
     }
 }
@@ -121,7 +160,11 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
                  credential_id = $credential_id, \
                  name = $name, \
                  credential_type = $credential_type, \
-                 passkey_json = $passkey_json",
+                 passkey_json = $passkey_json, \
+                 aaguid = $aaguid, \
+                 attestation_format = $attestation_format, \
+                 attested = $attested, \
+                 authenticator_name = $authenticator_name",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -133,6 +176,10 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
                 input.credential_type.as_str().to_string(),
             ))
             .bind(("passkey_json", input.passkey_json))
+            .bind(("aaguid", input.aaguid.map(|u| u.to_string())))
+            .bind(("attestation_format", input.attestation_format))
+            .bind(("attested", input.attested))
+            .bind(("authenticator_name", input.authenticator_name))
             .await
             .map_err(DbError::from)?;
 
@@ -184,6 +231,29 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<WebauthnCredentialRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_credential().map_err(Into::into))
+            .collect()
+    }
+
+    /// X3 wave 3 (D9): every credential in the tenant, across all users —
+    /// the compliance report's source list. Mirrors `list_by_user` minus the
+    /// `user_id` filter.
+    async fn list_by_tenant(&self, tenant_id: Uuid) -> AxiamResult<Vec<WebauthnCredential>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM webauthn_credential \
+                 WHERE tenant_id = $tenant_id \
+                 ORDER BY created_at DESC",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?;
 

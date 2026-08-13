@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 149 |
-| **Mitigated / Open** | 128 / 21 |
+| **Threats identified** | 154 |
+| **Mitigated / Open** | 132 / 22 |
 | **Owner** | ilpanich |
 
 ---
@@ -921,9 +921,9 @@ A party with broker access modifies subject, action or resource between publish 
 
 ### 5.6 PKI, certificates & IoT device identity
 
-Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption.
+Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.
 
-*13 threats — 5 critical, 6 high, 2 medium; 1 open.*
+*18 threats — 6 critical, 9 high, 3 medium; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -940,6 +940,11 @@ Organization CA lifecycle, tenant certificate issuance with policy enforcement, 
 | T-103 | OpenPGP key service (audit signing, GDPR export) <br/>*Process* | T | Substituted PGP key invalidates audit tamper-evidence | High | Mitigated |
 | T-104 | certificate (public certs, fingerprints) <br/>*Store* | T | Certificate status flipped back to active | High | Mitigated |
 | T-105 | certificate + private key (once) <br/>*Flow* | I | Private key intercepted on its single delivery | Critical | Mitigated |
+| T-150 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | S | Public-CA root proves "a GlobalSign EV customer", not "FIDO Alliance" | High | Mitigated |
+| T-151 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | T | Vendored trust anchor silently swapped for an attacker-controlled root | Critical | Mitigated |
+| T-152 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | T | Older MDS BLOB replayed to reintroduce a since-revoked authenticator | High | Mitigated |
+| T-153 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | E | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | Medium | Open |
+| T-154 | mds_entry / mds_blob_meta (global, X3) <br/>*Store* | T | MDS entry status edited directly in the datastore to hide a revocation | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1034,6 +1039,41 @@ Editing a revoked certificate's status directly in the datastore silently restor
 The generated private key crosses the network exactly once, in the issuance response; interception yields a complete, indefinitely usable identity.
 
 > Delivery is over TLS 1.3 only, the key is never persisted server-side and is never repeated in any later response, and the issuance is audited so an unexpected issuance is visible.
+
+**T-150 — Public-CA root proves "a GlobalSign EV customer", not "FIDO Alliance"**  
+`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Spoofing · High · Mitigated
+
+GlobalSign Root CA – R3 is a public CA root sitting above the entire public web, not just the FIDO Alliance. Chain-verifying `x5c` up to that root alone is satisfied by any genuine end-entity certificate an attacker can obtain under the same public root, spliced beneath a self-minted leaf carrying whatever SAN the attacker chose.
+
+> The leaf must additionally carry the pinned hostname (`mds.fidoalliance.org`) as a SAN DNS entry (CN fallback only when no SAN extension exists), and every issuing position in the chain must be a real CA (`basicConstraints` `CA=true`, and `keyCertSign` when `keyUsage` is present) with `pathLenConstraint` enforced — closing the ordinary-end-entity-certificate splice that signature verification alone would miss (`axiam-pki::mds::blob::assert_is_issuer`).
+
+**T-151 — Vendored trust anchor silently swapped for an attacker-controlled root**  
+`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Tampering · Critical · Mitigated
+
+The vendored root certificate is the root of trust for every attestation decision the policy engine makes; a swapped file would convert "only FIDO-certified authenticators may register" into "any authenticator an attacker can mint an attestation chain for" — a security regression that produces no test failure and no error, only a bad key.
+
+> The loader recomputes the SHA-256 of the vendored PEM's DER bytes against a pinned hex constant (`FIDO_MDS_ROOT_SHA256_HEX`) on every use and fails closed on any mismatch. Matching the digest is the check; the anchor is never re-fetched from anywhere at runtime. The documented update procedure requires updating the file and the pinned digest in the same reviewed commit.
+
+**T-152 — Older MDS BLOB replayed to reintroduce a since-revoked authenticator**  
+`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Tampering · High · Mitigated
+
+A validly-signed but older BLOB (a captured earlier serial, or a compromised/rolled-back distribution point) could overwrite newer entries and quietly re-admit an authenticator model FIDO has since revoked or decertified.
+
+> Ingestion compares the freshly-verified BLOB's serial (`no`) against the stored serial before replacing entries: a lower serial is rejected outright as a rollback, an equal serial only bumps `last_refreshed_at`, and only a strictly higher serial replaces stored entries (`axiam_pki::mds::decide_ingest_outcome`, applied by the `axiam-db` ingestion orchestrator).
+
+**T-153 — Stale MDS metadata leaves a newly-revoked authenticator treated as compliant**  
+`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Elevation of privilege · Medium · Open
+
+A BLOB past its own `nextUpdate` date is deliberately not treated as a hard failure — ingestion still succeeds so a transient FIDO Alliance outage cannot brick registration — but this means an authenticator model FIDO has revoked or decertified since the last successful refresh keeps passing `block_revoked_status` / `require_fido_certified` / `min_certification` until the next successful refresh. Air-gapped deployments on `AXIAM__PKI__MDS_BLOB_PATH` have no automatic refresh path at all.
+
+> Staleness is logged at WARN with the `nextUpdate`/now delta and surfaced on `GET /api/v1/mds/status` (`stale: true`); the weekly background job and the admin-triggered `POST /api/v1/mds/refresh` both re-attempt ingestion. No automated alert on sustained staleness ships yet, and air-gapped operators must re-supply the local BLOB file themselves — accepted as an operational responsibility rather than closed in-product; monitor `stale` and the `mds.refreshed` / `mds.refresh_failed` audit actions.
+
+**T-154 — MDS entry status edited directly in the datastore to hide a revocation**  
+`mds_entry / mds_blob_meta (global, X3)` (Store) · Tampering · High · Mitigated
+
+Flipping a stored entry's status reports directly in the datastore would let an authenticator model FIDO has revoked keep passing `block_revoked_status` / `require_fido_certified` indefinitely, bypassing the policy engine entirely.
+
+> Same posture as the certificate store (T-104): these tables are written only by the verified ingestion path (weekly refresh job or the admin-triggered refresh endpoint), which always re-derives entries from a BLOB that passed the full digest-pinned trust-chain verification. Direct datastore write access is restricted to the service credentials on the private data tier and is treated as full administrative compromise.
 
 </details>
 
@@ -1433,7 +1473,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-21 of 149 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+22 of 154 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1457,6 +1497,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-129 | Medium | Erasure or expiry job silently stops running | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Deployment & platform (Kubernetes)* | Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack. |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
+| T-153 | Medium | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*PKI, certificates & IoT device identity* | Staleness never hard-fails ingestion (a transient FIDO Alliance outage must not brick registration), so a since-revoked authenticator model keeps passing policy until the next… |
 | T-119 | Low | Unbounded audit growth degrades the datastore | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements. |
 
 ### Grouping
@@ -1466,6 +1507,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - **No deny-override in the RBAC cascade** (SEC-040). The engine is additive, allow-wins, default-deny; a grant on a parent resource cannot be revoked on one child. Deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy rather than granting high and excluding.
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
 - **Audit records cannot be erased.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.
+- **A stale FIDO MDS3 BLOB is never a hard failure (X3).** A transient outage at the FIDO Alliance must not brick WebAuthn registration, so ingestion past `nextUpdate` still succeeds — logged at WARN and surfaced as `stale: true` on `GET /api/v1/mds/status` — rather than blocking. The cost is T-153: a since-revoked authenticator model keeps passing policy until the next successful refresh.
 
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
 
@@ -1476,6 +1518,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - Edge protection (WAF, connection limits) in front of the ingress
 - Alerting on scheduled-job completion, so a missed GDPR erasure or certificate-expiry run is noticed
 - Kubernetes audit logging, since cluster-admin bypasses the AXIAM audit trail entirely
+- Re-supplying the local FIDO MDS3 BLOB file on air-gapped deployments (`AXIAM__PKI__MDS_BLOB_PATH`) — there is no automatic refresh path off the public network, so an operator who never updates the file never gets the newer BLOB's revocations either
 
 **Genuine gaps worth scheduling**
 
@@ -1489,20 +1532,20 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 | Category | Threats |
 |---|---|
-| Spoofing | 37 |
-| Tampering | 29 |
+| Spoofing | 38 |
+| Tampering | 32 |
 | Repudiation | 5 |
 | Information disclosure | 43 |
 | Denial of service | 15 |
-| Elevation of privilege | 20 |
+| Elevation of privilege | 21 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 22 | 1 |
-| High | 60 | 9 |
-| Medium | 61 | 10 |
+| Critical | 23 | 1 |
+| High | 63 | 9 |
+| Medium | 62 | 11 |
 | Low | 6 | 1 |
 
 **By diagram**
@@ -1514,7 +1557,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | OAuth2 / OIDC authorization server | 14 | 0 |
 | Federation — SAML SP & OIDC relying party | 15 | 0 |
 | Authorization engine — RBAC, hierarchy & scopes | 15 | 1 |
-| PKI, certificates & IoT device identity | 13 | 1 |
+| PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
 | Deployment & platform (Kubernetes) | 11 | 7 |
 | Client SDKs & admin UI integration surface | 15 | 4 |

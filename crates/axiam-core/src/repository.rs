@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -25,6 +26,7 @@ use crate::models::{
         CreateExportJob, ErasureProof, ExportJob,
     },
     group::{CreateGroup, Group, UpdateGroup},
+    mds::{MdsBlobMeta, MdsEntry},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
@@ -49,6 +51,7 @@ use crate::models::{
     uma::{CreatePermissionTicket, PermissionTicket},
     user::{CreateUser, UpdateUser, User},
     webauthn_credential::{CreateWebauthnCredential, WebauthnCredential},
+    webauthn_policy::WebauthnAttestationPolicy,
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
@@ -1822,6 +1825,146 @@ pub trait WebauthnCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// List every WebAuthn credential registered in a tenant, across all
+    /// users (X3 wave 3, D9 compliance report — "for every credential in
+    /// the tenant").
+    ///
+    /// Default implementation returns an empty list so the pre-existing
+    /// test-double implementations of this trait (which never exercise
+    /// tenant-wide listing) keep compiling unmodified; the real
+    /// SurrealDB-backed repository overrides this.
+    fn list_by_tenant(
+        &self,
+        _tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<WebauthnCredential>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-tenant WebAuthn attestation policy (X3, D5)
+// ---------------------------------------------------------------------------
+
+pub trait WebauthnAttestationPolicyRepository: Send + Sync {
+    /// `None` means no row exists for the tenant — callers treat that as
+    /// `WebauthnAttestationPolicy::default()`, which is today's behavior
+    /// unchanged (D5: "an absent row means the defaults below").
+    fn get_by_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<WebauthnAttestationPolicy>>> + Send;
+
+    /// Create or replace the tenant's policy row. Callers are responsible
+    /// for running `webauthn_policy::validate_attestation_policy` first —
+    /// this method stores whatever it is given.
+    fn set(
+        &self,
+        tenant_id: Uuid,
+        policy: WebauthnAttestationPolicy,
+    ) -> impl Future<Output = AxiamResult<WebauthnAttestationPolicy>> + Send;
+
+    /// Delete the tenant's policy row (revert to the default — `mode: none`).
+    fn delete(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// FIDO MDS3 metadata — server-global, NOT tenant-scoped (X3, D10)
+// ---------------------------------------------------------------------------
+//
+// Trust-anchor/authenticator metadata is a platform-wide concern, not a
+// per-tenant one — every tenant looks up the same AAGUID against the same
+// FIDO Alliance BLOB, so there is exactly one `mds_entry` table and one
+// `mds_blob_meta` row for the whole server (D10), not one per tenant.
+
+pub trait MdsRepository: Send + Sync {
+    /// Atomically replace the entire entry set with a freshly verified
+    /// BLOB's entries and store its metadata.
+    ///
+    /// The D4-step-8 rollback/no-op-refresh decision
+    /// (`axiam_pki::mds::decide_ingest_outcome`) is the **caller's**
+    /// responsibility, using [`Self::get_meta`] to read the currently
+    /// stored `no` first — this method assumes that decision already
+    /// concluded "replace" by the time it is called.
+    fn replace_entries(
+        &self,
+        entries: Vec<MdsEntry>,
+        meta: MdsBlobMeta,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Look up a single entry by AAGUID — the registration-time policy
+    /// lookup (D7/D8). `None` means FIDO Alliance has no metadata for this
+    /// AAGUID (not necessarily malicious — MDS coverage is incomplete).
+    fn get_by_aaguid(
+        &self,
+        aaguid: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<MdsEntry>>> + Send;
+
+    /// Every stored entry (X3 wave 2, added beyond the wave-1 trait — see the
+    /// `axiam-auth::attestation` module docs for why: building an
+    /// `AttestationCaList` that accepts *any* FIDO-certified authenticator
+    /// (a tenant with `mode != none` but no `allowed_aaguids` allowlist) needs
+    /// every attestation root MDS knows, not a bounded set of point lookups).
+    /// Ordering is unspecified; callers that need a stable order sort it
+    /// themselves.
+    fn list_all(&self) -> impl Future<Output = AxiamResult<Vec<MdsEntry>>> + Send;
+
+    /// Current BLOB metadata (`no`, `nextUpdate`, staleness, entry count).
+    /// `None` before the first successful ingestion.
+    fn get_meta(&self) -> impl Future<Output = AxiamResult<Option<MdsBlobMeta>>> + Send;
+
+    /// Bump only `last_refreshed_at` on the stored metadata — the D4-step-8
+    /// "equal `no` is a no-op refresh" case, where the entries themselves
+    /// are already up to date and do not need replacing.
+    fn touch_refreshed_at(&self, at: DateTime<Utc>)
+    -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Attestation metadata source (X3 wave 2, W2-D4)
+// ---------------------------------------------------------------------------
+//
+// `axiam-auth` needs three things to enforce the attestation policy: the
+// effective policy (resolved by its caller from `WebauthnAttestationPolicyRepository`
+// before calling into `WebauthnService`), an AAGUID -> `MdsEntry` lookup, and
+// the DER attestation roots needed to build a `webauthn-rs` `AttestationCaList`.
+// This trait covers the last two, deliberately returning **plain data** (no
+// `webauthn-rs` or `axiam-pki` types) so `axiam-auth` can depend on it without
+// pulling in `axiam-pki` (the module doc on `axiam_auth::attestation` explains
+// which choice was made and why — see W2-D4). It is implemented in `axiam-db`
+// over `MdsRepository`.
+
+/// One MDS-sourced attestation root: the owning AAGUID, the root certificate's
+/// raw DER bytes (as `AttestationCaListBuilder::insert_device_der` wants them),
+/// and the human-readable description to record alongside it.
+#[derive(Debug, Clone)]
+pub struct AttestationRootMaterial {
+    pub aaguid: Uuid,
+    pub der: Vec<u8>,
+    pub description: String,
+}
+
+pub trait AttestationMetadataSource: Send + Sync {
+    /// Look up a single MDS entry by AAGUID (the registration-time policy
+    /// lookup, D7/D8). `None` means FIDO Alliance has no metadata for this
+    /// AAGUID.
+    fn get_entry(&self, aaguid: Uuid)
+    -> impl Future<Output = AxiamResult<Option<MdsEntry>>> + Send;
+
+    /// Every attestation root certificate known to MDS, one entry per
+    /// `(aaguid, root certificate)` pair — an authenticator model can be
+    /// covered by more than one root, and a root can cover more than one
+    /// model, so the flattened list is the right shape for
+    /// `AttestationCaListBuilder::insert_device_der`, which is called once
+    /// per pair.
+    ///
+    /// `allowed_aaguids: Some(list)` restricts the result to those AAGUIDs
+    /// only (W2-D3: "the cryptographic layer and the policy layer agree").
+    /// `None` returns every root for every AAGUID MDS has metadata for.
+    fn attestation_roots(
+        &self,
+        allowed_aaguids: Option<&[Uuid]>,
+    ) -> impl Future<Output = AxiamResult<Vec<AttestationRootMaterial>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

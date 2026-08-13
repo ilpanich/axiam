@@ -24,6 +24,7 @@ async fn setup_db() -> Surreal<TestDb> {
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     }
 }
 
@@ -163,6 +164,7 @@ async fn cert_generate_rejects_expired_ca() {
     use axiam_pki::ca::PkiConfig as Cfg;
     let temp_config = Cfg {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     };
     let svc_ca_temp = CaService::new(
         ca_repo.clone(),
@@ -584,6 +586,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
     // ...but the CertService is built with no encryption key configured.
     let no_key_config = PkiConfig {
         encryption_key: None,
+        ..Default::default()
     };
     let svc_cert = CertService::new(ca_repo, cert_repo, no_key_config, sem);
 

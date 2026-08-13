@@ -26,6 +26,7 @@ import { ServiceAccountsPage } from "@/pages/service-accounts/ServiceAccountsPag
 import { FederationPage } from "@/pages/federation/FederationPage";
 import { TenantsPage } from "@/pages/tenants/TenantsPage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
+import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -199,6 +200,16 @@ export const router = createBrowserRouter([
         path: "settings",
         element: <SettingsPage />,
         handle: { crumb: "Settings" },
+      },
+      {
+        element: <ProtectedRoute permission="webauthn_policy:read" />,
+        children: [
+          {
+            path: "settings/webauthn-attestation-policy",
+            element: <AttestationPolicyPage />,
+            handle: { crumb: "WebAuthn Attestation Policy" },
+          },
+        ],
       },
       {
         path: "profile",

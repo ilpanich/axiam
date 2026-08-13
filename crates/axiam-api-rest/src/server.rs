@@ -889,6 +889,32 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         handlers::email_config::delete_tenant_email_config::<C>,
                     )),
             )
+            // --- Tenant WebAuthn Attestation Policy (X3 wave 3, explicit
+            // {tenant_id} path segment, same convention as email-config above) ---
+            .service(
+                web::resource("/tenants/{tenant_id}/webauthn/attestation-policy")
+                    .route(web::get().to(
+                        handlers::webauthn_policy::get_policy::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::webauthn_policy::set_policy::<C>,
+                    )),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/webauthn/compliance-report")
+                    .route(web::get().to(
+                        handlers::webauthn_policy::compliance_report::<C>,
+                    )),
+            )
+            // --- FIDO MDS3 (X3 wave 3) — server-global, no {tenant_id} ---
+            .service(
+                web::resource("/mds/status")
+                    .route(web::get().to(handlers::mds::status::<C>)),
+            )
+            .service(
+                web::resource("/mds/refresh")
+                    .route(web::post().to(handlers::mds::refresh::<C>)),
+            )
             // --- Federation Links ---
             .service(
                 web::resource("/federation-links/user/{user_id}")

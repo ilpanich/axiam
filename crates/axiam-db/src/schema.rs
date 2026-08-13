@@ -207,6 +207,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "uma_resource_registration_provenance",
         sql: SCHEMA_V33,
     },
+    Migration {
+        version: 34,
+        name: "resource_child_epoch_delete_race",
+        sql: SCHEMA_V34,
+    },
+    Migration {
+        version: 35,
+        name: "webauthn_attestation_policy_and_mds",
+        sql: SCHEMA_V35,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1715,6 +1725,148 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE optio
 // rather than backfilling a claim about resources nobody registered.
 const SCHEMA_V33: &str = "\
 DEFINE FIELD IF NOT EXISTS uma_registered_by ON TABLE resource TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v34 — a key for resource-delete and child-create to collide on (#308)
+// -----------------------------------------------------------------------
+//
+// `resource.delete` refuses to delete a resource that has children, and folds
+// the check into its own transaction:
+//
+//     BEGIN;
+//     LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:<id>);
+//     IF array::len($children) > 0 { THROW ... };
+//     DELETE ...; DELETE type::record('resource', $id) ...;
+//     COMMIT;
+//
+// D-13/CQ-B46 introduced that shape to close a TOCTOU window and described it
+// as making the read-then-decide-then-delete atomic. It does make the
+// statements atomic. That is not the property the guard needs, and #308 is the
+// proof: on `surrealkv` a concurrent child-create beats it on trial 0 of every
+// run, leaving a deleted parent with a live `child_of` edge pointing at it.
+//
+// The guard is a RANGE READ — every edge whose `out` is this parent — and the
+// racing create INSERTS INTO THAT RANGE. Excluding that is the definition of a
+// phantom, and preventing phantoms takes serialisable isolation. These engines
+// give snapshot isolation: they detect write-write conflicts on the same key
+// (measured doing exactly that, 21613 aborts in 40000 contended attempts — see
+// `tools/surreal-race-probe`), and they let this through because the two
+// transactions have no key in common. The delete writes the parent row and the
+// edges it could see; the create writes a NEW edge the delete never saw.
+//
+// No query can fix that, because the guard cannot read a row that does not
+// exist yet. What fixes it is giving the two transactions a shared key, so the
+// conflict the engine already detects reliably is the one that decides the
+// race. That is what this field is for:
+//
+//   * `resource.delete` already writes the parent row — it deletes it.
+//   * Every path that adds a child edge now also writes the parent row, by
+//     bumping `child_epoch`, inside the same transaction as the RELATE.
+//
+// One of the two must now lose. If the create commits first, the delete's write
+// to the parent conflicts and it aborts, leaving parent and child intact. If
+// the delete commits first, the create's bump matches no row, its guard throws,
+// and no edge is written. Neither order produces an orphan.
+//
+// The counter's VALUE is not used for anything and deliberately so — reading it
+// would be a second way to get this wrong. Its only job is to be a write to the
+// parent's key. It is `option<int>` rather than `int DEFAULT 0` so that rows
+// predating this migration need no backfill: `child_epoch ?? 0` treats absent
+// and zero alike, and nothing distinguishes "never had a child" from "has had
+// exactly zero".
+const SCHEMA_V34: &str = "\
+DEFINE FIELD IF NOT EXISTS child_epoch ON TABLE resource TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v35 — WebAuthn attestation policy + FIDO MDS3 storage (X3 wave 2)
+// -----------------------------------------------------------------------
+//
+// Three additive, brand-new tables — no existing table's shape changes here
+// except the additive `webauthn_credential` columns at the bottom (D6), which
+// are all `option<..>`/`DEFAULT false` so every pre-X3 row keeps reading back
+// unchanged (no backfill, same reasoning as v25's `grants.effect`).
+//
+// - `webauthn_attestation_policy` (D5): tenant-scoped, **one row per tenant**.
+//   `idx_webauthn_attestation_policy_tenant` is UNIQUE on `tenant_id` so a
+//   double-write can never leave two rows for the same tenant (the repository
+//   upserts via a v5-UUID deterministic record id derived from tenant_id, the
+//   same pattern `security_settings` already uses — this index is the
+//   datastore-level backstop, not the only guard). An absent row means
+//   `WebauthnAttestationPolicy::default()` (D5) — there is no "empty policy"
+//   row ever written for that case, so the table only ever holds tenants that
+//   explicitly opted into a non-default policy.
+// - `mds_entry` (D10): **server-global**, not tenant-scoped — every tenant
+//   looks up the same AAGUID against the same FIDO Alliance BLOB. Keyed by a
+//   generated record id (house convention — every other table in this schema
+//   uses a generated id rather than a domain value as the primary key), with
+//   `aaguid` as an indexed, UNIQUE field so the registration-time lookup
+//   (`MdsRepository::get_by_aaguid`) is a single index seek. `status_reports`
+//   is stored as a JSON string (`status_reports_json`) rather than a nested
+//   SurrealDB array-of-objects — it is opaque, read-only-as-a-whole audit/
+//   policy data (never queried by sub-field), so a JSON blob column avoids
+//   modelling FIDO's `StatusReport` schema a second time in DDL.
+// - `mds_blob_meta` (D10): **server-global, single row**. Record id is the
+//   fixed sentinel `mds_blob_meta:singleton` — the same "deterministic
+//   record id as the uniqueness constraint" pattern `_migration_lock:startup`
+//   already uses, so there is structurally never more than one row.
+//
+// `min_certification` and `unknown_aaguid` follow v25's `option<string>
+// ASSERT $value = NONE OR $value IN [...]` pattern for an optional enum-like
+// column.
+const SCHEMA_V35: &str = "\
+-- =======================================================================
+-- WebAuthn attestation policy (tenant scope, one row per tenant) — D5
+-- =======================================================================
+DEFINE TABLE webauthn_attestation_policy SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE webauthn_attestation_policy TYPE string;
+DEFINE FIELD mode ON TABLE webauthn_attestation_policy TYPE string
+    ASSERT $value IN ['none', 'indirect', 'direct_required'];
+DEFINE FIELD require_fido_certified ON TABLE webauthn_attestation_policy TYPE bool
+    DEFAULT false;
+DEFINE FIELD min_certification ON TABLE webauthn_attestation_policy TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['L1', 'L1plus', 'L2', 'L2plus', 'L3', 'L3plus'];
+DEFINE FIELD allowed_aaguids ON TABLE webauthn_attestation_policy TYPE option<array<string>>;
+DEFINE FIELD blocked_aaguids ON TABLE webauthn_attestation_policy TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD block_revoked_status ON TABLE webauthn_attestation_policy TYPE bool
+    DEFAULT true;
+DEFINE FIELD unknown_aaguid ON TABLE webauthn_attestation_policy TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['allow', 'deny'];
+DEFINE FIELD created_at ON TABLE webauthn_attestation_policy TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE webauthn_attestation_policy TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX idx_webauthn_attestation_policy_tenant
+    ON TABLE webauthn_attestation_policy COLUMNS tenant_id UNIQUE;
+
+-- =======================================================================
+-- FIDO MDS3 metadata (server-global, NOT tenant-scoped) — D10
+-- =======================================================================
+DEFINE TABLE mds_entry SCHEMAFULL;
+DEFINE FIELD aaguid ON TABLE mds_entry TYPE string;
+DEFINE FIELD description ON TABLE mds_entry TYPE option<string>;
+DEFINE FIELD attestation_root_certificates ON TABLE mds_entry TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD status_reports_json ON TABLE mds_entry TYPE string DEFAULT '[]';
+DEFINE FIELD time_of_last_status_change ON TABLE mds_entry TYPE option<string>;
+DEFINE INDEX idx_mds_entry_aaguid ON TABLE mds_entry COLUMNS aaguid UNIQUE;
+
+DEFINE TABLE mds_blob_meta SCHEMAFULL;
+DEFINE FIELD no ON TABLE mds_blob_meta TYPE int;
+DEFINE FIELD next_update ON TABLE mds_blob_meta TYPE string;
+DEFINE FIELD entry_count ON TABLE mds_blob_meta TYPE int;
+DEFINE FIELD last_refreshed_at ON TABLE mds_blob_meta TYPE datetime;
+DEFINE FIELD stale ON TABLE mds_blob_meta TYPE bool DEFAULT false;
+
+-- =======================================================================
+-- WebAuthn credential attestation metadata (additive, no migration) — D6
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS aaguid ON TABLE webauthn_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS attestation_format ON TABLE webauthn_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS attested ON TABLE webauthn_credential TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS authenticator_name ON TABLE webauthn_credential TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

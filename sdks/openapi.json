@@ -1028,7 +1028,7 @@
           "webauthn"
         ],
         "summary": "`POST /api/v1/auth/webauthn/register/finish`",
-        "description": "Complete a WebAuthn passkey registration ceremony.",
+        "description": "Complete a WebAuthn passkey registration ceremony.\n\nX3 wave 3: routes through\n[`WebauthnService::finish_registration_for_policy`], which dispatches on\nwhich ceremony the state token was minted for and re-checks it against\nthe policy **currently** in force (see that method's docs for why a\npolicy tightened mid-ceremony still denies).",
         "operationId": "finish_registration",
         "requestBody": {
           "content": {
@@ -1053,6 +1053,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Denied by the tenant's attestation policy (this security key model is not permitted by your organization)"
           }
         },
         "security": [
@@ -1068,7 +1071,7 @@
           "webauthn"
         ],
         "summary": "`POST /api/v1/auth/webauthn/register/start`",
-        "description": "Begin a WebAuthn passkey registration ceremony for the\nauthenticated user.",
+        "description": "Begin a WebAuthn passkey registration ceremony for the\nauthenticated user.\n\nX3 wave 3: routes through\n[`WebauthnService::start_registration_for_policy`], resolving the\ntenant's [`WebauthnAttestationPolicy`](axiam_core::models::webauthn_policy::WebauthnAttestationPolicy)\nfirst (an absent row is `WebauthnAttestationPolicy::default()` — `mode:\nnone`, today's behavior unchanged). This is the single call-site switch\nthat makes attestation enforcement live: calling\n[`WebauthnService::start_registration`] directly here would silently\ndowngrade every tenant to the unattested ceremony regardless of policy.",
         "operationId": "start_registration",
         "responses": {
           "200": {
@@ -1083,6 +1086,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "503": {
+            "description": "Attestation policy requires attestation but no FIDO metadata is available (W2-D3 fail-closed)"
           }
         },
         "security": [
@@ -2436,6 +2442,65 @@
         "responses": {
           "204": {
             "description": "Member removed"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mds/refresh": {
+      "post": {
+        "tags": [
+          "mds"
+        ],
+        "summary": "`POST /api/v1/mds/refresh`",
+        "description": "Fetches (or, when `AXIAM__PKI__MDS_BLOB_PATH` is set, loads locally),\nverifies, and ingests the FIDO MDS3 BLOB. Refuses to run when MDS\ningestion is disabled (`AXIAM__PKI__MDS_ENABLED=false`, the default) —\nper `PkiConfig`'s documented contract, the master switch being off means\nthis endpoint makes no outbound call at all, not just that the\nbackground job doesn't run.",
+        "operationId": "refresh",
+        "responses": {
+          "200": {
+            "description": "Ingestion attempt completed (see `outcome` — a rejected rollback or no-op refresh is still a 200, not an error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MdsRefreshOutcome"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "MDS ingestion is disabled"
+          },
+          "503": {
+            "description": "Fetch or cryptographic verification of the BLOB failed"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mds/status": {
+      "get": {
+        "tags": [
+          "mds"
+        ],
+        "summary": "`GET /api/v1/mds/status`",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Current FIDO MDS3 ingestion status (never-ingested returns nulls, not a 404)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MdsStatusResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -6805,6 +6870,134 @@
         ]
       }
     },
+    "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy": {
+      "get": {
+        "tags": [
+          "webauthn-policy"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/webauthn/attestation-policy`",
+        "operationId": "get_policy",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective WebAuthn attestation policy (defaults returned when no policy row exists — D5)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "webauthn-policy"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/webauthn/attestation-policy`",
+        "operationId": "set_policy",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebauthnAttestationPolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policy updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebauthnAttestationPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Config error — e.g. require_fido_certified/min_certification set with mode: none"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/webauthn/compliance-report": {
+      "get": {
+        "tags": [
+          "webauthn-policy"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/webauthn/compliance-report`",
+        "operationId": "compliance_report",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-credential compliance report against the current policy — never mutates or revokes anything",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ComplianceReportEntry"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -8465,6 +8658,28 @@
           }
         }
       },
+      "AttestationDenyReason": {
+        "type": "string",
+        "description": "Why [`evaluate`] denied a registration. Machine-readable — goes to the\naudit record; the end user sees a fixed, non-specific message (D7/D11).",
+        "enum": [
+          "attestation_required",
+          "aaguid_blocked",
+          "aaguid_not_allowed",
+          "unknown_authenticator",
+          "authenticator_revoked",
+          "not_fido_certified",
+          "certification_too_low"
+        ]
+      },
+      "AttestationMode": {
+        "type": "string",
+        "description": "What attestation conveyance a registration ceremony requests, and whether\nthe policy is enforced at all.\n\n`None` is the default and reproduces today's behavior byte-for-byte:\n`evaluate` allows every registration unconditionally, with no MDS lookup\n(D8 step 1).",
+        "enum": [
+          "none",
+          "indirect",
+          "direct_required"
+        ]
+      },
       "AuditLogEntry": {
         "type": "object",
         "required": [
@@ -8765,6 +8980,18 @@
           "Device"
         ]
       },
+      "CertificationLevel": {
+        "type": "string",
+        "description": "FIDO certification level, as recorded in an MDS `statusReports` entry's\n`FIDO_CERTIFIED*` status.\n\nVariant order is significant: `derive(PartialOrd, Ord)` gives `L1 < L1Plus\n< L2 < L2Plus < L3 < L3Plus`, which `WebauthnAttestationPolicy::evaluate`\n(D8 step 9) relies on directly for the `min_certification` boundary\ncheck (`entry_level >= policy_min`).",
+        "enum": [
+          "L1",
+          "L1Plus",
+          "L2",
+          "L2Plus",
+          "L3",
+          "L3Plus"
+        ]
+      },
       "CheckAccessBody": {
         "type": "object",
         "description": "Body for a single authorization check.",
@@ -8821,6 +9048,54 @@
           "reason_code": {
             "type": "string",
             "description": "B1: machine-readable decision reason — `allowed`, `no_grant`, or\n`denied_by_rule` (SDK contract §11).\n\nBoth refusals still return `allowed: false` and still map to 403, so a\nclient that reads only `allowed` is unaffected. The distinction matters\nto the person on the other end: `no_grant` means \"ask an admin for\naccess\", `denied_by_rule` means \"an admin has already decided\" — and a\nUI that cannot tell them apart sends users to raise tickets that will\nbe refused.\n\nT-15-02 still holds: this is a fixed, closed vocabulary of three\nvalues. It says which *kind* of decision was made, never which rule\nmade it or where in the resource tree it sits."
+          }
+        }
+      },
+      "ComplianceReportEntry": {
+        "type": "object",
+        "description": "One credential's compliance outcome (D9).",
+        "required": [
+          "credential_id",
+          "user_id",
+          "name",
+          "compliant"
+        ],
+        "properties": {
+          "aaguid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "authenticator_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "compliant": {
+            "type": "boolean",
+            "description": "`false` only for a genuine policy violation\n([`ComplianceStatus::NonCompliant`]) — a credential with no recorded\nAAGUID ([`ComplianceStatus::Unknown`], D9's pre-X3 case) is always\n`true` here, never reported as a violation."
+          },
+          "credential_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The credential's user-assigned name (`WebauthnCredential::name`),\nnot the owning user's account name."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` only when `compliant` and the credential has a recorded\nAAGUID; set for every non-compliant *and* every \"unknown\" (pre-X3)\ncredential."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -10468,6 +10743,144 @@
           }
         }
       },
+      "MdsRefreshOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "First-ever ingestion — no stored serial existed.",
+            "required": [
+              "no",
+              "entry_count",
+              "outcome"
+            ],
+            "properties": {
+              "entry_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "no": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "initial"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A newer BLOB replaced the stored entries.",
+            "required": [
+              "no",
+              "entry_count",
+              "outcome"
+            ],
+            "properties": {
+              "entry_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "no": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "replaced"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The fetched BLOB's `no` equalled the stored serial — a no-op refresh.",
+            "required": [
+              "no",
+              "outcome"
+            ],
+            "properties": {
+              "no": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "no_op_refresh"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The fetched BLOB's `no` was lower than the stored serial — rejected\nas a rollback attempt. Nothing was written.",
+            "required": [
+              "attempted_no",
+              "stored_no",
+              "outcome"
+            ],
+            "properties": {
+              "attempted_no": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "rollback_rejected"
+                ]
+              },
+              "stored_no": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          }
+        ],
+        "description": "`POST /api/v1/mds/refresh` response — the outcome of one ingestion\nattempt (mirrors `axiam_db::mds_ingest::MdsIngestOutcome`)."
+      },
+      "MdsStatusResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/mds/status` response. `no`/`next_update`/`last_refreshed_at`\nare `None` and `stale` is `false` when MDS has never been ingested — a\nmeaningful, valid answer (\"nothing ingested yet\"), not an error.",
+        "required": [
+          "entry_count",
+          "stale"
+        ],
+        "properties": {
+          "entry_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_refreshed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "next_update": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "no": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "stale": {
+            "type": "boolean"
+          }
+        }
+      },
       "MfaConfirmRequest": {
         "type": "object",
         "required": [
@@ -11463,6 +11876,26 @@
           "Active",
           "Revoked"
         ]
+      },
+      "PolicyResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/WebauthnAttestationPolicy"
+          },
+          {
+            "type": "object",
+            "required": [
+              "effective_unknown_aaguid"
+            ],
+            "properties": {
+              "effective_unknown_aaguid": {
+                "$ref": "#/components/schemas/UnknownAaguidAction",
+                "description": "The action actually applied to an AAGUID with no MDS metadata,\nwith `unknown_aaguid: null` resolved against `mode`. Read-only —\n`PUT` ignores it."
+              }
+            }
+          }
+        ],
+        "description": "`GET` response: the stored policy plus the unknown-AAGUID action it\ncurrently *resolves to*.\n\n`unknown_aaguid` is nullable, where `null` means \"use this mode's\ndefault\" (deny under `direct_required`, allow otherwise). A client that\nonly saw the stored `null` would have to re-derive that rule itself to\ndisplay what the policy actually does — and a security rule implemented\ntwice is a security rule that will eventually disagree with itself. So\nthe server resolves it once, here, and reports both: the admin's stored\nintent and its effect."
       },
       "ProviderConfig": {
         "oneOf": [
@@ -13195,6 +13628,14 @@
           }
         }
       },
+      "UnknownAaguidAction": {
+        "type": "string",
+        "description": "What to do with an AAGUID that has no MDS entry (i.e. FIDO Alliance has\nno metadata for it — not necessarily malicious, MDS coverage is\nincomplete for some legitimate authenticators).",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
       "UpdateFederationConfigRequest": {
         "type": "object",
         "properties": {
@@ -14085,6 +14526,67 @@
           }
         }
       },
+      "WebauthnAttestationPolicy": {
+        "type": "object",
+        "description": "Per-tenant WebAuthn attestation policy (D5). One row per tenant; an\nabsent row means [`WebauthnAttestationPolicy::default`], which is\ntoday's behavior unchanged.",
+        "required": [
+          "mode",
+          "require_fido_certified",
+          "block_revoked_status"
+        ],
+        "properties": {
+          "allowed_aaguids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "`None` = every AAGUID is allowed except `blocked_aaguids`.\n`Some(vec![])` is a deliberate \"nothing may register\" policy — it\nmust be set explicitly, not produced as a serialization accident of\n`None` (validated by the API layer, not here)."
+          },
+          "block_revoked_status": {
+            "type": "boolean",
+            "description": "Deny registration if the MDS entry has ever reported `REVOKED` or any\n`*_COMPROMISE` status (sticky — D8 step 7)."
+          },
+          "blocked_aaguids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "min_certification": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CertificationLevel"
+              }
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/AttestationMode"
+          },
+          "require_fido_certified": {
+            "type": "boolean",
+            "description": "Require *some* `FIDO_CERTIFIED*` status, any level. Independent of\n(and checked before) `min_certification`."
+          },
+          "unknown_aaguid": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UnknownAaguidAction",
+                "description": "What to do with an AAGUID MDS has no metadata for.\n\n`None` means \"use the default for this `mode`\", which is **deny under\n`direct_required` and allow otherwise** — see\n[`WebauthnAttestationPolicy::effective_unknown_aaguid`]. It is\ndeliberately an `Option` rather than a plain value with a fixed\ndefault: a single struct-level default cannot be correct for both\nmodes, and the one that is wrong is wrong in the dangerous direction.\nA tenant that opts into the strictest posture and does not mention\nthis field would otherwise admit every authenticator FIDO has no\nmetadata for — silently, with no error and nothing in the audit trail\nto suggest the policy was not doing what its name says.\n\nAn explicit `Some(_)` always wins, in both directions: an admin who\ndeliberately wants `direct_required` *and* lenient handling of\nunlisted authenticators can still say so."
+              }
+            ]
+          }
+        }
+      },
       "WebauthnCredentialType": {
         "type": "string",
         "description": "Type of WebAuthn authenticator.",
@@ -14279,6 +14781,14 @@
     {
       "name": "authz",
       "description": "Authorization check (FND-04 REST surface)"
+    },
+    {
+      "name": "webauthn-policy",
+      "description": "Tenant WebAuthn attestation policy and compliance reporting (X3)"
+    },
+    {
+      "name": "mds",
+      "description": "FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"
     }
   ]
 }

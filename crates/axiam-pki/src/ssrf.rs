@@ -147,7 +147,7 @@ pub fn pinned_client(host: &str, ip: IpAddr, port: u16) -> Result<reqwest::Clien
 }
 
 /// Orchestrates resolve + pin + fetch + bounded manual redirect
-/// re-validation (D-01b).
+/// re-validation (D-01b), using the default [`MAX_RESPONSE_BYTES`] cap.
 ///
 /// `allow_private` is honored only for the first hop — see the module docs
 /// for why redirect targets are always strictly validated regardless of the
@@ -159,6 +159,25 @@ pub fn pinned_client(host: &str, ip: IpAddr, port: u16) -> Result<reqwest::Clien
 pub async fn guarded_fetch(
     url: &str,
     allow_private: bool,
+    build_request: impl Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, SsrfError> {
+    guarded_fetch_with_cap(url, allow_private, MAX_RESPONSE_BYTES, build_request).await
+}
+
+/// Same as [`guarded_fetch`], but with an explicit Content-Length cap
+/// instead of the hard-coded default [`MAX_RESPONSE_BYTES`] (SEC-069).
+///
+/// Added for the FIDO MDS3 BLOB fetch path (D2/D10, X3): the BLOB is
+/// legitimately ~10 MB, well over the 5 MiB default every other guarded
+/// fetch type (JWKS, OIDC discovery, token, SAML metadata, webhook
+/// delivery) uses. This does **not** change the cap for any of those
+/// existing callers — [`guarded_fetch`] still always uses
+/// `MAX_RESPONSE_BYTES`; only a caller that deliberately opts in by naming
+/// its own cap (e.g. `axiam_pki::mds::MDS_MAX_BLOB_BYTES`) gets a larger one.
+pub async fn guarded_fetch_with_cap(
+    url: &str,
+    allow_private: bool,
+    max_response_bytes: usize,
     build_request: impl Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, SsrfError> {
     let mut current = url.to_string();
@@ -208,9 +227,9 @@ pub async fn guarded_fetch(
         // need a hard guarantee against a lying/chunked response still apply
         // their own streaming cap (JWKS: 512 KiB).
         if let Some(len) = resp.content_length()
-            && len > MAX_RESPONSE_BYTES as u64
+            && len > max_response_bytes as u64
         {
-            return Err(SsrfError::ResponseTooLarge(MAX_RESPONSE_BYTES));
+            return Err(SsrfError::ResponseTooLarge(max_response_bytes));
         }
 
         return Ok(resp);
@@ -362,6 +381,58 @@ mod tests {
         assert!(
             matches!(result, Err(SsrfError::InsecureScheme)),
             "expected a plaintext first hop (no seam) to be rejected, got: {result:?}"
+        );
+    }
+
+    /// D2/D10 (X3): `guarded_fetch_with_cap` accepts a response whose
+    /// advertised Content-Length exceeds the default [`MAX_RESPONSE_BYTES`]
+    /// but is within the caller-supplied cap — proving the MDS BLOB fetch
+    /// path (~10 MB, opting into a 32 MiB cap) is not silently rejected by
+    /// the coarse gate the default-cap `guarded_fetch` would apply.
+    #[tokio::test]
+    async fn guarded_fetch_with_cap_allows_body_over_default_cap_but_within_custom_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+        // Bigger than MAX_RESPONSE_BYTES (5 MiB) would allow via `guarded_fetch`.
+        let big_len = MAX_RESPONSE_BYTES + 1024;
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                // Only the headers matter for this test — `guarded_fetch_with_cap`
+                // decides from Content-Length before the body is ever read.
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {big_len}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/big", addr.port());
+
+        // Default cap: rejected.
+        let default_result = guarded_fetch(&url, true, |c, u| c.get(u)).await;
+        assert!(
+            matches!(default_result, Err(SsrfError::ResponseTooLarge(cap)) if cap == MAX_RESPONSE_BYTES),
+            "expected the default cap to reject a body this large, got: {default_result:?}"
+        );
+
+        // MDS-sized cap: accepted (the coarse Content-Length gate passes;
+        // the connection is dropped afterward so `.send()` may itself race
+        // with `Connection: close`, which is irrelevant to what this test
+        // is asserting — that the cap comparison itself used our larger
+        // value, not the default).
+        let mds_cap = MAX_RESPONSE_BYTES + 2 * 1024 * 1024;
+        let capped_result = guarded_fetch_with_cap(&url, true, mds_cap, |c, u| c.get(u)).await;
+        assert!(
+            !matches!(capped_result, Err(SsrfError::ResponseTooLarge(_))),
+            "expected a body within the custom cap to pass the Content-Length gate, got: {capped_result:?}"
         );
     }
 

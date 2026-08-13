@@ -97,6 +97,69 @@ pub struct SurrealResourceRepository<C: Connection> {
     db: DbHandle<C>,
 }
 
+/// The message `claim_parent` throws when the parent is gone. Matched on the
+/// way back out, so the caller sees `NotFound` rather than an opaque error.
+const PARENT_GONE: &str = "parent resource not found";
+
+/// SQL that claims `parent_id` for a child about to be attached to it (#308).
+///
+/// # Why a write, and why it must be this write
+///
+/// `resource.delete` guards itself by reading the `child_of` range for the
+/// resource being deleted and refusing if it is non-empty. That read cannot see
+/// an edge a concurrent transaction has not written yet, and snapshot isolation
+/// does not turn a range read into a conflict against a later insert — that is
+/// a phantom, and it needs serialisable isolation. So the guard alone loses the
+/// race, reproducibly (#308: trial 0 of every run on surrealkv).
+///
+/// What these engines DO detect reliably is two transactions writing the same
+/// key; `tools/surreal-race-probe` measures them doing it 21613 times in 40000
+/// contended attempts. `delete` already writes the parent's key — it deletes
+/// the row. So every path that attaches a child writes it too, and the engine's
+/// existing conflict detection decides the race instead of a query that cannot.
+///
+/// Two things here are load-bearing and easy to strip by accident:
+///
+/// 1. **The `THROW` is not an error-message nicety.** If the parent has already
+///    been deleted, the `UPDATE` matches nothing, and *nothing matching is not
+///    a conflict* — the create would sail past and write an edge to a row that
+///    no longer exists, which is precisely the orphan being prevented. Losing
+///    the race has to be an error, so it throws.
+/// 2. **It must be in the same transaction as the `RELATE`.** Split across two
+///    transactions, the parent could be deleted in the gap.
+///
+/// The counter's value is never read. Bumping it is the entire point.
+///
+/// Reads the already-bound `$parent_id` and `$tenant_id`, so callers add no
+/// bindings; the tenant guard is what stops a child being attached under
+/// another tenant's node.
+fn claim_parent() -> String {
+    format!(
+        "LET $parent = (UPDATE type::record('resource', $parent_id) \
+             SET child_epoch = (child_epoch ?? 0) + 1 \
+             WHERE tenant_id = $tenant_id RETURN VALUE id); \
+         IF array::len($parent) = 0 {{ THROW '{PARENT_GONE}'; }};"
+    )
+}
+
+/// Turns a `claim_parent` throw into `NotFound`, and anything else into a
+/// database error.
+///
+/// Mirrors `delete`'s handling and for the same reason: a `THROW` fires on its
+/// own statement slot while the trailing statements report the generic "not
+/// executed due to a failed transaction", and `Response::check()` may surface
+/// either — so every statement error is scanned rather than just the first.
+fn parent_claim_error(errors: Vec<String>, parent_id: &str) -> AxiamError {
+    let combined = errors.join("; ");
+    if combined.contains(PARENT_GONE) {
+        return AxiamError::NotFound {
+            entity: "resource".into(),
+            id: parent_id.to_string(),
+        };
+    }
+    DbError::Migration(combined).into()
+}
+
 impl<C: Connection> SurrealResourceRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
@@ -138,13 +201,23 @@ impl<C: Connection> SurrealResourceRepository<C> {
                     metadata = $metadata, \
                     uma_registered_by = $uma_registered_by";
 
-        let query = if let Some(ref pid) = parent_id_str {
-            format!("{base}; RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`;")
-        } else {
-            base.to_string()
+        // Same #308 parent claim as `create` — the Protection API attaches
+        // children through this path too, and an orphan made here is
+        // indistinguishable from one made there.
+        let (query, row_slot) = match parent_id_str.as_deref() {
+            Some(pid) => (
+                format!(
+                    "BEGIN TRANSACTION; {claim} {base}; \
+                     RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`; \
+                     COMMIT TRANSACTION",
+                    claim = claim_parent(),
+                ),
+                3,
+            ),
+            None => (base.to_string(), 0),
         };
 
-        let result = self
+        let mut result = self
             .db
             .current()
             .query(query)
@@ -152,17 +225,22 @@ impl<C: Connection> SurrealResourceRepository<C> {
             .bind(("tenant_id", tenant_id_str))
             .bind(("name", input.name))
             .bind(("resource_type", input.resource_type))
-            .bind(("parent_id", parent_id_str))
+            .bind(("parent_id", parent_id_str.clone()))
             .bind(("metadata", metadata))
             .bind(("uma_registered_by", client_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
+            return Err(match parent_id_str.as_deref() {
+                Some(pid) => parent_claim_error(msgs, pid),
+                None => DbError::Migration(msgs.join("; ")).into(),
+            });
+        }
 
-        let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<ResourceRow> = result.take(row_slot).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
@@ -187,13 +265,28 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                     parent_id = $parent_id, \
                     metadata = $metadata";
 
-        let query = if let Some(ref pid) = parent_id_str {
-            format!("{base}; RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`;")
-        } else {
-            base.to_string()
+        // #308: attaching a child claims the parent inside the same
+        // transaction as the RELATE, so a concurrent `delete` of that parent
+        // has a key to conflict on. See `claim_parent` for why the range guard
+        // in `delete` cannot do this on its own. Without a parent there is no
+        // edge, nothing to race, and no transaction needed.
+        //
+        // Slots with a parent: BEGIN=0, LET $parent=1, IF/THROW=2, CREATE=3,
+        // RELATE=4, COMMIT=5. Without: CREATE=0.
+        let (query, row_slot) = match parent_id_str.as_deref() {
+            Some(pid) => (
+                format!(
+                    "BEGIN TRANSACTION; {claim} {base}; \
+                     RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`; \
+                     COMMIT TRANSACTION",
+                    claim = claim_parent(),
+                ),
+                3,
+            ),
+            None => (base.to_string(), 0),
         };
 
-        let result = self
+        let mut result = self
             .db
             .current()
             .query(query)
@@ -201,16 +294,25 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .bind(("tenant_id", tenant_id_str))
             .bind(("name", input.name))
             .bind(("resource_type", input.resource_type))
-            .bind(("parent_id", parent_id_str))
+            .bind(("parent_id", parent_id_str.clone()))
             .bind(("metadata", metadata))
             .await
             .map_err(DbError::from)?;
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        // Every statement's error is scanned rather than only the first: a
+        // THROW fires on its own slot while the statements after it report the
+        // generic "not executed due to a failed transaction", and `check()` can
+        // surface either. Same reasoning as `delete`.
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
+            return Err(match parent_id_str.as_deref() {
+                Some(pid) => parent_claim_error(msgs, pid),
+                None => DbError::Migration(msgs.join("; ")).into(),
+            });
+        }
 
-        let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<ResourceRow> = result.take(row_slot).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
@@ -304,12 +406,29 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             // it a foreign-tenant resource id could strip another tenant's
             // parent edge.
             //
-            // Result slots become: BEGIN=0, DELETE child_of=1, UPDATE=2,
-            // [RELATE=3], COMMIT=last — so the UPDATE row lands at slot 2.
+            // #308: re-parenting inserts into the NEW parent's `child_of`
+            // range, which is the same phantom the `create` path had, so the
+            // new parent is claimed here too. Only the new one: detaching a
+            // child removes an edge, and a delete racing that either sees the
+            // child and refuses or does not and has nothing to orphan.
+            //
+            // The `get_by_id` existence check above does NOT cover this — it is
+            // a read, outside the transaction, and a read cannot conflict with
+            // the delete. The claim is a write, and it throws if the parent
+            // went away, which is what makes losing the race an error rather
+            // than an orphan.
+            //
+            // Result slots become: BEGIN=0, DELETE child_of=1, then either
+            // [LET $parent=2, IF/THROW=3, UPDATE=4, RELATE=5] when a new parent
+            // is claimed, or [UPDATE=2] when the child is being detached.
+            let claim = match &input.parent_id {
+                Some(Some(_)) => claim_parent(),
+                _ => String::new(),
+            };
             query = format!(
                 "BEGIN TRANSACTION; \
                  DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
-                 {query}"
+                 {claim} {query}"
             );
 
             // If new parent is Some, create new child_of edge.
@@ -347,14 +466,26 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             builder = builder.bind(("metadata", metadata));
         }
 
-        let result = builder.await.map_err(DbError::from)?;
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let mut result = builder.await.map_err(DbError::from)?;
+
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
+            return Err(match &input.parent_id {
+                Some(Some(new_parent)) => parent_claim_error(msgs, &new_parent.to_string()),
+                _ => DbError::Migration(msgs.join("; ")).into(),
+            });
+        }
 
         // The UPDATE statement index depends on whether we wrapped the
-        // re-parent in a transaction: BEGIN=0, DELETE child_of=1, UPDATE=2.
-        let stmt_idx = if parent_id_changed { 2 } else { 0 };
+        // re-parent in a transaction, and on whether that re-parent claimed a
+        // new parent: BEGIN=0, DELETE child_of=1, then [LET=2, IF=3, UPDATE=4]
+        // when attaching or [UPDATE=2] when detaching.
+        let stmt_idx = match (parent_id_changed, &input.parent_id) {
+            (true, Some(Some(_))) => 4,
+            (true, _) => 2,
+            (false, _) => 0,
+        };
         let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "resource", &id_str)?;
 

@@ -1,6 +1,7 @@
 //! Authentication error types.
 
 use axiam_core::error::AxiamError;
+use axiam_core::models::webauthn_policy::AttestationDenyReason;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -83,6 +84,28 @@ pub enum AuthError {
 
     #[error("new password must differ from the current password")]
     PasswordReusedCurrent,
+
+    /// X3 D7/D11/W2-D1: the registration ceremony completed but the
+    /// tenant's attestation policy (`axiam_core::models::webauthn_policy::evaluate`)
+    /// denied it, or `webauthn-rs` itself rejected the attestation as
+    /// unverifiable (W2-D1 point 3 — a `none`/self-attested credential
+    /// presented to the attested ceremony). `reason` is the machine-readable
+    /// [`AttestationDenyReason`] for the audit record; the `Display` text is
+    /// deliberately the fixed, non-specific message a user is shown — never
+    /// a raw library error string (D11).
+    #[error("this security key model is not permitted by your organization")]
+    WebauthnAttestationDenied { reason: AttestationDenyReason },
+
+    /// W2-D3: the tenant's policy requires attestation (`mode != none`) but
+    /// no attestation CA list could be built — MDS has never been ingested,
+    /// or no allowed AAGUID has a known root. Distinct from
+    /// [`AuthError::WebauthnAttestationDenied`] (a per-credential policy
+    /// decision): this is an operator-facing configuration problem that
+    /// blocks *every* attested registration for the tenant, and registration
+    /// MUST fail closed here rather than silently falling back to the
+    /// unattested ceremony.
+    #[error("attestation policy is enabled but no FIDO metadata is available")]
+    WebauthnAttestationUnavailable,
 }
 
 impl From<AuthError> for AxiamError {
@@ -124,6 +147,19 @@ impl From<AuthError> for AxiamError {
             AuthError::PasswordReusedCurrent => AxiamError::Validation {
                 message: err.to_string(),
             },
+            // D11: the end user sees the fixed `Display` text (never the raw
+            // `reason`); the raw `AttestationDenyReason` is for the caller to
+            // log/audit *before* this conversion happens (see
+            // `axiam_auth::webauthn`'s attested-registration path, which logs
+            // it at the point of denial).
+            AuthError::WebauthnAttestationDenied { .. } => AxiamError::AuthorizationDenied {
+                reason: err.to_string(),
+                action: Some("webauthn:register".into()),
+                resource_id: None,
+            },
+            AuthError::WebauthnAttestationUnavailable => {
+                AxiamError::ServiceUnavailable(err.to_string())
+            }
         }
     }
 }

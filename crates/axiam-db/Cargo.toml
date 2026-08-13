@@ -10,6 +10,12 @@ rust-version.workspace = true
 [dependencies]
 axiam-core = { workspace = true }
 axiam-auth = { workspace = true }
+# X3 wave 2: the MDS ingestion orchestrator (`mds_ingest`) ties axiam-pki's
+# BLOB fetch/verify pipeline to this crate's `MdsRepository` storage. axiam-pki
+# depends only on axiam-core in its regular dependencies (its `axiam-db` dep is
+# dev-only, for its own tests), so this direction is acyclic — mirrors the
+# already-shipped axiam-db -> axiam-auth relationship.
+axiam-pki = { workspace = true }
 argon2 = { workspace = true }
 surrealdb = { workspace = true, features = ["protocol-http"] }
 arc-swap = { workspace = true }

@@ -2,6 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
+use axiam_core::repository::WebauthnAttestationPolicyRepository;
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -124,6 +125,15 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
 ///
 /// Begin a WebAuthn passkey registration ceremony for the
 /// authenticated user.
+///
+/// X3 wave 3: routes through
+/// [`WebauthnService::start_registration_for_policy`], resolving the
+/// tenant's [`WebauthnAttestationPolicy`](axiam_core::models::webauthn_policy::WebauthnAttestationPolicy)
+/// first (an absent row is `WebauthnAttestationPolicy::default()` — `mode:
+/// none`, today's behavior unchanged). This is the single call-site switch
+/// that makes attestation enforcement live: calling
+/// [`WebauthnService::start_registration`] directly here would silently
+/// downgrade every tenant to the unattested ceremony regardless of policy.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/webauthn/register/start",
@@ -132,6 +142,8 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
         (status = 200, description = "Registration challenge",
          body = StartRegistrationResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 503, description = "Attestation policy requires attestation but no \
+            FIDO metadata is available (W2-D3 fail-closed)"),
     ),
     security(("bearer" = []))
 )]
@@ -140,9 +152,23 @@ pub async fn start_registration<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
+    let policy = state
+        .webauthn_attestation_policy_repo
+        .get_by_tenant(user.tenant_id)
+        .await?
+        .unwrap_or_default();
+
     let (challenge, state_token) = state
         .webauthn_service
-        .start_registration(user.tenant_id, user.org_id, user.user_id, &user_name)
+        .start_registration_for_policy(
+            user.tenant_id,
+            user.org_id,
+            user.user_id,
+            &user_name,
+            &policy,
+            &state.attestation_metadata_source,
+            &state.attestation_ca_cache,
+        )
         .await?;
 
     Ok(HttpResponse::Ok().json(StartRegistrationResponse {
@@ -154,6 +180,12 @@ pub async fn start_registration<C: Connection + Clone>(
 /// `POST /api/v1/auth/webauthn/register/finish`
 ///
 /// Complete a WebAuthn passkey registration ceremony.
+///
+/// X3 wave 3: routes through
+/// [`WebauthnService::finish_registration_for_policy`], which dispatches on
+/// which ceremony the state token was minted for and re-checks it against
+/// the policy **currently** in force (see that method's docs for why a
+/// policy tightened mid-ceremony still denies).
 #[utoipa::path(
     post,
     path = "/api/v1/auth/webauthn/register/finish",
@@ -163,6 +195,8 @@ pub async fn start_registration<C: Connection + Clone>(
         (status = 201, description = "Credential registered",
          body = CredentialResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Denied by the tenant's attestation policy \
+            (this security key model is not permitted by your organization)"),
     ),
     security(("bearer" = []))
 )]
@@ -172,14 +206,23 @@ pub async fn finish_registration<C: Connection + Clone>(
     body: web::Json<FinishRegistrationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+    let policy = state
+        .webauthn_attestation_policy_repo
+        .get_by_tenant(user.tenant_id)
+        .await?
+        .unwrap_or_default();
+
     let cred = state
         .webauthn_service
-        .finish_registration(
+        .finish_registration_for_policy(
             user.tenant_id,
             user.user_id,
             &b.state_token,
             &b.credential_name,
             &b.response,
+            &policy,
+            &state.attestation_metadata_source,
+            &state.attestation_ca_cache,
         )
         .await?;
 

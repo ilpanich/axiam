@@ -81,3 +81,11 @@ Two things follow from that binding, and both surprise people:
 All ceremony policy — challenge generation, `residentKey`, `userVerification`,
 credential exclusion, and verification of the result — is decided and enforced
 server-side. The browser client passes the server's options through unchanged.
+
+A tenant may additionally restrict *which* authenticator models are allowed
+to register (hardware security keys only, specific certification levels,
+explicit allow/block lists) via an opt-in attestation policy. This does not
+change sign-in for already-registered credentials, but it can exclude
+consumer passkey providers from *new* registrations — see
+[Authenticator policies](../admin/authenticator-policies.md#the-passkey-caveat--read-this-before-enabling-anything)
+for the exact trade-off before enabling it.

@@ -29,9 +29,24 @@ pgp = { workspace = true }
 zeroize = { workspace = true }
 smallvec = "1"
 time = "0.3"
+# D2 (X3): shared SSRF guard, lifted from axiam-federation — outbound
+# fetch (MDS BLOB, and federation's discovery/JWKS/token/SAML metadata via
+# the re-export in axiam-federation::ssrf).
+reqwest = { workspace = true }
+url = { workspace = true }
+# D1/D4 (X3): FIDO MDS3 BLOB is a signed JWT; parse header/payload and verify
+# the RS256 signature over it.
+jsonwebtoken = { workspace = true }
+# D1/D3 (X3): parse the vendored root anchor and x5c chain entries from PEM.
+pem = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }
+# Test-only: generates the throwaway RSA key the MDS BLOB vectors sign with,
+# so no private key is committed to the repository. Already in Cargo.lock via
+# `pgp`, so this adds a dependency edge, not a new crate.
+rsa = "0.9"
+
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 uuid = { workspace = true }

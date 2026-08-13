@@ -25,9 +25,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.5.0",
  "diagramCount": 9,
- "total": 149,
- "open": 21,
- "mitigated": 128,
+ "total": 154,
+ "open": 22,
+ "mitigated": 132,
  "areas": [
   {
    "id": 0,
@@ -62,8 +62,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 13,
-   "open": 1
+   "total": 18,
+   "open": 2
   },
   {
    "id": 6,

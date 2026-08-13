@@ -128,6 +128,10 @@ async fn create_webauthn(
             name: name.into(),
             credential_type: cred_type,
             passkey_json: r#"{"dummy":"passkey"}"#.into(),
+            aaguid: None,
+            attestation_format: None,
+            attested: false,
+            authenticator_name: None,
         })
         .await
         .unwrap();

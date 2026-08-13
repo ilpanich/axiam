@@ -27,6 +27,7 @@ async fn ca_generate_without_key_errors() {
     let repo = SurrealCaCertificateRepository::new(db);
     let config = PkiConfig {
         encryption_key: None,
+        ..Default::default()
     };
     let svc = CaService::new(
         repo,
@@ -62,6 +63,7 @@ async fn ca_generate_with_key_ok() {
     let repo = SurrealCaCertificateRepository::new(db);
     let config = PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     };
     let svc = CaService::new(
         repo,

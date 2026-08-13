@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Settings,
@@ -6,11 +7,13 @@ import {
   Clock,
   Smartphone,
   Bell,
+  Fingerprint,
   Pencil,
   X,
   Loader2,
   AlertCircle,
   CheckCircle2,
+  ChevronRight,
 } from "lucide-react";
 import {
   settingsService,
@@ -675,6 +678,39 @@ export function SettingsPage() {
               />
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* ── WebAuthn Attestation Policy (X3) ───────────────────────────── */}
+      {/* This has its own admin-permission pair (webauthn_policy:read/write,
+          deliberately not settings:get/update — see the handler module's
+          docs) and its own page: mode, AAGUID allow/block lists, the
+          compliance report, and MDS status don't fit this page's flat
+          toggle-grid shape, and an admin with settings:update should not
+          automatically be able to change which security keys a tenant
+          accepts. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <Fingerprint size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">
+              WebAuthn Attestation Policy
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            Restrict which security key or passkey models may register,
+            backed by the FIDO Metadata Service. Default is unchanged: every
+            authenticator is accepted until this is opted into.
+          </p>
+          <Link
+            to="/settings/webauthn-attestation-policy"
+            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+          >
+            Manage attestation policy
+            <ChevronRight size={14} aria-hidden="true" />
+          </Link>
         </CardContent>
       </Card>
 

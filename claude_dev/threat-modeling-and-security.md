@@ -84,7 +84,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 149 threats** and a
+The system is verified against a **STRIDE threat model of 154 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -105,8 +105,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 149 |
-| Mitigated / Open | 128 / 21 |
+| Threats identified | 154 |
+| Mitigated / Open | 132 / 22 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -124,7 +124,7 @@ optimistic closed one.
 | OAuth2 / OIDC authorization server | 14 | 0 |
 | Federation (SAML SP & OIDC RP) | 15 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 15 | 1 |
-| PKI, certificates & IoT device identity | 13 | 1 |
+| PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
 | Deployment & platform (Kubernetes) | 11 | 7 |
 | Client SDKs & admin-UI integration surface | 15 | 4 |
@@ -309,6 +309,15 @@ against the classic federation attacks:
   status on every connection — a fingerprint match alone is never enough.
 - **OpenPGP keys** sign the audit trail and encrypt GDPR data exports, so both are
   independently verifiable and confidential.
+- **WebAuthn attestation policy (X3)** verifies the FIDO Alliance's MDS3 metadata
+  BLOB against a **digest-pinned vendored trust anchor** — chaining to the public
+  GlobalSign root alone would only prove "some GlobalSign EV customer", so the
+  leaf's SAN DNS identity and the CA/`basicConstraints` status of every issuer in
+  the chain are checked too. Ingestion rejects a rollback to an older BLOB serial
+  and never hard-fails on a stale one (logged, not blocking). This is opt-in
+  (`AXIAM__PKI__MDS_ENABLED=false` by default, zero outbound calls) and enforced
+  only at registration — existing credentials are never auto-revoked on a policy
+  change.
 
 ### Audit & accountability
 

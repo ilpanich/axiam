@@ -30,6 +30,10 @@ fn make_input(
         name: name.to_owned(),
         credential_type: cred_type,
         passkey_json: r#"{"encrypted":"placeholder"}"#.to_owned(),
+        aaguid: None,
+        attestation_format: None,
+        attested: false,
+        authenticator_name: None,
     }
 }
 
@@ -113,6 +117,53 @@ async fn list_by_user_returns_only_matching() {
     let list_b = repo.list_by_user(tenant_id, user_b).await.unwrap();
     assert_eq!(list_b.len(), 1);
     assert_eq!(list_b[0].user_id, user_b);
+}
+
+/// X3 wave 3 (D9): `list_by_tenant` returns every credential across every
+/// user in the tenant, and none from a different tenant — the source list
+/// the compliance-report handler evaluates.
+#[tokio::test]
+async fn list_by_tenant_returns_every_user_but_not_other_tenants() {
+    let db = setup().await;
+    let repo = SurrealWebauthnCredentialRepository::new(db);
+
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let user_1 = Uuid::new_v4();
+    let user_2 = Uuid::new_v4();
+
+    repo.create(make_input(
+        tenant_a,
+        user_1,
+        "A / user 1 / key",
+        WebauthnCredentialType::SecurityKey,
+    ))
+    .await
+    .unwrap();
+    repo.create(make_input(
+        tenant_a,
+        user_2,
+        "A / user 2 / passkey",
+        WebauthnCredentialType::Passkey,
+    ))
+    .await
+    .unwrap();
+    repo.create(make_input(
+        tenant_b,
+        user_1,
+        "B / user 1 / key",
+        WebauthnCredentialType::SecurityKey,
+    ))
+    .await
+    .unwrap();
+
+    let tenant_a_creds = repo.list_by_tenant(tenant_a).await.unwrap();
+    assert_eq!(tenant_a_creds.len(), 2);
+    assert!(tenant_a_creds.iter().all(|c| c.tenant_id == tenant_a));
+
+    let tenant_b_creds = repo.list_by_tenant(tenant_b).await.unwrap();
+    assert_eq!(tenant_b_creds.len(), 1);
+    assert_eq!(tenant_b_creds[0].tenant_id, tenant_b);
 }
 
 #[tokio::test]

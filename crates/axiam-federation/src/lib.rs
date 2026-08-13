@@ -12,7 +12,14 @@ pub mod oidc;
 #[cfg(feature = "saml")]
 pub mod saml;
 pub mod secrets;
-pub mod ssrf;
+
+/// Shared SSRF guard (D2, X3): lifted verbatim to `axiam-pki` because it now
+/// backs the MDS BLOB fetch path too, and PKI is where trust-anchor/outbound
+/// fetch concerns belong. Re-exported here so every pre-existing
+/// `crate::ssrf::…` call site and test in this crate keeps compiling
+/// unchanged — `axiam-pki` depends only on `axiam-core`, so this direction
+/// (`federation -> pki`) introduces no dependency cycle.
+pub use axiam_pki::ssrf;
 
 use error::FederationError;
 

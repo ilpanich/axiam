@@ -37,6 +37,10 @@ Task-oriented guides for operators and integrators.
 
 - [`admin/README.md`](./admin/README.md) — first-run bootstrap and day-to-day
   admin operations (organizations/tenants, users, roles, permissions)
+- [`admin/authenticator-policies.md`](./admin/authenticator-policies.md) —
+  WebAuthn attestation policy: policy fields and decision order, the passkey
+  caveat, FIDO MDS3 refresh/air-gap operations, trust-anchor update
+  procedure, and the compliance report
 - [`pki/README.md`](./pki/README.md) — certificate lifecycle: CA issuance,
   leaf cert issuance, mTLS binding, revocation
 

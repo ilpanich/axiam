@@ -9,8 +9,10 @@ pub mod ca;
 pub mod cert;
 pub mod config;
 mod crypto;
+pub mod mds;
 pub mod mtls;
 pub mod pgp;
+pub mod ssrf;
 
 pub use ca::{CaService, MAX_CA_VALIDITY_DAYS};
 pub use cert::{CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, MAX_LEAF_CERT_VALIDITY_DAYS};

@@ -48,10 +48,12 @@ use std::sync::Arc;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
-    AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
+    AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
+    PasswordResetService, WebauthnService,
 };
 use axiam_authz::AuthzConfig;
 use axiam_db::DbHandle;
+use axiam_db::attestation_metadata_source::MdsAttestationMetadataSource;
 use axiam_db::repository::SurrealPermissionTicketRepository;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
@@ -59,13 +61,14 @@ use axiam_db::{
     SurrealConsentRepository, SurrealDeviceGrantRepository, SurrealEmailConfigRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
-    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
+    SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebhookRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -79,7 +82,7 @@ use axiam_oauth2::jwks_cache::{
 use axiam_oauth2::par::ParService;
 use axiam_oauth2::token::TokenService;
 use axiam_oauth2::token_exchange::TokenExchangeService;
-use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
+use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use surrealdb::Connection;
 use tokio::sync::Semaphore;
 
@@ -274,6 +277,36 @@ pub struct AppState<C: Connection + Clone> {
     pub auth_service: AuthServiceT<C>,
     pub webauthn_service: WebauthnServiceT<C>,
     pub mfa_method_service: MfaMethodServiceT<C>,
+    /// X3 wave 3: direct access to WebAuthn credentials for the tenant-wide
+    /// compliance report (D9) — `webauthn_service` only exposes per-user
+    /// ceremony operations, not a tenant-wide listing.
+    pub webauthn_credential_repo: SurrealWebauthnCredentialRepository<C>,
+    /// X3 (D5): tenant WebAuthn attestation policy. Resolved by REST
+    /// handlers on every registration ceremony start/finish (an absent row
+    /// means `WebauthnAttestationPolicy::default()`, i.e. today's `mode:
+    /// none` behavior) and by the policy admin/compliance-report endpoints.
+    pub webauthn_attestation_policy_repo: SurrealWebauthnAttestationPolicyRepository<C>,
+    /// X3 (D10): server-global FIDO MDS3 metadata storage, read by the
+    /// `GET /api/v1/mds/status` / `POST /api/v1/mds/refresh` admin endpoints.
+    pub mds_repo: SurrealMdsRepository<C>,
+    /// X3 (W2-D4): the small, data-only view over `mds_repo` that
+    /// `axiam-auth`'s attestation enforcement and compliance evaluation
+    /// consume, keeping `axiam-auth` free of a hard `axiam-db` dependency.
+    pub attestation_metadata_source: MdsAttestationMetadataSource<SurrealMdsRepository<C>>,
+    /// X3 (W2-D3): process-wide cache of built `AttestationCaList`s.
+    /// `Arc`-shared (mirrors `tenant_org_cache`) so every worker/request
+    /// sees the same cache, and so it can be invalidated from the MDS
+    /// refresh and attestation-policy-update endpoints (and the background
+    /// MDS refresh job in `axiam-server`) without threading a second
+    /// `web::Data` registration through every call site.
+    pub attestation_ca_cache: Arc<AttestationCaCache>,
+    /// X3 (D10): FIDO MDS3 ingestion configuration (`mds_enabled`,
+    /// `mds_blob_url`/`mds_blob_path`, `mds_leaf_dns`). `POST
+    /// /api/v1/mds/refresh` reads this to decide whether ingestion is
+    /// enabled at all and which source to fetch from — `encryption_key`
+    /// here is unused by the REST layer (PKI-service construction in
+    /// `axiam-server` keeps its own copy for that).
+    pub pki_config: PkiConfig,
     pub mail_outbound_publisher: Arc<dyn DynMailPublisher>,
     pub session_repo: SurrealSessionRepository<C>,
     pub session_validator: Arc<dyn SessionValidator>,
@@ -458,6 +491,7 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,
+            ..Default::default()
         };
 
         let user_repo = SurrealUserRepository::new(db.clone());
@@ -465,6 +499,10 @@ impl<C: Connection + Clone> AppState<C> {
         let federation_link_repo = SurrealFederationLinkRepository::new(db.clone());
         let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
         let webauthn_cred_repo = axiam_db::SurrealWebauthnCredentialRepository::new(db.clone());
+        let webauthn_attestation_policy_repo =
+            SurrealWebauthnAttestationPolicyRepository::new(db.clone());
+        let mds_repo = SurrealMdsRepository::new(db.clone());
+        let attestation_metadata_source = MdsAttestationMetadataSource::new(mds_repo.clone());
         let cert_repo = SurrealCertificateRepository::new(db.clone());
         let ca_cert_repo = axiam_db::SurrealCaCertificateRepository::new(db.clone());
         let pgp_repo = axiam_db::SurrealPgpKeyRepository::new(db.clone());
@@ -594,6 +632,12 @@ impl<C: Connection + Clone> AppState<C> {
             auth_service,
             webauthn_service,
             mfa_method_service,
+            webauthn_credential_repo: webauthn_cred_repo.clone(),
+            webauthn_attestation_policy_repo,
+            mds_repo,
+            attestation_metadata_source,
+            attestation_ca_cache: Arc::new(AttestationCaCache::new()),
+            pki_config,
             mail_outbound_publisher: Arc::new(NoopMailPublisher),
             session_repo,
             session_validator: Arc::new(SurrealSessionRepository::new(db.clone())),

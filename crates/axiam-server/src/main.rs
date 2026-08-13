@@ -44,11 +44,13 @@ use axiam_api_rest::{
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
-    AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
+    AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
+    PasswordResetService, WebauthnService,
 };
 use axiam_core::repository::{
     OrganizationRepository, Pagination, ServiceAccountRepository, TenantRepository,
 };
+use axiam_db::attestation_metadata_source::MdsAttestationMetadataSource;
 use axiam_db::{
     DbConfig, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
@@ -57,14 +59,15 @@ use axiam_db::{
     SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
-    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
+    SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealPushedAuthRequestRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
     SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
     SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -581,12 +584,55 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to build WebauthnService");
     let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
 
+    // X3 wave 3: attestation-policy resolution, MDS metadata, and the
+    // process-wide CA-list cache the attested registration ceremony needs.
+    let webauthn_attestation_policy_repo =
+        SurrealWebauthnAttestationPolicyRepository::new(pool.handle_for_repo());
+    let mds_repo = SurrealMdsRepository::new(pool.handle_for_repo());
+    let attestation_metadata_source = MdsAttestationMetadataSource::new(mds_repo.clone());
+    // Shared (Arc) so the REST handlers (policy update, MDS refresh) and the
+    // background MDS refresh job below invalidate the SAME cache instance
+    // (W2-D3) rather than each maintaining an unreachable private one.
+    let attestation_ca_cache = Arc::new(AttestationCaCache::new());
+
     // PKI service — encryption key for CA private keys (SEC-012).
     // Absent key → None; operations that encrypt private key material will fail fast
     // with a clear error rather than silently using an all-zero key.
+    //
+    // X3 (D10): FIDO MDS3 ingestion config. `PkiConfig` doesn't derive
+    // `Deserialize` (it holds `[u8; 32]`/`PathBuf`, same reason
+    // `encryption_key` above is loaded manually rather than through
+    // `AppConfig`), so these five `AXIAM__PKI__MDS_*` vars are parsed here by
+    // hand, mirroring `load_key_from_env`'s style. `mds_enabled` defaults to
+    // `false` — "off means zero outbound calls" — so an unset env var
+    // reproduces `PkiConfig::default()`'s documented behavior exactly.
     let pki_config = PkiConfig {
         encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
+        mds_enabled: std::env::var("AXIAM__PKI__MDS_ENABLED")
+            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false),
+        mds_blob_url: std::env::var("AXIAM__PKI__MDS_BLOB_URL")
+            .unwrap_or_else(|_| axiam_pki::config::DEFAULT_MDS_BLOB_URL.to_string()),
+        mds_blob_path: std::env::var("AXIAM__PKI__MDS_BLOB_PATH")
+            .ok()
+            .map(std::path::PathBuf::from),
+        mds_refresh_interval_secs: std::env::var("AXIAM__PKI__MDS_REFRESH_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(axiam_pki::config::DEFAULT_MDS_REFRESH_INTERVAL_SECS),
+        mds_leaf_dns: std::env::var("AXIAM__PKI__MDS_LEAF_DNS")
+            .unwrap_or_else(|_| axiam_pki::config::DEFAULT_MDS_LEAF_DNS.to_string()),
     };
+    tracing::info!(
+        mds_enabled = pki_config.mds_enabled,
+        mds_refresh_interval_secs = pki_config.mds_refresh_interval_secs,
+        mds_blob_source = if pki_config.mds_blob_path.is_some() {
+            "local_file"
+        } else {
+            "network"
+        },
+        "FIDO MDS3 ingestion config resolved (D10)"
+    );
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
@@ -598,7 +644,10 @@ async fn main() -> std::io::Result<()> {
     let cert_service = CertService::new(
         ca_cert_repo,
         cert_repo.clone(),
-        pki_config,
+        // X3: `pki_config` is needed again below (AppState field + the MDS
+        // background job), so this is now a clone rather than the final move
+        // it used to be.
+        pki_config.clone(),
         Arc::clone(&crypto_semaphore),
     );
     // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
@@ -1334,6 +1383,100 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!("Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing");
     }
 
+    // X3 (D10): weekly FIDO MDS3 background refresh job. `should_spawn_refresh_job`
+    // is the single gate — `mds_enabled: false` (the shipped default) or
+    // `mds_refresh_interval_secs == 0` both mean this branch is never taken,
+    // so a default deployment makes ZERO outbound MDS calls (see
+    // `axiam_server::mds_job`'s unit tests for the pure decision function
+    // this reads, since `main()` itself cannot be linked from `tests/`).
+    if axiam_server::mds_job::should_spawn_refresh_job(&pki_config) {
+        let mds_repo_for_job = mds_repo.clone();
+        let mds_blob_url = pki_config.mds_blob_url.clone();
+        let mds_blob_path = pki_config.mds_blob_path.clone();
+        let mds_leaf_dns = pki_config.mds_leaf_dns.clone();
+        let mds_interval_secs = pki_config.mds_refresh_interval_secs;
+        let mds_ca_cache_for_job = Arc::clone(&attestation_ca_cache);
+        tokio::spawn(async move {
+            // Jitter the FIRST fire only, so replicas that start at the same
+            // moment don't all hit the MDS BLOB source in the same second
+            // (D10). `Uuid::new_v4` is already a dependency of this binary
+            // (used for `replica_id` above) — no new crate for randomness.
+            let jitter = axiam_server::mds_job::jitter_secs(
+                mds_interval_secs,
+                uuid::Uuid::new_v4().as_u128(),
+            );
+            tracing::info!(
+                interval_secs = mds_interval_secs,
+                jitter_secs = jitter,
+                blob_source = if mds_blob_path.is_some() {
+                    "local_file"
+                } else {
+                    "network"
+                },
+                "FIDO MDS3 background refresh job starting (D10)"
+            );
+            tokio::time::sleep(Duration::from_secs(jitter)).await;
+
+            let mut ticker = tokio::time::interval(Duration::from_secs(mds_interval_secs));
+            loop {
+                ticker.tick().await;
+                // D11: every outcome is logged — `mds.refreshed` on success
+                // (axiam_db::mds_ingest::ingest_blob) and `mds.refresh_failed`
+                // on a fetch/verify failure (axiam_pki::mds's
+                // `log_fetch_failure`, invoked from `ingest_from_url`/
+                // `ingest_from_file`) — both fire from inside these calls
+                // regardless of caller, so the admin-triggered
+                // `POST /api/v1/mds/refresh` endpoint and this background job
+                // share exactly one audit-emitting code path.
+                let outcome = if let Some(path) = &mds_blob_path {
+                    axiam_db::mds_ingest::ingest_from_file(&mds_repo_for_job, path, &mds_leaf_dns)
+                        .await
+                } else {
+                    axiam_db::mds_ingest::ingest_from_url(
+                        &mds_repo_for_job,
+                        &mds_blob_url,
+                        &mds_leaf_dns,
+                        false, // production: never allow private/loopback targets
+                    )
+                    .await
+                };
+
+                match outcome {
+                    // W2-D3: the CA-list cache only needs rebuilding when the
+                    // set of known attestation roots actually changed — a
+                    // no-op refresh or a rejected rollback left it untouched.
+                    Ok(
+                        o @ (axiam_db::mds_ingest::MdsIngestOutcome::Initial { .. }
+                        | axiam_db::mds_ingest::MdsIngestOutcome::Replaced { .. }),
+                    ) => {
+                        tracing::info!(
+                            outcome = ?o,
+                            "FIDO MDS3 background refresh completed with new entries"
+                        );
+                        mds_ca_cache_for_job.invalidate();
+                    }
+                    Ok(o) => {
+                        tracing::info!(outcome = ?o, "FIDO MDS3 background refresh completed (no change)");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "FIDO MDS3 background refresh failed");
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            interval_secs = pki_config.mds_refresh_interval_secs,
+            "FIDO MDS3 background refresh job spawned (D10)"
+        );
+    } else {
+        tracing::info!(
+            mds_enabled = pki_config.mds_enabled,
+            refresh_interval_secs = pki_config.mds_refresh_interval_secs,
+            "FIDO MDS3 background refresh job NOT spawned (disabled, or refresh interval is 0) \
+             — zero outbound MDS calls"
+        );
+    }
+
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
     let grpc_engine = {
@@ -1502,6 +1645,12 @@ async fn main() -> std::io::Result<()> {
         auth_service: auth_service.clone(),
         webauthn_service: webauthn_service.clone(),
         mfa_method_service: mfa_method_service.clone(),
+        webauthn_credential_repo: webauthn_cred_repo.clone(),
+        webauthn_attestation_policy_repo: webauthn_attestation_policy_repo.clone(),
+        mds_repo: mds_repo.clone(),
+        attestation_metadata_source: attestation_metadata_source.clone(),
+        attestation_ca_cache: Arc::clone(&attestation_ca_cache),
+        pki_config: pki_config.clone(),
         mail_outbound_publisher: Arc::new(mail_outbound_publisher.clone())
             as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
         session_repo: session_repo.clone(),

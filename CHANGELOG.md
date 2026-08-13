@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WebAuthn attestation policy enforcement (X3).** Registration has always
+  accepted any authenticator; tenants can now opt into "only FIDO-certified /
+  non-revoked / explicitly-allowed authenticators may register," backed by
+  the FIDO Alliance's Metadata Service (MDS3).
+
+  `axiam-pki` gains an MDS3 ingestion pipeline: fetch (or load, air-gapped)
+  the ~10 MB signed BLOB, verify its RS256 JWT signature chain against a
+  **digest-pinned** vendored GlobalSign Root CA – R3 anchor — matching the
+  pinned SHA-256 is the check, the anchor is never re-fetched at runtime —
+  pin the leaf's SAN DNS identity (chaining to a public CA root by itself
+  only proves "some GlobalSign EV customer," not "FIDO Alliance"), require
+  every issuer in the chain to actually be a CA (closing an end-entity
+  certificate splice a naive verifier would miss), reject a rollback to an
+  older BLOB serial, and mark a BLOB stale past its own `nextUpdate` without
+  ever hard-failing ingestion over it. Ingestion is opt-in
+  (`AXIAM__PKI__MDS_ENABLED=false` by default — zero outbound calls) with a
+  weekly background refresh, an admin-triggered `POST /api/v1/mds/refresh`,
+  status via `GET /api/v1/mds/status`, and an `AXIAM__PKI__MDS_BLOB_PATH`
+  escape hatch for air-gapped deployments (the BLOB itself is not vendored in
+  git).
+
+  Per-tenant policy (`GET|PUT /api/v1/tenants/{tenant_id}/webauthn/attestation-policy`)
+  controls attestation mode, required certification level, AAGUID
+  allow/block lists, and revoked-status blocking, evaluated by a pure,
+  exhaustively-tested decision function
+  (`axiam_core::models::webauthn_policy::evaluate`): blocklist beats
+  allowlist, compromise/revocation status is sticky across the authenticator's
+  whole history, and an AAGUID explicitly allow-listed by an admin is trusted
+  even with no MDS entry for it. The default (`mode: none`) reproduces
+  today's behavior byte-for-byte, with no MDS lookup at all.
+
+  **Every non-`none` mode excludes synced passkeys** (iCloud Keychain, Google
+  Password Manager) **and hybrid sign-in**, not only the strictest setting —
+  `webauthn-rs` always requires user verification and always rejects
+  synchronised authenticators once attestation is requested at all. AXIAM's
+  `mode: indirect` still requests `direct` conveyance on the wire; it differs
+  from `mode: direct_required` only in policy strictness afterwards. See
+  [`docs/admin/authenticator-policies.md`](docs/admin/authenticator-policies.md)
+  for the full trade-off before enabling it.
+
+  Denials return a fixed, non-specific error and audit
+  `webauthn.attestation_denied` with the AAGUID and machine-readable reason —
+  never a raw library error to the end user. **Existing credentials are never
+  auto-revoked** on a policy change: `GET
+  /api/v1/tenants/{tenant_id}/webauthn/compliance-report` lists which
+  registered credentials would now fail the current policy (a credential
+  with no recorded AAGUID — every credential registered before X3 — is
+  reported `unknown`, never as a violation), and revocation stays the
+  existing admin credential-delete path, a deliberate human action.
+
+  Known, documented limitation: `block_revoked_status` covers `REVOKED` and
+  the three `*_COMPROMISE` statuses, not `USER_VERIFICATION_BYPASS` — an
+  authenticator with only a UV-bypass advisory still passes that check.
+  Operators who care should use `blocked_aaguids`.
+
 - **OIDC logout: RP-initiated and back-channel (B5).**
   `GET`/`POST /oauth2/end_session` ends the session named by a signed
   `id_token_hint`, and every client that participated in that session and

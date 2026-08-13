@@ -13,10 +13,12 @@
 //!   ([`SharedRateLimitCounter`]), used by BOTH the REST and gRPC
 //!   shared-store rate-limit layers
 
+pub mod attestation_metadata_source;
 mod connection;
 mod error;
 mod handle;
 pub mod helpers;
+pub mod mds_ingest;
 pub mod metrics;
 mod pool;
 pub mod rate_limit_counter;
@@ -43,7 +45,7 @@ pub use repository::{
     SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository, SurrealMdsRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
@@ -51,7 +53,8 @@ pub use repository::{
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 
 /// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because

@@ -203,6 +203,18 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "authz:check_as",
         "Perform an authorization check on behalf of another subject (admin override)",
     ),
+    // WebAuthn Attestation Policy (X3 wave 3, D5/D9). Deliberately its own
+    // pair rather than reusing settings:get/settings:update — see
+    // handlers::webauthn_policy's module docs for why the attestation
+    // policy is not part of the SecuritySettings inheritance model.
+    (
+        "webauthn_policy:read",
+        "Read a tenant's WebAuthn attestation policy or compliance report",
+    ),
+    (
+        "webauthn_policy:write",
+        "Update a tenant's WebAuthn attestation policy",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -685,4 +697,24 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/tenants/{tenant_id}/email-config",
         "email_config:write",
     ),
+    // WebAuthn Attestation Policy (X3 wave 3)
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy",
+        "webauthn_policy:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy",
+        "webauthn_policy:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/webauthn/compliance-report",
+        "webauthn_policy:read",
+    ),
+    // FIDO MDS3 (X3 wave 3) — server-global, reuses the CA-admin permission
+    // pair (see handlers::mds's module docs for the rationale).
+    ("GET", "/api/v1/mds/status", "ca_certificates:list"),
+    ("POST", "/api/v1/mds/refresh", "ca_certificates:generate"),
 ];

@@ -53,6 +53,7 @@ fn test_auth_config() -> AuthConfig {
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     }
 }
 

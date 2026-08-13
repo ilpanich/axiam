@@ -7,7 +7,9 @@ Task-oriented walkthroughs for the first-run admin bootstrap and the common
 day-to-day admin operations: creating organizations/tenants, users, roles,
 and permissions, and assigning roles. See also:
 [Deployment Guide](../deployment/README.md) (env/secrets),
-[PKI Guide](../pki/README.md) (certificates), [API docs](../api/README.md).
+[PKI Guide](../pki/README.md) (certificates),
+[Authenticator policies](authenticator-policies.md) (WebAuthn attestation
+policy, MDS3 operations), [API docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,
 obtained via `POST /api/v1/auth/login`) except the bootstrap endpoint itself.

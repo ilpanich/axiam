@@ -217,6 +217,13 @@ use crate::handlers;
         // Authz check — FND-04 REST authorization surface (same engine as gRPC, D-08)
         handlers::authz_check::check_access,
         handlers::authz_check::batch_check_access,
+        // WebAuthn Attestation Policy (X3 wave 3)
+        handlers::webauthn_policy::get_policy,
+        handlers::webauthn_policy::set_policy,
+        handlers::webauthn_policy::compliance_report,
+        // FIDO MDS3 (X3 wave 3)
+        handlers::mds::status,
+        handlers::mds::refresh,
     ),
     components(schemas(
         // Health
@@ -431,6 +438,17 @@ use crate::handlers;
         handlers::authz_check::BatchCheckAccessResponse,
         // Pagination
         axiam_core::repository::Pagination,
+        // WebAuthn Attestation Policy (X3 wave 3)
+        axiam_core::models::webauthn_policy::WebauthnAttestationPolicy,
+        axiam_core::models::webauthn_policy::AttestationMode,
+        axiam_core::models::webauthn_policy::UnknownAaguidAction,
+        axiam_core::models::webauthn_policy::AttestationDenyReason,
+        axiam_core::models::mds::CertificationLevel,
+        handlers::webauthn_policy::PolicyResponse,
+        handlers::webauthn_policy::ComplianceReportEntry,
+        // FIDO MDS3 (X3 wave 3)
+        handlers::mds::MdsStatusResponse,
+        handlers::mds::MdsRefreshOutcome,
     )),
     tags(
         (name = "health", description = "Health and readiness probes"),
@@ -459,6 +477,8 @@ use crate::handlers;
         (name = "federation-sso", description = "First-time SSO — public OIDC/SAML start and callback endpoints"),
         (name = "notification_rules", description = "Notification rule management"),
         (name = "authz", description = "Authorization check (FND-04 REST surface)"),
+        (name = "webauthn-policy", description = "Tenant WebAuthn attestation policy and compliance reporting (X3)"),
+        (name = "mds", description = "FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"),
     ),
     modifiers(&SecurityAddon),
 )]

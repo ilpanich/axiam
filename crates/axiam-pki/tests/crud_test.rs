@@ -29,6 +29,7 @@ async fn setup_db() -> Surreal<TestDb> {
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     }
 }
 

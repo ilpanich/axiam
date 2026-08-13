@@ -11,6 +11,10 @@ rust-version.workspace = true
 axiam-auth = { workspace = true }
 axiam-core = { workspace = true }
 axiam-db = { workspace = true }
+# D2 (X3): the shared SSRF guard now lives in axiam-pki (it also backs the
+# MDS BLOB fetch path); re-exported as `axiam_federation::ssrf` in lib.rs so
+# every existing call site keeps working unchanged.
+axiam-pki = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 jsonwebtoken = { workspace = true }

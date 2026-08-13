@@ -25,6 +25,7 @@ async fn setup_db() -> Surreal<TestDb> {
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
+        ..Default::default()
     }
 }
 
@@ -305,6 +306,7 @@ async fn pgp_generate_audit_signing_without_encryption_key_errors() {
         repo,
         PkiConfig {
             encryption_key: None,
+            ..Default::default()
         },
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     );
@@ -343,6 +345,7 @@ async fn pgp_generate_export_key_without_encryption_key_succeeds() {
         repo,
         PkiConfig {
             encryption_key: None,
+            ..Default::default()
         },
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     );
@@ -424,6 +427,7 @@ async fn pgp_sign_audit_batch_without_encryption_key_errors() {
         repo2,
         PkiConfig {
             encryption_key: None,
+            ..Default::default()
         },
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     );

@@ -55,6 +55,11 @@ fn cred_with_json(passkey_json: &str) -> WebauthnCredential {
         passkey_json: passkey_json.into(),
         created_at: Utc::now(),
         last_used_at: None,
+        // D6 (X3): no attestation metadata for this pre-X3-style fixture.
+        aaguid: None,
+        attestation_format: None,
+        attested: false,
+        authenticator_name: None,
     }
 }
 
@@ -70,6 +75,12 @@ impl WebauthnCredentialRepository for MockCredRepo {
             passkey_json: input.passkey_json,
             created_at: Utc::now(),
             last_used_at: None,
+            // D6 (X3): forward whatever the caller resolved, mirroring what
+            // a real repository would persist.
+            aaguid: input.aaguid,
+            attestation_format: input.attestation_format,
+            attested: input.attested,
+            authenticator_name: input.authenticator_name,
         })
     }
     async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> {

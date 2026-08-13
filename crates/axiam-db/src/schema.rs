@@ -212,6 +212,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "resource_child_epoch_delete_race",
         sql: SCHEMA_V34,
     },
+    Migration {
+        version: 35,
+        name: "webauthn_attestation_policy_and_mds",
+        sql: SCHEMA_V35,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1772,6 +1777,96 @@ DEFINE FIELD IF NOT EXISTS uma_registered_by ON TABLE resource TYPE option<strin
 // exactly zero".
 const SCHEMA_V34: &str = "\
 DEFINE FIELD IF NOT EXISTS child_epoch ON TABLE resource TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v35 — WebAuthn attestation policy + FIDO MDS3 storage (X3 wave 2)
+// -----------------------------------------------------------------------
+//
+// Three additive, brand-new tables — no existing table's shape changes here
+// except the additive `webauthn_credential` columns at the bottom (D6), which
+// are all `option<..>`/`DEFAULT false` so every pre-X3 row keeps reading back
+// unchanged (no backfill, same reasoning as v25's `grants.effect`).
+//
+// - `webauthn_attestation_policy` (D5): tenant-scoped, **one row per tenant**.
+//   `idx_webauthn_attestation_policy_tenant` is UNIQUE on `tenant_id` so a
+//   double-write can never leave two rows for the same tenant (the repository
+//   upserts via a v5-UUID deterministic record id derived from tenant_id, the
+//   same pattern `security_settings` already uses — this index is the
+//   datastore-level backstop, not the only guard). An absent row means
+//   `WebauthnAttestationPolicy::default()` (D5) — there is no "empty policy"
+//   row ever written for that case, so the table only ever holds tenants that
+//   explicitly opted into a non-default policy.
+// - `mds_entry` (D10): **server-global**, not tenant-scoped — every tenant
+//   looks up the same AAGUID against the same FIDO Alliance BLOB. Keyed by a
+//   generated record id (house convention — every other table in this schema
+//   uses a generated id rather than a domain value as the primary key), with
+//   `aaguid` as an indexed, UNIQUE field so the registration-time lookup
+//   (`MdsRepository::get_by_aaguid`) is a single index seek. `status_reports`
+//   is stored as a JSON string (`status_reports_json`) rather than a nested
+//   SurrealDB array-of-objects — it is opaque, read-only-as-a-whole audit/
+//   policy data (never queried by sub-field), so a JSON blob column avoids
+//   modelling FIDO's `StatusReport` schema a second time in DDL.
+// - `mds_blob_meta` (D10): **server-global, single row**. Record id is the
+//   fixed sentinel `mds_blob_meta:singleton` — the same "deterministic
+//   record id as the uniqueness constraint" pattern `_migration_lock:startup`
+//   already uses, so there is structurally never more than one row.
+//
+// `min_certification` and `unknown_aaguid` follow v25's `option<string>
+// ASSERT $value = NONE OR $value IN [...]` pattern for an optional enum-like
+// column.
+const SCHEMA_V35: &str = "\
+-- =======================================================================
+-- WebAuthn attestation policy (tenant scope, one row per tenant) — D5
+-- =======================================================================
+DEFINE TABLE webauthn_attestation_policy SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE webauthn_attestation_policy TYPE string;
+DEFINE FIELD mode ON TABLE webauthn_attestation_policy TYPE string
+    ASSERT $value IN ['none', 'indirect', 'direct_required'];
+DEFINE FIELD require_fido_certified ON TABLE webauthn_attestation_policy TYPE bool
+    DEFAULT false;
+DEFINE FIELD min_certification ON TABLE webauthn_attestation_policy TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['L1', 'L1plus', 'L2', 'L2plus', 'L3', 'L3plus'];
+DEFINE FIELD allowed_aaguids ON TABLE webauthn_attestation_policy TYPE option<array<string>>;
+DEFINE FIELD blocked_aaguids ON TABLE webauthn_attestation_policy TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD block_revoked_status ON TABLE webauthn_attestation_policy TYPE bool
+    DEFAULT true;
+DEFINE FIELD unknown_aaguid ON TABLE webauthn_attestation_policy TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['allow', 'deny'];
+DEFINE FIELD created_at ON TABLE webauthn_attestation_policy TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE webauthn_attestation_policy TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX idx_webauthn_attestation_policy_tenant
+    ON TABLE webauthn_attestation_policy COLUMNS tenant_id UNIQUE;
+
+-- =======================================================================
+-- FIDO MDS3 metadata (server-global, NOT tenant-scoped) — D10
+-- =======================================================================
+DEFINE TABLE mds_entry SCHEMAFULL;
+DEFINE FIELD aaguid ON TABLE mds_entry TYPE string;
+DEFINE FIELD description ON TABLE mds_entry TYPE option<string>;
+DEFINE FIELD attestation_root_certificates ON TABLE mds_entry TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD status_reports_json ON TABLE mds_entry TYPE string DEFAULT '[]';
+DEFINE FIELD time_of_last_status_change ON TABLE mds_entry TYPE option<string>;
+DEFINE INDEX idx_mds_entry_aaguid ON TABLE mds_entry COLUMNS aaguid UNIQUE;
+
+DEFINE TABLE mds_blob_meta SCHEMAFULL;
+DEFINE FIELD no ON TABLE mds_blob_meta TYPE int;
+DEFINE FIELD next_update ON TABLE mds_blob_meta TYPE string;
+DEFINE FIELD entry_count ON TABLE mds_blob_meta TYPE int;
+DEFINE FIELD last_refreshed_at ON TABLE mds_blob_meta TYPE datetime;
+DEFINE FIELD stale ON TABLE mds_blob_meta TYPE bool DEFAULT false;
+
+-- =======================================================================
+-- WebAuthn credential attestation metadata (additive, no migration) — D6
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS aaguid ON TABLE webauthn_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS attestation_format ON TABLE webauthn_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS attested ON TABLE webauthn_credential TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS authenticator_name ON TABLE webauthn_credential TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

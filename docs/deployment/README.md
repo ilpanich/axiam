@@ -95,6 +95,58 @@ Before applying, an operator must:
    [`k8s/network-policy/server-egress.yml`](../../k8s/network-policy/server-egress.yml)
    with your cluster's real pod/service CIDRs and your SMTP relay's CIDR.
 
+## ⚠ Storage engine: a deployment MUST run a persistent SurrealDB datastore
+
+**Requirement (MUST).** Every AXIAM deployment MUST start SurrealDB on a
+persistent storage engine — `surrealkv:` or `rocksdb:`. A deployment MUST NOT
+run the in-memory `memory` datastore, and MUST NOT set
+`AXIAM__DB__ALLOW_MEMORY_ENGINE`.
+
+This is a correctness requirement, not a durability preference. AXIAM has three
+single-use credentials — UMA permission tickets, RFC 8628 device grants and
+RFC 9126 PAR `request_uri`s — and each is redeemed by a guarded `UPDATE` inside
+an explicit transaction, with a per-attempt nonce read back after the commit as
+a second layer. The first layer only holds if the engine actually arbitrates the
+write-write conflict between two concurrent redemptions. Measured with
+[`tools/surreal-race-probe`](../../tools/surreal-race-probe/) — see
+[`RESULTS.md`](../../tools/surreal-race-probe/RESULTS.md) for the version-pinned
+numbers:
+
+| Engine | Contended attempts | Rounds admitting two winners |
+|---|---|---|
+| `surrealkv` | 40 000 | 0 |
+| `rocksdb` | 9 600 | 0 |
+| `memory` | 9 600 | 23 |
+
+`memory` is not failing to arbitrate — it aborts contended attempts at the same
+54% rate the persistent engines do, then occasionally misses, silently, with
+both callers receiving the pre-transition row. On that engine a double
+redemption yields two RPTs from one authorization decision, two token sets from
+one user approval, or a replayable authorization request
+([ilpanich/axiam#302](https://github.com/ilpanich/axiam/issues/302)).
+
+The shipped deployments already satisfy this — `docker-compose.dev.yml`,
+`docker-compose.e2e.yml` and `docker-compose.prod.yml` all pass
+`surrealkv:/data/axiam.db`, and
+[`k8s/surrealdb/statefulset.yml`](../../k8s/surrealdb/statefulset.yml) passes
+`surrealkv:/data/surreal.db`. If you author your own manifest, carry that
+argument over.
+
+**The server cannot verify this for you.** SurrealDB exposes no datastore
+identity over the wire: neither `/version`, nor `INFO FOR ROOT` (including its
+`system`, `nodes` and `config` sections), nor any `session::*` function names
+the engine, as of SurrealDB 3.2.4. `axiam-server` therefore logs a WARN at
+startup saying the engine could not be attested, and enforcement rests here,
+with the operator. The check itself is already written
+(`axiam_db::engine_attestation`): the day a SurrealDB release publishes the
+engine name, the server will refuse to start against `memory` unless
+`AXIAM__DB__ALLOW_MEMORY_ENGINE=true` is set, and a unit test fails on the next
+dependency bump that makes the name available.
+
+| Variable | Meaning |
+|---|---|
+| `AXIAM__DB__ALLOW_MEMORY_ENGINE` | **Development only.** `true` lets the server start against a positively-identified `memory` datastore instead of refusing. Never set it in a deployment; single-use redemption is not guaranteed when it is honoured. Unset (the default) fails closed. |
+
 ## Required secrets & environment
 
 All AXIAM configuration keys use a **double underscore** after the `AXIAM`

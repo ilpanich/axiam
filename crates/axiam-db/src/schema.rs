@@ -1576,11 +1576,12 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 // Schema v31 — redemption nonce, so single-use stops depending on the engine
 // -----------------------------------------------------------------------
 //
-// READ THE 2026-08 ADDENDUM AT THE END OF THIS COMMENT FIRST. The premise
+// READ THE TWO ADDENDA AT THE END OF THIS COMMENT FIRST — the 2026-08
+// re-measurement, then the X6 note, which is the current state. The premise
 // below — "SurrealDB does not detect the write-write conflict" — was measured
 // on `kv-mem`, which is the TEST engine and not one AXIAM deploys. On the two
-// persistent engines the conflict IS detected, and this mechanism is belt to
-// the engine's braces rather than a substitute for them.
+// persistent engines the conflict IS detected, and this mechanism is now
+// layered ON TOP of an explicit transaction rather than instead of one.
 //
 // v30 relied on SurrealDB detecting the write-write conflict between two
 // concurrent redemptions. Measured, it does not: 8 rounds in 1200 (8 racers
@@ -1611,10 +1612,10 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 // can land after another racer's read-back. An opaque failure to detect a
 // conflict is not analysable in that way.
 //
-// No mechanism tested reaches zero. Single-use is **not** guaranteed here, and
-// no comment in this tree should be read as saying otherwise. Closing the
-// window needs a guarantee from below this layer — a storage engine that
-// serialises, or single-writer serialisation in front of it.
+// No mechanism tested at this layer reaches zero, and closing the window needs
+// a guarantee from below it — a storage engine that serialises, or
+// single-writer serialisation in front of it. (X6 took the first of those; see
+// the second addendum.)
 //
 // The read-back is deliberately NOT inside a transaction. Under snapshot
 // isolation a racer would see its own write and every racer would believe it
@@ -1661,12 +1662,53 @@ DEFINE INDEX IF NOT EXISTS idx_permission_ticket_tenant_expiry
 //     proof, and no probe run reproduces the coverage-instrumented, saturated
 //     conditions #302 describes.
 //
-// Re-run the probe on any SurrealDB bump — README.md in that directory says
-// why and how.
-//
 // `WHERE consumed = false` is still required: it is what makes a later,
 // non-concurrent redemption match nothing and leave the first winner's nonce
 // undisturbed.
+//
+// -----------------------------------------------------------------------
+// ADDENDUM 2, X6 (#302 closed) — the current state of this mechanism
+// -----------------------------------------------------------------------
+//
+// Everything above describes a choice between the transaction and the nonce.
+// X6 stopped choosing. All three consume paths now run BOTH:
+//
+//   1. the guarded `UPDATE` inside an explicit `BEGIN`/`COMMIT`, so the
+//      deployed engine arbitrates and aborts the loser (54% of contended
+//      attempts on `surrealkv`, 0 double winners in 40 000); and
+//   2. the per-attempt nonce, read back in a SEPARATE QUERY AFTER THE COMMIT,
+//      which asks the engine for nothing and therefore still catches a
+//      conflict the engine silently missed.
+//
+// The read-back's position is the load-bearing detail and the reason this is
+// two queries rather than one transaction: inside the transaction, snapshot
+// isolation shows every racer its own write, so every racer reads back its own
+// nonce and believes it won. Folding the read-back inside would convert an
+// occasional double redemption into a certain one. Do not "simplify" it.
+//
+// So the posture changes, and this is the wording #302 was holding open until
+// the fix landed: **single-use is guaranteed, conditional on an attested
+// persistent storage engine** — the transaction arbitrating, the nonce
+// auditing. A double redemption now requires two independent failures rather
+// than one. On `kv-mem` it remains explicitly NOT guaranteed (the nonce leaks
+// there too, 6 rounds in 1200), which is why `axiam-server` attests the engine
+// at startup and refuses a positively-identified `memory` datastore unless
+// `AXIAM__DB__ALLOW_MEMORY_ENGINE=true` — see
+// `crate::engine_attestation`, including its finding that SurrealDB 3.2.4
+// exposes no engine identity over the wire, so today that attestation is a
+// WARN plus a MUST-level operator requirement in `docs/deployment/README.md`.
+//
+// The escalation path if a future engine bump breaks this, recorded and
+// deliberately NOT built: single-writer serialisation in front of the
+// datastore via a RabbitMQ single-active-consumer redemption queue. It is
+// disproportionate against 0/40 000 plus a layered mechanism; build it when
+// the measurement says to.
+//
+// Re-run the probe on any SurrealDB bump — README.md in that directory says
+// why and how, `RESULTS.md` records what each pinned version measured, and
+// `.github/workflows/surreal-race-probe.yml` makes it a required check
+// whenever `Cargo.lock` moves `surrealdb`, `surrealdb-core` or `surrealkv`, so
+// a bump can no longer change this silently.
 const SCHEMA_V31: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<string>;
 ";
@@ -1678,9 +1720,8 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<
 // v31 fixed `permission_ticket.consume`. `device_grant.redeem` and
 // `pushed_auth_request.consume` were written in the same shape, at the same
 // time, on the same understanding — that `BEGIN`/`COMMIT` makes SurrealDB
-// detect the write-write conflict and abort every loser. It does not, so those
-// two carry the same defect, and their doc comments carry the same false
-// claim.
+// detect the write-write conflict and abort every loser. On `kv-mem` it does
+// not, so on that engine those two carried the same defect.
 //
 // They were not measured failing. That is not evidence they are sound: the
 // permission-ticket race needed coverage instrumentation *plus* a saturated
@@ -1698,11 +1739,13 @@ DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE permission_ticket TYPE option<
 //                                  is a replayable authorization request
 //
 // See `SCHEMA_V31` for the mechanism and the measurements behind choosing it,
-// including the two repairs that turned out worse than the defect — and its
-// 2026-08 addendum, which re-measured all of it on the engine AXIAM actually
-// deploys and found the premise engine-specific. The short version: these two
-// paths are in the same position as the ticket, which is a better position than
-// this comment originally claimed.
+// including the two repairs that turned out worse than the defect; its 2026-08
+// addendum, which re-measured all of it on the engine AXIAM actually deploys
+// and found the premise engine-specific; and its X6 addendum, which is the
+// current state. The short version: these two paths are in exactly the same
+// position as the ticket. All three now run the transaction AND the nonce, and
+// single-use is guaranteed on an attested persistent engine — not on `kv-mem`,
+// which `axiam-server` refuses when it can identify it.
 const SCHEMA_V32: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE device_grant TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE pushed_auth_request TYPE option<string>;

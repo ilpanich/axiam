@@ -441,6 +441,25 @@ checklist — most of the threat model's open items live here.
 - Add edge protection (WAF, connection limits, autoscaling) for volumetric floods,
   and a **liveness alert on scheduled-job completion** so a missed GDPR-erasure or
   certificate-expiry run is noticed.
+- **Run SurrealDB on a persistent storage engine — `surrealkv:` or `rocksdb:`,
+  never `memory:`.** This is a correctness control, not a durability preference.
+  AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device
+  grants and RFC 9126 PAR `request_uri`s — are redeemed by a guarded `UPDATE`
+  inside an explicit transaction, so a second concurrent redemption is a
+  write-write conflict the engine must abort. Measured
+  (`tools/surreal-race-probe`), `surrealkv` and `rocksdb` abort every one; the
+  in-memory engine arbitrates at the same rate and then silently misses,
+  admitting two winners in roughly 1% of contended rounds. A double redemption
+  there yields two RPTs from one authorization decision, two token sets from one
+  user approval, or a replayable authorization request
+  ([ilpanich/axiam#302](https://github.com/ilpanich/axiam/issues/302)). The
+  shipped compose files and k8s StatefulSet already pin `surrealkv:`; **the
+  server cannot verify this for you** — SurrealDB exposes no datastore identity
+  over the wire, so `axiam-server` logs a startup WARN that the engine could not
+  be attested and the requirement lands here. A per-attempt redemption nonce,
+  read back after the transaction commits, is the second layer that catches a
+  missed conflict, so this is a defence-in-depth requirement rather than a
+  single point of failure — but do not spend the second layer to save the first.
 
 **Integration & SDKs**
 

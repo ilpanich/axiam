@@ -1,0 +1,221 @@
+name: SurrealDB race probe
+
+# Version-bump gate for AXIAM's single-use credentials (ilpanich/axiam#302, X6).
+#
+# `permission_ticket.consume`, `device_grant.redeem` and
+# `pushed_auth_request.consume` decide "exactly one caller may redeem this row"
+# in two layers: a guarded `UPDATE` inside an explicit transaction, which asks
+# the storage engine to arbitrate, and a per-attempt nonce read back after the
+# commit, which asks it for nothing. The first layer is a measured property of
+# the engine, not a documented guarantee — SurrealDB promises nothing about
+# write-write conflict detection, so a version bump can take it away silently.
+#
+# This job is what stops that being silent. It re-measures the property on the
+# engine AXIAM deploys, at the scale the finding was established at, and fails
+# on a single double-winner round.
+#
+# ## Why it is shaped like this
+#
+# The probe costs a long release build plus two 40 000-attempt runs, so it must
+# not run on every commit. But a `paths:` filter at the workflow level would
+# make the check never report on unrelated PRs, and a required check that never
+# reports blocks the PR forever. So the workflow runs on every PR, a cheap
+# `detect` job decides whether the probe is actually needed, and `gate` — the
+# job to mark required in branch protection — always reports.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "Rounds per shape (the established scale is 5000)"
+        required: false
+        default: "5000"
+      racers:
+        description: "Concurrent racers per round"
+        required: false
+        default: "8"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  detect:
+    name: Detect a SurrealDB version change
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.check.outputs.required }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Two commits is enough to diff a push against its parent; a PR is
+          # diffed against its merge base, fetched below.
+          fetch-depth: 2
+
+      - name: Compare the pinned engine versions against the base
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manually triggered" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            base="$BASE_SHA"
+          else
+            base="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+
+          if [ -z "$base" ]; then
+            # No parent to compare against (an initial commit). Measure rather
+            # than assume — this is the cheap, conservative direction.
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "reason=no base commit to compare against" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before="$(git show "$base:Cargo.lock" > /tmp/base.lock 2>/dev/null \
+                    && ./scripts/surreal-engine-versions.sh /tmp/base.lock || true)"
+          after="$(./scripts/surreal-engine-versions.sh Cargo.lock)"
+
+          if [ "$before" = "$after" ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "reason=surrealdb / surrealdb-core / surrealkv unchanged" >> "$GITHUB_OUTPUT"
+            echo "Engine crates unchanged:"
+            echo "$after" | sed 's/^/  /'
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "reason=surrealdb / surrealdb-core / surrealkv changed" >> "$GITHUB_OUTPUT"
+            echo "::warning::SurrealDB engine versions changed — re-measuring the single-use race (#302)"
+            diff <(echo "$before") <(echo "$after") || true
+          fi
+
+  probe:
+    name: Probe surrealkv (tx + nonce)
+    needs: detect
+    if: needs.detect.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    # A cold release build of three storage engines plus two 40 000-attempt
+    # runs. Generous on purpose: a gate that times out reads as a red build
+    # rather than as a measurement.
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: tools/surreal-race-probe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: tools/surreal-race-probe
+
+      # First, and before spending the build: a probe pinned to different
+      # versions than the workspace measures an engine the server does not run,
+      # which would be a green gate that means nothing.
+      - name: The probe must be pinned to the workspace's engine versions
+        working-directory: .
+        run: ./scripts/check-probe-pin.sh
+
+      - run: cargo build --release --locked
+
+      # Both shapes, because they measure different things. `tx` is the only
+      # one that measures conflict detection — it asks the engine to arbitrate
+      # and counts the aborts. `nonce` asks the engine for nothing, so a clean
+      # run there is a statement about the read-back ordering rather than about
+      # the engine. AXIAM ships both layers, so a regression in either matters.
+      - name: surrealkv, transaction shape
+        env:
+          ROUNDS: ${{ github.event.inputs.rounds || '5000' }}
+          RACERS: ${{ github.event.inputs.racers || '8' }}
+        run: |
+          set -euo pipefail
+          export PROBE_DIR="$RUNNER_TEMP/probe-tx"
+          rm -rf "$PROBE_DIR"
+          ./target/release/surreal-race-probe surrealkv tx "$ROUNDS" "$RACERS" | tee tx.out
+          grep -q "VERDICT: exactly one winner in every round" tx.out
+
+      - name: surrealkv, nonce shape
+        env:
+          ROUNDS: ${{ github.event.inputs.rounds || '5000' }}
+          RACERS: ${{ github.event.inputs.racers || '8' }}
+        run: |
+          set -euo pipefail
+          export PROBE_DIR="$RUNNER_TEMP/probe-nonce"
+          rm -rf "$PROBE_DIR"
+          ./target/release/surreal-race-probe surrealkv nonce "$ROUNDS" "$RACERS" | tee nonce.out
+          grep -q "VERDICT: exactly one winner in every round" nonce.out
+
+      # Whoever bumps the version has to put these numbers in RESULTS.md, so
+      # keep them out of the log-scrollback lottery.
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## SurrealDB race probe — surrealkv"
+            echo
+            echo '```'
+            cat tx.out nonce.out 2>/dev/null || echo "(no output — the run did not complete)"
+            echo '```'
+            echo
+            echo "Record these in \`tools/surreal-race-probe/RESULTS.md\` against the new pins."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: surreal-race-probe-output
+          path: |
+            tools/surreal-race-probe/tx.out
+            tools/surreal-race-probe/nonce.out
+          if-no-files-found: ignore
+
+  gate:
+    name: Race probe gate
+    # Always reports, so it can be a required check without blocking every PR
+    # that does not touch the lockfile. `needs` with `always()` means a skipped
+    # probe is a pass and a failed probe is a failure.
+    needs: [detect, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          REQUIRED: ${{ needs.detect.outputs.required }}
+          REASON: ${{ needs.detect.outputs.reason }}
+          DETECT: ${{ needs.detect.result }}
+          PROBE: ${{ needs.probe.result }}
+        run: |
+          set -euo pipefail
+          if [ "$DETECT" != "success" ]; then
+            echo "Could not determine whether the probe was needed ($DETECT)." >&2
+            exit 1
+          fi
+          if [ "$REQUIRED" != "true" ]; then
+            echo "Probe not required: $REASON."
+            echo "Single-use arbitration (#302) is unchanged by this diff."
+            exit 0
+          fi
+          if [ "$PROBE" != "success" ]; then
+            echo "The SurrealDB race probe did not pass ($PROBE)." >&2
+            echo "This gate exists because a version bump can remove write-write" >&2
+            echo "conflict detection silently. Do not merge on a red probe — see" >&2
+            echo "tools/surreal-race-probe/README.md and ilpanich/axiam#302." >&2
+            exit 1
+          fi
+          echo "Probe green at the established scale ($REASON)."

@@ -272,6 +272,28 @@ async fn find_by_hash_returns_none_for_an_unknown_handle() {
 /// strictly better than the single unsynchronised round this test used to run —
 /// which could not even distinguish "serialises" from "never overlapped".
 /// For questions about an engine, run the probe; that is what it is for.
+///
+/// # Triaging a red run here (revised by X6, #302 closed)
+///
+/// #302 used to carry a note telling triagers that an intermittent failure of
+/// this test was a known residual rather than a regression from whatever PR was
+/// in front of them, to be re-run once and moved past. **That note no longer
+/// applies and must not be used.** The residual it described was a property of
+/// the nonce-only mechanism, and `consume` now runs a transaction *and* the
+/// nonce: the engine aborts the losers and the nonce read-back catches anything
+/// it missed.
+///
+/// So on `surrealkv` — which is what this test opens — a failure here is a real
+/// regression. Do not re-run it and move on, and do not weaken the test.
+/// Diagnose in this order:
+///
+///   1. Did someone fold the nonce read-back back inside the transaction?
+///      Under snapshot isolation every racer then sees its own write and
+///      believes it won, so the failure will be near-total rather than rare.
+///   2. Did the `BEGIN`/`COMMIT` come off, or `WHERE consumed = false`?
+///   3. Did SurrealDB move? Run `tools/surreal-race-probe surrealkv tx 5000 8`
+///      and compare against `RESULTS.md`. That is the case the CI gate exists
+///      to catch before it reaches here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_redemptions_yield_exactly_one_winner() {
     const ROUNDS: usize = 200;

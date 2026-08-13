@@ -1916,12 +1916,21 @@ telling the caller their assumption about their own privileges was wrong.
 Signature (canonical order; each language's §1 casing applies):
 
 ```
-token_exchange(subject_token, *, actor_token=None, scopes=None, audience=None, resource=None)
+token_exchange(subject_token, subject_token_type, *, actor_token=None, scopes=None,
+               audience=None, resource=None)
 ```
 
-`subject_token` is positional and first. Everything else is optional and keyword/named where
-the language has that, because four optional strings in positional order is a bug waiting to
-be written.
+`subject_token` is positional and first, and **`subject_token_type` is positional, second, and
+required**. Everything else is optional and keyword/named where the language has that, because
+four optional strings in positional order is a bug waiting to be written.
+
+**`subject_token_type` is required, and has no default.** Through contract 1.12 it was not a
+parameter at all: every SDK sent `…:access_token` unconditionally, which was true by
+construction while an AXIAM access token was the only admissible subject token. [§15.7](#§157-external-idp-subject-tokens-x4)
+ended that, and a defaulted type would mean the SDK guessing which kind of credential the
+caller holds — the one thing §15.7 forbids. Requiring it moves the guess to the only party who
+cannot get it wrong. Pass `urn:ietf:params:oauth:token-type:access_token` explicitly for the
+same-domain exchange this section describes.
 
 The exchanging client **authenticates** (`client_secret_post`, per §12.1 rule 3) — unlike
 §14's device, this is a confidential service. §12.1's `tenant_id`-as-query rule and the
@@ -2014,7 +2023,7 @@ the resolved AXIAM user may actually do.
 | Parameter | External exchange |
 |---|---|
 | `subject_token` | the **partner's** access token (a JWT) |
-| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` — or `…:access_token`; both are accepted for an external issuer |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` — or `…:access_token`; both are accepted for an external issuer. **Required** (§15.1); there is no default to fall back on |
 | `actor_token` | **MUST be omitted.** Delegation across a trust boundary is not supported in v1 and is refused with `invalid_request` |
 | `scope` | as always: omit to get everything the trust configuration and the user's permissions allow, or name scopes to be told about any you cannot have |
 
@@ -2022,6 +2031,15 @@ An SDK MUST NOT inspect the subject token to decide which `subject_token_type` t
 MUST NOT default `subject_token_type` on the caller's behalf. Which kind of token the caller
 holds is something only the caller knows, and a wrong guess here is the difference between a
 request that is refused and one that is silently reinterpreted.
+
+**This is enforced by making the parameter required** ([§15.1](#§151-canonical-operation-and-endpoint-map)),
+not merely by documenting a prohibition. An optional parameter with a sensible-looking default
+is a default an SDK applies on every call where the caller said nothing — which is exactly the
+guess this clause forbids, relocated from the SDK's code into its signature. Where the language
+can refuse to compile a call that omits it, it MUST; where it cannot (a nullable field, a
+zero-initialised struct), the SDK MUST fail **client-side with no wire call**, the same way
+§15.1's missing-client-secret check does. A request that reaches the server with a type nobody
+chose is the failure mode this section exists to prevent.
 
 #### Which errors mean what
 
@@ -2068,6 +2086,12 @@ An exchange with an external subject token and `subject_token_type=…:jwt` surf
 result unchanged; passing an `actor_token` alongside an external subject token surfaces
 `invalid_request` with no retry and no rewriting; the `issuer is not configured` description
 reaches the caller intact; a token carrying `ext_exchange` is not re-exchanged by any helper.
+
+Two more pin the required parameter of §15.1. **A subject token that looks exactly like a JWT
+does not change what is sent** — without this, an SDK that sniffed the token and one that
+obeyed the caller are indistinguishable. And **an omitted type never reaches the wire**: either
+the call does not compile, or it fails client-side with no request sent. Assert whichever of
+the two the language admits.
 
 ---
 
@@ -2972,6 +2996,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.12 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable*
+*Contract version: 1.13 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

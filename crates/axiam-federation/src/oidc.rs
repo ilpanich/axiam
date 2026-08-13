@@ -23,7 +23,12 @@ use crate::discovery_cache::DiscoveryCache;
 use crate::error::FederationError;
 use crate::jwks_cache::JwksCache;
 use crate::secrets::decrypt_client_secret_or_legacy;
+// X4: the unverified-issuer reader is shared with `axiam-oauth2`'s exchange
+// grant, so it lives in `axiam-auth` (the crate both depend on) rather than
+// being written twice. Re-exported here so this crate's own call sites and
+// tests keep referring to it by the module they use.
 use crate::validate_metadata_url;
+pub use axiam_auth::token::unverified_issuer_of;
 
 /// Minimal OIDC Discovery document fields we care about.
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +146,36 @@ where
             discovery_cache,
             encryption_key,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Collaborator accessors (X4)
+    // ------------------------------------------------------------------
+    //
+    // The external token-exchange path lives in a sibling module and needs the
+    // same collaborators this one already owns. Exposing them `pub(crate)`
+    // beats a second service with its own copies: two JWKS caches would mean
+    // two rollover states, and two federation-link repositories would mean two
+    // answers to "which user is this".
+
+    pub(crate) fn jwks_cache(&self) -> &JwksCache {
+        &self.cache
+    }
+
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
+    pub(crate) fn federation_config_repo_ref(&self) -> &FC {
+        &self.federation_config_repo
+    }
+
+    pub(crate) fn federation_link_repo_ref(&self) -> &FL {
+        &self.federation_link_repo
+    }
+
+    pub(crate) fn user_repo_ref(&self) -> &UR {
+        &self.user_repo
     }
 
     /// Fetch and parse the OIDC discovery document from the provider.
@@ -496,7 +531,13 @@ where
 
     /// Provision a new user or link an existing one to the external IdP
     /// identity.
-    async fn provision_or_link_user(
+    ///
+    /// `pub(crate)` since X4: the external token-exchange path
+    /// ([`crate::token_exchange`]) resolves its subject through **this exact
+    /// function** rather than a parallel one, so a partner token and a browser
+    /// login can never disagree about which AXIAM user an `(issuer, sub)` pair
+    /// means, and the JIT provisioning rules are written down once.
+    pub(crate) async fn provision_or_link_user(
         &self,
         tenant_id: Uuid,
         config_id: Uuid,
@@ -1171,6 +1212,12 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         ) -> AxiamResult<PaginatedResult<FederationConfig>> {
             unimplemented!()
         }
+        async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
         async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
             unimplemented!()
         }
@@ -1761,6 +1808,12 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         ) -> AxiamResult<PaginatedResult<FederationConfig>> {
             unimplemented!()
         }
+        async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
         async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
             unimplemented!()
         }
@@ -1806,6 +1859,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             client_secret_ciphertext: None,
             client_secret_nonce: None,
             client_secret_key_version: None,
+            token_exchange: Default::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

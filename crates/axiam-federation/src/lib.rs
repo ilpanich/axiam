@@ -12,6 +12,8 @@ pub mod oidc;
 #[cfg(feature = "saml")]
 pub mod saml;
 pub mod secrets;
+/// X4 — verifying an external IdP's token as an RFC 8693 subject token.
+pub mod token_exchange;
 
 /// Shared SSRF guard (D2, X3): lifted verbatim to `axiam-pki` because it now
 /// backs the MDS BLOB fetch path too, and PKI is where trust-anchor/outbound

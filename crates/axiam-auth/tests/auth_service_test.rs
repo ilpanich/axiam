@@ -1277,6 +1277,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            token_exchange: None,
         })
         .await
         .unwrap();

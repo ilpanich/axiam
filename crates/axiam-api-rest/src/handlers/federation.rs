@@ -5,8 +5,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::federation::{
-    CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol,
-    UpdateFederationConfig,
+    CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, SubjectMapping,
+    TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
@@ -34,6 +34,96 @@ use crate::state::AppState;
 // Request / response DTOs
 // ---------------------------------------------------------------------------
 
+/// X4 trust for exchanging this provider's tokens (RFC 8693, external issuer).
+///
+/// Mirrors [`TokenExchangeTrust`] on the wire rather than reusing it directly
+/// so the API surface can carry its own defaults: an admin PUTting a partial
+/// block gets the documented default for anything they omitted, instead of a
+/// deserialization error listing fields they have never heard of.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TokenExchangeTrustRequest {
+    /// Off unless explicitly enabled. Configuring a provider for *login* is
+    /// not agreement to accept its tokens as API credentials.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Audiences an incoming subject token may name. Required (non-empty)
+    /// when `enabled`; there is deliberately no accept-all value.
+    #[serde(default)]
+    pub accepted_audiences: Vec<String>,
+    /// `linked_only` (default) or `jit_provision`.
+    #[serde(default)]
+    pub subject_mapping: Option<String>,
+    /// External asserted value -> AXIAM scopes. Deny-by-default: an external
+    /// value with no entry contributes nothing.
+    #[serde(default)]
+    pub scope_map: std::collections::BTreeMap<String, Vec<String>>,
+    /// Bound on `now - iat`, independent of the token's own `exp`.
+    #[serde(default)]
+    pub max_token_age_secs: Option<i64>,
+    /// Per-provider ceiling on the issued AXIAM token's lifetime.
+    #[serde(default)]
+    pub max_lifetime_secs: Option<i64>,
+}
+
+impl TokenExchangeTrustRequest {
+    /// Convert and validate in one step.
+    ///
+    /// Validation happens **here**, at the edge, rather than in the
+    /// repository: this is the only layer that can tell an operator *which*
+    /// field they got wrong, and a trust block that reaches storage malformed
+    /// is one an admin later enables without being told.
+    fn into_domain(self) -> Result<TokenExchangeTrust, AxiamApiError> {
+        let subject_mapping = match self.subject_mapping.as_deref() {
+            None => SubjectMapping::default(),
+            Some(raw) => SubjectMapping::from_wire(raw).ok_or_else(|| {
+                validation_err(
+                    "token_exchange.subject_mapping must be 'linked_only' or 'jit_provision'",
+                )
+            })?,
+        };
+        let trust = TokenExchangeTrust {
+            enabled: self.enabled,
+            accepted_audiences: self.accepted_audiences,
+            subject_mapping,
+            scope_map: self.scope_map,
+            max_token_age_secs: self
+                .max_token_age_secs
+                .unwrap_or(axiam_core::models::federation::DEFAULT_MAX_TOKEN_AGE_SECS),
+            max_lifetime_secs: self.max_lifetime_secs,
+        };
+        trust
+            .validate()
+            .map_err(|e| validation_err(e.to_string()))?;
+        Ok(trust)
+    }
+}
+
+/// X4 trust as returned. Same shape as the request; nothing here is secret —
+/// an operator reading a provider needs to see exactly what it trusts.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TokenExchangeTrustResponse {
+    pub enabled: bool,
+    pub accepted_audiences: Vec<String>,
+    pub subject_mapping: String,
+    pub scope_map: std::collections::BTreeMap<String, Vec<String>>,
+    pub max_token_age_secs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_lifetime_secs: Option<i64>,
+}
+
+impl From<TokenExchangeTrust> for TokenExchangeTrustResponse {
+    fn from(t: TokenExchangeTrust) -> Self {
+        Self {
+            enabled: t.enabled,
+            accepted_audiences: t.accepted_audiences,
+            subject_mapping: t.subject_mapping.as_str().to_owned(),
+            scope_map: t.scope_map,
+            max_token_age_secs: t.max_token_age_secs,
+            max_lifetime_secs: t.max_lifetime_secs,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateFederationConfigRequest {
     /// Display name for the identity provider (e.g., "Google", "Okta").
@@ -54,6 +144,8 @@ pub struct CreateFederationConfigRequest {
     /// Accepted JWT signing algorithms (OIDC) or signature algorithms (SAML).
     /// Defaults to `["RS256"]` when not provided (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
+    /// X4 external token-exchange trust. Omitted means disabled.
+    pub token_exchange: Option<TokenExchangeTrustRequest>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -69,6 +161,10 @@ pub struct UpdateFederationConfigRequest {
     pub idp_signing_cert_pem: Option<Option<String>>,
     /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
+    /// X4 external token-exchange trust. Replaced **wholesale** when present:
+    /// a partial merge of a trust configuration is how an operator ends up
+    /// keeping an `accepted_audiences` entry they believed they had removed.
+    pub token_exchange: Option<TokenExchangeTrustRequest>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -82,6 +178,8 @@ pub struct FederationConfigResponse {
     pub client_id: String,
     pub attribute_map: serde_json::Value,
     pub enabled: bool,
+    /// X4 external token-exchange trust.
+    pub token_exchange: TokenExchangeTrustResponse,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -97,6 +195,7 @@ impl From<FederationConfig> for FederationConfigResponse {
             client_id: c.client_id,
             attribute_map: c.attribute_map,
             enabled: c.enabled,
+            token_exchange: c.token_exchange.into(),
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -240,6 +339,21 @@ pub async fn create<C: Connection + Clone>(
         _ => return Err(validation_err("protocol must be 'OidcConnect' or 'Saml'")),
     };
 
+    // X4: validated before anything is written, and refused outright on SAML.
+    // A SAML provider has no issuer to match and no JWKS to verify against, so
+    // an enabled trust block on one is not a harmless no-op — it is a claim in
+    // the admin UI that tokens are being accepted when nothing could accept
+    // them.
+    let token_exchange = req.token_exchange.map(|t| t.into_domain()).transpose()?;
+    if let Some(ref t) = token_exchange
+        && t.enabled
+        && protocol != FederationProtocol::OidcConnect
+    {
+        return Err(validation_err(
+            "token_exchange is only supported for OidcConnect providers",
+        ));
+    }
+
     // Validate IdP signing cert PEM before storage so garbage certs are
     // rejected at upload rather than at assertion-verification time (CQ-B40).
     if let Some(ref pem) = req.idp_signing_cert_pem {
@@ -275,6 +389,7 @@ pub async fn create<C: Connection + Clone>(
             attribute_map: req.attribute_map,
             idp_signing_cert_pem: req.idp_signing_cert_pem,
             allowed_algorithms: req.allowed_algorithms,
+            token_exchange,
         })
         .await?;
 
@@ -421,6 +536,24 @@ pub async fn update<C: Connection + Clone>(
             .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
     }
 
+    // X4: validated before the write, and refused on a SAML row for the same
+    // reason `create` refuses it — the protocol is immutable after creation,
+    // so the existing row's protocol is the one that matters.
+    let token_exchange = req.token_exchange.map(|t| t.into_domain()).transpose()?;
+    if let Some(ref t) = token_exchange
+        && t.enabled
+    {
+        let existing = state
+            .federation_config_repo
+            .get_by_id(user.tenant_id, id)
+            .await?;
+        if existing.protocol != FederationProtocol::OidcConnect {
+            return Err(validation_err(
+                "token_exchange is only supported for OidcConnect providers",
+            ));
+        }
+    }
+
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
     let new_secret_plaintext = req.client_secret.clone();
@@ -441,6 +574,7 @@ pub async fn update<C: Connection + Clone>(
                 enabled: req.enabled,
                 idp_signing_cert_pem: req.idp_signing_cert_pem,
                 allowed_algorithms: req.allowed_algorithms,
+                token_exchange,
             },
         )
         .await?;

@@ -428,6 +428,39 @@ pub struct AppState<C: Connection + Clone> {
 }
 
 impl<C: Connection + Clone> AppState<C> {
+    /// Switch on X4's external token-exchange path.
+    ///
+    /// A method on the assembled state rather than a constructor parameter,
+    /// because the collaborator it needs — the OIDC federation service — is
+    /// itself conditional on `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` and is
+    /// installed after this state is built.
+    ///
+    /// **No federation service ⇒ no external path**, and that is the correct
+    /// coupling rather than an accident of ordering: without the encryption
+    /// key there is no way to read a provider's configuration, so there is
+    /// nothing to trust an external issuer *with*. Returns whether it was
+    /// enabled, so a caller can log the posture instead of guessing at it.
+    #[must_use = "the return value says whether the external path is actually live"]
+    pub fn enable_external_token_exchange(&mut self) -> bool {
+        let Some(federation) = self.oidc_federation_service.clone() else {
+            return false;
+        };
+        let (resolver, authority) = crate::token_exchange::external_collaborators(
+            federation,
+            self.role_repo.clone(),
+            self.permission_repo.clone(),
+        );
+        // `with_external_subjects` consumes and returns, so the field is
+        // rebuilt rather than mutated in place — the service is a handful of
+        // cheap handles, so this costs nothing and keeps the "both or
+        // neither" pairing enforced by the type.
+        self.token_exchange_service = self
+            .token_exchange_service
+            .clone()
+            .with_external_subjects(resolver, authority);
+        true
+    }
+
     /// Assemble the X2 UMA service for one request.
     ///
     /// Built per call rather than stored, because it needs the

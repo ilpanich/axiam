@@ -6,6 +6,7 @@ import { apiMock, res } from "@/test/apiMock";
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { FederationPage } from "./FederationPage";
+import { DEFAULT_TOKEN_EXCHANGE_TRUST } from "@/services/federation";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { setToastDispatch } from "@/hooks/useToast";
 
@@ -316,6 +317,11 @@ describe("FederationPage", () => {
         metadata_url: "https://okta.example.com/.well-known/openid-configuration",
         attribute_map: { email: "mail" },
         enabled: true,
+        // X4: an OIDC provider always carries its complete trust block. The
+        // server replaces it wholesale, so sending a patch — or omitting it —
+        // is how an operator keeps a setting they believed they had changed.
+        // This fixture has none configured, so it is the disabled default.
+        token_exchange: DEFAULT_TOKEN_EXCHANGE_TRUST,
       }),
     );
   });

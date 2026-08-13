@@ -1125,6 +1125,20 @@ pub trait FederationConfigRepository: Send + Sync {
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<FederationConfig>>> + Send;
 
+    /// Every enabled OIDC provider of this tenant that has X4 external token
+    /// exchange switched on.
+    ///
+    /// A dedicated method rather than a filtered `list()` because it runs on
+    /// the exchange path: it is index-backed
+    /// (`idx_federation_config_tenant_tx`), it never hydrates the encrypted
+    /// secret columns, and — the part that matters for review — the "enabled
+    /// AND token-exchange-enabled" predicate lives in exactly one place
+    /// instead of being restated by every caller that could get it wrong.
+    fn list_token_exchange_enabled(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
+
     /// Return all `federation_config` rows where the legacy plaintext
     /// `client_secret` is present and the encrypted columns are absent.
     ///

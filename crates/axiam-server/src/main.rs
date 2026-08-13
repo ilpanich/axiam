@@ -1711,6 +1711,27 @@ async fn main() -> std::io::Result<()> {
         saml_federation_service: saml_federation_service.clone(),
     };
 
+    // X4 — accept subject tokens from trusted external IdPs.
+    //
+    // Enabled here rather than at construction because it needs the OIDC
+    // federation service, which is itself conditional on the federation
+    // encryption key. Nothing changes for a deployment that has not switched
+    // `token_exchange.enabled` on for any provider: the path exists, and every
+    // issuer fails to resolve.
+    let mut app_state = app_state;
+    if app_state.enable_external_token_exchange() {
+        tracing::info!(
+            "X4: external-IdP token exchange is available (per-provider trust \
+             still decides whether any issuer is accepted)"
+        );
+    } else {
+        tracing::info!(
+            "X4: external-IdP token exchange is OFF — no OIDC federation service \
+             (AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY is unset)"
+        );
+    }
+    let app_state = app_state;
+
     let http_server = HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
         App::new()

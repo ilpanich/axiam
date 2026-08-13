@@ -323,6 +323,7 @@ async fn federation_config_list_excludes_secret_columns() {
         attribute_map: None,
         idp_signing_cert_pem: None,
         allowed_algorithms: None,
+        token_exchange: None,
     })
     .await
     .unwrap();
@@ -352,6 +353,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            token_exchange: None,
         })
         .await
         .unwrap();
@@ -367,6 +369,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            token_exchange: None,
         })
         .await
         .unwrap();

@@ -3,11 +3,20 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   federationService,
+  validateTokenExchangeTrust,
+  DEFAULT_TOKEN_EXCHANGE_TRUST,
   type FederationConfig,
   type FederationProtocol,
   type CreateFederationConfigRequest,
   type UpdateFederationConfigRequest,
+  type TokenExchangeTrust,
 } from "@/services/federation";
+import {
+  TokenExchangeTrustEditor,
+  parseScopeMap,
+  stringifyAudiences,
+  stringifyScopeMap,
+} from "./TokenExchangeTrustEditor";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -309,6 +318,14 @@ function useConfigFormState() {
   const [attributeMap, setAttributeMap] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState("");
+  // X4 — the trust block, plus the two textareas' raw text kept beside it so a
+  // half-typed scope map survives a re-render instead of being swallowed by the
+  // parse.
+  const [tokenExchange, setTokenExchange] = useState<TokenExchangeTrust>(
+    DEFAULT_TOKEN_EXCHANGE_TRUST,
+  );
+  const [audiencesText, setAudiencesText] = useState("");
+  const [scopeMapText, setScopeMapText] = useState("");
 
   function reset() {
     setProvider("");
@@ -321,6 +338,9 @@ function useConfigFormState() {
     setAttributeMap("");
     setEnabled(true);
     setError("");
+    setTokenExchange(DEFAULT_TOKEN_EXCHANGE_TRUST);
+    setAudiencesText("");
+    setScopeMapText("");
   }
 
   function load(config: FederationConfig) {
@@ -335,6 +355,10 @@ function useConfigFormState() {
     setAttributeMap(stringifyAttributeMap(config.attribute_map));
     setEnabled(config.enabled);
     setError("");
+    const trust = config.token_exchange ?? DEFAULT_TOKEN_EXCHANGE_TRUST;
+    setTokenExchange(trust);
+    setAudiencesText(stringifyAudiences(trust.accepted_audiences));
+    setScopeMapText(stringifyScopeMap(trust.scope_map));
   }
 
   return {
@@ -358,6 +382,12 @@ function useConfigFormState() {
     setEnabled,
     error,
     setError,
+    tokenExchange,
+    setTokenExchange,
+    audiencesText,
+    setAudiencesText,
+    scopeMapText,
+    setScopeMapText,
     reset,
     load,
   };
@@ -521,6 +551,25 @@ export function FederationPage() {
       if (cert) payload.idp_signing_cert_pem = cert;
       const algos = parseAlgorithms(editForm.allowedAlgorithms);
       if (algos.length > 0) payload.allowed_algorithms = algos;
+    } else {
+      // X4. Sent as a complete block, never a patch — the server replaces it
+      // wholesale, and a partial send is how an operator keeps an accepted
+      // audience they believed they had removed.
+      const scopeMapResult = parseScopeMap(editForm.scopeMapText);
+      if ("error" in scopeMapResult) {
+        editForm.setError(scopeMapResult.error);
+        return;
+      }
+      const trust: TokenExchangeTrust = {
+        ...editForm.tokenExchange,
+        scope_map: scopeMapResult.value,
+      };
+      const trustError = validateTokenExchangeTrust(trust);
+      if (trustError) {
+        editForm.setError(trustError);
+        return;
+      }
+      payload.token_exchange = trust;
     }
 
     editMutation.mutate({ id: editConfig.id, payload });
@@ -713,6 +762,19 @@ export function FederationPage() {
           label="Enabled"
           checked={editForm.enabled}
           onChange={editForm.setEnabled}
+        />
+        {/* X4 — external token-exchange trust. Edit-only: you configure what a
+            provider's tokens are worth after the provider exists, and the
+            create form is already long. */}
+        <TokenExchangeTrustEditor
+          value={editForm.tokenExchange}
+          onChange={editForm.setTokenExchange}
+          audiencesText={editForm.audiencesText}
+          onAudiencesTextChange={editForm.setAudiencesText}
+          scopeMapText={editForm.scopeMapText}
+          onScopeMapTextChange={editForm.setScopeMapText}
+          isOidc={editConfig?.protocol !== "Saml"}
+          idPrefix="edit"
         />
       </FormDialog>
 

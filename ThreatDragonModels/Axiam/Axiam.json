@@ -1,5 +1,5 @@
 {
-  "version": "2.5.0",
+  "version": "2.6.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -5602,6 +5602,61 @@
                   "mitigation": "state and nonce are both required, generated with a CSPRNG, stored server-side against the pending flow, and verified before any identity is established.",
                   "modelType": "STRIDE",
                   "number": 66
+                },
+                {
+                  "id": "54bac98f-8186-571d-aa62-e6e737a7aed5",
+                  "title": "A partner's token is accepted as an AXIAM credential (X4)",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "External-IdP token exchange (RFC 8693, X4) lets a client present a token minted by a partner's IdP and receive an AXIAM token. If the partner's assertions were trusted as authorization, the partner's administrator would be able to name AXIAM scopes and grant their own users authority in this tenant.",
+                  "mitigation": "An external subject token is treated as evidence of authentication only. The issued token's scopes are the intersection of an AXIAM-admin-authored deny-by-default scope_map, the exchanging client's registration, and the RBAC engine's answer for the resolved user at mint time (deny-override applied at its broadest reading). Trust is off by default per provider, and enabling it requires a non-empty accepted_audiences list.",
+                  "modelType": "STRIDE",
+                  "number": 155
+                },
+                {
+                  "id": "fe285bf2-cfb5-5fc0-8094-56e9158b1565",
+                  "title": "A token not addressed to AXIAM is replayed at the exchange (X4)",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "A token the partner minted for a third party \u2014 or for their own internal service \u2014 is captured and presented to AXIAM's token endpoint. Without an audience check, any token from the partner's estate becomes an AXIAM credential.",
+                  "mitigation": "accepted_audiences is required and non-empty whenever token exchange is enabled; there is deliberately no accept-all value. Matching is exact string equality in both directions (no trailing-slash forgiveness, no case folding), and aud may be a string or an array, of which at least one member must match.",
+                  "modelType": "STRIDE",
+                  "number": 156
+                },
+                {
+                  "id": "bc4a8f6c-9204-5601-87ca-a126d6f50a59",
+                  "title": "Trust composes transitively across three domains (X4)",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "AXIAM trusts partner B; B trusts partner C. Without a barrier, a token C minted can be exchanged at B and the result exchanged at AXIAM, giving C authority nobody configured and neither configuration reveals.",
+                  "mitigation": "Every token minted from an external subject token carries an ext_exchange provenance claim naming the foreign issuer, and BOTH exchange paths refuse a subject token that carries it. An exchanged token can never be re-exchanged, ours or theirs.",
+                  "modelType": "STRIDE",
+                  "number": 157
+                },
+                {
+                  "id": "8b667b1d-7e90-5802-a208-b84bffb3bdc4",
+                  "title": "A long-lived partner token becomes a long replay window (X4)",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "A partner IdP that issues 24-hour access tokens would, without an independent bound, hand a captured token a 24-hour window in which it can be turned into AXIAM credentials.",
+                  "mitigation": "max_token_age_secs bounds the token's age independently of its own exp (default 300 s, hard ceiling 3600 s), and an iat in the future beyond 60 s of skew is refused. The issued token's lifetime is the minimum of the partner token's remaining life, the per-provider ceiling, and the server-wide exchange maximum.",
+                  "modelType": "STRIDE",
+                  "number": 158
+                },
+                {
+                  "id": "82310a4d-6f0c-526e-9be9-0553bb1ba203",
+                  "title": "An ID token or refresh token is presented as a subject token (X4)",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "An ID token is an assertion to a client about a login, which an OIDC deployment distributes more widely and gives a longer life than an access token; a refresh token is a re-authentication credential. Either accepted as a subject token would let an artefact the partner considers low-risk buy an AXIAM credential.",
+                  "mitigation": "Both are refused by name at the subject_token_type check, and \u2014 since a caller can mislabel a token \u2014 again by shape: the ID-token-only claims nonce, at_hash, c_hash and s_hash, and typ headers or claims naming an ID or refresh token, are rejected even when the signature verifies.",
+                  "modelType": "STRIDE",
+                  "number": 159
                 }
               ]
             }
@@ -5769,7 +5824,7 @@
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
-              "hasOpenThreats": false,
+              "hasOpenThreats": true,
               "handlesCardPayment": false,
               "handlesGoodsOrServices": false,
               "isWebApplication": false,
@@ -5796,6 +5851,28 @@
                   "mitigation": "JIT provisioning is opt-in per federation config and the created users hold no roles beyond those the mapping allow-list grants.",
                   "modelType": "STRIDE",
                   "number": 73
+                },
+                {
+                  "id": "0010f3ef-fd9d-5a95-85fb-fb26d3a70da6",
+                  "title": "A suspended user is revived through the exchange path (X4)",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "An AXIAM user who has been locked, deactivated or anonymized would, if the exchange path skipped the status gate, still be able to obtain tokens for as long as their partner IdP kept authenticating them.",
+                  "mitigation": "The resolved user's status is checked after subject resolution and before any token is minted; Locked, Inactive and Anonymized are refused. PendingVerification is allowed deliberately: federation provisioning never moves a federated user off it, so requiring Active would refuse the whole population the feature serves while stopping nobody.",
+                  "modelType": "STRIDE",
+                  "number": 160
+                },
+                {
+                  "id": "96f5b87b-821e-5380-a623-2285211bd217",
+                  "title": "A partner's IdP silently populates the AXIAM user table (X4)",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "With subject_mapping set to jit_provision, every previously-unseen subject the partner vouches for creates an AXIAM user row. A partner with a large or hostile user population can grow the table without an AXIAM administrator acting.",
+                  "mitigation": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit.",
+                  "modelType": "STRIDE",
+                  "number": 161
                 }
               ]
             }
@@ -5852,6 +5929,17 @@
                   "mitigation": "SECHRD-09: the federation secret type carries a manual Debug impl that redacts the value, and the secret is encrypted at rest. The same treatment was applied to webhook secrets under SEC-067.",
                   "modelType": "STRIDE",
                   "number": 74
+                },
+                {
+                  "id": "de9240f5-0275-5a1e-b4da-021453bc8734",
+                  "title": "A malformed trust block is enabled without review (X4)",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown subject_mapping value stored while token exchange is disabled becomes live the moment an administrator ticks the enable box \u2014 which is not where they expect to be told their configuration was wrong.",
+                  "mitigation": "The trust block is validated at the API edge on every write, whether or not it is enabled (only the non-empty-audience rule is conditional). On read, every hydration failure resolves towards the default, and enabled is read from its own column so a corrupt neighbouring column can never switch exchange on. A provider whose stored trust block fails validation is skipped at resolution time with a warning rather than being used.",
+                  "modelType": "STRIDE",
+                  "number": 162
                 }
               ]
             }

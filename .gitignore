@@ -35,6 +35,13 @@ docker/.secrets/
 **/*.pem
 **/*.key
 
+# Exception: the vendored FIDO MDS3 trust anchor (GlobalSign Root CA - R3).
+# It is a *public* root certificate — no private key — and it is the pinned
+# root of trust for every WebAuthn attestation policy decision, so it has to
+# ship in the tree and in the binary (`include_str!`). Its SHA-256 is pinned
+# in code and checked at load; see crates/axiam-pki/src/mds/mod.rs.
+!crates/axiam-pki/src/mds/fido-mds-root-ca-r3.pem
+
 # Claude Code dev tooling — generated/ephemeral, reprovisioned by
 # scripts/bootstrap-dev-tools.sh (GSD installs globally to ~/.claude).
 .claude/

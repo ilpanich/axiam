@@ -11,12 +11,12 @@ import {
   type UpdateFederationConfigRequest,
   type TokenExchangeTrust,
 } from "@/services/federation";
+import { TokenExchangeTrustEditor } from "./TokenExchangeTrustEditor";
 import {
-  TokenExchangeTrustEditor,
   parseScopeMap,
   stringifyAudiences,
   stringifyScopeMap,
-} from "./TokenExchangeTrustEditor";
+} from "./tokenExchangeTrustFormat";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";

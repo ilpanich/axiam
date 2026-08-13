@@ -327,12 +327,10 @@ where
         now: i64,
     ) -> Result<ExternalSubject, ExternalSubjectError> {
         // --- 1. Which provider claims this issuer? -------------------------
-        let claimed_issuer = unverified_issuer_of(token).ok_or_else(|| {
-            // No readable `iss` is indistinguishable, from the caller's side,
-            // from an issuer nobody trusts — and it is: neither can name a
-            // provider.
-            ExternalSubjectError::IssuerNotTrusted
-        })?;
+        // No readable `iss` is indistinguishable, from the caller's side, from
+        // an issuer nobody trusts — and rightly so: neither can name a provider.
+        let claimed_issuer =
+            unverified_issuer_of(token).ok_or(ExternalSubjectError::IssuerNotTrusted)?;
 
         let (config, discovery) = self
             .resolve_trusted_provider(tenant_id, &claimed_issuer)

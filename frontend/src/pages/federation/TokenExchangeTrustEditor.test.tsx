@@ -4,7 +4,7 @@ import {
   parseScopeMap,
   stringifyAudiences,
   stringifyScopeMap,
-} from "./TokenExchangeTrustEditor";
+} from "./tokenExchangeTrustFormat";
 import {
   DEFAULT_TOKEN_EXCHANGE_TRUST,
   validateTokenExchangeTrust,

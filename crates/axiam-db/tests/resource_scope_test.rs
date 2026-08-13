@@ -254,36 +254,42 @@ async fn delete_resource_blocked_by_existing_child() {
 /// exercise both possible interleavings against the engine's actual
 /// transaction isolation.
 ///
-/// # IGNORED: this FAILS on the engine we deploy (2026-08)
+/// # The shape of the fix, and why the guard alone was not it (#308)
 ///
-/// It passed for as long as it ran on `Mem`. Moved to `surrealkv` — what
-/// `docker-compose.prod.yml` and the k8s StatefulSet run — it fails on **trial
-/// 0, every run**: the delete commits and a `child_of` edge to the deleted
-/// parent survives. Exactly the orphan the D-13/CQ-B46 fix was written to make
-/// impossible.
+/// This passed for as long as it ran on `Mem`, and failed on **trial 0 of every
+/// run** the moment it moved to `surrealkv` — the engine
+/// `docker-compose.prod.yml` and the k8s StatefulSet actually run. The delete
+/// committed and a `child_of` edge to the deleted parent survived: exactly the
+/// orphan D-13/CQ-B46 was written to make impossible.
 ///
-/// The fix's premise does not hold. Folding the guard into one transaction
-/// makes the statements atomic, but the guard is a **range read** (`SELECT …
-/// FROM child_of WHERE out = resource:<id>`) and the racing create **inserts
-/// into that range**. Preventing that is a phantom-read problem, which needs
-/// serialisable isolation; snapshot isolation — which is what these engines
-/// appear to provide — detects write-write conflicts on the same key and lets
-/// this through. The two transactions never touch a common key, so there is
-/// nothing for the engine to conflict on.
+/// Folding the guard into one transaction makes the statements atomic, which is
+/// not the property needed. The guard is a **range read** (`SELECT … FROM
+/// child_of WHERE out = resource:<id>`) and the racing create **inserts into
+/// that range** — a phantom, and excluding phantoms takes serialisable
+/// isolation. These engines give snapshot isolation: they detect write-write
+/// conflicts on the same key, and the two transactions had no key in common.
 ///
-/// So this is not a flaky test and not the #302 residual: it is a reproducible
-/// defect in `SurrealResourceRepository::delete`, which `Mem` hid because its
-/// scheduling never opened the window. Fixing it means giving the two
-/// transactions a key to collide on (e.g. having child-create write the parent
-/// row) rather than tightening the query, and that is a design change to the
-/// resource repository — its own issue and its own PR.
+/// So the fix is not a better query. `create`, `create_uma_registered` and
+/// `update`'s re-parent now bump `child_epoch` on the parent inside the same
+/// transaction as the `RELATE` (schema v34), which is a write to the very row
+/// `delete` removes. One of the two must now lose: if the create commits first
+/// the delete conflicts and aborts, and if the delete commits first the create's
+/// claim matches nothing and throws. Neither order leaves an orphan.
 ///
-/// Kept here, on the right engine, rather than reverted to `Mem`: a green run
-/// against an engine AXIAM does not ship is worse than an ignored test that
-/// says what is actually true. Un-ignore it as the acceptance test for the fix.
+/// This is the acceptance test for that fix, and it was checked both ways
+/// before being trusted: with the repository change reverted it fails on trial
+/// 0 of every run, and with it applied it survived 200 trials × the same race.
+/// TRIALS is 15 because the old code never got past the first one; the margin
+/// is for scheduling luck, not for hunting a rare event.
+///
+/// One thing it does NOT prove, said here rather than left to be assumed. In
+/// the observed runs the create always commits first and `delete` then refuses
+/// through the ordinary child guard — so this exercises the fix's *atomicity*
+/// (the edge is never visible without the parent write beside it) rather than
+/// the conflict itself. `create_rejects_a_parent_that_does_not_exist` covers
+/// the other half deterministically: the branch where the claim matches nothing
+/// and must throw instead of writing a dangling edge.
 #[tokio::test]
-#[ignore = "reproduces a real orphan race in resource delete on surrealkv — see the doc comment; \
-            un-ignore as the acceptance test when delete is fixed"]
 async fn concurrent_child_create_never_orphans_after_parent_delete() {
     const TRIALS: usize = 15;
 
@@ -360,6 +366,149 @@ async fn concurrent_child_create_never_orphans_after_parent_delete() {
         // warning.
         let _ = &create_result;
     }
+}
+
+/// The other half of the #308 fix, and the half that is deterministic.
+///
+/// `claim_parent` throws when its `UPDATE` of the parent matches no row, and
+/// that `THROW` is load-bearing rather than a friendlier error message. If the
+/// parent has already been deleted, the claim matches nothing — and *nothing
+/// matching is not a conflict*, so without the throw the create would sail past
+/// and `RELATE` an edge to a record that no longer exists. That is the very
+/// orphan the concurrent test above is about, reached by a slower route.
+///
+/// Deleting the parent first makes the losing side of the race reproducible
+/// without needing to win a scheduling coin flip.
+#[tokio::test]
+async fn create_rejects_a_parent_that_does_not_exist() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealResourceRepository::new(db.clone());
+
+    let parent = repo
+        .create(CreateResource {
+            tenant_id,
+            name: "doomed-parent".into(),
+            resource_type: "project".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let parent_id = parent.id;
+    repo.delete(tenant_id, parent_id).await.unwrap();
+
+    let result = repo
+        .create(CreateResource {
+            tenant_id,
+            name: "would-be-orphan".into(),
+            resource_type: "service".into(),
+            parent_id: Some(parent_id),
+            metadata: None,
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "attaching a child to a deleted parent must fail — before #308 this \
+         silently wrote a child_of edge to a record that no longer existed"
+    );
+
+    // And it must fail without leaving anything behind: no dangling edge, and
+    // no half-created resource. A rolled-back transaction is the point.
+    let mut edges = db
+        .query(format!(
+            "SELECT * FROM child_of WHERE out = resource:`{parent_id}`"
+        ))
+        .await
+        .unwrap();
+    let remaining: Vec<surrealdb_types::Value> = edges.take(0).unwrap();
+    assert!(
+        remaining.is_empty(),
+        "a refused create must not leave a child_of edge behind"
+    );
+}
+
+/// The same guard on the re-parent path. `update` already validated the new
+/// parent with `get_by_id`, but that is a READ outside the transaction and
+/// cannot conflict with a concurrent delete — so the claim has to hold here
+/// too, and it has to refuse the same way.
+#[tokio::test]
+async fn reparent_rejects_a_parent_that_does_not_exist() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealResourceRepository::new(db.clone());
+
+    let child = repo
+        .create(CreateResource {
+            tenant_id,
+            name: "mover".into(),
+            resource_type: "service".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let result = repo
+        .update(
+            tenant_id,
+            child.id,
+            axiam_core::models::resource::UpdateResource {
+                parent_id: Some(Some(uuid::Uuid::new_v4())),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "re-parenting onto a resource that does not exist must fail"
+    );
+
+    // The old parent edge state must be untouched: the re-parent transaction
+    // deletes the old edge before claiming the new parent, so a failed claim
+    // that did not roll back would leave the child detached from everything.
+    let unchanged = repo.get_by_id(tenant_id, child.id).await.unwrap();
+    assert!(
+        unchanged.parent_id.is_none(),
+        "a refused re-parent must leave the resource as it was"
+    );
+}
+
+/// A child may not be attached across a tenant boundary. `claim_parent` carries
+/// `WHERE tenant_id = $tenant_id`, so a parent in another tenant matches
+/// nothing and the create is refused — the same code path as a parent that does
+/// not exist, which is the correct answer: from this tenant's side, it does not.
+#[tokio::test]
+async fn create_rejects_a_parent_in_another_tenant() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealResourceRepository::new(db.clone());
+
+    let parent = repo
+        .create(CreateResource {
+            tenant_id,
+            name: "other-tenants-parent".into(),
+            resource_type: "project".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let intruder_tenant = uuid::Uuid::new_v4();
+    let result = repo
+        .create(CreateResource {
+            tenant_id: intruder_tenant,
+            name: "cross-tenant-child".into(),
+            resource_type: "service".into(),
+            parent_id: Some(parent.id),
+            metadata: None,
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a resource in one tenant must not be attachable under another tenant's node"
+    );
 }
 
 #[tokio::test]

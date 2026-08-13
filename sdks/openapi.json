@@ -14544,7 +14544,7 @@
               "type": "string",
               "format": "uuid"
             },
-            "description": "`None` = every AAGUID is allowed except `blocked_aaguids`.\n`Some(vec![])` is a deliberate \"nothing may register\" policy — it\nmust be set explicitly, not produced as a serialization accident of\n`None` (validated by the API layer, not here)."
+            "description": "`None` = every AAGUID is allowed except `blocked_aaguids`.\n\n`Some(vec![])` is a deliberate \"nothing may register\" policy and is\naccepted as such: `evaluate` denies every AAGUID against an empty\nallow-list. Nothing rejects it, precisely because the failure\ndirection is safe — a client that sends `[]` when it meant `null`\ngets a locked-down tenant, which is visible immediately, rather than\nan open one, which is not."
           },
           "block_revoked_status": {
             "type": "boolean",

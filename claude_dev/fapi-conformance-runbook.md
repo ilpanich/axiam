@@ -212,6 +212,15 @@ cannot quietly undo one:
 
 ---
 
+## Submitting (§X5.3)
+
+When the run is green and you are ready to make it official, follow
+[`fapi-certification-submission.md`](fapi-certification-submission.md) — the
+digest-pinned release run, the OIDF submission, and the §X5.4 letter amendment
+the `private_key_jwt` gap forces before the letter can be sent.
+
+---
+
 ## Moving the suite pin
 
 Change `SUITE_VERSION` in `conformance/suite.env`, `just conformance-up`, re-run.

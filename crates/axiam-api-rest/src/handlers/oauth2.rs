@@ -470,31 +470,19 @@ pub async fn token<C: Connection + Clone>(
 /// credential must not be assertable by anything that can set a header. See
 /// `axiam_oauth2::mtls`'s module docs for the full argument.
 ///
-/// Cost on the ordinary path: one `conn_data` lookup that misses, and no
-/// allocation. The DER re-parse happens only on connections that actually
-/// carried a client certificate — i.e. mTLS deployments, which are the ones
-/// that asked for it.
+/// Cost on the ordinary path — a connection with no client certificate, which
+/// is every non-mTLS deployment — is one `conn_data` lookup that misses and no
+/// allocation at all. On an mTLS connection it is one copy of the DER plus one
+/// SHA-256 over it. The X.509 *parse* is deliberately not done here: it is
+/// deferred to `PresentedCertificate::identity`, which only the
+/// `tls_client_auth` branch calls, so a deployment running mTLS with ordinary
+/// secret-authenticating clients does not pay for a DN nobody reads.
 fn token_request_context(req: &HttpRequest) -> TokenRequestContext {
     let Some(verified) = req.conn_data::<VerifiedClientCert>() else {
         return TokenRequestContext::default();
     };
-    match PresentedCertificate::from_der(&verified.der) {
-        Ok(cert) => TokenRequestContext {
-            client_certificate: Some(cert),
-        },
-        Err(e) => {
-            // rustls parsed these same bytes to verify the chain, so this is
-            // not reachable in practice. If it ever were, the safe reading is
-            // "no certificate": an unparseable certificate must not
-            // authenticate anybody, and every path that needs one refuses
-            // when it is absent.
-            tracing::error!(
-                error = %e,
-                "could not parse the client certificate rustls verified on this connection; \
-                 treating the request as having presented none"
-            );
-            TokenRequestContext::default()
-        }
+    TokenRequestContext {
+        client_certificate: Some(PresentedCertificate::from_der(&verified.der)),
     }
 }
 

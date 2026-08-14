@@ -176,3 +176,77 @@ bootstrap-local:
     # Must match the database run-local targets (DbConfig default: main).
     export AXIAM__DB__DATABASE="${AXIAM__DB__DATABASE:-main}"
     bash scripts/e2e-bootstrap.sh
+
+# ---------------------------------------------------------------------------
+# FAPI 2.0 conformance (X5.2) — see claude_dev/fapi-conformance-runbook.md
+# ---------------------------------------------------------------------------
+#
+# The OpenID Foundation conformance suite, pinned, driven against a running
+# AXIAM. The suite is NOT a unit test: it needs a real deployment with an mTLS
+# listener, two registered FAPI clients, and — for several modules — a human
+# with a browser. Read the runbook before the first run; it is short and it
+# will save an evening.
+#
+#   just conformance-certs      # throwaway client certs for both auth variants
+#   just conformance-up         # start the pinned suite (~60s to ready)
+#   just conformance-register   # create the two fapi2 clients, fill suite.env
+#   just conformance-run        # drive both test plans, collect results
+#   just conformance-report     # render docs/conformance/*.md — failures first
+#   just conformance-down
+
+# Throwaway client certificates for the two client-auth variants.
+conformance-certs:
+    bash conformance/scripts/gen-certs.sh
+
+# Start the pinned OIDF conformance suite.
+conformance-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a; . conformance/suite.env; set +a
+    docker compose -f conformance/docker-compose.yml up -d
+    echo "[conformance] waiting for the suite to become ready (up to 3 min)…"
+    for _ in $(seq 1 90); do
+      if curl -sSk --max-time 5 "${SUITE_BASE_URL}/api/runner/available" >/dev/null 2>&1; then
+        echo "[conformance] ready at ${SUITE_BASE_URL}"
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "[conformance] the suite did not become ready; check 'docker compose -f conformance/docker-compose.yml logs'" >&2
+    exit 1
+
+# Register the two fapi2 clients against a running AXIAM and update suite.env.
+conformance-register:
+    bash conformance/scripts/register-clients.sh
+
+# Drive both FAPI 2.0 plans and collect their results.
+#
+# Exits non-zero if either plan has a module that did not pass — deliberately,
+# so this can be wired into a manually-triggered CI workflow without silently
+# going green on a red run. Both plans always run: stopping at the first red
+# one would hide the second variant's failures behind the first's.
+conformance-run:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    PLAN_NAME="${CONFORMANCE_PLAN_NAME:-fapi2-security-profile-final-test-plan}"
+    rc=0
+    for variant in mtls self-signed; do
+      cfg="conformance/plans/fapi2-security-profile-final-${variant}.json"
+      echo
+      echo "=== ${variant} client authentication ==="
+      bash conformance/scripts/render-plan.sh "$cfg" || { rc=1; continue; }
+      bash conformance/scripts/run-plan.sh \
+        "conformance/.run/$(basename "$cfg")" "$PLAN_NAME" || rc=1
+    done
+    exit $rc
+
+# Render the collected results into docs/conformance/, failures first.
+conformance-report:
+    python3 conformance/scripts/report.py --results conformance/.run/results \
+      --out docs/conformance --date "${CONFORMANCE_DATE:-}"
+
+conformance-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a; . conformance/suite.env; set +a
+    docker compose -f conformance/docker-compose.yml down -v

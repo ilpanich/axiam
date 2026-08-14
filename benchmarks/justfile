@@ -852,3 +852,230 @@ bench-pack:
 # docker, no k6) — CI runs the same script on every PR.
 bench-pack-selftest:
     bash runner/pack-selftest.sh
+
+# ---------------------------------------------------------------------------
+# bench-quick (X5) — the two cells the archive is missing, in minutes
+# ---------------------------------------------------------------------------
+#
+# `bench-matrix` is hours. This is not that, and must never be read as that.
+#
+# It measures ONE thing properly: the per-request cost of RFC 8705
+# certificate-bound access tokens, as an A/B between two AXIAM clients that
+# differ in exactly one registered field. Single target (axiam), single profile
+# (p3-mtls, because binding requires a client certificate), one short window per
+# arm, no repeats, no cross-product.
+#
+#   just bench-quick
+#
+# Knobs: quickdur (measured window per arm, default 45s), quickvus (default 20).
+# Everything else is fixed on purpose — the value of this recipe is that two
+# people running it are running the same thing.
+#
+# WHAT A RUN OF THIS SIZE ESTABLISHES, AND WHAT IT DOES NOT: printed by the
+# recipe itself, at the end, every time. Read it. A single unrepeated 45-second
+# window on shared hardware is an indicative number, not a matrix result, and
+# this project publishes its receipts precisely so that the difference stays
+# visible.
+quickdur := "45s"
+quickvus := "20"
+
+bench-quick:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    OUT="${BENCH_RESULTS_DIR:-$PWD/results}/quick"
+    mkdir -p "$OUT"
+    TARGET=axiam
+    PROFILE=p3-mtls
+
+    command -v k6 >/dev/null || { echo "[bench-quick] k6 is not installed" >&2; exit 1; }
+    command -v jq >/dev/null || { echo "[bench-quick] jq is required" >&2; exit 1; }
+
+    echo "[bench-quick] target=$TARGET profile=$PROFILE vus={{quickvus}} window={{quickdur}} per arm"
+    echo "[bench-quick] two arms, no repeats. Expect ~4 minutes including bring-up."
+    echo
+
+    # ---------------------------------------------------------------------
+    # Cell 1 — mTLS certificate-binding overhead
+    # ---------------------------------------------------------------------
+    #
+    # The A/B is two clients on the SAME running server, over the SAME mTLS
+    # connections, on the SAME scenario, differing in exactly one registered
+    # field: tls_client_certificate_bound_access_tokens.
+    #
+    # Both authenticate with client_secret_post rather than mTLS. That is
+    # deliberate and it is what makes this measurement mean "binding" rather
+    # than "mTLS": the client certificate is present on the connection for
+    # both arms (p3 requires it), so the handshake cost, the TLS record cost
+    # and the certificate's presence are all held constant. The only thing
+    # that varies is whether AXIAM stamps a cnf.x5t#S256 claim into the token
+    # it mints. Measuring an mTLS-authenticating client against a
+    # secret-authenticating one would have conflated two changes and produced
+    # a number nobody could attribute.
+
+    source profiles/$PROFILE.env
+    BASE="https://${BENCH_HOST:-localhost}:${BENCH_PORT:-8443}"
+    SEED_ENV="${BENCH_SEED_DIR:-$PWD/.seed}/$TARGET.seed.env"
+    [ -f "$SEED_ENV" ] || { echo "[bench-quick] no seed at $SEED_ENV — run 'just target=axiam profile=p3-mtls bench-up && just target=axiam bench-seed' first" >&2; exit 1; }
+    source "$SEED_ENV"
+
+    # Admin calls reuse seed.sh's mechanism exactly — cookie session plus CSRF
+    # double-submit — rather than inventing a bearer-token path that the seeded
+    # fixture has no way to produce. The admin credential is the same one
+    # `bench-seed` bootstrapped, so a machine that can seed can run this.
+    JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
+    ADMIN_PW="${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}"
+    curl -sSk --cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY" \
+      -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
+      -d "{\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}" \
+      >/dev/null
+    awk -F'\t' '$6=="axiam_access"{f=1} END{exit !f}' "$JAR" \
+      || { echo "[bench-quick] admin login failed — is the stack seeded?" >&2; exit 1; }
+
+    make_client() {
+      # $1: name, $2: bound (true|false)
+      local csrf body
+      csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
+      body="$(jq -n --arg n "$1" --argjson b "$2" '{
+        name: $n,
+        redirect_uris: ["http://localhost/cb"],
+        grant_types: ["client_credentials"],
+        scopes: ["openid"],
+        tls_client_certificate_bound_access_tokens: $b
+      }')"
+      curl -sSk --cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY" \
+        -b "$JAR" -c "$JAR" -X POST "$BASE/api/v1/oauth2-clients" \
+        -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d "$body"
+    }
+
+    echo "[bench-quick] registering the A/B pair"
+    UNBOUND=$(make_client "quick-unbound" false)
+    BOUND=$(make_client "quick-bound" true)
+    for pair in "UNBOUND:$UNBOUND" "BOUND:$BOUND"; do
+      label="${pair%%:*}"
+      if [ -z "$(jq -r '.client_id // empty' <<<"${pair#*:}")" ]; then
+        echo "[bench-quick] could not register the $label client: ${pair#*:}" >&2; exit 1
+      fi
+    done
+
+    run_arm() {
+      # $1: arm label, $2: client json
+      local arm="$1" client="$2"
+      echo "[bench-quick] arm: $arm"
+      BENCH_CLIENT_ID=$(jq -r .client_id <<<"$client") \
+      BENCH_CLIENT_SECRET=$(jq -r .client_secret <<<"$client") \
+      BENCH_VUS={{quickvus}} BENCH_WARMUP=10s BENCH_DURATION={{quickdur}} BENCH_COOLDOWN=5s \
+      k6 run --quiet --summary-export "$OUT/binding-$arm.k6.json" \
+        scenarios/oauth2_client_credentials.js >"$OUT/binding-$arm.log" 2>&1 \
+        || { echo "[bench-quick] the $arm arm failed; see $OUT/binding-$arm.log" >&2; exit 1; }
+    }
+
+    run_arm unbound "$UNBOUND"
+    run_arm bound "$BOUND"
+
+    # ---------------------------------------------------------------------
+    # Cell 2 — X1 reactor hook cost (conditional, by design)
+    # ---------------------------------------------------------------------
+    #
+    # X5's bench list asks for this "if and only if X1 is on main". It is not
+    # enough for X1's CODE to be on main: measuring a hook costs nothing to
+    # measure if the hook is never called. So the condition checked here is
+    # whether a reactor dispatcher is actually invoked from a request path,
+    # not whether the module exists.
+    #
+    # As of this recipe's addition it is not: crates/axiam-amqp carries the
+    # dispatcher, the event model, the DB config and the admin CRUD, but
+    # nothing outside that module invokes ReactorDispatcher — X1.4
+    # (server-side dispatch) is not wired. So this cell reports that it did
+    # not run, and why, rather than producing the cost of a code path that
+    # never executes.
+    HOOK_STATE="not wired"
+    if grep -rqs "ReactorDispatcher" ../crates/axiam-api-rest/src ../crates/axiam-oauth2/src 2>/dev/null; then
+      HOOK_STATE="wired"
+    fi
+
+    # ---------------------------------------------------------------------
+    # Report
+    # ---------------------------------------------------------------------
+    python3 - "$OUT" "$HOOK_STATE" "{{quickdur}}" "{{quickvus}}" <<'PY'
+    import json, pathlib, sys
+
+    out, hook_state, window, vus = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+
+    def arm(name):
+        d = json.loads((out / f"binding-{name}.k6.json").read_text())
+        m = d.get("metrics", {})
+        lat = m.get("bench_op_latency_ms", {})
+        return {
+            "rps": m.get("iterations", {}).get("rate", 0.0),
+            "p50": lat.get("med", 0.0),
+            "p95": lat.get("p(95)", 0.0),
+            "p99": lat.get("p(99)", 0.0),
+        }
+
+    a, b = arm("unbound"), arm("bound")
+
+    def delta(x, y):
+        return ((y - x) / x * 100.0) if x else float("nan")
+
+    lines = []
+    lines.append("# bench-quick — indicative, NOT a matrix result")
+    lines.append("")
+    lines.append(f"One unrepeated {window} window per arm at {vus} VUs, single target (axiam),")
+    lines.append("single profile (p3-mtls), no cross-product.")
+    lines.append("")
+    lines.append("## Cell 1 — RFC 8705 certificate-binding overhead")
+    lines.append("")
+    lines.append("Two clients on one server, same connections, same scenario, differing in")
+    lines.append("exactly one registered field (`tls_client_certificate_bound_access_tokens`).")
+    lines.append("")
+    lines.append("| Metric | unbound | certificate-bound | delta |")
+    lines.append("|---|---:|---:|---:|")
+    lines.append(f"| throughput (req/s) | {a['rps']:.1f} | {b['rps']:.1f} | {delta(a['rps'], b['rps']):+.1f}% |")
+    lines.append(f"| p50 latency (ms) | {a['p50']:.2f} | {b['p50']:.2f} | {delta(a['p50'], b['p50']):+.1f}% |")
+    lines.append(f"| p95 latency (ms) | {a['p95']:.2f} | {b['p95']:.2f} | {delta(a['p95'], b['p95']):+.1f}% |")
+    lines.append(f"| p99 latency (ms) | {a['p99']:.2f} | {b['p99']:.2f} | {delta(a['p99'], b['p99']):+.1f}% |")
+    lines.append("")
+    lines.append("## Cell 2 — X1 reactor hook cost")
+    lines.append("")
+    if hook_state == "wired":
+        lines.append("A reactor dispatcher IS invoked from a request path, so this cell is now")
+        lines.append("measurable and this recipe needs the arm written. It has not been.")
+    else:
+        lines.append("**Not run.** X1's dispatcher, event model, DB config and admin CRUD are on")
+        lines.append("main, but nothing outside `crates/axiam-amqp/src/reactor/` invokes")
+        lines.append("`ReactorDispatcher` — X1.4 (server-side dispatch) is not wired into any")
+        lines.append("request path. There is no hook on the token path to measure, and")
+        lines.append("measuring one anyway would report the cost of code that never executes.")
+    lines.append("")
+    lines.append("## What this run establishes")
+    lines.append("")
+    lines.append("- The **direction and rough size** of the binding overhead on this machine,")
+    lines.append("  for this scenario, under this profile.")
+    lines.append("- That the bound arm works at all end to end — a smoke check the unit tests")
+    lines.append("  cannot give you, because they never open a TLS connection.")
+    lines.append("")
+    lines.append("## What this run does NOT establish")
+    lines.append("")
+    lines.append("- **Anything with error bars.** One window per arm, no repeats. A delta")
+    lines.append("  inside single-digit percent is not distinguishable from run-to-run noise")
+    lines.append("  at this sample size; `bench-matrix`'s median-of-3 exists for exactly this")
+    lines.append("  reason (methodology §8).")
+    lines.append("- **A comparison against any other product.** No competitor ran.")
+    lines.append("- **Behaviour under any other profile, scenario, or fixture size.** One cell")
+    lines.append("  of a matrix is not the matrix.")
+    lines.append("- **A publishable headline number.** If a claim in the plan or the README")
+    lines.append("  rests on this figure, the claim must say it rests on an indicative")
+    lines.append("  single-window measurement, or `bench-matrix` must be run.")
+    lines.append("")
+    lines.append("Artifacts: `results/quick/binding-*.k6.json`, `results/quick/binding-*.log`.")
+    lines.append("These are NOT collected by `bench-report` or `bench-pack` — they are not")
+    lines.append("matrix cells and must not be aggregated as though they were.")
+
+    text = "\n".join(lines) + "\n"
+    (out / "SUMMARY.md").write_text(text)
+    print()
+    print(text)
+    PY
+
+    echo "[bench-quick] wrote $OUT/SUMMARY.md"

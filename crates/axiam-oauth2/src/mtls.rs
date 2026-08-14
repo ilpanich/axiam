@@ -69,32 +69,71 @@ pub(crate) const MTLS_AUTH_FAILED: &str = "invalid client credentials";
 
 /// A client certificate that the TLS layer verified on this connection.
 ///
-/// Constructed only from a chain rustls accepted. The fields are the three
-/// things RFC 8705 matching needs, parsed once at construction so the
-/// authentication path does no X.509 work per comparison.
+/// Constructed only from a chain rustls accepted.
+///
+/// # Why the X.509 parse is lazy
+///
+/// The thumbprint is computed eagerly, because it is one SHA-256 over bytes
+/// already in memory and *every* certificate-bound token needs it. The subject
+/// DN and SANs are not: they are needed only by the `tls_client_auth` variant
+/// of client authentication, and parsing an X.509 structure to extract and
+/// allocate strings nobody reads is real work on a hot path.
+///
+/// The distinction matters because these two costs land on different
+/// populations. Certificate *binding* is what X5.1 advertises as cheap, and it
+/// pays only the SHA-256. A deployment running mTLS with ordinary
+/// `client_secret_post` clients — the IoT shape AXIAM targets — would
+/// otherwise have paid for a DN parse on every token request in exchange for
+/// nothing at all. Eager parsing was the first cut of this type; the
+/// benchmark's A/B is what made the asymmetry visible.
 #[derive(Debug, Clone)]
 pub struct PresentedCertificate {
+    /// DER encoding of the verified leaf certificate.
+    der: Vec<u8>,
+    /// Base64url (no padding) SHA-256 digest of [`Self::der`] — the
+    /// `x5t#S256` value of RFC 8705 §3.1.
+    pub thumbprint_s256: String,
+}
+
+/// The identity fields of a certificate, parsed on demand.
+///
+/// Separate from [`PresentedCertificate`] so the type system records which
+/// operations need an X.509 parse and which do not: you cannot read a subject
+/// DN without having called [`PresentedCertificate::identity`], and that call
+/// is the parse.
+#[derive(Debug, Clone)]
+pub struct CertificateIdentity {
     /// Subject distinguished name in RFC 4514 string form.
     pub subject_dn: String,
     /// `dNSName` SAN entries, in certificate order.
     pub san_dns: Vec<String>,
     /// `uniformResourceIdentifier` SAN entries, in certificate order.
     pub san_uri: Vec<String>,
-    /// Base64url (no padding) SHA-256 digest of the DER certificate — the
-    /// `x5t#S256` value of RFC 8705 §3.1.
-    pub thumbprint_s256: String,
 }
 
 impl PresentedCertificate {
-    /// Parse the fields RFC 8705 matches on out of a DER leaf certificate.
+    /// Wrap a DER leaf certificate and compute its `x5t#S256` thumbprint.
+    ///
+    /// Infallible: a SHA-256 over arbitrary bytes always succeeds, and the
+    /// bytes are not interpreted here. Anything that needs them to be a
+    /// well-formed certificate goes through [`Self::identity`], which reports
+    /// the parse failure at the point where it actually matters.
+    pub fn from_der(der: &[u8]) -> Self {
+        Self {
+            der: der.to_vec(),
+            thumbprint_s256: thumbprint_s256(der),
+        }
+    }
+
+    /// Parse the subject DN and SANs (RFC 8705 §2.1.2 matching inputs).
     ///
     /// Returns `Err` only when the bytes are not a parseable X.509
     /// certificate. In the native-mTLS path that cannot happen — rustls parsed
     /// the same bytes to verify the chain — but the fallible signature is kept
     /// so a future caller cannot introduce an unchecked `unwrap`.
-    pub fn from_der(der: &[u8]) -> Result<Self, String> {
+    pub fn identity(&self) -> Result<CertificateIdentity, String> {
         let (_, cert) =
-            parse_x509_certificate(der).map_err(|e| format!("parse client cert DER: {e}"))?;
+            parse_x509_certificate(&self.der).map_err(|e| format!("parse client cert DER: {e}"))?;
 
         let mut san_dns = Vec::new();
         let mut san_uri = Vec::new();
@@ -108,11 +147,10 @@ impl PresentedCertificate {
             }
         }
 
-        Ok(Self {
+        Ok(CertificateIdentity {
             subject_dn: cert.subject().to_string(),
             san_dns,
             san_uri,
-            thumbprint_s256: thumbprint_s256(der),
         })
     }
 }
@@ -235,6 +273,24 @@ pub fn authenticate_mtls_client(
                 _ => {}
             }
 
+            // The X.509 parse happens here and nowhere else — this is the one
+            // branch that needs a DN or a SAN. A parse failure is an
+            // authentication failure, never a pass: rustls verified these
+            // bytes, so unparseable-here means something is deeply wrong and
+            // the only safe reading is "this is not the registered client".
+            let identity = match cert.identity() {
+                Ok(identity) => identity,
+                Err(e) => {
+                    tracing::error!(
+                        client_id = %client.client_id,
+                        error = %e,
+                        "could not parse a client certificate rustls had already verified; \
+                         refusing the authentication"
+                    );
+                    return Err(OAuth2Error::InvalidClient(MTLS_AUTH_FAILED.into()));
+                }
+            };
+
             if let Some(expected) = non_empty(client.tls_client_auth_subject_dn.as_deref()) {
                 // The DN comparison is exact on the RFC 4514 string form. RFC
                 // 8705 §2.1.2 describes this as a comparison of the DN, and a
@@ -244,21 +300,22 @@ pub fn authenticate_mtls_client(
                 // which fails an onboarding rather than authenticating a
                 // stranger. The operator guide tells operators to copy the DN
                 // out of `openssl x509 -noout -subject -nameopt rfc2253`.
-                expected == cert.subject_dn
+                expected == identity.subject_dn
             } else if let Some(expected) = non_empty(client.tls_client_auth_san_dns.as_deref()) {
                 // DNS names are case-insensitive (RFC 4343). No wildcard
                 // handling: a wildcard registered here would authenticate
                 // every certificate a CA issued under that suffix as this
                 // client, which is not an authentication decision anybody
                 // should be able to make by typing `*`.
-                cert.san_dns
+                identity
+                    .san_dns
                     .iter()
                     .any(|got| got.eq_ignore_ascii_case(expected))
             } else if let Some(expected) = non_empty(client.tls_client_auth_san_uri.as_deref()) {
                 // URIs are compared exactly: unlike a DNS name, no component
                 // of a URI is case-insensitive in a way that is safe to assume
                 // here.
-                cert.san_uri.iter().any(|got| got == expected)
+                identity.san_uri.iter().any(|got| got == expected)
             } else {
                 // Unreachable: `mtls_binding_count()` returned 1 above, and it
                 // counts exactly these three fields under the same
@@ -332,8 +389,14 @@ mod tests {
         )
         .expect("generate self-signed cert");
         let der = generated.cert.der().to_vec();
-        let parsed = PresentedCertificate::from_der(&der).expect("parse");
-        (der, parsed)
+        (der.clone(), PresentedCertificate::from_der(&der))
+    }
+
+    /// The parsed identity of a generated certificate, for the tests that need
+    /// to register the DN or SAN the certificate actually carries.
+    fn identity_of(cert: &PresentedCertificate) -> CertificateIdentity {
+        cert.identity()
+            .expect("parse a certificate we just generated")
     }
 
     // -- parsing ---------------------------------------------------------
@@ -341,7 +404,10 @@ mod tests {
     #[test]
     fn from_der_extracts_dns_sans_and_thumbprint() {
         let (der, parsed) = cert_with_sans(&["client.example.com"]);
-        assert_eq!(parsed.san_dns, vec!["client.example.com".to_string()]);
+        assert_eq!(
+            identity_of(&parsed).san_dns,
+            vec!["client.example.com".to_string()]
+        );
         assert_eq!(parsed.thumbprint_s256, thumbprint_s256(&der));
         // Base64url, unpadded, 32 bytes -> 43 chars.
         assert_eq!(parsed.thumbprint_s256.len(), 43);
@@ -350,9 +416,24 @@ mod tests {
         assert!(!parsed.thumbprint_s256.contains('/'));
     }
 
+    /// Wrapping garbage succeeds — a thumbprint is a digest over bytes, not an
+    /// interpretation of them — but the moment anything asks for an identity,
+    /// the parse failure surfaces. This is the seam the lazy parse introduced.
     #[test]
-    fn from_der_rejects_garbage() {
-        assert!(PresentedCertificate::from_der(b"not a certificate").is_err());
+    fn garbage_der_yields_a_thumbprint_but_no_identity() {
+        let cert = PresentedCertificate::from_der(b"not a certificate");
+        assert_eq!(cert.thumbprint_s256.len(), 43);
+        assert!(cert.identity().is_err());
+    }
+
+    /// ...and an unparseable certificate must fail authentication rather than
+    /// slip through the `tls_client_auth` branch on a parse it never did.
+    #[test]
+    fn garbage_der_cannot_authenticate_a_tls_client_auth_client() {
+        let cert = PresentedCertificate::from_der(b"not a certificate");
+        let mut c = client(ClientAuthMethod::TlsClientAuth);
+        c.tls_client_auth_san_dns = Some("client.example.com".into());
+        assert!(authenticate_mtls_client(&c, Some(&cert)).is_err());
     }
 
     #[test]
@@ -412,7 +493,7 @@ mod tests {
     fn subject_dn_match_is_exact() {
         let (_, cert) = cert_with_sans(&["client.example.com"]);
         let mut c = client(ClientAuthMethod::TlsClientAuth);
-        c.tls_client_auth_subject_dn = Some(cert.subject_dn.clone());
+        c.tls_client_auth_subject_dn = Some(identity_of(&cert).subject_dn);
         assert!(authenticate_mtls_client(&c, Some(&cert)).is_ok());
 
         // A different DN does not match, and nothing normalises the two into
@@ -420,7 +501,8 @@ mod tests {
         // whitespace-inside-the-value collapsing. Those are the normalisations
         // DN-matching CVEs are built from.
         let mut wrong = client(ClientAuthMethod::TlsClientAuth);
-        wrong.tls_client_auth_subject_dn = Some(cert.subject_dn.to_ascii_uppercase() + ",OU=extra");
+        wrong.tls_client_auth_subject_dn =
+            Some(identity_of(&cert).subject_dn.to_ascii_uppercase() + ",OU=extra");
         assert!(authenticate_mtls_client(&wrong, Some(&cert)).is_err());
     }
 
@@ -435,7 +517,7 @@ mod tests {
     fn registered_subject_dn_is_trimmed_before_comparison() {
         let (_, cert) = cert_with_sans(&["client.example.com"]);
         let mut c = client(ClientAuthMethod::TlsClientAuth);
-        c.tls_client_auth_subject_dn = Some(format!("  {}  ", cert.subject_dn));
+        c.tls_client_auth_subject_dn = Some(format!("  {}  ", identity_of(&cert).subject_dn));
         assert!(authenticate_mtls_client(&c, Some(&cert)).is_ok());
     }
 
@@ -515,7 +597,7 @@ mod tests {
     fn registered_dn_is_ignored_under_the_self_signed_method() {
         let (_, cert) = cert_with_sans(&["client.example.com"]);
         let mut c = client(ClientAuthMethod::SelfSignedTlsClientAuth);
-        c.tls_client_auth_subject_dn = Some(cert.subject_dn.clone());
+        c.tls_client_auth_subject_dn = Some(identity_of(&cert).subject_dn);
         assert!(authenticate_mtls_client(&c, Some(&cert)).is_err());
     }
 

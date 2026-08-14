@@ -529,13 +529,63 @@ what B5 delivers:
 | Requirement | Status | Work |
 |---|---|---|
 | PAR, mandatory for FAPI clients | B5 (parent) | gate `require_par` on the FAPI client profile |
-| Client auth: `private_key_jwt` **or** mTLS | absent | implement **both**; mTLS first (AXIAM's differentiator — the p3 infra exists), `private_key_jwt` second (RFC 7523 assertion validation, per-client registered JWKS/jwks_uri) |
-| Sender-constrained tokens: mTLS certificate binding (`cnf.x5t#S256`, RFC 8705) **or** DPoP | absent | implement **mTLS binding first** (natural fit: cert already verified in-process at ~1% cost — this becomes a headline: *certificate-bound tokens at IoT prices*); DPoP (RFC 9449) second for non-mTLS clients |
-| Resource servers verify the binding | absent | introspection + local-validation additions: `cnf` exposed via introspection; SDK middleware (§10) verifies `x5t#S256` against the presented client cert / DPoP proof |
-| RFC 9207 `iss` in authz responses | absent | small; always emit |
+| Client auth: `private_key_jwt` **or** mTLS | **mTLS landed**, `private_key_jwt` absent | mTLS done, both RFC 8705 methods (`tls_client_auth` matching a registered subject DN / SAN, `self_signed_tls_client_auth` matching a registered `x5t#S256`). `private_key_jwt` (RFC 7523) **not landed** — see the conformance runbook's "Known gaps": §X5.4's letter currently promises both variants and is ahead of the implementation |
+| Sender-constrained tokens: mTLS certificate binding (`cnf.x5t#S256`, RFC 8705) **or** DPoP | **landed** (mTLS half) | mTLS binding implemented first — the certificate is already verified in-process by the handshake, so issuance adds no cryptography beyond one SHA-256. **Measured cost, see below — the earlier "~1%" figure was a prediction and is withdrawn until `bench-quick` runs.** DPoP (RFC 9449) second, for non-mTLS clients: not landed |
+| Resource servers verify the binding | **server side landed**, SDK fan-out pending | `cnf` exposed via introspection (RFC 8705 §3.3) and `axiam_auth::token::verify_certificate_binding` for local validation. A `cnf` naming a method the validator cannot check is refused, never read as unbound. SDK middleware (§10.1) is contract 1.15's fan-out |
+| RFC 9207 `iss` in authz responses | **landed** | emitted on every authorization response, success and error alike, for every client — not gated on the profile, because mix-up is the attack a client does not know it is under |
 | Authorization code single-use, strict redirect_uri equality, `response_type=code` only, no token in any URL | partially verified | audit + tests; enforce strictly under the FAPI profile |
 | ID token / JWT algs: PS256/ES256/EdDSA only, no `none`, keys ≥ 2048 | EdDSA already | conformance-tightening pass + tests |
 | Refresh-token & code lifetimes, `exp` bounds per profile | mostly | profile-driven config bundle |
+
+#### What the binding actually costs (measured 2026-08-14)
+
+The row above originally claimed certificate-bound tokens cost **~1%** and made
+that a headline — *certificate-bound tokens at IoT prices*. That number was
+never measured. It has now been measured as far as this environment allows, and
+the claim is corrected rather than the measurement.
+
+**Measured** (criterion, in-process, `cargo bench -p axiam-auth`; the bench is
+`bench_certificate_binding` in `crates/axiam-auth/benches/auth_bench.rs`):
+
+| Operation | Time | Note |
+|---|---:|---|
+| `issue_access_token_bound`, unbound | 38.99 µs | the A of the A/B |
+| `issue_access_token_bound`, certificate-bound | 42.17 µs | the B |
+| **delta at the mint** | **+3.17 µs (+8.1%)** | one extra claim inside the signed payload |
+| `thumbprint_s256` over a 1 KiB DER leaf | 0.88 µs | the per-request SHA-256 |
+| `verify_certificate_binding` (resource server) | 0.067 µs | the check at point of use |
+| **total added per bound token** | **≈ 4.05 µs (≈ +10% of an isolated mint)** | |
+
+**What this establishes.** The mechanism is cheap in absolute terms — four
+microseconds — and the reason the original argument gave is correct: no
+certificate is verified per request, because the handshake already did it. The
+whole added cost is one SHA-256 and ~60 more bytes through an EdDSA signature.
+
+**What it does not establish, and why the headline is withdrawn.** ~1% was a
+claim about *end-to-end request cost*, and this is a measurement of the *mint in
+isolation* — no TLS, no serialization, and crucially none of the two database
+round-trips a real token request makes. Whether 4 µs is ~1% or ~10% of a request
+depends entirely on what fraction of that request the mint represents, and this
+tree has not measured that. It could plausibly land at ~1% end-to-end; it is not
+entitled to say so.
+
+`benchmarks/`'s **`bench-quick`** exists to settle it: an A/B between two clients
+differing in exactly that one registered field, on one server over one set of
+mTLS connections. It has not been run — the environment X5 was implemented in
+has no docker daemon and no k6. Until it is:
+
+- do not publish "~1%", "at IoT prices", or any end-to-end percentage;
+- the defensible public claim is the measured one — **certificate binding adds
+  ~4 µs per token and no per-request asymmetric cryptography** — with the
+  micro-benchmark cited;
+- and note that `bench-quick` itself yields an indicative single-window number,
+  not a matrix cell. A headline belongs to `bench-matrix`.
+
+One design change came directly out of setting up this A/B: the X.509 parse that
+extracts a subject DN and SANs is now **lazy** (`PresentedCertificate::identity`)
+rather than performed on construction. Only `tls_client_auth` needs those fields;
+an mTLS deployment whose clients authenticate with secrets was otherwise paying
+for a DN parse per token request in exchange for nothing.
 
 Implementation vehicle: a per-client **`profile: "fapi2"` flag** that
 bundles the constraints (require PAR + PKCE S256, require

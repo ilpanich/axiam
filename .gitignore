@@ -61,3 +61,11 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# X5.2 — conformance-harness working state. `.run/` holds rendered plan
+# configs, which carry client private keys; `certs/` holds the throwaway
+# client certificates and their unencrypted keys. The committed artifacts are
+# the plan TEMPLATES (conformance/plans/) and the rendered REPORTS
+# (docs/conformance/), never the credentials in between.
+conformance/.run/
+conformance/certs/

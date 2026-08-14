@@ -714,7 +714,7 @@ impl<C: Connection + Clone> AppState<C> {
             federation_config_repo: federation_config_repo.clone(),
             federation_link_repo: federation_link_repo.clone(),
             assertion_replay_repo: assertion_replay_repo.clone(),
-            proof_replay_repo: proof_replay_repo.clone(),
+            proof_replay_repo,
             federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),
@@ -741,7 +741,6 @@ impl<C: Connection + Clone> AppState<C> {
                 federation_link_repo,
                 user_repo,
                 assertion_replay_repo,
-                proof_replay_repo,
                 reqwest::Client::new(),
             ),
         }

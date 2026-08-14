@@ -31,6 +31,59 @@ message ValidateTokenResponse {
   string org_id = 4;
   // Expiration (Unix timestamp). Zero when token is invalid.
   int64 exp = 5;
+
+  // RFC 7800 confirmation (X5.1). Present ONLY when the token is
+  // sender-constrained.
+  //
+  // `valid: true` means the SIGNATURE, EXPIRY and TENANT check out. It does
+  // NOT mean the token may be used by whoever presented it. When `cnf` is
+  // present the caller MUST additionally prove possession of the named key,
+  // or refuse the request — this service cannot do it for them, because the
+  // proof is against the caller's OWN connection and not against this one.
+  //
+  // A caller that ignores this field has converted a sender-constrained token
+  // back into a bearer token. See `token_type`, which says the same thing in
+  // a form that is harder to skip.
+  CnfClaim cnf = 6;
+
+  // RFC 6749 §7.1 / RFC 9449 §5: "Bearer" or "DPoP".
+  //
+  // Deliberately redundant with `cnf`. A caller that only ever looked at
+  // `valid` will at least see the token type change, and "DPoP" is a value no
+  // pre-X5.1 client has any handling for — which is the point: it fails
+  // visibly rather than silently downgrading.
+  string token_type = 7;
+}
+
+// RFC 7800 confirmation claim (X5.1). Either, both or neither member may be
+// set; a claim with NEITHER set names a confirmation method this server
+// version does not implement.
+//
+// The consumer rule is the same one SDK contract §10.1 rule 9 makes normative,
+// and it is the whole reason this message exists: a confirmation the consumer
+// cannot check MUST be refused, never read as "unconstrained". Two members set
+// is a CONJUNCTION — both must hold.
+message CnfClaim {
+  // RFC 8705 §3.1 — base64url-unpadded SHA-256 of the DER client certificate.
+  string x5t_s256 = 1;
+  // RFC 9449 §6.1 — base64url-unpadded RFC 7638 thumbprint of the DPoP key.
+  string jkt = 2;
+}
+
+// A UMA 2.0 permission carried by an RPT (X2).
+//
+// Mirrors `axiam_core::models::uma::RptPermission` field for field, including
+// the per-permission `exp`: UMA allows an RPT to accumulate permissions with
+// different lifetimes, and AXIAM issues them uniformly in v1 only. Flattening
+// that to a single token-level expiry here would foreclose a shape the
+// specification permits and the domain model already carries.
+message RptPermission {
+  // Resource UUID, as a string.
+  string resource_id = 1;
+  // Scopes granted on that resource.
+  repeated string resource_scopes = 2;
+  // Absolute expiry of THIS permission, seconds since the epoch.
+  int64 exp = 3;
 }
 
 message IntrospectTokenRequest {
@@ -54,4 +107,40 @@ message IntrospectTokenResponse {
   int64 exp = 7;
   // Unique token ID.
   string jti = 8;
+
+  // ---------------------------------------------------------------------
+  // Parity with the REST introspection response (RFC 7662 §2.2).
+  //
+  // Everything below was absent from this message while the equivalent REST
+  // endpoint returned it. That was not a harmless omission: a resource server
+  // in a service mesh introspects over THIS transport, and contract §10.1
+  // rule 9 detail 4 requires that "local-verification SDKs and introspecting
+  // SDKs must not disagree about whether a token is a bearer token." Without
+  // `cnf` here, a gRPC introspecting SDK could not agree even in principle.
+  // ---------------------------------------------------------------------
+
+  // Space-separated granted scopes (RFC 7662 §2.2). Empty when the token
+  // carries no scope claim.
+  string scope = 9;
+
+  // The client the token was issued to, when it was issued to one.
+  string client_id = 10;
+
+  // RFC 6749 §7.1 / RFC 9449 §5: "Bearer" or "DPoP".
+  string token_type = 11;
+
+  // RFC 8705 §3.3 / RFC 9449 §6.1 — the confirmation, when the token is
+  // sender-constrained. See CnfClaim for the consumer's obligation.
+  CnfClaim cnf = 12;
+
+  // UMA 2.0 (X2) — present ONLY on an RPT, and a record of a decision already
+  // made rather than an input to a future one. A live authorization check
+  // re-evaluates against the engine; a grant revoked after issuance does not
+  // retroactively empty a live RPT.
+  repeated RptPermission permissions = 13;
+
+  // X4 cross-domain provenance — the foreign issuer whose subject token bought
+  // this one, when there was one. Its presence is what lets a resource server
+  // tell a cross-domain token from a locally-issued one without asking anybody.
+  string ext_exchange_iss = 14;
 }

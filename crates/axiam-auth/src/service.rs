@@ -455,11 +455,13 @@ impl<
         let (base32_secret, totp_uri) =
             totp::generate_enrollment(&self.config.totp_issuer, &user.email)?;
 
-        // Parse the base32 secret to raw bytes for encryption.
-        let secret = totp_rs::Secret::Encoded(base32_secret.clone());
-        let secret_bytes = secret
-            .to_bytes()
+        // Parse the base32 secret to raw bytes for encryption. Under totp-rs
+        // 6.0 the fallible step is the *parse* rather than the byte extraction:
+        // `try_from_base32` rejects a malformed encoding, and `as_bytes` on the
+        // result cannot fail.
+        let secret = totp_rs::Secret::try_from_base32(&base32_secret)
             .map_err(|e| AuthError::Crypto(format!("secret decode: {e}")))?;
+        let secret_bytes = secret.as_bytes().to_vec();
         let encrypted = totp::encrypt_secret(encryption_key, &secret_bytes)?;
 
         // Store encrypted secret but leave mfa_enabled = false.

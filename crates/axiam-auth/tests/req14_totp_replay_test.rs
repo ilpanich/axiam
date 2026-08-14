@@ -4,31 +4,31 @@
 //! time step.
 
 use axiam_auth::totp;
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 /// Helper to build a TOTP and get the current code + current step.
-fn make_totp(secret_bytes: &[u8]) -> TOTP {
-    TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes.to_vec(),
-        Some("AXIAM".into()),
-        "test@test.com".into(),
-    )
-    .unwrap()
+fn make_totp(secret_bytes: &[u8]) -> Totp {
+    Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes.to_vec())
+        .with_issuer(Some("AXIAM"))
+        .with_account_name("test@test.com")
+        .build()
+        .unwrap()
 }
 
 /// Verifying a valid code once succeeds; replaying the same code with the
 /// same step stored as last_used_step returns false (rejected).
 #[test]
 fn totp_replay_rejected() {
-    let secret = Secret::generate_secret();
-    let secret_bytes = secret.to_bytes().unwrap();
+    let secret = Secret::generate();
+    let secret_bytes = secret.as_bytes().to_vec();
     let totp = make_totp(&secret_bytes);
 
-    let code = totp.generate_current().unwrap();
+    let code = totp.generate_current().to_string();
     let current_step = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -73,11 +73,11 @@ fn totp_replay_rejected() {
 /// A code from a strictly later step is accepted even if last_used_step is set.
 #[test]
 fn totp_new_step_accepted() {
-    let secret = Secret::generate_secret();
-    let secret_bytes = secret.to_bytes().unwrap();
+    let secret = Secret::generate();
+    let secret_bytes = secret.as_bytes().to_vec();
     let totp = make_totp(&secret_bytes);
 
-    let code = totp.generate_current().unwrap();
+    let code = totp.generate_current().to_string();
     let current_step = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -109,10 +109,10 @@ fn totp_new_step_accepted() {
 /// Legacy verify_code (no replay check) still works for backward compatibility.
 #[test]
 fn verify_code_legacy_api_unchanged() {
-    let secret = Secret::generate_secret();
-    let secret_bytes = secret.to_bytes().unwrap();
+    let secret = Secret::generate();
+    let secret_bytes = secret.as_bytes().to_vec();
     let totp = make_totp(&secret_bytes);
-    let code = totp.generate_current().unwrap();
+    let code = totp.generate_current().to_string();
 
     assert!(
         totp::verify_code(&secret_bytes, &code, "AXIAM", "test@test.com").unwrap(),

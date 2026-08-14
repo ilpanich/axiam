@@ -222,6 +222,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_external_token_exchange_trust",
         sql: SCHEMA_V36,
     },
+    Migration {
+        version: 37,
+        name: "authorization_code_redemption_nonce",
+        sql: SCHEMA_V37,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1957,6 +1962,43 @@ DEFINE FIELD IF NOT EXISTS token_exchange_max_lifetime_secs ON TABLE federation_
     TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS idx_federation_config_tenant_tx ON TABLE federation_config
     COLUMNS tenant_id, token_exchange_enabled;
+";
+
+// -----------------------------------------------------------------------
+// Schema v37 — the fourth single-use consume joins the layered mechanism
+// -----------------------------------------------------------------------
+//
+// v31 and v32 gave `permission_ticket.consume`, `device_grant.redeem` and
+// `pushed_auth_request.consume` a per-attempt redemption nonce, and X6 layered
+// an explicit transaction underneath all three. `oauth2_auth_code.consume` is
+// the fourth single-use consume in this crate and did not get either.
+//
+// It was never in #302's scope, and it is not broken: its redemption is ONE
+// statement, so it already runs in the engine's own transaction and two
+// concurrent callers conflict on one key. That is the same first layer the
+// other three now have — it just arrives implicitly rather than by writing
+// `BEGIN`/`COMMIT`.
+//
+// What it did not have is the second layer. Every argument in `SCHEMA_V31`'s
+// X6 addendum for keeping the nonce applies here unchanged: conflict detection
+// is not a documented SurrealDB guarantee, a version bump could take it away
+// silently, and the cost is one extra write and one extra read on an operation
+// that happens once per login. A code redeemed twice is two token pairs from
+// one authorization — the same class of outcome as the ticket path's two RPTs,
+// and the reason T-54/T-164 in the threat model rate it High.
+//
+// So this field is the ticket's `redemption_id` for authorization codes, and
+// `consume` is rewritten to the same shape as the other three: guarded UPDATE
+// inside an explicit transaction, nonce read back in a SEPARATE QUERY AFTER
+// THE COMMIT. The read-back's position is load-bearing for the same reason it
+// is there — inside the transaction, snapshot isolation shows every racer its
+// own write and every racer believes it won.
+//
+// `option<string>` rather than `string DEFAULT ''` so rows predating this
+// migration need no backfill: an authorization code created before v37 and
+// redeemed after it simply has no prior nonce to disturb.
+const SCHEMA_V37: &str = "\
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE oauth2_auth_code TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

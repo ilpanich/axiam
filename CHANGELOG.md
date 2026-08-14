@@ -272,6 +272,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The authorization-code grant joins the layered single-use mechanism
+  (schema v37).** `authorization_code.consume` was the fourth single-use
+  consume in `axiam-db` and the only one X6 left alone — it was outside #302's
+  scope. It was not broken: its redemption is a single statement, so it already
+  ran in the storage engine's own transaction and two concurrent callers
+  conflicted on one key. What it lacked was the second layer.
+
+  It now carries both, identically to the other three: the guarded `UPDATE`
+  inside an explicit `BEGIN`/`COMMIT`, and a per-attempt `redemption_id` read
+  back in a **separate query after that transaction commits**. The read-back
+  must stay outside the transaction — inside one, snapshot isolation shows
+  every racer its own write and every racer believes it won.
+
+  The reasoning is the same one that kept the nonce on the other three: a code
+  redeemed twice is two token pairs from one authorization, conflict detection
+  is not a documented SurrealDB guarantee, and the cost is one extra write and
+  one extra read on an operation that happens once per login. A losing racer
+  still answers `NotFound`, exactly as an unknown code does, so no caller can
+  distinguish "someone else just redeemed this" from "no such code".
+
+  `authorization_code_consume_serialises` now runs 50 rounds of 8 racers rather
+  than one, and a new `an_authorization_code_redemption_stamps_its_nonce`
+  asserts the second layer directly — a race test alone cannot tell a two-layer
+  mechanism from a one-layer one when the engine arbitrates either way. Threat
+  T-164 in the STRIDE model is updated accordingly.
+
 - **Single-use redemption is now a guarantee, conditional on a persistent
   storage engine (X6, closes #302).** UMA permission tickets, RFC 8628 device
   grants and RFC 9126 PAR `request_uri`s could each admit a second concurrent

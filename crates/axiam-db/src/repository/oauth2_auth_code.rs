@@ -1,4 +1,41 @@
 //! SurrealDB implementation of [`AuthorizationCodeRepository`].
+//!
+//! # Why `consume` layers a transaction under a nonce
+//!
+//! An authorization code is single-use: redeeming it mints one token pair, and
+//! a code redeemed twice is two token pairs from one authorization. The
+//! precondition — unused, unexpired, right tenant, right client, right
+//! `redirect_uri` — lives in the `WHERE` clause of the redeeming `UPDATE`,
+//! which is what makes a later, non-concurrent replay match nothing.
+//!
+//! Single-use is a **guarantee, conditional on an attested persistent storage
+//! engine**, carried by the same two layers as `permission_ticket.consume`,
+//! `device_grant.redeem` and `pushed_auth_request.consume` (#302, T-164):
+//!
+//!   1. The guarded `UPDATE` runs inside an explicit `BEGIN`/`COMMIT`, so two
+//!      concurrent redemptions conflict on one key and the deployed engine
+//!      aborts the loser. This path had that layer implicitly before — its
+//!      redemption was a single statement, which runs in the engine's own
+//!      transaction — and writing it out changes nothing about the
+//!      arbitration. It is written out anyway so all four consumes read the
+//!      same and none of them depends on a reader knowing that a lone
+//!      statement is atomic.
+//!   2. A per-attempt nonce is read back **after** the commit, in a query of
+//!      its own; only the caller whose `redemption_id` survived reports a
+//!      redemption. This is what this path did not have before v37. It asks
+//!      the engine for nothing, so it catches a conflict the engine silently
+//!      missed — and conflict detection is not a documented SurrealDB
+//!      guarantee, so a version bump could take layer 1 away without notice.
+//!
+//! The read-back **must** stay outside the transaction. Inside one, snapshot
+//! isolation shows every racer its own write and every racer believes it won,
+//! turning an occasional double redemption into a certain one — see
+//! `SCHEMA_V31`, and `SCHEMA_V37` for why this path joined them.
+//!
+//! Losing either race answers exactly as an unknown code does: `NotFound`. A
+//! caller that could distinguish "someone else just redeemed this" from "no
+//! such code" could probe for live codes, and the token endpoint answers
+//! `invalid_grant` for both regardless.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
@@ -12,7 +49,15 @@ use uuid::Uuid;
 use crate::error::DbError;
 
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, is_transaction_conflict, take_first_or_not_found};
+
+/// Projected explicitly rather than `SELECT *` because the redeeming statement
+/// now also writes `redemption_id`, which [`AuthCodeRowWithId`] does not carry
+/// — naming the columns keeps the row type and the query in step instead of
+/// relying on how the deserializer treats an unexpected key.
+const CONSUME_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, user_id, \
+     code_hash, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, \
+     session_id, expires_at, used, created_at";
 
 /// Parse an optional stored UUID.
 ///
@@ -228,41 +273,99 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         let code_hash_owned = code_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        // Single atomic UPDATE with WHERE guards: only one concurrent
-        // caller can match `used = false`, eliminating the race
-        // condition of a separate SELECT + UPDATE. client_id and
-        // redirect_uri are verified atomically to prevent
-        // code-burning attacks.
+        // Two layers, in two queries (#302 / T-164 — see the module header).
+        //
+        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction.
+        // `used = false` is what makes a later, non-concurrent replay match
+        // nothing; `client_id` and `redirect_uri` are matched inside the
+        // statement rather than checked on the returned row, so a redemption
+        // attempt with the wrong pair changes nothing and cannot burn a code
+        // its holder is entitled to.
+        //
+        // Layer 2, in the SEPARATE query below: the per-attempt nonce read
+        // back after this transaction has committed. It must not be folded in
+        // here — under snapshot isolation every racer would see its own write
+        // and believe it won (`SCHEMA_V31`, `SCHEMA_V37`).
+        let redemption = new_id().to_string();
         let result = self
             .db
             .current()
-            .query(
-                "SELECT meta::id(id) AS record_id, * FROM \
-                 (UPDATE oauth2_auth_code SET used = true \
+            .query(format!(
+                "BEGIN TRANSACTION; \
+                 LET $claimed = (UPDATE oauth2_auth_code \
+                     SET used = true, redemption_id = $redemption \
                   WHERE tenant_id = $tenant_id \
                     AND code_hash = $code_hash \
                     AND client_id = $client_id \
                     AND redirect_uri = $redirect_uri \
                     AND used = false \
-                    AND expires_at > time::now())",
-            )
-            .bind(("tenant_id", tenant_id_str))
+                    AND expires_at > time::now()); \
+                 SELECT {CONSUME_FIELDS} FROM $claimed; \
+                 COMMIT TRANSACTION"
+            ))
+            .bind(("tenant_id", tenant_id_str.clone()))
             .bind(("code_hash", code_hash_owned.clone()))
             .bind(("client_id", client_id.to_string()))
             .bind(("redirect_uri", redirect_uri.to_string()))
-            .await
-            .map_err(DbError::from)?;
+            .bind(("redemption", redemption.clone()))
+            .await;
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        // A loser's abort is "someone else redeemed first", which is this
+        // method's `NotFound` answer rather than a server fault; propagating
+        // it would turn a correctly-refused replay into a 500.
+        let not_found = || {
+            DbError::NotFound {
+                entity: "oauth2_auth_code".to_string(),
+                id: format!("code_hash={code_hash_owned}"),
+            }
+            .into()
+        };
 
-        let rows: Vec<AuthCodeRowWithId> = result.take(0).map_err(DbError::from)?;
+        let mut result = match result {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Err(not_found()),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<AuthCodeRowWithId> = match result.take::<Vec<AuthCodeRowWithId>>(2) {
+            Ok(rows) => rows,
+            Err(e) if is_transaction_conflict(&e) => return Err(not_found()),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
         let row = take_first_or_not_found(
             rows,
             "oauth2_auth_code",
             &format!("code_hash={code_hash_owned}"),
         )?;
+
+        // Layer 2: outside, and after, the transaction above.
+        let stored = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE redemption_id FROM oauth2_auth_code \
+                 WHERE tenant_id = $tenant_id AND code_hash = $code_hash LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("code_hash", code_hash_owned.clone()))
+            .await;
+        let mut stored = match stored {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Err(not_found()),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let stored: Vec<Option<String>> = match stored.take::<Vec<Option<String>>>(0) {
+            Ok(v) => v,
+            Err(e) if is_transaction_conflict(&e) => return Err(not_found()),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        if stored.into_iter().flatten().next().as_deref() != Some(redemption.as_str()) {
+            // Our write landed but another redemption's landed after it. That
+            // caller holds the code; this one must not also mint a token pair.
+            // The code is spent either way, so `used` staying true is correct.
+            return Err(not_found());
+        }
 
         row.try_into_auth_code().map_err(Into::into)
     }

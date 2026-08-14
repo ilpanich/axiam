@@ -130,6 +130,14 @@ async fn setup() -> Fixture {
             post_logout_redirect_uris: vec![POST_LOGOUT_URI.into()],
             backchannel_logout_uri: Some("https://rp.test.example/backchannel".into()),
             require_par: false,
+            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+            token_endpoint_auth_method:
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
         })
         .await
         .unwrap();
@@ -143,6 +151,14 @@ async fn setup() -> Fixture {
             post_logout_redirect_uris: Vec::new(),
             backchannel_logout_uri: None,
             require_par: false,
+            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+            token_endpoint_auth_method:
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
         })
         .await
         .unwrap();

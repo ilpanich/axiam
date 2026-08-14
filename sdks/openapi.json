@@ -2848,6 +2848,11 @@
                           "redirect_uris",
                           "grant_types",
                           "scopes",
+                          "profile",
+                          "token_endpoint_auth_method",
+                          "self_signed_tls_client_auth_thumbprints",
+                          "tls_client_certificate_bound_access_tokens",
+                          "require_par",
                           "created_at",
                           "updated_at"
                         ],
@@ -2872,13 +2877,26 @@
                           "name": {
                             "type": "string"
                           },
+                          "profile": {
+                            "$ref": "#/components/schemas/ClientProfile",
+                            "description": "X5.1 — the registered posture and mTLS credentials. Read-back matters:\nan operator auditing which clients are financial-grade should be able\nto answer it from this endpoint rather than from the database."
+                          },
                           "redirect_uris": {
                             "type": "array",
                             "items": {
                               "type": "string"
                             }
                           },
+                          "require_par": {
+                            "type": "boolean"
+                          },
                           "scopes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "self_signed_tls_client_auth_thumbprints": {
                             "type": "array",
                             "items": {
                               "type": "string"
@@ -2887,6 +2905,30 @@
                           "tenant_id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "tls_client_auth_san_dns": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "tls_client_auth_san_uri": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "tls_client_auth_subject_dn": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "tls_client_certificate_bound_access_tokens": {
+                            "type": "boolean"
+                          },
+                          "token_endpoint_auth_method": {
+                            "$ref": "#/components/schemas/ClientAuthMethod"
                           },
                           "updated_at": {
                             "type": "string",
@@ -9056,6 +9098,36 @@
           }
         }
       },
+      "ClientAuthMethod": {
+        "type": "string",
+        "description": "How a client proves its identity at the token endpoint (RFC 8705 §2,\nOIDC Core §9 naming).\n\nOnly the methods AXIAM actually implements are representable. There is\ndeliberately no `none` variant: every AXIAM client is confidential today\n(see `handle_authorization_code`), and adding a public-client value here\nbefore the rest of the server understands one would let an operator\nregister a client whose authentication is silently skipped.",
+        "enum": [
+          "client_secret_post",
+          "tls_client_auth",
+          "self_signed_tls_client_auth"
+        ]
+      },
+      "ClientProfile": {
+        "type": "string",
+        "description": "Which security posture a client is registered under (X5.1).\n\nThis is the FAPI \"one switch\". FAPI 2.0 is not a single feature but a\nbundle of constraints — mandatory PAR, mandatory PKCE with `S256`,\nmandatory strong client authentication, mandatory sender-constrained\ntokens, and a refusal of every relaxation the base specs permit. Encoding\nthem as one profile rather than a dozen independent booleans means an\noperator cannot register a client that is *nearly* FAPI, and a reviewer\ncan answer \"is this client financial-grade?\" by reading one field.\n\nThe same philosophy as the rate-limit postures: ordinary clients see no\nbehaviour change at all, because [`Standard`](Self::Standard) is the serde\ndefault and every row written before schema v38 decodes to it.",
+        "enum": [
+          "standard",
+          "fapi2"
+        ]
+      },
+      "CnfClaim": {
+        "type": "object",
+        "description": "RFC 7800 confirmation claim. Only the certificate-thumbprint method is\nrepresentable, because it is the only sender-constraining mechanism AXIAM\nimplements today.\n\nDeliberately a struct with one optional field rather than an enum: RFC 7800\npermits several confirmation methods in one claim, and a token that arrived\ncarrying a method AXIAM does not implement must still round-trip through\n`serde` intact rather than fail to decode. What it must *not* do is\nvalidate — see [`CnfClaim::certificate_thumbprint`], which answers `None`\nfor exactly that case, and the callers that treat `None` as \"refuse\".",
+        "properties": {
+          "x5t#S256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8705 §3.1 `x5t#S256` — the base64url-encoded (unpadded) SHA-256\ndigest of the DER-encoded client certificate the token was issued to."
+          }
+        }
+      },
       "ComplianceReportEntry": {
         "type": "object",
         "description": "One credential's compliance outcome (D9).",
@@ -9412,6 +9484,10 @@
             },
             "description": "B5 — allow-list for RP-initiated logout's `post_logout_redirect_uri`.\nSeparate from `redirect_uris` on purpose: that list receives\nauthorization codes, this one receives a browser after logout."
           },
+          "profile": {
+            "$ref": "#/components/schemas/ClientProfile",
+            "description": "X5.1 — the security posture this client is registered under.\n\n`\"standard\"` (the default) is every AXIAM client that has ever existed.\n`\"fapi2\"` turns on the whole FAPI 2.0 constraint bundle at once, and\nthe registration is refused unless it also sets `require_par`, an mTLS\n`token_endpoint_auth_method`, and\n`tls_client_certificate_bound_access_tokens`. See the FAPI operator\nguide."
+          },
           "redirect_uris": {
             "type": "array",
             "items": {
@@ -9429,6 +9505,42 @@
               "type": "string"
             },
             "description": "Scopes the client may request."
+          },
+          "self_signed_tls_client_auth_thumbprints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted certificate thumbprints for `self_signed_tls_client_auth`,\nas base64url-unpadded SHA-256 digests of the DER certificate (the same\n`x5t#S256` encoding as the `cnf` claim). More than one permits an\noverlapping rotation."
+          },
+          "tls_client_auth_san_dns": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8705 §2.1.2 — expected `dNSName` SAN."
+          },
+          "tls_client_auth_san_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8705 §2.1.2 — expected `uniformResourceIdentifier` SAN."
+          },
+          "tls_client_auth_subject_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8705 §2.1.2 — expected certificate subject DN, RFC 4514 form.\nExactly one of the three `tls_client_auth_*` parameters may be set."
+          },
+          "tls_client_certificate_bound_access_tokens": {
+            "type": "boolean",
+            "description": "RFC 8705 §3.4 — issue certificate-bound (sender-constrained) access\ntokens to this client. Independent of the authentication method."
+          },
+          "token_endpoint_auth_method": {
+            "$ref": "#/components/schemas/ClientAuthMethod",
+            "description": "X5.1 — how this client authenticates at the token endpoint\n(RFC 8705 §2). Defaults to `client_secret_post`."
           }
         }
       },
@@ -10529,6 +10641,17 @@
               "null"
             ]
           },
+          "cnf": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CnfClaim",
+                "description": "RFC 8705 §3.3 `cnf` — present only when the introspected token is\ncertificate-bound (X5.1).\n\nRFC 8705 requires the authorization server to expose the confirmation\nthrough introspection, because a resource server doing token\nintrospection rather than local JWT validation has no other way to\nlearn that the token it is holding is not a bearer token. Omitting it\nwould leave every introspecting resource server treating bound tokens\nas unbound — the exact failure the binding exists to prevent."
+              }
+            ]
+          },
           "exp": {
             "type": [
               "integer",
@@ -11288,6 +11411,11 @@
           "redirect_uris",
           "grant_types",
           "scopes",
+          "profile",
+          "token_endpoint_auth_method",
+          "self_signed_tls_client_auth_thumbprints",
+          "tls_client_certificate_bound_access_tokens",
+          "require_par",
           "created_at",
           "updated_at"
         ],
@@ -11312,13 +11440,26 @@
           "name": {
             "type": "string"
           },
+          "profile": {
+            "$ref": "#/components/schemas/ClientProfile",
+            "description": "X5.1 — the registered posture and mTLS credentials. Read-back matters:\nan operator auditing which clients are financial-grade should be able\nto answer it from this endpoint rather than from the database."
+          },
           "redirect_uris": {
             "type": "array",
             "items": {
               "type": "string"
             }
           },
+          "require_par": {
+            "type": "boolean"
+          },
           "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "self_signed_tls_client_auth_thumbprints": {
             "type": "array",
             "items": {
               "type": "string"
@@ -11327,6 +11468,30 @@
           "tenant_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "tls_client_auth_san_dns": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_client_auth_san_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_client_auth_subject_dn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_client_certificate_bound_access_tokens": {
+            "type": "boolean"
+          },
+          "token_endpoint_auth_method": {
+            "$ref": "#/components/schemas/ClientAuthMethod"
           },
           "updated_at": {
             "type": "string",
@@ -11467,11 +11632,17 @@
           "scopes_supported",
           "token_endpoint_auth_methods_supported",
           "claims_supported",
-          "grant_types_supported"
+          "grant_types_supported",
+          "authorization_response_iss_parameter_supported",
+          "tls_client_certificate_bound_access_tokens"
         ],
         "properties": {
           "authorization_endpoint": {
             "type": "string"
+          },
+          "authorization_response_iss_parameter_supported": {
+            "type": "boolean",
+            "description": "RFC 9207 §3 — X5.1. AXIAM emits `iss` on **every** authorization\nresponse, success and error alike, for every client, so this is\nunconditionally true. See `handlers::oauth2::append_issuer` for why it\nis not made conditional."
           },
           "backchannel_logout_session_supported": {
             "type": "boolean",
@@ -11544,6 +11715,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "tls_client_certificate_bound_access_tokens": {
+            "type": "boolean",
+            "description": "RFC 8705 §3.3 — X5.1. Certificate-bound access tokens are available;\nwhether a given client *gets* them is that client's\n`tls_client_certificate_bound_access_tokens` registration, which is\ndeliberately not discoverable for the same reason `require_par` is not:\nthis document is scoped to the server, and a per-client answer here\nwould leak one client's posture to every reader."
           },
           "token_endpoint": {
             "type": "string"
@@ -13915,6 +14090,17 @@
               "type": "string"
             }
           },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClientProfile",
+                "description": "X5.1 — see [`CreateOAuth2ClientRequest::profile`]."
+              }
+            ]
+          },
           "redirect_uris": {
             "type": [
               "array",
@@ -13938,6 +14124,50 @@
             "items": {
               "type": "string"
             }
+          },
+          "self_signed_tls_client_auth_thumbprints": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "tls_client_auth_san_dns": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_client_auth_san_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_client_auth_subject_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass an empty string to clear, as with `backchannel_logout_uri`."
+          },
+          "tls_client_certificate_bound_access_tokens": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "token_endpoint_auth_method": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClientAuthMethod"
+              }
+            ]
           }
         }
       },

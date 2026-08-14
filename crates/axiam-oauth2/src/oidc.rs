@@ -48,6 +48,18 @@ pub struct OidcDiscoveryDocument {
     pub token_endpoint_auth_methods_supported: Vec<String>,
     pub claims_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
+    /// RFC 9207 §3 — X5.1. AXIAM emits `iss` on **every** authorization
+    /// response, success and error alike, for every client, so this is
+    /// unconditionally true. See `handlers::oauth2::append_issuer` for why it
+    /// is not made conditional.
+    pub authorization_response_iss_parameter_supported: bool,
+    /// RFC 8705 §3.3 — X5.1. Certificate-bound access tokens are available;
+    /// whether a given client *gets* them is that client's
+    /// `tls_client_certificate_bound_access_tokens` registration, which is
+    /// deliberately not discoverable for the same reason `require_par` is not:
+    /// this document is scoped to the server, and a per-client answer here
+    /// would leak one client's posture to every reader.
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 /// Build a fully-populated OIDC discovery document for the given issuer URL.
@@ -71,7 +83,17 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],
         scopes_supported: vec!["openid".into(), "profile".into(), "email".into()],
-        token_endpoint_auth_methods_supported: vec!["client_secret_post".into()],
+        token_endpoint_auth_methods_supported: vec![
+            "client_secret_post".into(),
+            // X5.1 / RFC 8705 §2. Advertised unconditionally: whether a mTLS
+            // handshake is actually available is a deployment's listener
+            // configuration (the p3 profile), and a client that cannot reach
+            // an mTLS listener discovers that at connect time rather than by
+            // reading a metadata field that would have to lie one way or the
+            // other on a multi-listener deployment.
+            "tls_client_auth".into(),
+            "self_signed_tls_client_auth".into(),
+        ],
         claims_supported: vec![
             "sub".into(),
             "iss".into(),
@@ -100,6 +122,8 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
             // registration's business.
             "urn:ietf:params:oauth:grant-type:token-exchange".into(),
         ],
+        authorization_response_iss_parameter_supported: true,
+        tls_client_certificate_bound_access_tokens: true,
     }
 }
 

@@ -1,0 +1,62 @@
+# OIDF conformance suite, pinned (X5.2).
+#
+# Upstream ships its own compose file; this is a trimmed copy carrying only
+# what a local OP run needs, with the image digest-pinnable via suite.env.
+# Trimmed rather than vendored wholesale because upstream's includes an
+# httpd fronting a hosted deployment and a mongo replica set sized for one —
+# neither of which a laptop iterating on a test plan wants.
+#
+# The suite talks to AXIAM over the host network, so AXIAM is NOT a service
+# here: you bring it up however you normally would (`just run-local`,
+# `just prod-up`, or the benchmark harness's p3-mtls target) and point
+# AXIAM_ISSUER at it. Keeping the system under test out of this file is
+# deliberate — a conformance run must be able to target a digest-pinned
+# release image, which is what §X5.3's submission requires, and that image is
+# not something this file should be choosing.
+
+services:
+  mongodb:
+    # The suite stores test-plan state here. Pinned for the same reason the
+    # suite is: a plan re-run must find the same storage semantics.
+    image: mongo:6.0.14
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  suite:
+    image: ${SUITE_IMAGE:?set SUITE_IMAGE (see conformance/suite.env)}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "${SUITE_PORT:-8442}:8443"
+    environment:
+      # The suite serves itself under a hostname that resolves to 127.0.0.1 by
+      # public DNS (localhost.emobix.co.uk) — that is upstream's documented
+      # local-run arrangement, and it exists because browsers refuse some of
+      # the redirect flows the tests exercise when the host is bare
+      # `localhost`. Not an outbound dependency at run time: only the DNS
+      # lookup leaves the machine, and `/etc/hosts` can serve it offline.
+      - BASE_URL=${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}
+      - MONGODB_URI=mongodb://mongodb:27017/test_suite
+      # No hosted-mode auth: this is a local, single-operator run. Do NOT
+      # expose this port beyond the host — an unauthenticated conformance
+      # suite will happily drive flows against whatever issuer it is given.
+      - FINTECHLABS_BASE_URL=${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}
+    extra_hosts:
+      # So AXIAM_ISSUER can name the host from inside the container on Linux,
+      # where host.docker.internal is not automatic.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsk https://localhost:8443/api/runner/available || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  mongo-data:

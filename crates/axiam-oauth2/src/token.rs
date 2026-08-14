@@ -5,8 +5,9 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token, issue_client_credentials_token,
-    issue_id_token, issue_service_account_client_credentials_token, validate_access_token,
+    generate_refresh_token, hash_refresh_token, issue_access_token_bound,
+    issue_client_credentials_token_bound, issue_id_token,
+    issue_service_account_client_credentials_token, validate_access_token,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::OAuth2Error;
+use crate::mtls::PresentedCertificate;
 use crate::pkce;
 
 /// The single `error_description` every token-endpoint client-authentication
@@ -186,6 +188,49 @@ pub struct IntrospectionResponse {
     /// why RPT lifetime is bounded rather than long.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<Vec<RptPermission>>,
+    /// RFC 8705 §3.3 `cnf` — present only when the introspected token is
+    /// certificate-bound (X5.1).
+    ///
+    /// RFC 8705 requires the authorization server to expose the confirmation
+    /// through introspection, because a resource server doing token
+    /// introspection rather than local JWT validation has no other way to
+    /// learn that the token it is holding is not a bearer token. Omitting it
+    /// would leave every introspecting resource server treating bound tokens
+    /// as unbound — the exact failure the binding exists to prevent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<axiam_auth::token::CnfClaim>,
+}
+
+/// What the token endpoint knows about the **connection** a request arrived
+/// on, as opposed to its body (X5.1).
+///
+/// Exists so `TokenService` can authenticate a client by certificate without
+/// depending on actix, rustls, or the REST layer's extractor types. The REST
+/// handler builds one from `HttpRequest::conn_data::<VerifiedClientCert>()`;
+/// a test builds one from a certificate it generated.
+///
+/// [`Default`] is "no certificate", which is what a plaintext or
+/// server-only-TLS connection legitimately has. Every path that *needs* a
+/// certificate checks for it explicitly; nothing infers authentication from
+/// this type's absence.
+#[derive(Debug, Clone, Default)]
+pub struct TokenRequestContext {
+    /// The client certificate rustls verified during the TLS handshake, if
+    /// this connection carried one.
+    ///
+    /// **Only** ever populated from a verified peer chain. See
+    /// `crate::mtls`'s module docs for why the `X-Client-Certificate` proxy
+    /// header is deliberately not a source here.
+    pub client_certificate: Option<PresentedCertificate>,
+}
+
+impl TokenRequestContext {
+    /// The `x5t#S256` thumbprint of the presented certificate, if any.
+    pub fn certificate_thumbprint(&self) -> Option<&str> {
+        self.client_certificate
+            .as_ref()
+            .map(|c| c.thumbprint_s256.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +348,74 @@ where
                 Ok(())
             }
             ClientSecretVerdict::Mismatch => {
+                Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))
+            }
+        }
+    }
+
+    /// Authenticate a registered client by whichever credential its
+    /// registration says it uses (X5.1).
+    ///
+    /// The **registration** decides, not the request. A client registered for
+    /// `tls_client_auth` is authenticated by its certificate even if it also
+    /// posted a `client_secret`, and a client registered for
+    /// `client_secret_post` is authenticated by its secret even over an mTLS
+    /// connection. Letting the request choose would turn the two methods into
+    /// an OR: an attacker holding either credential could authenticate, which
+    /// is strictly weaker than holding the one the operator registered.
+    ///
+    /// This preserves every ordering property SEC-086 established for the
+    /// secret path — see [`Self::verify_client_secret`] and the callers, where
+    /// the *presence* of a credential is still checked before the client
+    /// lookup so that "no such client" and "client lacks this grant" stay
+    /// indistinguishable.
+    async fn authenticate_client_credential(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        presented_secret: Option<&str>,
+        ctx: &TokenRequestContext,
+    ) -> Result<(), OAuth2Error> {
+        if client.token_endpoint_auth_method.is_mtls() {
+            return crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref());
+        }
+
+        let secret = presented_secret
+            .ok_or_else(|| OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))?;
+        self.verify_client_secret(tenant_id, client, secret).await
+    }
+
+    /// Decide the `cnf` confirmation claim for a token about to be issued
+    /// (X5.1, RFC 8705 §3).
+    ///
+    /// Returns `Ok(None)` for every client that has not asked for binding —
+    /// which is every client that existed before X5.1 — so this is a branch
+    /// predictor's dream and costs nothing on the ordinary path.
+    ///
+    /// When a client *has* asked for binding and no certificate is present,
+    /// this **refuses** rather than issuing an unbound token. Silently
+    /// downgrading would be the worst possible behaviour: the operator
+    /// configured binding, the resource servers were told to expect it, and
+    /// the one request that arrives without a certificate would be the one
+    /// that gets a bearer token.
+    fn certificate_binding_for(
+        &self,
+        client: &OAuth2Client,
+        ctx: &TokenRequestContext,
+    ) -> Result<Option<axiam_auth::token::CnfClaim>, OAuth2Error> {
+        if !crate::fapi::wants_certificate_binding(client) {
+            return Ok(None);
+        }
+        match ctx.certificate_thumbprint() {
+            Some(thumbprint) => Ok(Some(
+                axiam_auth::token::CnfClaim::from_certificate_thumbprint(thumbprint),
+            )),
+            None => {
+                tracing::warn!(
+                    client_id = %client.client_id,
+                    "client requires certificate-bound access tokens but presented no client \
+                     certificate; refusing rather than issuing an unbound token"
+                );
                 Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))
             }
         }
@@ -502,15 +615,21 @@ where
     }
 
     /// Dispatch a token request to the appropriate grant handler.
+    ///
+    /// `ctx` carries what the transport knows (X5.1) — today, the client
+    /// certificate rustls verified during the handshake. Pass
+    /// [`TokenRequestContext::default()`] on a connection that has none; every
+    /// path that requires a certificate checks for it rather than assuming.
     pub async fn exchange(
         &self,
         tenant_id: Uuid,
         req: TokenRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<TokenResponse, OAuth2Error> {
         match req.grant_type.as_str() {
-            "authorization_code" => self.handle_authorization_code(tenant_id, req).await,
-            "client_credentials" => self.handle_client_credentials(tenant_id, req).await,
-            "refresh_token" => self.handle_refresh_token(tenant_id, req).await,
+            "authorization_code" => self.handle_authorization_code(tenant_id, req, ctx).await,
+            "client_credentials" => self.handle_client_credentials(tenant_id, req, ctx).await,
+            "refresh_token" => self.handle_refresh_token(tenant_id, req, ctx).await,
             _ => Err(OAuth2Error::UnsupportedGrantType),
         }
     }
@@ -520,6 +639,7 @@ where
         &self,
         tenant_id: Uuid,
         req: TokenRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<TokenResponse, OAuth2Error> {
         let code = req
             .code
@@ -546,10 +666,20 @@ where
         // grant even after the description was unified everywhere else.
         // `client_credentials` and `refresh_token` already ordered it this
         // way; only this grant did not.
-        let client_secret = req
-            .client_secret
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
+        //
+        // X5.1 widens "presented a client_secret" to "presented *a*
+        // credential", because an mTLS client sends no secret at all. The
+        // widened check is still decidable **before** the lookup — it asks
+        // only what this request carries, never what this client registered —
+        // so SEC-086's property is preserved exactly: a caller with no
+        // credential gets one answer regardless of whether the client id
+        // exists.
+        let client_secret = req.client_secret.as_deref();
+        if client_secret.is_none() && ctx.client_certificate.is_none() {
+            return Err(OAuth2Error::InvalidClient(
+                "client authentication is required".into(),
+            ));
+        }
 
         // Authenticate client
         let client = self
@@ -577,8 +707,15 @@ where
         // lacks this grant" from "no such client" — a second oracle on the
         // same grant, which moving the presence check alone does not close.
         // Both safe grants verify first; this now matches them exactly.
-        self.verify_client_secret(tenant_id, &client, client_secret)
+        //
+        // X5.1: the profile gate runs *after* authentication, for the same
+        // reason. `enforce_token_request` reports a fact about the client's
+        // registration (its profile, its auth method), and reporting that to a
+        // caller who has not proven possession of a credential would be a new
+        // oracle on a path that just spent three comment blocks closing one.
+        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
+        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
 
         // Verify client is authorized for authorization_code grant
         if !client.grant_types.iter().any(|s| s == "authorization_code") {
@@ -634,7 +771,12 @@ where
 
         // Issue access token (include scopes from the authorization code).
         // OAuth2 auth-code flow has no persistent session row — use random jti.
-        let access_token = issue_access_token(
+        //
+        // X5.1: `cnf` is `None` for every client that has not asked for
+        // certificate binding, which makes this byte-identical to what the
+        // pre-X5 call produced.
+        let cnf = self.certificate_binding_for(&client, ctx)?;
+        let access_token = issue_access_token_bound(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
@@ -642,6 +784,7 @@ where
             &self.auth_config,
             uuid::Uuid::new_v4().to_string(),
             axiam_auth::token::AUD_USER,
+            cnf,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -757,16 +900,24 @@ where
         &self,
         tenant_id: Uuid,
         req: TokenRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<TokenResponse, OAuth2Error> {
         let started = std::time::Instant::now();
         let client_id = req
             .client_id
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
-        let client_secret = req
-            .client_secret
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
+        // X5.1: as on the authorization-code grant, "presented a client_secret"
+        // widens to "presented a credential", so an mTLS client that sends no
+        // secret is not turned away before its certificate is ever looked at.
+        // Still decidable from the request alone, so no client-existence
+        // oracle is created.
+        let client_secret = req.client_secret.as_deref();
+        if client_secret.is_none() && ctx.client_certificate.is_none() {
+            return Err(OAuth2Error::InvalidClient(
+                "client authentication is required".into(),
+            ));
+        }
 
         // Service accounts are the other machine principal in AXIAM and live in
         // their own table. Both client-id families are **server-generated** with
@@ -780,6 +931,16 @@ where
         // table where their `client_id` does not exist — an `invalid_client`,
         // exactly as before.
         if client_id.starts_with(SERVICE_ACCOUNT_CLIENT_ID_PREFIX) {
+            // A service account has no `token_endpoint_auth_method` — it is a
+            // different table with a different lifecycle, and its mTLS story is
+            // the device-auth path (`POST /api/v1/auth/device`), not RFC 8705.
+            // So this branch still requires a secret. The error is the generic
+            // one rather than "client_secret is required", because by this
+            // point the caller has named an `sa_…` id and a specific message
+            // would confirm that the id belongs to the service-account family.
+            let Some(client_secret) = client_secret else {
+                return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+            };
             return self
                 .handle_client_credentials_service_account(
                     tenant_id,
@@ -819,12 +980,20 @@ where
         // row additionally costs one SHA-256 and, once, one DB write to
         // migrate; the timing recorded here therefore includes that one-off
         // upgrade for a legacy client's first authentication.
+        //
+        // X5.1: for an mTLS client this stage is a string comparison against
+        // the certificate rustls already verified during the handshake — no
+        // cryptography at all, since the signature check happened once per
+        // connection rather than once per request. That is the mechanical
+        // reason certificate-bound tokens are cheap here, and what
+        // `bench-quick` measures.
         let t_secret_verify = std::time::Instant::now();
         let secret_result = self
-            .verify_client_secret(tenant_id, &client, client_secret)
+            .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await;
         let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
         secret_result?;
+        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
 
         // Verify grant type is allowed
         if !client.grant_types.iter().any(|s| s == "client_credentials") {
@@ -870,12 +1039,14 @@ where
         // Stage 4 — token mint + EdDSA (Ed25519) signature. No refresh token is
         // issued for client_credentials, so there is no persist stage.
         let t_token_mint = std::time::Instant::now();
-        let access_token = issue_client_credentials_token(
+        let cnf = self.certificate_binding_for(&client, ctx)?;
+        let access_token = issue_client_credentials_token_bound(
             client_id,
             tenant_id,
             tenant.organization_id,
             &scopes,
             &self.auth_config,
+            cnf,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -923,6 +1094,7 @@ where
         &self,
         tenant_id: Uuid,
         req: TokenRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<TokenResponse, OAuth2Error> {
         let raw_token = req
             .refresh_token
@@ -936,10 +1108,17 @@ where
         // Authenticate client BEFORE looking up the refresh token to
         // avoid a token-validity oracle (different error for valid vs
         // invalid tokens when client auth fails).
-        let client_secret_val = req
-            .client_secret
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
+        //
+        // X5.1: widened from "a client_secret" to "a credential" so an mTLS
+        // client is not turned away before its certificate is consulted. Still
+        // answered from the request alone, so the oracle this ordering exists
+        // to close stays closed.
+        let client_secret_val = req.client_secret.as_deref();
+        if client_secret_val.is_none() && ctx.client_certificate.is_none() {
+            return Err(OAuth2Error::InvalidClient(
+                "client authentication is required".into(),
+            ));
+        }
 
         let client = self
             .client_repo
@@ -959,8 +1138,9 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
-        self.verify_client_secret(tenant_id, &client, client_secret_val)
+        self.authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
             .await?;
+        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
 
         // Verify client is authorized for refresh_token grant
         if !client.grant_types.iter().any(|s| s == "refresh_token") {
@@ -998,8 +1178,16 @@ where
 
         // Issue new access token.
         // OAuth2 refresh flow has no persistent session row — use random jti.
+        //
+        // X5.1: the binding is re-derived from the certificate presented on
+        // THIS connection, never copied from the token being refreshed. A
+        // refresh is a fresh proof of possession — carrying the old `cnf`
+        // forward would let a client that has lost its certificate keep
+        // renewing tokens bound to it, and would survive a certificate
+        // rotation the operator performed precisely to revoke access.
+        let cnf = self.certificate_binding_for(&client, ctx)?;
         let access_token = if let Some(user_id) = stored.user_id {
-            issue_access_token(
+            issue_access_token_bound(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
@@ -1007,17 +1195,19 @@ where
                 &self.auth_config,
                 uuid::Uuid::new_v4().to_string(),
                 axiam_auth::token::AUD_USER,
+                cnf,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
             // Client-credentials-originated refresh (shouldn't normally
             // happen, but handle gracefully)
-            issue_client_credentials_token(
+            issue_client_credentials_token_bound(
                 client_id,
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
                 &self.auth_config,
+                cnf,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
@@ -1195,6 +1385,11 @@ where
                 iat: Some(claims.iat),
                 token_type: Some("Bearer".into()),
                 permissions: claims.permissions.clone(),
+                // RFC 8705 §3.3 — echoed from the token, like `permissions`.
+                // A resource server that introspects rather than validating
+                // locally learns from this field, and only from this field,
+                // that the token in its hand is not a bearer token.
+                cnf: claims.cnf.clone(),
             });
         }
 
@@ -1231,6 +1426,14 @@ where
                 // no refresh token, precisely so that an RPT cannot be renewed
                 // past the ticket that authorised it.
                 permissions: None,
+                // A refresh token is not sender-constrained in AXIAM: it is an
+                // opaque server-stored value, single-use with rotation, and it
+                // is presented at the token endpoint where the client
+                // re-authenticates. Its constraint is client authentication,
+                // not `cnf`, and the certificate binding of the ACCESS token it
+                // mints is re-derived from that fresh authentication (see
+                // `handle_refresh_token`).
+                cnf: None,
             });
         }
 

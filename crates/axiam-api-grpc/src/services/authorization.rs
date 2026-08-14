@@ -389,6 +389,7 @@ mod tests {
             act: None,
             permissions: None,
             ext_exchange: None,
+            cnf: None,
         });
 
         let svc = AuthorizationServiceImpl::new(make_engine(&db), 2);

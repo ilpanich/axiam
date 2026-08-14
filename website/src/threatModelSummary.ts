@@ -25,9 +25,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 165,
+ "total": 168,
  "open": 23,
- "mitigated": 142,
+ "mitigated": 145,
  "areas": [
   {
    "id": 0,
@@ -44,7 +44,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 16,
+   "total": 18,
    "open": 0
   },
   {
@@ -80,7 +80,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 15,
+   "total": 16,
    "open": 4
   }
  ]

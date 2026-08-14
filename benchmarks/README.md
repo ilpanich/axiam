@@ -139,6 +139,45 @@ just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-mat
 # just repeat=1 targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
 ```
 
+### One question in minutes (`bench-quick`)
+
+`bench-matrix` is hours. `bench-quick` is one A/B, and the two are not
+interchangeable — use it when you need the **direction and rough size** of a
+single effect, not a publishable cell:
+
+```bash
+just target=axiam profile=p3-mtls bench-up
+just target=axiam bench-seed
+just bench-quick
+```
+
+| Use | When |
+|---|---|
+| `bench-matrix` | a number that goes in a comparison table, a README, a plan's claim, or the public archive. Median-of-3, full cross-product, competitors included. |
+| `bench-dry-run` | rehearsing the matrix — does every cell's client actually connect and get the answer it expects? Never a measurement. |
+| `bench-quick` | "did this change cost anything, roughly?" One target, one profile, one short window per arm, no repeats. |
+
+It measures the per-request cost of RFC 8705 certificate-bound access tokens
+(X5.1) as an A/B between two AXIAM clients that differ in exactly one registered
+field, on the same server over the same mTLS connections — so the delta is
+attributable to the binding rather than to mTLS. `quickdur=` (default `45s`) and
+`quickvus=` (default `20`) are the only knobs; everything else is fixed so that
+two people running it run the same thing.
+
+Its second cell — the X1 reactor hook cost — is **conditional and currently does
+not run**: X1's dispatcher exists in `crates/axiam-amqp` but nothing invokes it
+from a request path, so there is no hook on the token path to measure. The
+recipe says so in its output rather than reporting the cost of code that never
+executes.
+
+**`bench-quick` output is not a matrix result and must not be presented as one.**
+The recipe prints what it establishes and what it does not — one unrepeated
+window per arm cannot separate a single-digit delta from run-to-run noise — and
+writes the same text to `results/quick/SUMMARY.md`. Its artifacts are
+deliberately excluded from `bench-report` and `bench-pack`. If a claim anywhere
+rests on a `bench-quick` figure, the claim has to say so, or the matrix has to
+be run.
+
 ### Rehearse the matrix first (`bench-dry-run`)
 
 A full matrix is hours long, and a break in the k6 client contract — a seeded

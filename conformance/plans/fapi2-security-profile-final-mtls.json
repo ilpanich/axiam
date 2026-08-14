@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "OIDF conformance test-plan configuration — FAPI 2.0 Security Profile (Final),",
+    "OpenID Provider, PKI mutual-TLS client authentication variant (X5.2).",
+    "",
+    "Placeholders of the form ${NAME} are substituted by",
+    "conformance/scripts/render-plan.sh from conformance/suite.env, so this file",
+    "is committed with no client ids, no secrets and no host-specific paths. The",
+    "rendered copy lands under conformance/.run/ (gitignored) and is what the",
+    "suite actually reads.",
+    "",
+    "Plan name to select in the suite UI or the API:",
+    "  fapi2-security-profile-final-test-plan",
+    "with variant { client_auth_type: mtls, sender_constrain: mtls,",
+    "               fapi_client_type: plain_oauth, openid: plain_oauth,",
+    "               fapi_request_method: pushed }.",
+    "",
+    "Why 'pushed' rather than 'unsigned': FAPI 2.0 §5.3.1.2 requires PAR, and a",
+    "fapi2-profile AXIAM client is registered require_par=true, so a plan run",
+    "with an unpushed request method would fail every authorization step for a",
+    "reason that is the profile working correctly. See the runbook."
+  ],
+
+  "alias": "axiam-fapi2-mtls",
+  "description": "AXIAM — FAPI 2.0 Security Profile (Final), mTLS client auth + mTLS sender-constraining",
+
+  "server": {
+    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration?tenant_id=${AXIAM_TENANT_ID}"
+  },
+
+  "client": {
+    "client_id": "${CLIENT_MTLS_ID}",
+    "scope": "openid",
+    "certificate": {
+      "cert": "${CLIENT_MTLS_CERT_PEM}",
+      "key": "${CLIENT_MTLS_KEY_PEM}"
+    },
+    "jwks": {
+      "keys": []
+    }
+  },
+
+  "client2": {
+    "client_id": "${CLIENT_SELF_SIGNED_ID}",
+    "scope": "openid",
+    "certificate": {
+      "cert": "${CLIENT_SELF_SIGNED_CERT_PEM}",
+      "key": "${CLIENT_SELF_SIGNED_KEY_PEM}"
+    },
+    "jwks": {
+      "keys": []
+    }
+  },
+
+  "mtls": {
+    "cert": "${CLIENT_MTLS_CERT_PEM}",
+    "key": "${CLIENT_MTLS_KEY_PEM}",
+    "ca": "${AXIAM_CA_PEM}"
+  },
+
+  "mtls2": {
+    "cert": "${CLIENT_SELF_SIGNED_CERT_PEM}",
+    "key": "${CLIENT_SELF_SIGNED_KEY_PEM}",
+    "ca": "${AXIAM_CA_PEM}"
+  },
+
+  "resource": {
+    "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
+  },
+
+  "variant": {
+    "client_auth_type": "mtls",
+    "sender_constrain": "mtls",
+    "fapi_client_type": "plain_oauth",
+    "openid": "plain_oauth",
+    "fapi_request_method": "pushed",
+    "fapi_response_mode": "plain_response"
+  }
+}

@@ -1,0 +1,200 @@
+name: FAPI 2.0 conformance
+
+# X5.5's integration gate: the pinned OpenID Foundation conformance suite, run
+# against a live AXIAM, for the FAPI 2.0 Security Profile (Final) OP test plan.
+#
+# ## Why this is manually triggered and nothing else
+#
+# A full FAPI 2.0 plan is dozens of modules and takes tens of minutes, and
+# several of its modules are *interactive by construction* — they need a browser
+# to complete an authorization, which no unattended runner has. Wiring that into
+# every PR would produce a check that is slow, flaky, and — worse — routinely
+# amber for a reason that is not a defect. A required check nobody trusts is a
+# required check people learn to click past.
+#
+# So: `workflow_dispatch` only. It is run deliberately, before a submission
+# (§X5.3) or after a change to the OAuth2/OIDC surface, and its output is an
+# artifact a human reads. There is no `pull_request` trigger and adding one
+# would be a mistake.
+#
+# ## What it does NOT prove
+#
+# A green run here is NOT a submittable result. §X5.3 requires the certified run
+# to target a **digest-pinned release image**, and this workflow builds from the
+# checked-out tree by default. Point `axiam_image` at a release digest for a run
+# whose artifacts are evidence rather than a smoke test; the report records
+# which was used, so the two can never be confused after the fact.
+#
+# Read `claude_dev/fapi-conformance-runbook.md` before interpreting any output,
+# and its "Known gaps" section before treating green as submission-ready:
+# `private_key_jwt` is not implemented, so the two variants here cover both
+# RFC 8705 mTLS methods rather than both FAPI client-authentication families.
+
+on:
+  workflow_dispatch:
+    inputs:
+      axiam_image:
+        description: >-
+          Digest-pinned AXIAM server image to test (e.g.
+          ghcr.io/ilpanich/axiam/server@sha256:...). Empty builds from this
+          checkout, which is a smoke test and NOT submission evidence.
+        required: false
+        default: ""
+      plan_name:
+        description: "OIDF plan name (override if upstream renames it)"
+        required: false
+        default: "fapi2-security-profile-final-test-plan"
+      module_timeout:
+        description: >-
+          Seconds to wait per module. Interactive modules cannot complete on a
+          runner and will time out; that is expected, and the report says so.
+        required: false
+        default: "180"
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: FAPI 2.0 Security Profile (Final) — both mTLS client-auth variants
+    runs-on: ubuntu-latest
+    # Generous, because the suite is slow and a hung module should surface as a
+    # timeout in the report rather than as a killed job with no artifacts.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install harness prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+          # `just` drives the recipes; the scripts underneath are plain bash and
+          # could be called directly, but going through the same entry points a
+          # human uses is the point — a harness only CI knows how to run is a
+          # harness that breaks silently for everyone else.
+          curl -fsSL https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+
+      - name: Generate throwaway client certificates
+        run: just conformance-certs
+
+      - name: Bring up AXIAM with an mTLS listener
+        env:
+          AXIAM_IMAGE: ${{ inputs.axiam_image }}
+        run: |
+          set -euo pipefail
+          # FAPI 2.0 requires mutual-TLS client authentication and
+          # certificate-bound tokens, so a plain-TLS deployment cannot pass the
+          # plan — it fails at client authentication in EVERY module, which
+          # reads like forty failures and is one configuration problem. The
+          # benchmark harness's p3-mtls profile is the shortest path to a
+          # correctly-configured listener.
+          cd benchmarks
+          if [ -n "${AXIAM_IMAGE}" ]; then
+            echo "::notice::testing digest-pinned image ${AXIAM_IMAGE}"
+            export BENCH_AXIAM_IMAGE="${AXIAM_IMAGE}"
+          else
+            echo "::warning::no axiam_image supplied — building from this checkout. \
+          This run is a smoke test and is NOT valid submission evidence (see §X5.3)."
+            export BUILD_FROM_SOURCE=1
+          fi
+          # The listener must trust the conformance CA, or the tls_client_auth
+          # client's certificate is rejected during the handshake — before AXIAM
+          # sees a request, so AXIAM's own logs show nothing at all.
+          export AXIAM__SERVER__TLS__CLIENT_CA_PATH="${GITHUB_WORKSPACE}/conformance/certs/ca.crt"
+          just target=axiam profile=p3-mtls build="${BUILD_FROM_SOURCE:-0}" bench-up
+          just target=axiam bench-seed
+
+      - name: Start the pinned conformance suite
+        run: just conformance-up
+
+      - name: Register the two fapi2 clients
+        env:
+          AXIAM_ADMIN_TOKEN: ${{ secrets.AXIAM_CONFORMANCE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Both clients are created with profile: "fapi2" and nothing else —
+          # the server refuses the registration unless it also carries PAR, an
+          # mTLS auth method and certificate binding, so a successful
+          # registration is FAPI-shaped by construction rather than by this
+          # workflow remembering to set four fields.
+          just conformance-register
+
+      - name: Run both test plans
+        id: run
+        continue-on-error: true
+        env:
+          CONFORMANCE_PLAN_NAME: ${{ inputs.plan_name }}
+          CONFORMANCE_MODULE_TIMEOUT: ${{ inputs.module_timeout }}
+        # `continue-on-error` so the REPORT step below always runs. A red plan
+        # whose artifacts were never uploaded is a run nobody can act on, and
+        # the job's overall verdict is restored by the final gate step.
+        run: just conformance-run
+
+      - name: Render the report
+        if: always()
+        run: |
+          set -uo pipefail
+          # Deliberately not `set -e`: the reporter exits non-zero on a red
+          # plan, which is information, not a reason to skip the upload.
+          CONFORMANCE_DATE="$(date -u +%Y-%m-%d)" just conformance-report || true
+          {
+            echo "## FAPI 2.0 conformance"
+            echo
+            if [ -n "${{ inputs.axiam_image }}" ]; then
+              echo "Target: \`${{ inputs.axiam_image }}\` (digest-pinned)"
+            else
+              echo "Target: **built from this checkout — smoke test, NOT submission evidence**"
+            fi
+            echo
+            for f in docs/conformance/*.md; do
+              [ -e "$f" ] || continue
+              [ "$(basename "$f")" = "README.md" ] && continue
+              cat "$f"
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload conformance artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: fapi-conformance-${{ github.run_id }}
+          # The rendered reports AND the raw per-module results, because a
+          # submission is built from the suite's own artifacts and a reader
+          # months later needs to be able to re-render them.
+          path: |
+            docs/conformance/
+            conformance/.run/results/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Collect server logs on failure
+        if: failure() || steps.run.outcome == 'failure'
+        run: |
+          cd benchmarks
+          docker compose -f targets/axiam/docker-compose.yml logs --no-color --tail 500 \
+            > "${GITHUB_WORKSPACE}/axiam-server.log" 2>&1 || true
+          echo "::group::axiam-server (last 500 lines)"
+          tail -200 "${GITHUB_WORKSPACE}/axiam-server.log" || true
+          echo "::endgroup::"
+          # AXIAM answers `invalid_client` for EVERY mTLS authentication failure
+          # by design (SEC-086), so the wire response cannot say which one — the
+          # specific reason is only ever in this log.
+
+      - name: Tear down
+        if: always()
+        run: |
+          just conformance-down || true
+          cd benchmarks && just target=axiam bench-down || true
+
+      - name: Gate on the plan result
+        if: always()
+        run: |
+          if [ "${{ steps.run.outcome }}" != "success" ]; then
+            echo "::error::at least one module did not pass — read the report artifact, \
+          failures are listed first"
+            exit 1
+          fi
+          echo "Both plans passed every applicable module."

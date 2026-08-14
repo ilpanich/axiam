@@ -118,6 +118,13 @@ where
             ));
         }
 
+        // 2c. X5.1: under the FAPI 2.0 profile PKCE is required of *every*
+        //     client, confidential ones included (FAPI 2.0 §5.3.1.2). A no-op
+        //     for a `standard` client, which is every client that predates
+        //     X5.1. `S256`-only is already enforced for everybody at step 6,
+        //     so this is the whole of the remaining gap.
+        crate::fapi::enforce_authorization_request(&client, req.code_challenge.as_deref())?;
+
         // 3. Validate response_type (now safe to redirect errors)
         if req.response_type != "code" {
             return Err(OAuth2Error::UnsupportedResponseType);
@@ -496,6 +503,14 @@ mod tests {
             post_logout_redirect_uris: Vec::new(),
             backchannel_logout_uri: None,
             require_par: false,
+            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+            token_endpoint_auth_method:
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

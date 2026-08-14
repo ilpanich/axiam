@@ -973,6 +973,7 @@ dependencies = [
  "totp-rs",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
  "webauthn-rs",
  "zeroize",
@@ -1106,6 +1107,7 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]

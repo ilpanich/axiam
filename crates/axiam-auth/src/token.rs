@@ -144,40 +144,91 @@ pub struct AccessTokenClaims {
     pub cnf: Option<CnfClaim>,
 }
 
-/// RFC 7800 confirmation claim. Only the certificate-thumbprint method is
-/// representable, because it is the only sender-constraining mechanism AXIAM
-/// implements today.
+/// RFC 7800 confirmation claim, carrying either or both of the two
+/// sender-constraining methods AXIAM implements.
 ///
-/// Deliberately a struct with one optional field rather than an enum: RFC 7800
+/// Deliberately a struct of optional fields rather than an enum: RFC 7800
 /// permits several confirmation methods in one claim, and a token that arrived
 /// carrying a method AXIAM does not implement must still round-trip through
 /// `serde` intact rather than fail to decode. What it must *not* do is
-/// validate — see [`CnfClaim::certificate_thumbprint`], which answers `None`
-/// for exactly that case, and the callers that treat `None` as "refuse".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+/// validate — see [`CnfClaim::names_only_known_methods`], which answers `false`
+/// for exactly that case, and [`verify_token_binding`], which treats it as a
+/// refusal.
+///
+/// # Both at once is a conjunction, never a disjunction
+///
+/// A `cnf` carrying both `x5t#S256` and `jkt` means the holder must satisfy
+/// **both**. Reading it as "either will do" would let a client that had asked
+/// for two constraints be used with one — which is strictly weaker than what it
+/// asked for, and is the failure mode of every "check whichever we can" binding
+/// validator.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CnfClaim {
     /// RFC 8705 §3.1 `x5t#S256` — the base64url-encoded (unpadded) SHA-256
     /// digest of the DER-encoded client certificate the token was issued to.
     #[serde(rename = "x5t#S256", default, skip_serializing_if = "Option::is_none")]
     pub x5t_s256: Option<String>,
+    /// RFC 9449 §6.1 `jkt` — the base64url-encoded (unpadded) SHA-256 RFC 7638
+    /// thumbprint of the public key whose DPoP proof was presented at the token
+    /// endpoint.
+    ///
+    /// A token carrying this is usable only by a caller that can sign a fresh
+    /// DPoP proof with the corresponding private key, on every request. That is
+    /// a different cost class from `x5t#S256` — an asymmetric verification per
+    /// request rather than one SHA-256 — and `axiam_oauth2::dpop`'s module docs
+    /// say so with a measured number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
 }
 
 impl CnfClaim {
-    /// Build a certificate-thumbprint confirmation.
+    /// Build a certificate-thumbprint confirmation (RFC 8705 §3.1).
     pub fn from_certificate_thumbprint(thumbprint: impl Into<String>) -> Self {
         Self {
             x5t_s256: Some(thumbprint.into()),
+            jkt: None,
         }
     }
 
-    /// The certificate thumbprint this token is bound to, or `None` when the
-    /// confirmation names some other (unimplemented) method.
-    ///
-    /// A caller that gets `None` from a token that *has* a `cnf` claim is
-    /// looking at a constraint it cannot check, and must refuse the token. It
-    /// must never treat it as unconstrained.
+    /// Build a DPoP key-thumbprint confirmation (RFC 9449 §6).
+    pub fn from_dpop_thumbprint(jkt: impl Into<String>) -> Self {
+        Self {
+            x5t_s256: None,
+            jkt: Some(jkt.into()),
+        }
+    }
+
+    /// Add a DPoP confirmation to an existing one, producing a `cnf` that
+    /// demands both.
+    #[must_use]
+    pub fn with_dpop_thumbprint(mut self, jkt: impl Into<String>) -> Self {
+        self.jkt = Some(jkt.into());
+        self
+    }
+
+    /// The certificate thumbprint this token is bound to, if it names one.
     pub fn certificate_thumbprint(&self) -> Option<&str> {
         self.x5t_s256.as_deref()
+    }
+
+    /// The DPoP key thumbprint this token is bound to, if it names one.
+    pub fn dpop_thumbprint(&self) -> Option<&str> {
+        self.jkt.as_deref()
+    }
+
+    /// Whether this confirmation names at least one method this build can
+    /// check, and no method it cannot.
+    ///
+    /// The second half is what makes the invariant hold. A `cnf` that names
+    /// *some* method a validator understands alongside one it does not is still
+    /// a constraint the validator cannot fully enforce — but AXIAM's
+    /// [`CnfClaim`] can only represent the two it implements, so anything
+    /// unknown deserializes into neither field and this answers `false`. A
+    /// `cnf` naming no method at all — `{}` — also answers `false`, because an
+    /// empty confirmation is not the same as an absent one and reading it as
+    /// "unbound" would let a stripped claim downgrade a token.
+    pub fn names_only_known_methods(&self) -> bool {
+        self.x5t_s256.is_some() || self.jkt.is_some()
     }
 }
 
@@ -872,69 +923,177 @@ pub fn validate_access_token(
     decode_access_token(token, config).map(ValidatedClaims)
 }
 
-/// Enforce a token's sender constraint against the certificate the caller
-/// actually presented on *this* connection (X5.1, RFC 8705 §3.2).
+/// What a caller can actually prove about itself on *this* request (X5.1).
 ///
-/// This is the half of certificate binding that makes the other half worth
+/// A struct rather than two `Option<&str>` parameters because both are
+/// base64url-unpadded SHA-256 digests of the same length: swapping them would
+/// compile, and would mean checking a certificate binding against a DPoP key.
+///
+/// [`Default`] is "proves nothing", which is what an ordinary bearer request
+/// legitimately carries. That default is deliberately the *weakest* value, so a
+/// caller that forgets to populate it fails closed on bound tokens rather than
+/// passing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PresentedProofs<'a> {
+    /// `x5t#S256` of the client certificate rustls verified during the
+    /// handshake — `axiam_oauth2::mtls::thumbprint_s256` produces it.
+    ///
+    /// Only ever derived from a verified peer chain. A value taken from a
+    /// header or a request body would make the whole mechanism decorative,
+    /// which is why `axiam_oauth2::mtls`'s module docs refuse the
+    /// `X-Client-Certificate` proxy header by construction.
+    pub certificate_thumbprint: Option<&'a str>,
+    /// `jkt` of the key that signed a DPoP proof **which has already been
+    /// verified** for this request — `axiam_oauth2::dpop::verify_dpop_proof`
+    /// produces it.
+    ///
+    /// This is the field it is easiest to get catastrophically wrong. It must
+    /// come from a *verified* proof: a `jkt` lifted out of an unverified proof
+    /// header is attacker-controlled, and passing one here turns DPoP into a
+    /// self-signed permission slip.
+    pub dpop_thumbprint: Option<&'a str>,
+}
+
+impl<'a> PresentedProofs<'a> {
+    /// Only a client certificate.
+    pub fn certificate(thumbprint: &'a str) -> Self {
+        Self {
+            certificate_thumbprint: Some(thumbprint),
+            dpop_thumbprint: None,
+        }
+    }
+
+    /// Only a verified DPoP proof.
+    pub fn dpop(jkt: &'a str) -> Self {
+        Self {
+            certificate_thumbprint: None,
+            dpop_thumbprint: Some(jkt),
+        }
+    }
+}
+
+/// Enforce a token's sender constraint against what the caller actually proved
+/// on *this* request (X5.1; RFC 8705 §3.2 and RFC 9449 §7.1).
+///
+/// This is the half of sender-constraining that makes the other half worth
 /// anything. Issuing a `cnf` claim costs an attacker nothing if every resource
 /// server ignores it; the constraint only exists at the point of use.
 ///
-/// The three cases, and why each answers as it does:
+/// # The decision table
 ///
-/// | token `cnf` | presented certificate | result | why |
-/// |---|---|---|---|
-/// | absent | anything | `Ok` | an ordinary bearer token; binding was never claimed, and a resource server must not start demanding certificates from callers holding perfectly valid unbound tokens |
-/// | `x5t#S256` | matching thumbprint | `Ok` | the caller holds the private key for the certificate the token was issued to — that is the whole proof |
-/// | `x5t#S256` | absent, different, or unparseable | `Err` | a bound token in the hands of something that cannot prove it is the intended holder |
-/// | present, no `x5t#S256` | anything | `Err` | the token names a confirmation method this build cannot check, so it cannot be honoured — see [`CnfClaim::certificate_thumbprint`] |
+/// | token `cnf` | `x5t#S256` evidence | `jkt` evidence | result | why |
+/// |---|---|---|---|---|
+/// | absent | — | — | `Ok` | an ordinary bearer token; binding was never claimed, and a resource server must not start demanding proofs from callers holding perfectly valid unbound tokens |
+/// | `x5t#S256` only | matching | — | `Ok` | the caller holds the private key for the certificate the token was issued to |
+/// | `x5t#S256` only | absent, different, or unparseable | — | `Err` | a bound token in the hands of something that cannot prove it is the intended holder |
+/// | `jkt` only | — | matching | `Ok` | the caller signed a fresh DPoP proof with the key the token names |
+/// | `jkt` only | — | absent or different | `Err` | as above, for the DPoP half |
+/// | **both** | matching | matching | `Ok` | a token that named two constraints is honoured only when **both** hold |
+/// | **both** | either one missing or wrong | | `Err` | "whichever we can check" is not a conjunction, and reading it as one would use a token under weaker terms than it was issued under |
+/// | present, naming neither | anything | anything | `Err` | the token names a confirmation method this build cannot check, so it cannot be honoured |
 ///
-/// The last row is the one that is easy to get wrong. A `cnf` claim carrying,
-/// say, a DPoP `jkt` would return `None` from `certificate_thumbprint()`, and
-/// treating that as "unbound" would downgrade a sender-constrained token to a
-/// bearer token exactly when a newer authorization server started issuing a
-/// constraint this validator predates. Fail closed.
+/// The last row is the one that is easy to get wrong, and it is the invariant
+/// the SDK contract's §10.1 rule 9 makes mandatory across all eleven SDKs: **a
+/// `cnf` naming a confirmation method the validator cannot check is refused,
+/// never read as unbound.** Treating an unrecognised confirmation as "no
+/// constraint" downgrades a sender-constrained token to a bearer token exactly
+/// when a newer authorization server has started issuing a constraint this
+/// validator predates — the moment at which failing open is most expensive.
 ///
-/// `presented_thumbprint` is the base64url-unpadded SHA-256 of the DER client
-/// certificate — `axiam_oauth2::mtls::thumbprint_s256` produces it, and the
-/// REST/gRPC layers derive it from the certificate rustls verified during the
-/// handshake. Passing a value from anywhere else (a header, a request body)
-/// would make the whole mechanism decorative.
-pub fn verify_certificate_binding(
+/// An **empty** `cnf` (`{}`) takes that same last row rather than the first. An
+/// absent claim means "never bound"; an empty object means "bound by something
+/// that did not survive the trip", and the difference matters because the
+/// second is what a claim-stripping intermediary produces.
+///
+/// # Ordinary clients
+///
+/// Row one is load-bearing and is asserted by a dedicated regression test. Every
+/// token AXIAM issued before X5.1, and every token it issues to a client that
+/// has never heard of DPoP, carries no `cnf` and therefore returns `Ok` without
+/// any evidence at all. Nothing in this function can make a resource server
+/// start demanding a proof from such a caller.
+pub fn verify_token_binding(
     claims: &AccessTokenClaims,
-    presented_thumbprint: Option<&str>,
+    presented: PresentedProofs<'_>,
 ) -> Result<(), AuthError> {
     let Some(cnf) = claims.cnf.as_ref() else {
         return Ok(());
     };
 
-    let Some(expected) = cnf.certificate_thumbprint() else {
+    if !cnf.names_only_known_methods() {
         return Err(AuthError::TokenInvalid(
             "token carries a confirmation claim naming a method this server cannot verify".into(),
         ));
-    };
-
-    let Some(presented) = presented_thumbprint else {
-        return Err(AuthError::TokenInvalid(
-            "token is certificate-bound but no client certificate was presented".into(),
-        ));
-    };
-
-    // Constant-time for the same reason `axiam_oauth2::mtls` is: the value is
-    // usually public, but the one case where it is not — an attacker probing
-    // which certificate a stolen token is bound to — should not be a
-    // character-at-a-time oracle.
-    let matches: bool = {
-        use subtle::ConstantTimeEq;
-        expected.as_bytes().ct_eq(presented.as_bytes()).into()
-    };
-
-    if matches {
-        Ok(())
-    } else {
-        Err(AuthError::TokenInvalid(
-            "token is bound to a different client certificate than the one presented".into(),
-        ))
     }
+
+    if let Some(expected) = cnf.certificate_thumbprint() {
+        let Some(got) = presented.certificate_thumbprint else {
+            return Err(AuthError::TokenInvalid(
+                "token is certificate-bound but no client certificate was presented".into(),
+            ));
+        };
+        if !thumbprints_match(expected, got) {
+            return Err(AuthError::TokenInvalid(
+                "token is bound to a different client certificate than the one presented".into(),
+            ));
+        }
+    }
+
+    if let Some(expected) = cnf.dpop_thumbprint() {
+        let Some(got) = presented.dpop_thumbprint else {
+            return Err(AuthError::TokenInvalid(
+                "token is DPoP-bound but no verified DPoP proof accompanied the request".into(),
+            ));
+        };
+        if !thumbprints_match(expected, got) {
+            return Err(AuthError::TokenInvalid(
+                "token is bound to a different DPoP key than the one that signed the proof".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Constant-time for the same reason `axiam_oauth2::mtls` is: the value is
+/// usually public, but the one case where it is not — an attacker probing which
+/// certificate or key a stolen token is bound to — should not be a
+/// character-at-a-time oracle.
+fn thumbprints_match(expected: &str, presented: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    expected.as_bytes().ct_eq(presented.as_bytes()).into()
+}
+
+/// [`verify_token_binding`] for a validator that can check a client certificate
+/// and nothing else (X5.1, RFC 8705 §3.2).
+///
+/// Retained because it is a genuinely different capability, not merely an older
+/// spelling: a resource server behind an mTLS listener with no DPoP support can
+/// check `x5t#S256` and cannot check `jkt`. Calling this expresses exactly that,
+/// and — crucially — a `jkt`-bound token reaching it is **refused**, because a
+/// validator that cannot check a constraint must not honour a token that
+/// carries it. That refusal is the whole point of keeping the narrower entry
+/// point rather than quietly widening every caller to the new one.
+pub fn verify_certificate_binding(
+    claims: &AccessTokenClaims,
+    presented_thumbprint: Option<&str>,
+) -> Result<(), AuthError> {
+    if claims
+        .cnf
+        .as_ref()
+        .is_some_and(|c| c.dpop_thumbprint().is_some())
+    {
+        return Err(AuthError::TokenInvalid(
+            "token is DPoP-bound and this validator can only check certificate binding".into(),
+        ));
+    }
+    verify_token_binding(
+        claims,
+        PresentedProofs {
+            certificate_thumbprint: presented_thumbprint,
+            dpop_thumbprint: None,
+        },
+    )
 }
 
 /// Generate a cryptographically random opaque refresh token
@@ -1585,16 +1744,26 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     /// predates.
     #[test]
     fn an_unrecognised_confirmation_method_is_refused_not_ignored() {
-        // A `cnf` object carrying something other than `x5t#S256` — e.g. a
-        // DPoP `jkt` — decodes to a `CnfClaim` with no thumbprint.
-        let cnf: CnfClaim =
-            serde_json::from_str(r#"{"jkt":"0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}"#)
-                .expect("a cnf naming another method must still decode");
-        assert_eq!(cnf.certificate_thumbprint(), None);
+        // A `cnf` naming a method AXIAM does not implement — RFC 7800's `jwe`
+        // encrypted-key confirmation — decodes to a `CnfClaim` with neither
+        // field set. (Until X5.1's second half, `jkt` was the example here;
+        // it is now a method this build *can* check, which is the point of
+        // this change.)
+        for raw in [
+            r#"{"jwe":"eyJhbGciOiJSU0Et...opaque"}"#,
+            // An empty confirmation is not an absent one. It is what a
+            // claim-stripping intermediary leaves behind.
+            r#"{}"#,
+        ] {
+            let cnf: CnfClaim =
+                serde_json::from_str(raw).expect("a cnf naming another method must still decode");
+            assert!(!cnf.names_only_known_methods(), "{raw}");
 
-        let claims = claims_with_cnf(Some(cnf));
-        assert!(verify_certificate_binding(&claims, Some(TP)).is_err());
-        assert!(verify_certificate_binding(&claims, None).is_err());
+            let claims = claims_with_cnf(Some(cnf));
+            assert!(verify_token_binding(&claims, PresentedProofs::default()).is_err());
+            assert!(verify_token_binding(&claims, PresentedProofs::certificate(TP)).is_err());
+            assert!(verify_token_binding(&claims, PresentedProofs::dpop(JKT)).is_err());
+        }
     }
 
     /// The claim must serialize under RFC 8705's exact key. `x5t#S256` is not
@@ -1605,6 +1774,131 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn cnf_serializes_under_the_rfc_8705_key() {
         let json = serde_json::to_string(&CnfClaim::from_certificate_thumbprint(TP)).unwrap();
         assert_eq!(json, format!(r#"{{"x5t#S256":"{TP}"}}"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // X5.1 second half — RFC 9449 DPoP binding
+    // -----------------------------------------------------------------------
+
+    /// A JWK thumbprint of the right shape.
+    const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+    const OTHER_JKT: &str = "YW5vdGhlci1rZXktdGh1bWJwcmludC00My1jaGFycw";
+
+    /// The positive regression test the contract requires of every SDK, and
+    /// which the server owes too: **a client that has never heard of DPoP must
+    /// get exactly the token behaviour it got before.** The likeliest way to
+    /// break DPoP support is a resource-server path that starts demanding a
+    /// proof from every caller, and this is what catches it.
+    #[test]
+    fn an_unbound_token_never_demands_a_dpop_proof() {
+        let claims = claims_with_cnf(None);
+        assert!(verify_token_binding(&claims, PresentedProofs::default()).is_ok());
+        assert!(verify_token_binding(&claims, PresentedProofs::dpop(JKT)).is_ok());
+        assert!(verify_token_binding(&claims, PresentedProofs::certificate(TP)).is_ok());
+        // ...and the narrower entry point agrees, since an unbound token is
+        // within any validator's competence.
+        assert!(verify_certificate_binding(&claims, None).is_ok());
+    }
+
+    #[test]
+    fn a_dpop_bound_token_is_accepted_only_with_its_own_key() {
+        let claims = claims_with_cnf(Some(CnfClaim::from_dpop_thumbprint(JKT)));
+        assert!(verify_token_binding(&claims, PresentedProofs::dpop(JKT)).is_ok());
+        assert!(verify_token_binding(&claims, PresentedProofs::dpop(OTHER_JKT)).is_err());
+        assert!(verify_token_binding(&claims, PresentedProofs::default()).is_err());
+        // A certificate is not a substitute for a proof.
+        assert!(verify_token_binding(&claims, PresentedProofs::certificate(TP)).is_err());
+    }
+
+    /// Both confirmations present is a conjunction. Honouring the token on one
+    /// of the two would use it under weaker terms than it was issued under.
+    #[test]
+    fn a_doubly_bound_token_demands_both_proofs() {
+        let claims = claims_with_cnf(Some(
+            CnfClaim::from_certificate_thumbprint(TP).with_dpop_thumbprint(JKT),
+        ));
+
+        assert!(
+            verify_token_binding(
+                &claims,
+                PresentedProofs {
+                    certificate_thumbprint: Some(TP),
+                    dpop_thumbprint: Some(JKT),
+                }
+            )
+            .is_ok()
+        );
+
+        for weaker in [
+            PresentedProofs::certificate(TP),
+            PresentedProofs::dpop(JKT),
+            PresentedProofs::default(),
+            PresentedProofs {
+                certificate_thumbprint: Some(TP),
+                dpop_thumbprint: Some(OTHER_JKT),
+            },
+            PresentedProofs {
+                certificate_thumbprint: Some(OTHER_TP),
+                dpop_thumbprint: Some(JKT),
+            },
+        ] {
+            assert!(
+                verify_token_binding(&claims, weaker).is_err(),
+                "a doubly-bound token must not be honoured on partial evidence: {weaker:?}"
+            );
+        }
+    }
+
+    /// A validator that can only check certificates must **refuse** a
+    /// DPoP-bound token rather than pass it as unbound. This is rule 9's
+    /// invariant applied to AXIAM's own narrower entry point, and it is the
+    /// behaviour every SDK that cannot verify a proof must copy.
+    #[test]
+    fn a_certificate_only_validator_refuses_a_dpop_bound_token() {
+        let claims = claims_with_cnf(Some(CnfClaim::from_dpop_thumbprint(JKT)));
+        assert!(verify_certificate_binding(&claims, None).is_err());
+        assert!(verify_certificate_binding(&claims, Some(TP)).is_err());
+
+        // ...including when the token also carries a certificate binding it
+        // *could* have checked. Half a conjunction is not the conjunction.
+        let both = claims_with_cnf(Some(
+            CnfClaim::from_certificate_thumbprint(TP).with_dpop_thumbprint(JKT),
+        ));
+        assert!(verify_certificate_binding(&both, Some(TP)).is_err());
+    }
+
+    #[test]
+    fn the_dpop_confirmation_serializes_under_rfc_9449s_key() {
+        let json = serde_json::to_string(&CnfClaim::from_dpop_thumbprint(JKT)).unwrap();
+        assert_eq!(json, format!(r#"{{"jkt":"{JKT}"}}"#));
+
+        let both = serde_json::to_string(
+            &CnfClaim::from_certificate_thumbprint(TP).with_dpop_thumbprint(JKT),
+        )
+        .unwrap();
+        assert_eq!(both, format!(r#"{{"x5t#S256":"{TP}","jkt":"{JKT}"}}"#));
+    }
+
+    #[test]
+    fn a_dpop_bound_token_round_trips_through_a_real_jwt() {
+        let config = test_config();
+        let token = issue_client_credentials_token_bound(
+            "oa_test",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Some(CnfClaim::from_dpop_thumbprint(JKT)),
+        )
+        .expect("issue DPoP-bound token");
+
+        let claims = validate_access_token(&token, &config).expect("validate").0;
+        assert_eq!(
+            claims.cnf.as_ref().and_then(CnfClaim::dpop_thumbprint),
+            Some(JKT)
+        );
+        assert!(verify_token_binding(&claims, PresentedProofs::dpop(JKT)).is_ok());
+        assert!(verify_token_binding(&claims, PresentedProofs::dpop(OTHER_JKT)).is_err());
     }
 
     /// A bound token must survive a real encode/decode round trip with the

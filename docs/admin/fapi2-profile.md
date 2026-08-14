@@ -32,8 +32,8 @@ POST /api/v1/oauth2-clients
 ```
 
 `profile: "fapi2"` is not a label. The server **refuses the registration**
-unless it also carries `require_par`, an mTLS `token_endpoint_auth_method`, and
-`tls_client_certificate_bound_access_tokens`, naming which one is missing:
+unless it also carries `require_par`, a **strong** `token_endpoint_auth_method`,
+and **some** sender-constraining — naming which one is missing:
 
 ```
 400 a fapi2 client must set require_par: FAPI 2.0 §5.3.1.2 requires pushed
@@ -55,8 +55,8 @@ is a well-formed patch and a completely broken client; it is refused.
 |---|---|
 | PAR mandatory | `require_par` forced at registration; `/oauth2/authorize` refuses a direct request |
 | PKCE mandatory, `S256` only | required of confidential clients too under this profile; `S256`-only is already global |
-| Strong client authentication | registration requires an mTLS method |
-| Sender-constrained tokens | registration requires certificate binding |
+| Strong client authentication | registration requires an mTLS method **or** `private_key_jwt` |
+| Sender-constrained tokens | registration requires certificate binding **or** DPoP |
 | `response_type=code` only, no token in any URL | already global — no other response type exists in this server |
 | Strict `redirect_uri` equality | already global — exact match, no prefixes, no wildcards |
 | Authorization code single-use | already global, and guaranteed rather than intended: a guarded update inside a transaction plus a post-commit nonce read-back |
@@ -64,6 +64,180 @@ is a well-formed patch and a completely broken client; it is refused.
 
 Seven of those were already true for every AXIAM client. The profile adds the
 first four and refuses to let the others be relaxed.
+
+### Two onboarding paths, and how to choose
+
+FAPI 2.0 asks two independent questions, and each has two acceptable answers.
+**All four pairings are valid**; the profile does not require the two columns to
+match.
+
+| | mutual TLS | asymmetric JWT |
+|---|---|---|
+| **Client authentication** | `tls_client_auth`, `self_signed_tls_client_auth` | `private_key_jwt` |
+| **Sender-constraining** | `tls_client_certificate_bound_access_tokens` | `dpop_bound_access_tokens` |
+
+What the gate refuses is a client with strong authentication and
+sender-constraining from **neither** — the shape a half-finished migration
+produces.
+
+**Choose mTLS when the client can reach an AXIAM mTLS listener directly.** It is
+cheaper: possession is proved once by the TLS handshake and amortised over every
+request on the connection, so binding costs one SHA-256 per token and nothing at
+all per request. This is the IoT shape AXIAM is built for.
+
+**Choose `private_key_jwt` + DPoP when it cannot.** A client behind a
+TLS-terminating load balancer, an API gateway or a CDN cannot present a client
+certificate to AXIAM — the connection AXIAM sees is the proxy's. Before this
+path existed, such a client had no route to a FAPI registration here at all.
+
+The cost is real and worth stating before you pick: **DPoP verifies an
+asymmetric signature on every single request**, where mTLS binding verifies
+none. If both are available to you, use mTLS.
+
+---
+
+## `private_key_jwt` client authentication (RFC 7523 §2.2)
+
+The second client-authentication family. The client signs a short-lived JWT with
+a private key whose public half AXIAM holds.
+
+```jsonc
+POST /api/v1/oauth2-clients
+{
+  "name": "payments-rp-behind-a-gateway",
+  "redirect_uris": ["https://rp.example/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "scopes": ["openid"],
+
+  "profile": "fapi2",
+  "require_par": true,
+  "token_endpoint_auth_method": "private_key_jwt",
+  "jwks_uri": "https://rp.example/.well-known/jwks.json",   // or "jwks": "{...}"
+  "dpop_bound_access_tokens": true
+}
+```
+
+### Where the keys come from — exactly one source
+
+RFC 7591 §2 permits `jwks` **or** `jwks_uri`, never both. Registering both is
+refused, and so is registering neither:
+
+```
+400 private_key_jwt requires exactly one of jwks or jwks_uri (RFC 7591 §2);
+    2 were registered
+```
+
+Two key sources are two answers to "which keys authenticate this client", and
+the union of them is a credential nobody registered.
+
+| Source | Use it when | What it costs you |
+|---|---|---|
+| `jwks` (inline) | the client's keys change rarely, or you want no outbound fetch at all | rotation is an admin API call |
+| `jwks_uri` | the client publishes and rotates its own keys | AXIAM fetches the URL |
+
+**`jwks_uri` is fetched through the same guard a federated IdP's JWKS is.** That
+means a 1-hour TTL, 24-hour stale-while-revalidate if the client's endpoint is
+down, a 512 KiB body cap, and — this is the one that surprises people — the
+**SSRF guard refuses private and loopback addresses**. A `jwks_uri` pointing at
+`http://10.0.0.5/jwks.json` or `https://localhost/...` will never be fetched,
+and the client will never authenticate. Use `jwks` for an internal client, or
+publish the key set somewhere publicly resolvable.
+
+The URL must also be absolute `https`. A plaintext URL is refused at
+registration, because AXIAM fetches it to obtain the keys that authenticate this
+client and a rewritable credential is not a credential.
+
+### What the client sends
+
+```http
+POST /oauth2/token?tenant_id=...
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+&client_id=oa_...
+&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer
+&client_assertion=eyJhbGciOiJFZERTQSJ9...
+```
+
+The assertion must carry `iss` = `sub` = the `client_id`, an `aud` naming this
+server (either the issuer or the token-endpoint URL — both are accepted, because
+OIDC Core §9 and RFC 7523 §3 disagree about which and refusing either would be
+an interop failure with no security content), a future `exp` no more than an
+hour out, and a **unique `jti`**.
+
+### The rules that will bite you first
+
+1. **`alg` comes from the registered key, not from the assertion header.** A
+   header naming an algorithm the registered key does not use is refused, not
+   reinterpreted. Permitted: `PS256`, `ES256`, `EdDSA`. **`RS256` is refused** —
+   the profile excludes PKCS#1 v1.5 padding, and this is the single most common
+   surprise when onboarding a client that worked against another server.
+2. **A P-384 or P-521 key is refused.** Perfectly good keys, not on the
+   profile's list.
+3. **`jti` is single-use, permanently.** Not "within a window" — a `jti` that
+   has authenticated once never authenticates again. A client that reuses one
+   (some test harnesses do) will authenticate exactly once.
+4. **A `kid` in the header selects, it does not hint.** If the assertion names a
+   `kid`, only the key carrying it is tried.
+
+### Rotation
+
+Publish both keys in the `jwks`/`jwks_uri` during the overlap window; any
+registered key may sign. This is the one place `jwks_uri` is genuinely easier
+than inline: the client rotates without an admin API call.
+
+---
+
+## DPoP sender-constrained tokens (RFC 9449)
+
+The second sender-constraining mechanism, for clients that cannot present a
+certificate. Set `dpop_bound_access_tokens: true` and the client's tokens carry:
+
+```json
+"cnf": { "jkt": "<base64url-unpadded RFC 7638 thumbprint of the client's public key>" }
+```
+
+The token response says `"token_type": "DPoP"`, and the client must then send
+**both** the token and a freshly signed proof on every request:
+
+```http
+GET /api/v1/whoami
+Authorization: DPoP eyJhbGciOiJFZERTQSJ9...
+DPoP: eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6...
+```
+
+### What an operator needs to know
+
+- **Ordinary clients are untouched.** A client without
+  `dpop_bound_access_tokens` still gets `"token_type": "Bearer"` and is never
+  asked for a proof. Turning DPoP on for one client changes nothing for any
+  other.
+- **Proofs are bound to the method and URI.** A proof minted for
+  `POST /oauth2/token` cannot be used on `GET /api/v1/whoami`. The comparison
+  strips query and fragment and normalises nothing else.
+- **Proofs are fresh for 60 seconds, in both directions**, and single-use within
+  that window at the token endpoint. A client with a badly skewed clock will
+  fail every request; this is the first thing to check.
+- **`dpop_require_nonce`** makes the first request of each window a challenge:
+  AXIAM answers `400 use_dpop_nonce` with a `DPoP-Nonce` header, and the client
+  retries with that value in the proof. It costs a round trip, so it is `false`
+  by default. Turn it on when you want proofs to be unusable before the server
+  has spoken.
+- **Both constraints at once is a conjunction.** A client registered with both
+  `tls_client_certificate_bound_access_tokens` and `dpop_bound_access_tokens`
+  gets a `cnf` carrying both, and a resource server must satisfy **both**.
+
+### What DPoP costs, honestly
+
+DPoP verifies an **asymmetric signature on every request**. Certificate binding
+verifies none — the handshake did it once for the whole connection. These are
+different cost classes, not different constants.
+
+`bench_dpop_binding` in `crates/axiam-auth/benches/auth_bench.rs` measures the
+pieces, and `claude_dev/extra-B-track-features.md` §X5.1 publishes what has
+actually been measured — deliberately without a percentage, for the same reason
+the certificate-binding "~1%" headline was withdrawn. **If both mechanisms are
+open to you, mTLS is the cheaper one.**
 
 ---
 
@@ -217,7 +391,8 @@ the signature.
 The **end-to-end** request-level cost has not been measured. Earlier planning
 documents quoted "~1%"; that figure was a prediction, not a measurement, and it
 is withdrawn until `benchmarks/`'s `bench-quick` has been run. Quote the
-microsecond figures above, which are real.
+microsecond figures above, which are real — and note that they are criterion
+micro-benchmarks of the mint in isolation, not a fraction of a request.
 
 ---
 
@@ -241,12 +416,21 @@ started the flow with, on both the success and the error callback.
 
 ## Not implemented
 
-- **`private_key_jwt`** (RFC 7523) client authentication. FAPI 2.0 accepts it or
-  mTLS; AXIAM implements mTLS. This matters for certification scope — see
-  [`claude_dev/fapi-conformance-runbook.md`](../../claude_dev/fapi-conformance-runbook.md).
-- **DPoP** (RFC 9449). FAPI 2.0 accepts it or mTLS certificate binding; AXIAM
-  implements the latter. A client that cannot do mTLS has no route to a
-  sender-constrained token here.
+`private_key_jwt` and DPoP used to be listed here. Both landed on 2026-08-14 and
+have their own sections above. What remains out of scope:
+
+- **FAPI Message Signing** (JARM, signed request objects, signed introspection
+  responses). A separate optional OIDF certification; `response_mode=jwt` is not
+  accepted.
+- **Certificate-bound or DPoP-bound *refresh* tokens.** Only access tokens carry
+  `cnf`.
+- **Sender-constrained token exchange.** An RFC 8693 exchange deliberately does
+  not inherit or mint a `cnf`: the exchanging client is a different party from
+  the subject, so copying the constraint would bind the new token to a key its
+  holder does not have.
+- **A stored, rotating DPoP nonce.** `dpop_require_nonce` issues a fresh nonce
+  with each challenge; AXIAM does not currently keep a per-client nonce to
+  compare a later proof against.
 
 ---
 

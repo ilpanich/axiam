@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 168,
+ "total": 175,
  "open": 23,
- "mitigated": 145,
+ "mitigated": 152,
  "diagrams": [
   {
    "id": 0,
@@ -1907,6 +1907,42 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A confidential client's client_secret leaks — through a log, a CI variable, a config repository or an operator's shell history — and an attacker presents it from an arbitrary host to mint tokens as that client. A shared secret carries no evidence of where it is being used from, so the authorization server cannot distinguish the legitimate client from the thief.",
        "mitigation": "X5.1 adds RFC 8705 mutual-TLS client authentication: a client registered tls_client_auth or self_signed_tls_client_auth authenticates by presenting a certificate rustls verifies during the TLS 1.3 handshake, matched against the registration's subject DN / SAN or its x5t#S256 thumbprint. The private key never leaves the client, so the credential cannot be copied out of a log. The REGISTRATION selects which credential authenticates, never the request, so the two methods can never become an OR an attacker may pick from; and the X-Client-Certificate proxy header the device-auth path accepts is deliberately not a source here, because a client credential must not be assertable by anything that can set a header. Every failure returns one uniform invalid_client description (SEC-086), so client existence stays undecidable to an unauthenticated caller."
+      },
+      {
+       "number": 169,
+       "title": "Client assertion replay (private_key_jwt)",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A private_key_jwt client assertion (RFC 7523 §2.2) is a bearer credential for whoever holds it until it expires. Anything that observes one -- a logging proxy, an APM trace that captures request bodies, a mis-scoped debug dump -- can present it again and authenticate as that client. Freshness alone does not stop this: `exp` only bounds how long the captured assertion stays interesting.",
+       "mitigation": "`jti` is single-use and permanently so. Recording is a CREATE against `oauth2_proof_replay`, whose UNIQUE index over (tenant_id, kind, scope, jti) IS the 'already seen' answer -- there is no read-then-write, so two concurrent copies of one assertion cannot both pass the race #316/#318 closed for authorization codes. Assertion lifetime is additionally capped at 3600 s whether or not the client sent `iat`, so omitting an optional claim cannot buy an unbounded credential. A replay guard that cannot record refuses the authentication rather than failing open."
+      },
+      {
+       "number": 170,
+       "title": "Client assertion minted for another authorization server",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A client that authenticates to several authorization servers signs an assertion for each. An assertion captured at (or by) one server is a valid signature by that client, and a server that does not check `aud` would accept it -- letting a malicious or compromised peer AS authenticate as the client here.",
+       "mitigation": "RFC 7523 §3: `aud` must name this server (its issuer or its token-endpoint URL; both are accepted because OIDC Core §9 and RFC 7523 disagree about which, and refusing either is an interop failure with no security content). `iss` and `sub` must both equal the client_id per OIDC Core §9, so one registered client cannot mint an assertion authenticating as another."
+      },
+      {
+       "number": 171,
+       "title": "Algorithm confusion on a client assertion or DPoP proof",
+       "type": "Spoofing",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Both mechanisms verify a JWS the server did not mint. The classic forgeries are `alg: none` and RSA-public-key-as-HMAC-secret, and both are the same bug: the token told the verifier how to check the token. A verifier that reads `alg` from the JWS header lets an attacker choose the verification path.",
+       "mitigation": "`axiam_oauth2::jose` derives the algorithm from the KEY MATERIAL -- the registered JWK for an assertion, the embedded JWK for a proof -- and then requires the header to agree with what the key already decided. A key declaring an `alg` inconsistent with its material is refused rather than reinterpreted. Only PS256, ES256 and EdDSA are permitted; RS256 and symmetric keys are refused explicitly. `none` is unreachable twice over: jsonwebtoken::Algorithm has no such variant, and the permitted list would not contain it if it did."
+      },
+      {
+       "number": 172,
+       "title": "DPoP proof replay",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A DPoP proof (RFC 9449) travels in a request header on every request, so it is observed by strictly more infrastructure than a client assertion is. A captured proof replayed within its freshness window would let the captor obtain or use a sender-constrained token without holding the private key -- which is the entire property DPoP exists to provide.",
+       "mitigation": "Layered, because no single layer is sufficient. (1) `iat` must be within 60 s in both directions. (2) `htm`/`htu` bind the proof to one method and one URI, compared with query and fragment stripped and nothing else normalised. (3) `ath` binds it to one access token, so a proof cannot be re-aimed at another token held by the same key. (4) `jti` is recorded single-use at the token endpoint through the same UNIQUE-index guard the client assertion uses, with the row expiring exactly at the end of the freshness window. (5) `dpop_require_nonce` optionally makes a proof unusable before the server has spoken. KNOWN RESIDUAL: the resource-server path in `axiam-api-rest`'s extractor is synchronous and does NOT record `jti`, so within the 60 s window a proof for that exact method, URI and token could be presented twice there. Documented in the extractor and in contract §21.7.2; closing it means moving the check into middleware that can await."
       }
      ],
      "open": 0
@@ -2020,6 +2056,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Plaintext client secrets in the database — or in a Debug or trace line — are directly reusable credentials.",
        "mitigation": "Secrets are stored HMAC-SHA256 hashed and returned once at creation; secret-bearing structs carry manual Debug impls that redact them (SEC-067 / SECHRD-09)."
+      },
+      {
+       "number": 173,
+       "title": "SSRF via a registered jwks_uri",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A `private_key_jwt` client may register a `jwks_uri` that AXIAM fetches on demand to obtain the keys that authenticate it. That is an operator- or client-supplied URL the server will retrieve: pointed at a link-local metadata endpoint, an internal admin service or a loopback port, it turns client registration into a request forgery primitive against the server's own network. A DNS name that resolves publicly at registration and privately at fetch time (rebinding) defeats a naive validate-then-fetch check.",
+       "mitigation": "The fetch goes through `axiam_federation::jwks_cache::JwksCache`, the SAME guarded path a federated IdP's JWKS uses -- not a bare reqwest::get. That guard (`ssrf::guarded_fetch`, SEC-054/SECHRD-02) resolves the host, rejects private, loopback and link-local addresses, and PINS the validated IP into the connection, which is what closes the rebinding TOCTOU. A 512 KiB body cap bounds the response. Registration additionally refuses a jwks_uri that is not absolute https, so the operator hears about the mistake while onboarding. Reusing one guard rather than writing a second is deliberate: two guards are two chances for one to miss a fix."
+      },
+      {
+       "number": 174,
+       "title": "Availability coupling to a client's JWKS endpoint",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A client registered with `jwks_uri` cannot authenticate if AXIAM cannot fetch its key set. Naively that makes every token request depend on a third party's uptime, and makes the token endpoint's latency a function of somebody else's TLS handshake.",
+       "mitigation": "The shared JWKS cache serves keys for a 1-hour TTL without any HTTP, and serves STALE keys for a further 24 hours when the client's endpoint is unreachable rather than failing the authentication. An operator who wants no outbound dependency at all registers the key set inline as `jwks`; the operator guide says which to choose and why."
       }
      ],
      "open": 0
@@ -2498,12 +2552,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 18,
+   "total": 24,
    "open": 0,
    "bySeverity": {
-    "High": 10,
-    "Medium": 6,
-    "Critical": 1,
+    "High": 14,
+    "Medium": 7,
+    "Critical": 2,
     "Low": 1
    }
   },
@@ -5637,6 +5691,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Open",
        "description": "The SDKs are published to seven public registries (crates.io, npm, PyPI, Maven Central, NuGet, Packagist, Go modules). A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.",
        "mitigation": "Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical package names in the SDK contract so integrators can verify what they installed."
+      },
+      {
+       "number": 175,
+       "title": "Sender-constrained token downgraded to a bearer token by a validator that cannot check `cnf`",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "With two confirmation methods now in use (`x5t#S256` and `jkt`), a resource server or SDK will eventually meet a `cnf` it does not understand -- an older SDK meeting a `jkt`, or any validator meeting a future method. The natural-looking implementation ('no x5t#S256 field, therefore unbound') silently converts a sender-constrained token back into a bearer token at exactly the moment a newer server has started issuing a constraint the validator predates. The same failure appears as 'check whichever confirmation we can' on a token that names both.",
+       "mitigation": "`axiam_auth::token::verify_token_binding` refuses a `cnf` naming no method it can check, INCLUDING an empty object, and treats two confirmations as a conjunction rather than a disjunction. The narrower `verify_certificate_binding` is retained for validators that genuinely cannot verify a proof, and it REFUSES a jkt-bound token rather than passing it. SDK contract §10.1 rule 9 makes the same behaviour normative for all eleven SDKs and requires both the negative tests and a positive regression test that an UNBOUND token is still accepted with no evidence at all -- because the opposite failure, demanding a proof from every caller, would break every existing deployment."
       }
      ],
      "open": 1
@@ -6192,10 +6255,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 16,
+   "total": 17,
    "open": 4,
    "bySeverity": {
-    "High": 9,
+    "High": 10,
     "Medium": 5,
     "Critical": 2
    }

@@ -381,11 +381,13 @@ pub async fn token<C: Connection + Clone>(
         return handle_uma_ticket(tenant_id, form, &state, &authz).await;
     }
 
-    match state
-        .token_service
-        .exchange(tenant_id, form, &token_request_context(&req))
-        .await
-    {
+    let ctx = token_request_context(&req).with_assertion_from(&form);
+    let ctx = match dpop_from_request(&req, &state, tenant_id, ctx).await {
+        Ok(ctx) => ctx,
+        Err(response) => return response,
+    };
+
+    match state.token_service.exchange(tenant_id, form, &ctx).await {
         Ok(resp) => {
             let exchange_us = started.elapsed().as_micros() as u64;
 
@@ -483,7 +485,153 @@ fn token_request_context(req: &HttpRequest) -> TokenRequestContext {
     };
     TokenRequestContext {
         client_certificate: Some(PresentedCertificate::from_der(&verified.der)),
+        ..TokenRequestContext::default()
     }
+}
+
+/// The header a DPoP proof arrives in (RFC 9449 §4).
+const DPOP_HEADER: &str = "DPoP";
+
+/// The response header carrying a nonce challenge (RFC 9449 §8).
+const DPOP_NONCE_HEADER: &str = "DPoP-Nonce";
+
+/// Verify the `DPoP` header, if one is present, and fold the result into the
+/// token-endpoint context (X5.1, RFC 9449 §4.3).
+///
+/// Two properties this function exists to hold, both of which are easy to lose
+/// by writing the obvious thing instead:
+///
+/// 1. **A proof that fails verification is an error, not an absence.** Returning
+///    a context with `dpop_proof: None` for a *bad* proof would be silently
+///    equivalent to not sending one — so a client that sent a forged proof would
+///    get whatever an unbound client gets. The `Err` arm is what stops that.
+/// 2. **An absent header is not an error here.** Whether this particular client
+///    needed a proof is `fapi::enforce_token_request`'s question and
+///    `certificate_binding_for`'s, both of which read the *registration*. Making
+///    the decision here would require loading the client twice, and would put
+///    the "does this client need a proof" rule in two places.
+///
+/// The `jti` is recorded on success, through the same `UNIQUE`-index guard the
+/// client-assertion path uses. A proof whose `jti` cannot be recorded is
+/// refused rather than accepted: failing open would turn a database blip into
+/// an unlimited replay window.
+async fn dpop_from_request<C: Connection + Clone>(
+    req: &HttpRequest,
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    mut ctx: TokenRequestContext,
+) -> Result<TokenRequestContext, HttpResponse> {
+    use axiam_core::repository::{ProofKind, ProofReplayRepository};
+    use axiam_oauth2::dpop::{self, DpopExpectation};
+
+    let Some(raw) = req
+        .headers()
+        .get(DPOP_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(ctx);
+    };
+
+    // RFC 9449 §4.3 step 2: more than one DPoP header is a malformed request,
+    // not a choice of proofs. Refusing rather than taking the first is what
+    // stops a request-smuggling intermediary from deciding which proof counts.
+    if req.headers().get_all(DPOP_HEADER).count() > 1 {
+        return Err(dpop_error_response(
+            "invalid_dpop_proof",
+            "a request may carry at most one DPoP header",
+            None,
+        ));
+    }
+
+    let htu = req.full_url().to_string();
+    let expect = DpopExpectation {
+        htm: req.method().as_str(),
+        htu: &htu,
+        // The nonce a rotating deployment would compare against is not stored
+        // per client today; `dpop_require_nonce` is a per-client switch that
+        // makes the *first* request of a session a challenge, and the client
+        // then echoes the nonce this server issued in the challenge. Wiring a
+        // stored, rotating nonce is a deliberate non-goal of this pass, and the
+        // absence is what `expected_nonce: None` says.
+        expected_nonce: None,
+        require_nonce: false,
+        access_token: None,
+        now: chrono::Utc::now().timestamp(),
+        max_age_secs: dpop::DEFAULT_PROOF_MAX_AGE_SECS,
+    };
+
+    let verified = match dpop::verify_dpop_proof(raw, &expect) {
+        Ok(v) => v,
+        Err(e) if e.is_nonce_challenge() => {
+            return Err(dpop_error_response(
+                e.error_code(),
+                "a DPoP nonce is required",
+                Some(dpop::new_nonce()),
+            ));
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "DPoP proof verification failed at the token endpoint");
+            return Err(dpop_error_response(
+                e.error_code(),
+                "the DPoP proof could not be verified",
+                None,
+            ));
+        }
+    };
+
+    match state
+        .proof_replay_repo
+        .insert_proof_jti(
+            tenant_id,
+            ProofKind::DpopProof,
+            &verified.jkt,
+            &verified.jti,
+            verified.replay_expiry(dpop::DEFAULT_PROOF_MAX_AGE_SECS),
+        )
+        .await
+    {
+        Ok(()) => {}
+        Err(axiam_core::error::AxiamError::ReplayDetected) => {
+            tracing::warn!(jkt = %verified.jkt, "a DPoP proof was replayed; refusing");
+            return Err(dpop_error_response(
+                "invalid_dpop_proof",
+                "this DPoP proof has already been used",
+                None,
+            ));
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "could not record a DPoP proof's jti; refusing rather than accepting a proof \
+                 that cannot be made single-use"
+            );
+            return Err(dpop_error_response(
+                "invalid_dpop_proof",
+                "the DPoP proof could not be verified",
+                None,
+            ));
+        }
+    }
+
+    ctx.dpop_proof = Some(verified);
+    Ok(ctx)
+}
+
+/// RFC 9449 §7.1 error response, optionally carrying a nonce challenge.
+fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) -> HttpResponse {
+    let mut builder = HttpResponse::BadRequest();
+    builder
+        .append_header(("Cache-Control", "no-store"))
+        .append_header(("Pragma", "no-cache"));
+    if let Some(nonce) = nonce {
+        builder.append_header((DPOP_NONCE_HEADER, nonce));
+    }
+    builder.json(serde_json::json!({
+        "error": error,
+        "error_description": description,
+    }))
 }
 
 /// Append an `oauth2.client_auth_failed` audit entry, fire-and-forget.

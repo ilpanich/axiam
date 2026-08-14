@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 168 |
-| **Mitigated / Open** | 145 / 23 |
+| **Threats identified** | 175 |
+| **Mitigated / Open** | 152 / 23 |
 | **Owner** | ilpanich |
 
 ---
@@ -526,7 +526,7 @@ Bearer values placed in query strings end up in access logs, browser history and
 
 Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores.
 
-*16 threats — 1 critical, 8 high, 6 medium, 1 low; 0 open.*
+*24 threats — 2 critical, 14 high, 7 medium, 1 low; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -548,6 +548,12 @@ Authorization Code with PKCE, client credentials and refresh grants; consent, in
 | T-164 | authorization codes (single-use) <br/>*Store* | T | Two concurrent redemptions of one authorization code | High | Mitigated |
 | T-166 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | Stolen client credential replayed from anywhere on the network | High | Mitigated |
 | T-168 | redirect with code <br/>*Flow* | S | Authorization-server mix-up delivers an honest server's code to an attacker's token endpoint | High | Mitigated |
+| T-169 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | Client assertion replay (private_key_jwt) | High | Mitigated |
+| T-170 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | Client assertion minted for another authorization server | High | Mitigated |
+| T-171 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | Algorithm confusion on a client assertion or DPoP proof | Critical | Mitigated |
+| T-172 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | DPoP proof replay | High | Mitigated |
+| T-173 | Client registration & secret rotation <br/>*Process* | I | SSRF via a registered jwks_uri | High | Mitigated |
+| T-174 | Client registration & secret rotation <br/>*Process* | D | Availability coupling to a client's JWKS endpoint | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -677,6 +683,48 @@ A confidential client's `client_secret` leaks — through a log, a CI variable, 
 A client configured against more than one authorization server receives an authorization response on a redirect URI shared between them. A bare `code`+`state` response names no sender, so an attacker controlling one of those servers can arrange for a code minted by an honest server to be redeemed at the attacker's token endpoint, or the reverse. The client's own `state` check does not help: the state is the client's, and it matches.
 
 > X5.1 implements RFC 9207 — every AXIAM authorization response carries an `iss` parameter naming the issuer, and discovery advertises `authorization_response_iss_parameter_supported: true`. It is emitted for **every** client regardless of profile, and on the **error** redirect as well as the success one: mix-up is the attack a client does not know it is under, so gating it on a setting would mean protection only where somebody remembered; and one variant of the attack works by injecting an error response, so a client that validates `iss` on success and skips it on failure has left ajar the door it just closed. Contract 1.15 §21.4 requires SDKs implementing the §12 relying-party flow to compare it against the issuer the flow began with. **Residual risk sits with the relying party**: a client that ignores the parameter gains nothing from it, which is why §21.4 is written as a SHOULD that any SDK talking to more than one issuer should treat as a MUST.
+
+**T-169 — Client assertion replay (private_key_jwt)**  
+`/oauth2/token (code, refresh, client credentials)` (Process) · Spoofing · High · Mitigated
+
+A `private_key_jwt` client assertion (RFC 7523 §2.2) is a bearer credential for whoever holds it until it expires. Anything that observes one — a logging proxy, an APM trace that captures request bodies, a mis-scoped debug dump — can present it again and authenticate as that client. Freshness alone does not stop this: `exp` only bounds how long the captured assertion stays interesting.
+
+> `jti` is single-use and permanently so. Recording is a `CREATE` against `oauth2_proof_replay`, whose `UNIQUE` index over `(tenant_id, kind, scope, jti)` **is** the "already seen" answer — there is no read-then-write, so two concurrent copies of one assertion cannot both pass the race #316/#318 closed for authorization codes. Assertion lifetime is additionally capped at 3600 s whether or not the client sent `iat`, so omitting an optional claim cannot buy an unbounded credential. A replay guard that cannot record refuses the authentication rather than failing open.
+
+**T-170 — Client assertion minted for another authorization server**  
+`/oauth2/token (code, refresh, client credentials)` (Process) · Spoofing · High · Mitigated
+
+A client that authenticates to several authorization servers signs an assertion for each. An assertion captured at (or by) one server is a valid signature by that client, and a server that does not check `aud` would accept it — letting a malicious or compromised peer AS authenticate as the client here.
+
+> RFC 7523 §3: `aud` must name this server (its issuer or its token-endpoint URL; both are accepted because OIDC Core §9 and RFC 7523 disagree about which, and refusing either is an interop failure with no security content). `iss` and `sub` must both equal the `client_id` per OIDC Core §9, so one registered client cannot mint an assertion authenticating as another.
+
+**T-171 — Algorithm confusion on a client assertion or DPoP proof**  
+`/oauth2/token (code, refresh, client credentials)` (Process) · Spoofing · Critical · Mitigated
+
+Both mechanisms verify a JWS the server did not mint. The classic forgeries are `alg: none` and RSA-public-key-as-HMAC-secret, and both are the same bug: the token told the verifier how to check the token. A verifier that reads `alg` from the JWS header lets an attacker choose the verification path.
+
+> `axiam_oauth2::jose` derives the algorithm from the **key material** — the registered JWK for an assertion, the embedded JWK for a proof — and then requires the header to agree with what the key already decided. A key declaring an `alg` inconsistent with its material is refused rather than reinterpreted. Only `PS256`, `ES256` and `EdDSA` are permitted; `RS256` and symmetric keys are refused explicitly. `none` is unreachable twice over: `jsonwebtoken::Algorithm` has no such variant, and the permitted list would not contain it if it did.
+
+**T-172 — DPoP proof replay**  
+`/oauth2/token (code, refresh, client credentials)` (Process) · Spoofing · High · Mitigated
+
+A DPoP proof (RFC 9449) travels in a request header on every request, so it is observed by strictly more infrastructure than a client assertion is. A captured proof replayed within its freshness window would let the captor obtain or use a sender-constrained token without holding the private key — which is the entire property DPoP exists to provide.
+
+> Layered, because no single layer is sufficient. (1) `iat` must be within 60 s in both directions. (2) `htm`/`htu` bind the proof to one method and one URI, compared with query and fragment stripped and nothing else normalised. (3) `ath` binds it to one access token, so a proof cannot be re-aimed at another token held by the same key. (4) `jti` is recorded single-use at the token endpoint through the same `UNIQUE`-index guard the client assertion uses, with the row expiring exactly at the end of the freshness window. (5) `dpop_require_nonce` optionally makes a proof unusable before the server has spoken. **Known residual:** the resource-server path in `axiam-api-rest`'s extractor is synchronous and does **not** record `jti`, so within the 60 s window a proof for that exact method, URI and token could be presented twice there. Documented in the extractor and in contract §21.7.2; closing it means moving the check into middleware that can await.
+
+**T-173 — SSRF via a registered jwks_uri**  
+`Client registration & secret rotation` (Process) · Information disclosure · High · Mitigated
+
+A `private_key_jwt` client may register a `jwks_uri` that AXIAM fetches on demand to obtain the keys that authenticate it. That is an operator- or client-supplied URL the server will retrieve: pointed at a link-local metadata endpoint, an internal admin service or a loopback port, it turns client registration into a request-forgery primitive against the server's own network. A DNS name that resolves publicly at registration and privately at fetch time (rebinding) defeats a naive validate-then-fetch check.
+
+> The fetch goes through `axiam_federation::jwks_cache::JwksCache`, the **same** guarded path a federated IdP's JWKS uses — not a bare `reqwest::get`. That guard (`ssrf::guarded_fetch`, SEC-054/SECHRD-02) resolves the host, rejects private, loopback and link-local addresses, and **pins the validated IP into the connection**, which is what closes the rebinding TOCTOU. A 512 KiB body cap bounds the response. Registration additionally refuses a `jwks_uri` that is not absolute `https`, so the operator hears about the mistake while onboarding. Reusing one guard rather than writing a second is deliberate: two guards are two chances for one to miss a fix.
+
+**T-174 — Availability coupling to a client's JWKS endpoint**  
+`Client registration & secret rotation` (Process) · Denial of service · Medium · Mitigated
+
+A client registered with `jwks_uri` cannot authenticate if AXIAM cannot fetch its key set. Naively that makes every token request depend on a third party's uptime, and makes the token endpoint's latency a function of somebody else's TLS handshake.
+
+> The shared JWKS cache serves keys for a 1-hour TTL without any HTTP, and serves **stale** keys for a further 24 hours when the client's endpoint is unreachable rather than failing the authentication. An operator who wants no outbound dependency at all registers the key set inline as `jwks`; the operator guide says which to choose and why.
 
 </details>
 
@@ -1445,7 +1493,7 @@ SurrealDB's in-memory datastore does not reliably arbitrate the write-write conf
 
 The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.
 
-*15 threats — 2 critical, 8 high, 5 medium; 4 open.*
+*17 threats — 2 critical, 10 high, 5 medium; 4 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1465,6 +1513,7 @@ The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#
 | T-147 | sdks/CONTRACT.md, openapi.json, proto/ <br/>*Store* | T | Contract weakened without review | Medium | Mitigated |
 | T-148 | Public package registries <br/>*Store* | T | Compromised release pipeline publishes a backdoored SDK | Critical | Open |
 | T-149 | install SDK package <br/>*Flow* | T | Unpinned SDK dependency pulls a malicious transitive update | High | Mitigated |
+| T-175 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Sender-constrained token downgraded to a bearer token by a validator that cannot check `cnf` | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1539,7 +1588,14 @@ An operator turns on certificate-bound access tokens (RFC 8705 §3) and the serv
 
 Note where this threat lives. Issuing the claim is the easy half and the server does it; the mechanism's entire security value depends on the **relying party**, which is why this is filed against SDK token verification rather than against the token service.
 
-> Contract 1.15 makes the check normative for all eleven SDKs (§10.1 rule 9): a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one. The rule is written as a four-row table whose last row is exactly the subtle failure above — a `cnf` naming an unimplemented method MUST be refused, never read as unconstrained — and the presented thumbprint MUST come from the transport, never from a caller-supplied header, or the mechanism is decorative for a different reason. Server-side, `axiam_auth::token::verify_certificate_binding` implements that table and is the reference; introspection exposes `cnf` (RFC 8705 §3.3) so an introspecting resource server cannot disagree with a locally-validating one. The contract additionally requires a *positive* regression test — an **unbound** token is still accepted with or without a certificate — because the likeliest wrong implementation of this rule is one that starts demanding certificates from every caller and breaks every existing deployment. Per-SDK conformance is verified in each SDK repository.
+> Contract 1.15 makes the check normative for all eleven SDKs (§10.1 rule 9): a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one. The rule is written as a four-row table whose last row is exactly the subtle failure above — a `cnf` naming an unimplemented method MUST be refused, never read as unconstrained — and the presented thumbprint MUST come from the transport, never from a caller-supplied header, or the mechanism is decorative for a different reason. Server-side, `axiam_auth::token::verify_certificate_binding` implements that table and is the reference; introspection exposes `cnf` (RFC 8705 §3.3) so an introspecting resource server cannot disagree with a locally-validating one. The contract additionally requires a *positive* regression test — an **unbound** token is still accepted with or without a certificate — because the likeliest wrong implementation of this rule is one that starts demanding certificates from every caller and breaks every existing deployment. Per-SDK conformance is verified in each SDK repository. **T-175 is the generalisation of this threat once a second confirmation method exists**, and is where the widened rule lives.
+
+**T-175 — Sender-constrained token downgraded to a bearer token by a validator that cannot check `cnf`**  
+`SDK token verification (JWKS cache, iss/aud)` (Process) · Elevation of privilege · High · Mitigated
+
+T-167 anticipated this in its second paragraph, as a hypothetical: a validator meeting a `cnf` naming some *other* confirmation method. With DPoP landed there are now two methods in circulation, so it is no longer hypothetical — an SDK built against contract 1.15 will meet a `jkt` the first time an operator turns DPoP on. The natural-looking implementation ("no `x5t#S256` field, therefore unbound") silently converts a sender-constrained token back into a bearer token at exactly that moment. The same failure appears in a second guise on a token that names **both** confirmations: "check whichever one we can" honours the token under weaker terms than it was issued under.
+
+> `axiam_auth::token::verify_token_binding` refuses a `cnf` naming no method it can check — **including an empty object**, because an absent claim means "never bound" while an empty one means "bound by something that did not survive the trip" — and treats two confirmations as a **conjunction** rather than a disjunction. The narrower `verify_certificate_binding` is deliberately retained for validators that genuinely cannot verify a proof, and it **refuses** a `jkt`-bound token rather than passing it; that refusal is the reason for keeping the narrower entry point rather than widening every caller to the new one. Contract 1.16 §10.1 rule 9 makes the same behaviour normative for all eleven SDKs, widening the four-row table to ten and adding a supported "we decline to verify proofs" posture (§21.7.3) whose only requirement is that declining means *rejecting*, never accepting as bearer. The positive regression test is widened too: an **unbound** token must still be accepted with no certificate and no proof, because demanding a proof from every caller remains the most likely way to implement this wrongly.
 
 **T-144 — HMAC verification present but inoperative**  
 `SDK AMQP consumer (HMAC verify, nonce)` (Process) · Spoofing · Critical · Mitigated

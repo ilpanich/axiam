@@ -62,12 +62,12 @@ use axiam_db::{
     SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealPushedAuthRequestRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealProofReplayRepository, SurrealPushedAuthRequestRepository, SurrealReactorRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -715,6 +715,9 @@ async fn main() -> std::io::Result<()> {
     let federation_config_repo = SurrealFederationConfigRepository::new(pool.handle_for_repo());
     let federation_link_repo = SurrealFederationLinkRepository::new(pool.handle_for_repo());
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(pool.handle_for_repo());
+    // X5.1 — the single-use `jti` store shared by RFC 7523 client assertions
+    // and RFC 9449 DPoP proofs.
+    let proof_replay_repo = SurrealProofReplayRepository::new(pool.handle_for_repo());
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
@@ -1714,6 +1717,7 @@ async fn main() -> std::io::Result<()> {
         federation_config_repo: federation_config_repo.clone(),
         federation_link_repo: federation_link_repo.clone(),
         assertion_replay_repo: assertion_replay_repo.clone(),
+        proof_replay_repo: proof_replay_repo.clone(),
         federation_login_state_repo: federation_login_state_repo.clone(),
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),

@@ -529,20 +529,26 @@ what B5 delivers:
 | Requirement | Status | Work |
 |---|---|---|
 | PAR, mandatory for FAPI clients | B5 (parent) | gate `require_par` on the FAPI client profile |
-| Client auth: `private_key_jwt` **or** mTLS | **mTLS landed**, `private_key_jwt` absent | mTLS done, both RFC 8705 methods (`tls_client_auth` matching a registered subject DN / SAN, `self_signed_tls_client_auth` matching a registered `x5t#S256`). `private_key_jwt` (RFC 7523) **not landed** — see the conformance runbook's "Known gaps": §X5.4's letter currently promises both variants and is ahead of the implementation |
-| Sender-constrained tokens: mTLS certificate binding (`cnf.x5t#S256`, RFC 8705) **or** DPoP | **landed** (mTLS half) | mTLS binding implemented first — the certificate is already verified in-process by the handshake, so issuance adds no cryptography beyond one SHA-256. **Measured cost, see below — the earlier "~1%" figure was a prediction and is withdrawn until `bench-quick` runs.** DPoP (RFC 9449) second, for non-mTLS clients: not landed |
-| Resource servers verify the binding | **server side landed**, SDK fan-out pending | `cnf` exposed via introspection (RFC 8705 §3.3) and `axiam_auth::token::verify_certificate_binding` for local validation. A `cnf` naming a method the validator cannot check is refused, never read as unbound. SDK middleware (§10.1) is contract 1.15's fan-out |
+| Client auth: `private_key_jwt` **or** mTLS | **both landed** | **Both families complete.** mTLS: both RFC 8705 methods (`tls_client_auth` matching a registered subject DN / SAN, `self_signed_tls_client_auth` matching a registered `x5t#S256`). `private_key_jwt` (RFC 7523 §2.2 / OIDC Core §9): registered `jwks` **or** `jwks_uri` (RFC 7591 §2 — exactly one), signature verified under the *registered* key with `alg` taken from the key rather than the header, `iss`/`sub`/`aud`/`exp` enforced per RFC 7523 §3, and a single-use `jti` decided by a `UNIQUE` index violation. `jwks_uri` is fetched through `axiam_federation::jwks_cache::JwksCache` — the same TTL, stale-while-revalidate and SEC-054 SSRF guard a federated IdP's JWKS goes through, because it is the same threat surface. **§X5.4's letter needs no amendment**: its scope sentence promising both variants is now accurate as drafted |
+| Sender-constrained tokens: mTLS certificate binding (`cnf.x5t#S256`, RFC 8705) **or** DPoP | **both landed** | mTLS binding landed first — the certificate is already verified in-process by the handshake, so issuance adds no cryptography beyond one SHA-256. DPoP (RFC 9449) now landed too: `cnf.jkt`, proof verification at the token endpoint and at resource-server validation, the `DPoP` token type, and the `DPoP-Nonce` challenge path. **The two are in different cost classes and the measured figures below say so; the earlier "~1%" headline remains withdrawn** |
+| Resource servers verify the binding | **server side landed**, SDK fan-out contract 1.16 | `cnf` exposed via introspection (RFC 8705 §3.3 / RFC 9449 §6.1) and `axiam_auth::token::verify_token_binding` for local validation — the successor to `verify_certificate_binding`, handling a `cnf` carrying `jkt`, `x5t#S256`, both, or neither. **Both present is a conjunction**; **neither is a refusal, not a pass.** The narrower `verify_certificate_binding` is retained for a validator that genuinely cannot check a proof, and it *refuses* a `jkt`-bound token rather than passing it. SDK middleware (§10.1 rule 9) is contract 1.16's fan-out |
 | RFC 9207 `iss` in authz responses | **landed** | emitted on every authorization response, success and error alike, for every client — not gated on the profile, because mix-up is the attack a client does not know it is under |
 | Authorization code single-use, strict redirect_uri equality, `response_type=code` only, no token in any URL | partially verified | audit + tests; enforce strictly under the FAPI profile |
 | ID token / JWT algs: PS256/ES256/EdDSA only, no `none`, keys ≥ 2048 | EdDSA already | conformance-tightening pass + tests |
 | Refresh-token & code lifetimes, `exp` bounds per profile | mostly | profile-driven config bundle |
 
-#### What the binding actually costs (measured 2026-08-14)
+#### What sender-constraining actually costs (measured 2026-08-14)
 
 The row above originally claimed certificate-bound tokens cost **~1%** and made
 that a headline — *certificate-bound tokens at IoT prices*. That number was
 never measured. It has now been measured as far as this environment allows, and
 the claim is corrected rather than the measurement.
+
+**Every number in this subsection is a criterion micro-benchmark measured
+in-process.** None of them is an end-to-end measurement, and none of them may be
+turned into a percentage of a request. That rule is the whole reason this
+subsection exists, and the DPoP figures added below are held to it exactly as
+the mTLS ones are.
 
 **Measured** (criterion, in-process, `cargo bench -p axiam-auth`; the bench is
 `bench_certificate_binding` in `crates/axiam-auth/benches/auth_bench.rs`):
@@ -580,6 +586,57 @@ has no docker daemon and no k6. Until it is:
   micro-benchmark cited;
 - and note that `bench-quick` itself yields an indicative single-window number,
   not a matrix cell. A headline belongs to `bench-matrix`.
+
+##### DPoP is a different cost class, and the docs should say so with a number
+
+`bench_dpop_binding` (same file, added with X5.1's second half) is the
+counterpart A/B. It exists because the two sender-constraining mechanisms are
+**not** interchangeable on cost:
+
+| Operation | Class | What pays for it |
+|---|---|---|
+| mTLS binding, per request | one SHA-256 | the handshake already proved possession, once, for the whole connection |
+| DPoP, per request | **one asymmetric signature verification** | there is no connection to amortise over; every request carries a freshly signed proof |
+
+The bench measures four cells: the DPoP-bound mint
+(`issue_access_token_bound` with a `cnf.jkt`), the resource-server check
+(`verify_token_binding`), the RFC 7638 JWK thumbprint, and an Ed25519 JWS
+verification.
+
+**The numbers are not published here yet, and that is deliberate.** `cargo bench
+-p axiam-auth` has not been run in this environment for the second half — the
+disk-quota rules in `CLAUDE.md` make a criterion run across the workspace
+expensive, and publishing a figure this document has not seen produced would be
+the exact mistake the `~1%` withdrawal above exists to prevent a repeat of.
+What *is* established without running anything, because it is a property of the
+mechanisms rather than of a measurement:
+
+- the mint cost of a `jkt` confirmation is the same shape as an `x5t#S256` one
+  (one more claim inside the same signed payload, ~50 bytes), so the ~3 µs delta
+  measured above is the right order for it too;
+- the resource-server check is the same constant-time string comparison, ~0.07 µs;
+- and the per-request signature verification is **new work that certificate
+  binding does not do at all**. An Ed25519 verify is conventionally on the order
+  of tens of microseconds — an order of magnitude above everything else in this
+  table — but *this tree has not measured it*, so no figure is asserted.
+
+Two further honesty notes about the bench itself, both recorded in its doc
+comment:
+
+1. The signature cell is a **lower bound**. `axiam-auth` may not depend on
+   `axiam-oauth2` (it sits below it), so the bench performs the verification with
+   the same `jsonwebtoken` call `verify_dpop_proof` makes, with the decoding key
+   prepared *outside* the loop. The real path additionally parses the header,
+   builds a `DecodingKey` from the embedded JWK, computes the thumbprint
+   (measured separately) and checks six claims.
+2. `benchmarks/`'s `bench-quick` is still the thing that would settle the
+   end-to-end question, for DPoP as for mTLS, and it still has not been run —
+   the environment has neither a docker daemon nor k6.
+
+**The defensible public claim**, therefore: *certificate binding adds no
+per-request asymmetric cryptography; DPoP adds one signature verification per
+request. A client that can do mTLS should.* No percentage, from either half,
+until `bench-quick` runs.
 
 One design change came directly out of setting up this A/B: the X.509 parse that
 extracts a subject DN and SANs is now **lazy** (`PresentedCertificate::identity`)

@@ -12,7 +12,8 @@ use std::hint::black_box;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::password::{hash_password, verify_password};
 use axiam_auth::token::{
-    AUD_USER, CnfClaim, issue_access_token, issue_access_token_bound, verify_certificate_binding,
+    AUD_USER, CnfClaim, PresentedProofs, issue_access_token, issue_access_token_bound,
+    verify_certificate_binding, verify_token_binding,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use uuid::Uuid;
@@ -211,11 +212,164 @@ fn bench_certificate_binding(c: &mut Criterion) {
     });
 }
 
+/// The DPoP counterpart to [`bench_certificate_binding`] (X5.1 second half).
+///
+/// This benchmark exists because the two sender-constraining mechanisms are in
+/// **different cost classes**, and the X5.1 write-up should say so with a number
+/// rather than an adjective:
+///
+/// * mTLS binding pays one SHA-256 per request, because the expensive part —
+///   proving possession of the certificate's private key — happened during the
+///   TLS handshake and is amortised over every request on the connection.
+/// * DPoP has no connection to amortise over. Every request carries a freshly
+///   signed proof, so every request pays an **asymmetric signature
+///   verification**.
+///
+/// # What these cells are, precisely
+///
+/// Every number here is a **criterion micro-benchmark measured in process**, not
+/// an end-to-end measurement. That distinction is the one §X5.1's "What the
+/// binding actually costs" subsection exists to enforce, after a `~1%` headline
+/// that had never been measured had to be withdrawn. No percentage of a request
+/// may be derived from these figures: this tree has not measured what fraction
+/// of a token request the mint represents, and `benchmarks/`'s `bench-quick` is
+/// the thing that would settle it.
+///
+/// The signature cell is additionally a **lower bound**, and is labelled as one.
+/// `axiam-auth` may not depend on `axiam-oauth2` (it sits below it), so the
+/// verification is performed here with the same `jsonwebtoken` call
+/// `axiam_oauth2::dpop::verify_dpop_proof` makes, with the decoding key
+/// prepared outside the loop. The real path additionally parses the header,
+/// builds a `DecodingKey` from the embedded JWK, computes the RFC 7638
+/// thumbprint (measured separately below) and checks six claims. Add the
+/// thumbprint cell to this one and you have most of it; do not report the
+/// signature cell alone as "the cost of DPoP".
+fn bench_dpop_binding(c: &mut Criterion) {
+    use jsonwebtoken::jwk::{Jwk, ThumbprintHash};
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+
+    let (private_pem, public_pem) = test_keypair();
+    let config = bench_config();
+    let (user_id, tenant_id, org_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let scopes: Vec<String> = vec!["read".into(), "write".into()];
+
+    // A JWK thumbprint of the right shape, standing in for the proof key's.
+    let jkt = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+
+    // --- the mint ---------------------------------------------------------
+    //
+    // Directly comparable to `bench_certificate_binding`'s A/B: the same
+    // function, the same token, one extra claim of the same size. If these two
+    // differ meaningfully, the difference is the claim key, not the mechanism.
+    c.bench_function("issue_access_token_bound (DPoP-bound)", |b| {
+        b.iter(|| {
+            issue_access_token_bound(
+                black_box(user_id),
+                black_box(tenant_id),
+                black_box(org_id),
+                black_box(&scopes),
+                black_box(&config),
+                Uuid::new_v4().to_string(),
+                AUD_USER,
+                Some(CnfClaim::from_dpop_thumbprint(jkt)),
+            )
+            .unwrap()
+        })
+    });
+
+    // --- the resource-server check ----------------------------------------
+    let bound_claims = {
+        let token = issue_access_token_bound(
+            user_id,
+            tenant_id,
+            org_id,
+            &scopes,
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Some(CnfClaim::from_dpop_thumbprint(jkt)),
+        )
+        .unwrap();
+        axiam_auth::token::validate_access_token(&token, &config)
+            .unwrap()
+            .0
+    };
+    c.bench_function("verify_token_binding (jkt, resource-server check)", |b| {
+        b.iter(|| {
+            verify_token_binding(
+                black_box(&bound_claims),
+                black_box(PresentedProofs::dpop(jkt)),
+            )
+            .unwrap();
+        })
+    });
+
+    // --- the part that is genuinely a different cost class -----------------
+    //
+    // One Ed25519 JWS verification, which is what a DPoP proof costs per
+    // request and what certificate binding does NOT pay at all.
+    let encoding = EncodingKey::from_ed_pem(private_pem.as_bytes()).unwrap();
+    let decoding = DecodingKey::from_ed_pem(public_pem.as_bytes()).unwrap();
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ProofClaims {
+        jti: String,
+        htm: String,
+        htu: String,
+        iat: i64,
+    }
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some("dpop+jwt".into());
+    let proof = encode(
+        &header,
+        &ProofClaims {
+            jti: Uuid::new_v4().to_string(),
+            htm: "POST".into(),
+            htu: "https://as.example/oauth2/token".into(),
+            iat: chrono::Utc::now().timestamp(),
+        },
+        &encoding,
+    )
+    .unwrap();
+
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    c.bench_function(
+        "dpop proof signature verification (Ed25519 JWS, key prepared — LOWER BOUND)",
+        |b| {
+            b.iter(|| {
+                decode::<ProofClaims>(
+                    black_box(&proof),
+                    black_box(&decoding),
+                    black_box(&validation),
+                )
+                .unwrap()
+            })
+        },
+    );
+
+    // The other per-request cost the real path pays and this bench would
+    // otherwise hide: turning the proof's embedded JWK into the `jkt` that is
+    // compared against `cnf`.
+    let jwk: Jwk = serde_json::from_str(
+        r#"{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#,
+    )
+    .unwrap();
+    c.bench_function(
+        "jwk_thumbprint (RFC 7638, SHA-256 over an Ed25519 JWK)",
+        |b| b.iter(|| black_box(&jwk).thumbprint(ThumbprintHash::SHA256).unwrap()),
+    );
+}
+
 criterion_group!(
     benches,
     bench_hash_password,
     bench_verify_password,
     bench_issue_access_token,
-    bench_certificate_binding
+    bench_certificate_binding,
+    bench_dpop_binding
 );
 criterion_main!(benches);

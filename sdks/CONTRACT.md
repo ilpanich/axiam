@@ -838,16 +838,28 @@ would never have honoured.
 | 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`; one guarding a **machine-facing** resource server SHOULD expect `axiam:m2m`, which is what *every* service-account token now carries — both the client-credentials grant and the mTLS device path (§12.1). |
 | 7 | clock skew | Rules 2 and 3 MAY allow a **small, named, documented** leeway (RECOMMENDED 60 s). It MUST be a named constant, not an inline literal, and MUST NOT be operator-configurable to an unbounded value. |
 | 8 | subject of the decision | The guard MUST decide on **the caller's credential and no other**. When that credential fails any rule above, the guard MUST reject. It MUST NOT retry, refresh, or fall back to a *different* credential — in particular not the SDK client's own session — and MUST NOT admit the request under any identity other than the one the caller presented. |
-| 9 | `cnf` | **A token carrying `cnf` is not a bearer token, and MUST NOT be accepted as one.** When the claim is present the guard MUST verify the sender constraint, or reject. See the normative rules below. |
+| 9 | `cnf` | **A token carrying `cnf` is not a bearer token, and MUST NOT be accepted as one.** When the claim is present the guard MUST verify **every** sender constraint it names, or reject. See the normative rules below. |
 
-**Rule 9 — sender-constrained tokens (contract 1.15, RFC 8705 §3 / RFC 7800).**
+**Rule 9 — sender-constrained tokens (contract 1.15; extended for DPoP in
+contract 1.16. RFC 8705 §3 / RFC 9449 §6 / RFC 7800).**
 
-AXIAM can issue **certificate-bound** access tokens: a client registered with
-`tls_client_certificate_bound_access_tokens` receives tokens carrying
+AXIAM can issue sender-constrained access tokens under **two** mechanisms, and a
+token may carry either or both:
 
 ```json
 "cnf": { "x5t#S256": "<base64url-unpadded SHA-256 of the DER client certificate>" }
+"cnf": { "jkt":      "<base64url-unpadded RFC 7638 SHA-256 thumbprint of the DPoP public key>" }
 ```
+
+* `x5t#S256` (RFC 8705 §3) comes from a client registered with
+  `tls_client_certificate_bound_access_tokens`. The caller proves possession by
+  completing a TLS handshake with the certificate — which the transport has
+  already done by the time the guard runs.
+* `jkt` (RFC 9449) comes from a client registered with
+  `dpop_bound_access_tokens`. The caller proves possession by **signing a fresh
+  DPoP proof on every request**, which the guard must verify itself. That is a
+  materially larger obligation than the certificate case, and §21.7 is where it
+  is spelled out.
 
 The claim's presence changes what the token *is*. An ordinary AXIAM access token
 is a bearer credential — whoever holds it may use it. A token with `cnf` names a
@@ -856,22 +868,41 @@ holds that key has silently converted it back into a bearer token, discarding
 the entire protection the operator turned on. That is why this is a rule and not
 a recommendation.
 
-An SDK guard MUST behave exactly as follows:
+An SDK guard MUST behave exactly as follows. "Evidence" means a certificate the
+transport verified for this connection, or a DPoP proof **the SDK has itself
+verified** per §21.7 — never one it has merely received:
 
-| Token's `cnf` | Certificate the caller presented on **this** connection | Guard MUST |
-|---|---|---|
-| absent | anything | **accept** (subject to rules 1–8) |
-| `x5t#S256` present | a certificate whose `x5t#S256` equals it | **accept** (subject to rules 1–8) |
-| `x5t#S256` present | a different certificate, or none | **reject** |
-| present, but with no `x5t#S256` | anything | **reject** |
+| Token's `cnf` | `x5t#S256` evidence | `jkt` evidence | Guard MUST |
+|---|---|---|---|
+| absent | — | — | **accept** (subject to rules 1–8) |
+| `x5t#S256` only | a certificate whose `x5t#S256` equals it | — | **accept** (subject to rules 1–8) |
+| `x5t#S256` only | a different certificate, or none | — | **reject** |
+| `jkt` only | — | a verified proof whose key thumbprint equals it | **accept** (subject to rules 1–8) |
+| `jkt` only | — | a different key, an unverified proof, or none | **reject** |
+| `jkt` only | anything | the SDK cannot verify DPoP proofs at all | **reject** |
+| **both** | matching certificate | matching verified proof | **accept** (subject to rules 1–8) |
+| **both** | either half missing or wrong | | **reject** |
+| present, naming neither | anything | anything | **reject** |
+| present, but an empty object `{}` | anything | anything | **reject** |
 
-The last row is the one that is easy to get wrong and the one that matters most.
-A `cnf` naming a confirmation method the SDK does not implement — a DPoP `jkt`,
-say — MUST be treated as *an unverifiable constraint*, never as *no constraint*.
-An SDK that reads "no `x5t#S256`, therefore unbound" downgrades a
-sender-constrained token to a bearer token the moment a newer AXIAM issues a
-confirmation that SDK predates. **Fail closed**, consistently with every other
-rule in this section.
+Three rows carry the weight:
+
+1. **`jkt` only, and the SDK cannot verify DPoP proofs → reject.** This is not a
+   deficiency to route around; it is the rule. An SDK whose role is
+   resource-server-only and which has not implemented §21.7 MUST refuse
+   `jkt`-bound tokens and MUST say so in its README. It MUST NOT accept them as
+   bearer tokens, and it MUST NOT accept them on the strength of the proof's
+   *presence* without verifying it.
+2. **Both present is a conjunction, never a disjunction.** A token that named two
+   constraints was issued under two, and honouring it on one uses it under
+   weaker terms than the operator configured. "Check whichever we can" is the
+   characteristic bug of a binding validator and is forbidden.
+3. **`cnf` naming no method the SDK knows → reject**, including an empty object.
+   An absent claim means "never bound"; an empty or unrecognised one means
+   "bound by something that did not survive the trip", and reading it as
+   unconstrained downgrades a sender-constrained token exactly when a newer
+   AXIAM has started issuing a confirmation the SDK predates. **Fail closed**,
+   consistently with every other rule in this section.
 
 Normative details:
 
@@ -900,15 +931,38 @@ Normative details:
    available. The thumbprint is usually public, so this is defence in depth
    rather than load-bearing — but it costs nothing and matches the discipline
    §10.1 applies elsewhere.
+6. **`jkt` is the RFC 7638 JWK thumbprint**, SHA-256, base64url without
+   padding — 43 characters, the same shape and encoding as `x5t#S256`, and
+   therefore trivially confusable with it. An SDK MUST NOT compare a `jkt`
+   against a certificate thumbprint or vice versa. Where the language permits,
+   the two SHOULD be distinct types or at minimum distinctly named parameters;
+   two same-shaped strings in adjacent positional parameters is a swap that
+   compiles.
+7. **A `jkt` comparison input MUST come from a proof the SDK verified.** A
+   thumbprint computed from the JWK in an *unverified* proof header is
+   attacker-supplied: anyone can mint a proof naming their own key. Taking it
+   without checking the signature turns DPoP into a self-signed permission slip.
+   §21.7 lists what "verified" means.
+8. **`cnf` from introspection carries `jkt` too** (RFC 9449 §6.1). Rule 9's
+   detail 4 applies unchanged: a local-verification SDK and an introspecting SDK
+   must not disagree about whether a token is a bearer token.
 
 **Required negative tests** (in addition to those listed below): a bound token
 presented with **no** certificate; a bound token presented with a **different**
-certificate; a token whose `cnf` carries a non-`x5t#S256` method. And one
-positive regression test that matters more than it looks: **an unbound token
-MUST still be accepted with or without a certificate present.** Rule 9 must not
-become a requirement that every caller present a certificate — that would break
-every existing deployment, and it is the most likely way to implement this rule
-wrongly.
+certificate; a token whose `cnf` carries a method the SDK does not implement; a
+token whose `cnf` is an empty object. For contract 1.16, additionally: a
+`jkt`-bound token presented **without** a proof; a `jkt`-bound token presented
+with a proof signed by a **different** key; and — for an SDK that does not
+implement proof verification — a `jkt`-bound token that is **rejected rather
+than accepted as a bearer token**.
+
+And one positive regression test that matters more than all of them: **an
+unbound token MUST still be accepted with or without a certificate and with or
+without a DPoP proof present.** Rule 9 must not become a requirement that every
+caller present a proof — that would break every existing deployment, and it
+remains the most likely way to implement this rule wrongly. Contract 1.16
+widens the ways to get it wrong without widening the rule: a client that has
+never heard of DPoP must get exactly the behaviour it got before.
 
 **Rule 8 is about control flow, not claims.** Rules 1–7 ask *"is this token
 good?"*; rule 8 asks *"is this the token the decision is about?"*. A guard can
@@ -3151,15 +3205,138 @@ skips it on failure has left ajar the door it just closed.
 |---|---|---|
 | `authorization_response_iss_parameter_supported` | `true` | §21.4 |
 | `tls_client_certificate_bound_access_tokens` | `true` | The server can issue bound tokens. Whether a *given* client receives them is that client's registration and is deliberately not discoverable — this document is scoped to the server, and a per-client answer here would leak one client's posture to every reader. |
-| `token_endpoint_auth_methods_supported` | now includes `tls_client_auth`, `self_signed_tls_client_auth` | Advertised unconditionally; whether an mTLS listener is reachable is a deployment's listener configuration, discovered at connect time. |
+| `token_endpoint_auth_methods_supported` | includes `tls_client_auth`, `self_signed_tls_client_auth`, and (contract 1.16) `private_key_jwt` | Advertised unconditionally; whether an mTLS listener is reachable is a deployment's listener configuration, discovered at connect time. `private_key_jwt` needs nothing from the listeners at all. |
+| `dpop_signing_alg_values_supported` | `["PS256", "ES256", "EdDSA"]` (contract 1.16) | RFC 9449 §5.1. Its **presence** is what says DPoP is supported — the RFC defines no separate boolean. Note the omission of `RS256`: a client library defaulting to RSA-PKCS#1 will be refused, and this list is where it should find that out. |
 
 ### §21.6 What is NOT in this contract version
 
-- **`private_key_jwt`** (RFC 7523) client authentication: not implemented
-  server-side. Do not add SDK support for it against this server.
-- **DPoP** (RFC 9449): not implemented. `cnf` will only ever carry `x5t#S256`
-  from this server — but see §10.1 rule 9's last table row for why an SDK must
-  still fail closed on a `cnf` it does not recognise rather than assuming that.
+Contract 1.15 listed `private_key_jwt` and DPoP here as absent server-side. Both
+landed in contract 1.16; §21.7 and §21.8 replace those two entries. What remains
+out of scope:
+
+- **FAPI Message Signing** (JARM, signed request objects, signed introspection
+  responses): a separate optional OIDF certification and out of scope for this
+  pass. `response_mode=jwt` is not accepted by this server.
+- **Certificate-bound *refresh* tokens.** Only access tokens carry `cnf`.
+- **Sender-constrained token exchange.** RFC 8693 exchange deliberately does not
+  inherit or mint a `cnf` — the exchanging client is a different party from the
+  subject, so copying the constraint would bind the new token to a key its
+  holder does not have. An SDK MUST NOT synthesise one.
+
+### §21.7 DPoP sender-constrained tokens (contract 1.16, RFC 9449)
+
+**This section is normative for the resource-server role and informative for the
+client role.** The normative part is small and it is already stated: §10.1 rule
+9's table. This section says what "verify a DPoP proof" means, so that an SDK
+which chooses to implement it does so correctly, and so that one which does not
+knows exactly what it is declining.
+
+#### §21.7.1 What a DPoP-bound request looks like
+
+```http
+GET /api/v1/whoami HTTP/1.1
+Host: rs.example
+Authorization: DPoP eyJhbGciOiJFZERTQSJ9...        <- the access token, scheme DPoP not Bearer
+DPoP: eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6...          <- a proof, freshly signed for THIS request
+```
+
+Two consequences an SDK guard MUST handle:
+
+1. **The scheme is `DPoP`, not `Bearer`.** A guard that only ever splits on
+   `Bearer ` will not find the token at all. Scheme comparison MUST be
+   case-insensitive (RFC 9110 §11.1).
+2. **The token endpoint's response says `"token_type": "DPoP"`.** A client that
+   hard-codes `Bearer` when building its own outbound `Authorization` header will
+   be refused by every DPoP-aware resource server.
+
+#### §21.7.2 Verifying a proof (normative for any SDK that claims to)
+
+An SDK that verifies DPoP proofs MUST perform **all** of the following. Partial
+verification is worse than none, because it produces a guard that reports
+success:
+
+| # | Check | Why |
+|---|---|---|
+| 1 | `typ` header is exactly `dpop+jwt` (case-insensitive) | Without it, an access token or ID token signed by the same key is replayable as a proof |
+| 2 | `alg` is `PS256`, `ES256` or `EdDSA`, **taken from the embedded `jwk`, not believed from the header** | `alg: none` and RSA-public-key-as-HMAC-secret are both "the token told the verifier how to check the token" |
+| 3 | The header carries a public `jwk`, and the signature verifies under it | |
+| 4 | The `jwk` carries **no private key material** (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`) — reject if it does | RFC 9449 §4.3. Many JWK libraries silently drop these when parsing into a public-key type, so the check MUST be made against the raw header JSON |
+| 5 | `htm` equals the request method | |
+| 6 | `htu` equals the request URI **with query and fragment removed**, compared without further normalisation | A normalising comparison is where two unequal URIs become equal |
+| 7 | `iat` is within a small window of now, in **both** directions (RECOMMENDED 60 s, a named constant) | |
+| 8 | `jti` is present, non-empty, and **single-use within that window** | Freshness bounds the window; the `jti` guard is what makes the window unusable. An SDK that cannot store `jti` MUST document that it does not prevent replay within the freshness window |
+| 9 | `ath` equals the base64url-unpadded SHA-256 of the access token | Without it, a proof captured on one request can be re-aimed at another token held by the same key |
+| 10 | The `jkt` (RFC 7638 thumbprint of the `jwk`) equals the token's `cnf.jkt` | This is the step that ties the proof to the token; the other nine are what make the proof mean anything |
+
+A server may answer `use_dpop_nonce` with a `DPoP-Nonce` response header. A
+**client**-role SDK SHOULD retry once with the supplied nonce in the proof's
+`nonce` claim; retrying more than once on the same nonce is a loop, not a retry,
+and §16's policy applies. A **resource-server**-role SDK is not required to
+issue nonces.
+
+#### §21.7.3 Declining is a supported answer
+
+Client-side proof *generation* is a per-language judgement call. An SDK whose
+role is resource-server-only, or whose language lacks a usable JOSE
+implementation for the three permitted algorithms, MAY decline to implement this
+section. Declining means, exactly:
+
+- `jkt`-bound tokens are **rejected**, per §10.1 rule 9 (never accepted as
+  bearer tokens);
+- the SDK's README says so, in the section that documents token validation; and
+- the required negative test for "a `jkt`-bound token is rejected" is present.
+
+What declining does **not** mean is shipping a stub that returns "verified".
+§21.9's per-SDK table records which SDKs implement §21.7.2 and which decline.
+
+### §21.8 `private_key_jwt` client authentication (contract 1.16, RFC 7523 §2.2)
+
+**Informative.** The server now accepts `private_key_jwt` as the second FAPI
+client-authentication family. A client registers `token_endpoint_auth_method:
+"private_key_jwt"` plus **exactly one** of `jwks` (inline) or `jwks_uri`
+(RFC 7591 §2 permits at most one), and authenticates by posting:
+
+| Parameter | Value |
+|---|---|
+| `client_assertion_type` | `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` |
+| `client_assertion` | a JWT with `iss` = `sub` = `client_id`, `aud` = the issuer or the token endpoint URL, a future `exp` within 3600 s, and a unique `jti` |
+
+Signed with `PS256`, `ES256` or `EdDSA`. The server takes the algorithm from the
+**registered key**, not the assertion header, so an assertion whose header
+disagrees with the registered key is refused rather than reinterpreted. The
+`jti` is single-use.
+
+This is optional for every SDK: the client role may keep using
+`client_secret_post` or mTLS. An SDK that implements it MUST NOT default the
+`aud` to anything — an assertion minted for another authorization server is a
+cross-AS replay, and guessing the audience is how one gets minted by accident.
+
+### §21.9 Per-SDK DPoP posture
+
+Each SDK records here whether it implements §21.7.2 proof verification, proof
+generation, both, or neither. "Neither" is a supported answer (§21.7.3); an
+unrecorded row is not.
+
+| SDK | Verifies proofs (RS role) | Generates proofs (client role) |
+|---|---|---|
+| rust | yes | yes |
+| typescript | yes | yes |
+| python | yes | yes |
+| go | yes | yes |
+| java | yes | yes |
+| kotlin | yes | yes |
+| csharp | yes | yes |
+| php | yes | no — see its README |
+| swift | yes | no — see its README |
+| c | verification of `cnf` shape only; declines §21.7.2 | no |
+| cplusplus | verification of `cnf` shape only; declines §21.7.2 | no |
+
+The two "declines" rows are not oversights. Both SDKs' role in this contract is
+resource-server-side validation, and neither ships a JOSE implementation
+covering PS256/ES256/EdDSA that could verify a proof without adding a
+dependency this contract does not otherwise require. They therefore **reject**
+`jkt`-bound tokens, which is what §10.1 rule 9 requires of them, and their
+READMEs say so.
 
 ---
 
@@ -3169,6 +3346,6 @@ skips it on failure has left ajar the door it just closed.
 
 ---
 
-*Contract version: 1.15 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST*
+*Contract version: 1.16 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST; **§10.1 rule 9 extended for DPoP and §21.6–§21.9 added 2026-08 (contract 1.16)** — the server gained the second half of two X5.1 rows, `private_key_jwt` client authentication (RFC 7523 §2.2) and DPoP sender-constrained tokens (RFC 9449), and rule 9's four-row table becomes a ten-row one **extended in place** rather than duplicated. The SDK-visible surface is the resource-server side only: a `cnf` may now carry `jkt`, an SDK that cannot verify a DPoP proof MUST refuse such a token rather than accept it as a bearer, and a `cnf` naming **both** methods is a conjunction — "check whichever we can" is forbidden, as is reading an empty `cnf` as unbound. No signature moves and no breaking change to any existing call; the compatibility risk again runs the other way, and the positive regression test is widened to say an **unbound** token must still be accepted with no certificate *and* no proof. Client-side proof generation is a per-language judgement call and §21.7.3 makes declining a supported answer with exactly three obligations (reject, document, test) — §21.9 records each SDK's posture, and the C and C++ SDKs decline §21.7.2 deliberately rather than by omission. §21.8 (`private_key_jwt`) is informative throughout: the client role may keep using `client_secret_post` or mTLS*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

@@ -64,24 +64,39 @@ just conformance-run            # drives both plans
 just conformance-report         # docs/conformance/*.md
 ```
 
-`conformance-register` creates both clients with `profile: "fapi2"`. That single
-field is what makes them FAPI-shaped: AXIAM refuses the registration unless it
-also carries `require_par`, an mTLS `token_endpoint_auth_method`, and
-`tls_client_certificate_bound_access_tokens`. If registration succeeds, the
-clients satisfy the profile's structural requirements by construction — you
-cannot have forgotten one.
+`conformance-register` creates all three clients with `profile: "fapi2"`. That
+single field is what makes them FAPI-shaped: AXIAM refuses the registration
+unless it also carries `require_par`, a **strong** `token_endpoint_auth_method`
+(either mTLS method or `private_key_jwt`), and **some** sender-constraining
+(`tls_client_certificate_bound_access_tokens` or `dpop_bound_access_tokens`). If
+registration succeeds, the clients satisfy the profile's structural requirements
+by construction — you cannot have forgotten one.
 
-### The two variants
+The gate accepts all four pairings of the two families; it does not require the
+authentication family and the binding mechanism to match. What it refuses is a
+client with strong authentication and sender-constraining from *neither*, which
+is the shape a half-finished migration produces.
 
-X5.2 calls for both client-authentication variants, and the harness runs both:
+### The three variants
 
-| Plan config | Method | Credential AXIAM matches |
-|---|---|---|
-| `…-mtls.json` | `tls_client_auth` (RFC 8705 §2.1) | the registered subject DN or SAN |
-| `…-self-signed.json` | `self_signed_tls_client_auth` (RFC 8705 §2.2) | the registered `x5t#S256` thumbprint |
+X5.2 calls for both client-authentication *families*, and since contract 1.16
+the harness runs all three methods across both:
 
-Both are mutual-TLS methods. See **Known gaps** for why that is not the same as
-covering both of FAPI's client-authentication families.
+| Plan config | Family | Method | Credential AXIAM matches |
+|---|---|---|---|
+| `…-mtls.json` | mutual TLS | `tls_client_auth` (RFC 8705 §2.1) | the registered subject DN or SAN |
+| `…-self-signed.json` | mutual TLS | `self_signed_tls_client_auth` (RFC 8705 §2.2) | the registered `x5t#S256` thumbprint |
+| `…-private-key-jwt.json` | asymmetric JWT | `private_key_jwt` (RFC 7523 §2.2) | a signature under the client's registered `jwks` / `jwks_uri` |
+
+The third variant is the one that needs no mTLS listener at all — which is both
+its point and a useful diagnostic. If the first two plans fail at client
+authentication and the third passes, the problem is your listener's client-CA
+bundle, not AXIAM.
+
+Its client is registered with `dpop_bound_access_tokens` rather than
+`tls_client_certificate_bound_access_tokens`, so the plan also exercises the
+DPoP half of sender-constraining end to end. The suite generates the proof key;
+nothing in `conformance/certs/` is involved.
 
 ---
 
@@ -147,7 +162,10 @@ These are configuration, not conformance. Recognising them saves the evening.
 | Symptom | Cause |
 |---|---|
 | Every module fails at the authorization step | The suite's redirect URI is not registered. `conformance-register` derives it from `SUITE_BASE_URL`; if you changed that afterwards, re-register. |
-| Every module fails at the token endpoint with `invalid_client` | The listener is not requesting client certificates, or does not trust `conformance/certs/ca.crt`. AXIAM answers `invalid_client` for *every* mTLS authentication failure by design (SEC-086), so the wire response cannot tell you which — check the server log, which names the specific reason. |
+| Every module fails at the token endpoint with `invalid_client` | The listener is not requesting client certificates, or does not trust `conformance/certs/ca.crt`. AXIAM answers `invalid_client` for *every* client-authentication failure by design (SEC-086), so the wire response cannot tell you which — check the server log, which names the specific reason. |
+| Only the `private-key-jwt` plan fails at the token endpoint | AXIAM could not obtain the client's keys. If the plan registered a `jwks_uri`, AXIAM fetches it through the SSRF-guarded JWKS cache, which **refuses private and loopback addresses** — a suite running on `host.docker.internal` publishes its JWKS somewhere AXIAM will not fetch from. Register the suite's key set inline (`jwks`) instead; `conformance-register` does this by default for exactly this reason. |
+| The `private-key-jwt` plan fails only on repeated runs | The `jti` replay guard is doing its job. The suite reuses assertion identifiers across a re-run of the *same* module in some versions; each assertion is single-use, permanently. Re-run the whole plan rather than one module, or wait out `oauth2_proof_replay`'s cleanup. |
+| A DPoP module fails with `use_dpop_nonce` and does not recover | The client was registered with `dpop_require_nonce: true`. The suite handles the challenge, but only once per module — check the suite log for a second challenge, which means AXIAM rotated the nonce mid-plan. |
 | The suite cannot reach the issuer | `AXIAM_ISSUER` names `localhost`, which inside the suite's container is the suite. Use `host.docker.internal` (the compose file maps it on Linux too). |
 | Discovery fails | AXIAM's discovery document is tenant-scoped; `AXIAM_TENANT_ID` must be set in `suite.env`. |
 | `COULD_NOT_START` on everything | The plan name changed upstream. Override with `CONFORMANCE_PLAN_NAME=…`, and update `justfile`'s default. |
@@ -156,38 +174,64 @@ These are configuration, not conformance. Recognising them saves the evening.
 
 ## Known gaps — read this before submitting
 
-**`private_key_jwt` is not implemented.** FAPI 2.0 §5.3.1.1 permits two
-families of client authentication: `private_key_jwt` (RFC 7523) and mutual TLS
-(RFC 8705). AXIAM implements the mutual-TLS family, both of its methods. It does
-**not** implement `private_key_jwt`.
+Two of the three entries this section carried have been closed. They are
+rewritten rather than deleted, because *why* a gap existed is the part a reader
+six months from now cannot reconstruct.
 
-X5.1's plan lists `private_key_jwt` as the second half of that row, and this
-pass deliberately landed the first half only — mTLS is AXIAM's differentiator
-and the infrastructure for it already existed. The consequence for
-certification is concrete and should not be discovered late:
+**`private_key_jwt` is implemented (closed 2026-08-14).** FAPI 2.0 §5.3.1.1
+permits two families of client authentication: `private_key_jwt` (RFC 7523) and
+mutual TLS (RFC 8705). AXIAM now implements **both**, and the harness covers
+both.
 
-- The two plans here cover **both RFC 8705 mTLS methods**, not both FAPI
-  client-authentication families.
-- A submission that claims coverage of `private_key_jwt` cannot be built on
-  these runs.
-- Whether the Foundation requires both families for a given certification is a
-  question for the certification team; the fee-waiver letter (§X5.4) already
-  says the submission will cover "both `private_key_jwt` and mutual-TLS client
-  authentication variants", **and that sentence is currently ahead of the
-  implementation.** Either implement `private_key_jwt` before sending, or amend
-  that sentence. Do not send it as drafted.
+The earlier revision of this section said `private_key_jwt` was absent and drew
+the consequence out at length: that the two plans covered both RFC 8705 *methods*
+but only one FAPI *family*, and that §X5.4's fee-waiver letter — which promises a
+submission "covering both `private_key_jwt` and mutual-TLS client authentication
+variants" — was ahead of the implementation, so it must be amended or the
+implementation finished before sending. **The implementation was finished.** That
+was option B in
+[`fapi-certification-submission.md`](fapi-certification-submission.md)'s A/B/C
+decision, and taking it means:
 
-**DPoP is not implemented.** FAPI 2.0 accepts either mTLS certificate binding or
-DPoP for sender-constraining. AXIAM implements the mTLS half, which satisfies
-the requirement — but a client that cannot do mTLS has no route to a
-sender-constrained token here. This is a coverage limitation, not a conformance
-failure.
+- The plans here now cover **both FAPI client-authentication families**, across
+  three methods (`tls_client_auth`, `self_signed_tls_client_auth`,
+  `private_key_jwt`).
+- A submission claiming coverage of `private_key_jwt` **can** be built on these
+  runs.
+- **§X5.4's letter needs no amendment.** Its scope sentence is now accurate as
+  originally drafted. Do not edit it; the reason the earlier revision said not to
+  send it as written no longer applies.
 
-**No run has been performed yet.** As of this document's addition, the harness
-exists and has not been executed against a live deployment — there is no docker
-daemon in the environment it was written in. `docs/conformance/` is therefore
-empty. The first person to run it should expect to find harness bugs, and
-should fix them here rather than working around them locally.
+Why the first half landed alone in the first pass: mTLS is AXIAM's
+differentiator and the listener infrastructure already existed, so the mTLS half
+was nearly free while `private_key_jwt` needed key resolution, an SSRF-guarded
+`jwks_uri` fetch, and a single-use `jti` store. Splitting the row was the right
+call; leaving it split would not have been.
+
+**DPoP is implemented (closed 2026-08-14).** FAPI 2.0 accepts either mTLS
+certificate binding or DPoP for sender-constraining. AXIAM previously
+implemented only the mTLS half, which satisfied the requirement — but a client
+that cannot present a certificate to AXIAM directly (anything behind a
+TLS-terminating load balancer it does not control) had **no route to a
+sender-constrained token here at all.** That was a coverage limitation rather
+than a conformance failure, and it is now closed: `cnf.jkt`, proof verification
+at the token endpoint and at resource-server validation, the `DPoP` token type,
+and the `DPoP-Nonce` challenge path all exist.
+
+What the closure costs, stated plainly because the alternative is discovering it
+under load: **DPoP pays an asymmetric signature verification per request**,
+where mTLS binding pays one SHA-256 amortised over a connection. The two are in
+different cost classes. §X5.1's "What sender-constraining actually costs"
+subsection carries the measured figures and is explicit about which of them are
+criterion micro-benchmarks rather than end-to-end measurements. A client that can
+do mTLS should.
+
+**No run has been performed yet.** As of this document's most recent revision the
+harness exists and has still not been executed against a live deployment — there
+is no docker daemon in the environment X5.1 was implemented in, either half.
+`docs/conformance/` is therefore empty. The first person to run it should expect
+to find harness bugs, and should fix them here rather than working around them
+locally. This entry has not moved and is now the only one blocking submission.
 
 ---
 
@@ -205,8 +249,13 @@ cannot quietly undo one:
   matching, no wildcards, anywhere.
 - **`response_type=code` only.** No other value is accepted for any client, and
   no token ever appears in a URL because no implicit-style response exists.
-- **Algorithms.** `EdDSA` is hard-coded at both encode and decode. `none` is
-  not reachable.
+- **Algorithms.** `EdDSA` is hard-coded at both encode and decode for AXIAM's own
+  tokens. For the signatures AXIAM *verifies* rather than mints — client
+  assertions and DPoP proofs — `crates/axiam-oauth2/src/jose.rs` permits exactly
+  `PS256`, `ES256` and `EdDSA`, takes the algorithm from the **registered or
+  embedded key rather than the JWS header**, and refuses `RS256` explicitly.
+  `none` is unreachable twice over: `jsonwebtoken::Algorithm` has no such
+  variant, and the permitted list would not contain it if it did.
 - **PKCE.** `S256` only, for every client; mandatory for public clients
   (SEC-025) and, under the `fapi2` profile, for confidential ones too.
 
@@ -216,8 +265,9 @@ cannot quietly undo one:
 
 When the run is green and you are ready to make it official, follow
 [`fapi-certification-submission.md`](fapi-certification-submission.md) — the
-digest-pinned release run, the OIDF submission, and the §X5.4 letter amendment
-the `private_key_jwt` gap forces before the letter can be sent.
+digest-pinned release run and the OIDF submission. The §X5.4 letter amendment
+that document used to require is no longer needed: `private_key_jwt` landed, so
+the letter's scope sentence is accurate as drafted.
 
 ---
 

@@ -76,6 +76,16 @@ struct OAuth2ClientRow {
     self_signed_tls_client_auth_thumbprints: Vec<String>,
     #[surreal(default)]
     tls_client_certificate_bound_access_tokens: bool,
+    // X5.1 second half. Rows written before schema v39 have none of these;
+    // every default reproduces the pre-v39 behaviour exactly (see `SCHEMA_V39`).
+    #[surreal(default)]
+    jwks: Option<String>,
+    #[surreal(default)]
+    jwks_uri: Option<String>,
+    #[surreal(default)]
+    dpop_bound_access_tokens: bool,
+    #[surreal(default)]
+    dpop_require_nonce: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -113,6 +123,16 @@ struct OAuth2ClientRowWithId {
     self_signed_tls_client_auth_thumbprints: Vec<String>,
     #[surreal(default)]
     tls_client_certificate_bound_access_tokens: bool,
+    // X5.1 second half. Rows written before schema v39 have none of these;
+    // every default reproduces the pre-v39 behaviour exactly (see `SCHEMA_V39`).
+    #[surreal(default)]
+    jwks: Option<String>,
+    #[surreal(default)]
+    jwks_uri: Option<String>,
+    #[surreal(default)]
+    dpop_bound_access_tokens: bool,
+    #[surreal(default)]
+    dpop_require_nonce: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -178,6 +198,10 @@ impl OAuth2ClientRow {
             self_signed_tls_client_auth_thumbprints: self.self_signed_tls_client_auth_thumbprints,
             tls_client_certificate_bound_access_tokens: self
                 .tls_client_certificate_bound_access_tokens,
+            jwks: self.jwks,
+            jwks_uri: self.jwks_uri,
+            dpop_bound_access_tokens: self.dpop_bound_access_tokens,
+            dpop_require_nonce: self.dpop_require_nonce,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -212,6 +236,10 @@ impl OAuth2ClientRowWithId {
             self_signed_tls_client_auth_thumbprints: self.self_signed_tls_client_auth_thumbprints,
             tls_client_certificate_bound_access_tokens: self
                 .tls_client_certificate_bound_access_tokens,
+            jwks: self.jwks,
+            jwks_uri: self.jwks_uri,
+            dpop_bound_access_tokens: self.dpop_bound_access_tokens,
+            dpop_require_nonce: self.dpop_require_nonce,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -262,7 +290,11 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  tls_client_auth_san_dns = $tls_client_auth_san_dns, \
                  tls_client_auth_san_uri = $tls_client_auth_san_uri, \
                  self_signed_tls_client_auth_thumbprints = $self_signed_thumbprints, \
-                 tls_client_certificate_bound_access_tokens = $cert_bound_tokens",
+                 tls_client_certificate_bound_access_tokens = $cert_bound_tokens, \
+                 jwks = $jwks, \
+                 jwks_uri = $jwks_uri, \
+                 dpop_bound_access_tokens = $dpop_bound_tokens, \
+                 dpop_require_nonce = $dpop_require_nonce",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -300,6 +332,10 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                 "cert_bound_tokens",
                 input.tls_client_certificate_bound_access_tokens,
             ))
+            .bind(("jwks", normalise_optional(input.jwks)))
+            .bind(("jwks_uri", normalise_optional(input.jwks_uri)))
+            .bind(("dpop_bound_tokens", input.dpop_bound_access_tokens))
+            .bind(("dpop_require_nonce", input.dpop_require_nonce))
             .await
             .map_err(DbError::from)?;
 
@@ -417,6 +453,18 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.tls_client_certificate_bound_access_tokens.is_some() {
             sets.push("tls_client_certificate_bound_access_tokens = $cert_bound_tokens");
         }
+        if input.jwks.is_some() {
+            sets.push("jwks = $jwks");
+        }
+        if input.jwks_uri.is_some() {
+            sets.push("jwks_uri = $jwks_uri");
+        }
+        if input.dpop_bound_access_tokens.is_some() {
+            sets.push("dpop_bound_access_tokens = $dpop_bound_tokens");
+        }
+        if input.dpop_require_nonce.is_some() {
+            sets.push("dpop_require_nonce = $dpop_require_nonce");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -478,6 +526,22 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         }
         if let Some(thumbprints) = input.self_signed_tls_client_auth_thumbprints {
             builder = builder.bind(("self_signed_thumbprints", thumbprints));
+        }
+        // `jwks` and `jwks_uri` take the same empty-string "clear it" sentinel
+        // for the same reason: RFC 7591 §2 permits at most one of them, so
+        // migrating a client from an inline key set to a published one has to be
+        // able to remove the first.
+        if let Some(jwks) = input.jwks {
+            builder = builder.bind(("jwks", normalise_optional(Some(jwks))));
+        }
+        if let Some(uri) = input.jwks_uri {
+            builder = builder.bind(("jwks_uri", normalise_optional(Some(uri))));
+        }
+        if let Some(bound) = input.dpop_bound_access_tokens {
+            builder = builder.bind(("dpop_bound_tokens", bound));
+        }
+        if let Some(required) = input.dpop_require_nonce {
+            builder = builder.bind(("dpop_require_nonce", required));
         }
         if let Some(bound) = input.tls_client_certificate_bound_access_tokens {
             builder = builder.bind(("cert_bound_tokens", bound));

@@ -46,10 +46,11 @@ pub struct CreateOAuth2ClientRequest {
     ///
     /// `"standard"` (the default) is every AXIAM client that has ever existed.
     /// `"fapi2"` turns on the whole FAPI 2.0 constraint bundle at once, and
-    /// the registration is refused unless it also sets `require_par`, an mTLS
-    /// `token_endpoint_auth_method`, and
-    /// `tls_client_certificate_bound_access_tokens`. See the FAPI operator
-    /// guide.
+    /// the registration is refused unless it also sets `require_par`, a strong
+    /// `token_endpoint_auth_method` (either mTLS method or `private_key_jwt`),
+    /// and at least one sender-constraining mechanism
+    /// (`tls_client_certificate_bound_access_tokens` or
+    /// `dpop_bound_access_tokens`). See the FAPI operator guide.
     #[serde(default)]
     pub profile: ClientProfile,
     /// X5.1 — how this client authenticates at the token endpoint
@@ -76,6 +77,26 @@ pub struct CreateOAuth2ClientRequest {
     /// tokens to this client. Independent of the authentication method.
     #[serde(default)]
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// RFC 7591 §2 — the client's public key set, inline, for
+    /// `private_key_jwt`. Exactly one of `jwks` and `jwks_uri` may be set.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7591 §2 — where the client publishes its public key set. Must be an
+    /// absolute `https` URL, and is fetched through the SSRF-guarded JWKS
+    /// cache, which refuses private and loopback addresses.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// RFC 9449 §5.2 — issue DPoP-bound (sender-constrained) access tokens to
+    /// this client. Independent of both the authentication method and
+    /// `tls_client_certificate_bound_access_tokens`; a client may ask for both
+    /// constraints, and a token carrying both must satisfy both.
+    #[serde(default)]
+    pub dpop_bound_access_tokens: bool,
+    /// RFC 9449 §8 — require this client's DPoP proofs to carry a
+    /// server-issued nonce. Costs a round trip on the first request of each
+    /// nonce window; `false` (the default) is the pre-v39 behaviour.
+    #[serde(default)]
+    pub dpop_require_nonce: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -98,6 +119,13 @@ pub struct UpdateOAuth2ClientRequest {
     pub tls_client_auth_san_uri: Option<String>,
     pub self_signed_tls_client_auth_thumbprints: Option<Vec<String>>,
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// X5.1 — see the create DTO. `Some("")` clears, so a client can be
+    /// migrated from an inline key set to a published one.
+    pub jwks: Option<String>,
+    /// X5.1 — see the create DTO. `Some("")` clears.
+    pub jwks_uri: Option<String>,
+    pub dpop_bound_access_tokens: Option<bool>,
+    pub dpop_require_nonce: Option<bool>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -123,6 +151,15 @@ pub struct OAuth2ClientResponse {
     pub tls_client_auth_san_uri: Option<String>,
     pub self_signed_tls_client_auth_thumbprints: Vec<String>,
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// X5.1 — echoed so an operator can confirm which key source is registered.
+    /// The document itself is public key material, so returning it leaks
+    /// nothing; a `jwks_uri` is likewise public by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    pub dpop_bound_access_tokens: bool,
+    pub dpop_require_nonce: bool,
     pub require_par: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -146,6 +183,10 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             self_signed_tls_client_auth_thumbprints: c.self_signed_tls_client_auth_thumbprints,
             tls_client_certificate_bound_access_tokens: c
                 .tls_client_certificate_bound_access_tokens,
+            jwks: c.jwks,
+            jwks_uri: c.jwks_uri,
+            dpop_bound_access_tokens: c.dpop_bound_access_tokens,
+            dpop_require_nonce: c.dpop_require_nonce,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -282,6 +323,10 @@ pub async fn create<C: Connection + Clone>(
         tls_client_auth_san_uri: req.tls_client_auth_san_uri,
         self_signed_tls_client_auth_thumbprints: req.self_signed_tls_client_auth_thumbprints,
         tls_client_certificate_bound_access_tokens: req.tls_client_certificate_bound_access_tokens,
+        jwks: req.jwks,
+        jwks_uri: req.jwks_uri,
+        dpop_bound_access_tokens: req.dpop_bound_access_tokens,
+        dpop_require_nonce: req.dpop_require_nonce,
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it
@@ -459,6 +504,10 @@ pub async fn update<C: Connection + Clone>(
         tls_client_auth_san_uri: req.tls_client_auth_san_uri,
         self_signed_tls_client_auth_thumbprints: req.self_signed_tls_client_auth_thumbprints,
         tls_client_certificate_bound_access_tokens: req.tls_client_certificate_bound_access_tokens,
+        jwks: req.jwks,
+        jwks_uri: req.jwks_uri,
+        dpop_bound_access_tokens: req.dpop_bound_access_tokens,
+        dpop_require_nonce: req.dpop_require_nonce,
     };
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to

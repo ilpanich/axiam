@@ -78,6 +78,17 @@ pub enum ClientAuthMethod {
     /// nothing, so the *certificate itself* is the registered credential —
     /// matched by its SHA-256 thumbprint.
     SelfSignedTlsClientAuth,
+    /// Asymmetric client assertion (RFC 7523 §2.2, OIDC Core §9) — X5.1's
+    /// second client-authentication family.
+    ///
+    /// The client signs a short-lived JWT with a private key whose public half
+    /// AXIAM holds, either inline in [`OAuth2Client::jwks`] or published at
+    /// [`OAuth2Client::jwks_uri`], and posts it as `client_assertion`. Unlike
+    /// the mTLS methods this needs no transport-level cooperation at all,
+    /// which is the whole reason FAPI 2.0 permits it: a client behind a
+    /// TLS-terminating load balancer it does not control can still
+    /// authenticate strongly.
+    PrivateKeyJwt,
 }
 
 impl ClientAuthMethod {
@@ -86,6 +97,7 @@ impl ClientAuthMethod {
             Self::ClientSecretPost => "client_secret_post",
             Self::TlsClientAuth => "tls_client_auth",
             Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
+            Self::PrivateKeyJwt => "private_key_jwt",
         }
     }
 
@@ -96,6 +108,7 @@ impl ClientAuthMethod {
             "client_secret_post" => Some(Self::ClientSecretPost),
             "tls_client_auth" => Some(Self::TlsClientAuth),
             "self_signed_tls_client_auth" => Some(Self::SelfSignedTlsClientAuth),
+            "private_key_jwt" => Some(Self::PrivateKeyJwt),
             _ => None,
         }
     }
@@ -104,6 +117,25 @@ impl ClientAuthMethod {
     /// than a shared secret.
     pub const fn is_mtls(self) -> bool {
         matches!(self, Self::TlsClientAuth | Self::SelfSignedTlsClientAuth)
+    }
+
+    /// Whether this method authenticates with a signed client assertion
+    /// (RFC 7523 §2.2).
+    pub const fn is_private_key_jwt(self) -> bool {
+        matches!(self, Self::PrivateKeyJwt)
+    }
+
+    /// Whether this method is one of the two client-authentication *families*
+    /// FAPI 2.0 §5.3.1.1 permits.
+    ///
+    /// The distinction the profile actually draws is "proof of possession of a
+    /// private key" versus "presentation of a shared secret", not
+    /// method-by-method. Expressing it once here is what lets
+    /// `axiam_oauth2::fapi` accept either family without enumerating methods at
+    /// each call site — the mistake that would let a fourth method be added and
+    /// silently fail the gate.
+    pub const fn is_strong(self) -> bool {
+        self.is_mtls() || self.is_private_key_jwt()
     }
 }
 
@@ -193,6 +225,54 @@ pub struct OAuth2Client {
     /// profile requires this to be true; nothing else does.
     #[serde(default)]
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// RFC 7591 `jwks` — the client's public key set, inline, as the raw JSON
+    /// document.
+    ///
+    /// Stored as a string rather than a parsed structure so that a key type
+    /// AXIAM does not implement round-trips through the database intact
+    /// instead of failing to decode the whole client row. Parsing happens on
+    /// the authentication path, where a failure is an authentication failure
+    /// and nothing worse.
+    ///
+    /// Mutually exclusive with [`Self::jwks_uri`] (RFC 7591 §2): two key
+    /// sources are two answers to "which keys authenticate this client", and
+    /// the union of them is a credential nobody registered. The exclusivity is
+    /// enforced by [`count_jwks_sources`] at registration, exactly as
+    /// [`count_mtls_bindings`] enforces RFC 8705 §2.1.2's.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7591 `jwks_uri` — where the client publishes its public key set.
+    ///
+    /// Fetched through `axiam_federation::jwks_cache::JwksCache`, which is the
+    /// same TTL + stale-while-revalidate + SSRF-guarded path a federated IdP's
+    /// JWKS goes through. A client-supplied URL AXIAM will fetch on demand is
+    /// the same threat surface whichever feature asked for it, so it gets the
+    /// same guard rather than a second one.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens` — when set, tokens issued to
+    /// this client carry a `cnf.jkt` confirmation naming the key that signed
+    /// the DPoP proof presented at the token endpoint.
+    ///
+    /// The DPoP half of the sender-constraining row, and independent of
+    /// [`Self::tls_client_certificate_bound_access_tokens`] for the same reason
+    /// that flag is independent of the authentication method: RFC 9449 binds a
+    /// token to a *key*, and which key that is has nothing to do with how the
+    /// client proved its identity. A client may legitimately want both, and a
+    /// token that carries both confirmations must satisfy both.
+    #[serde(default)]
+    pub dpop_bound_access_tokens: bool,
+    /// Whether this client's DPoP proofs must carry a server-issued `nonce`
+    /// (RFC 9449 §8).
+    ///
+    /// Server policy rather than client metadata in the RFC, but per-client
+    /// here because the cost is per-client: a nonce turns every first request
+    /// into two round trips, which a high-frequency IoT client feels and a
+    /// browser-driven one does not. `false` — no nonce required — is the
+    /// pre-v39 behaviour and the default, so turning DPoP on does not silently
+    /// double anybody's request count.
+    #[serde(default)]
+    pub dpop_require_nonce: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -216,6 +296,23 @@ pub fn count_mtls_bindings(
         .count()
 }
 
+/// How many of the mutually exclusive key sources a `private_key_jwt` client
+/// registered (RFC 7591 §2 permits at most one).
+///
+/// A free function for the same reason [`count_mtls_bindings`] is: the pending
+/// registration, the merged update and the stored row must agree on what counts
+/// as registered, and a blank string must not count. If they disagreed, a
+/// registration could pass validation with one source and then store zero,
+/// leaving a client that can authenticate nothing — or two, leaving a client
+/// whose credentials are the union of a document it controls and one it
+/// publishes.
+pub fn count_jwks_sources(jwks: Option<&str>, jwks_uri: Option<&str>) -> usize {
+    [jwks, jwks_uri]
+        .iter()
+        .filter(|v| v.is_some_and(|s| !s.trim().is_empty()))
+        .count()
+}
+
 impl OAuth2Client {
     /// See [`count_mtls_bindings`].
     pub fn mtls_binding_count(&self) -> usize {
@@ -224,6 +321,22 @@ impl OAuth2Client {
             self.tls_client_auth_san_dns.as_deref(),
             self.tls_client_auth_san_uri.as_deref(),
         )
+    }
+
+    /// See [`count_jwks_sources`].
+    pub fn jwks_source_count(&self) -> usize {
+        count_jwks_sources(self.jwks.as_deref(), self.jwks_uri.as_deref())
+    }
+
+    /// Whether tokens issued to this client must carry a confirmation claim of
+    /// *some* kind (X5.1).
+    ///
+    /// The FAPI profile requires sender-constrained tokens without caring which
+    /// mechanism supplies the constraint, so the gate asks this rather than
+    /// enumerating the two flags — which is what keeps a third mechanism from
+    /// having to be added in two places.
+    pub const fn is_sender_constrained(&self) -> bool {
+        self.tls_client_certificate_bound_access_tokens || self.dpop_bound_access_tokens
     }
 }
 
@@ -236,6 +349,11 @@ impl CreateOAuth2Client {
             self.tls_client_auth_san_dns.as_deref(),
             self.tls_client_auth_san_uri.as_deref(),
         )
+    }
+
+    /// See [`count_jwks_sources`].
+    pub fn jwks_source_count(&self) -> usize {
+        count_jwks_sources(self.jwks.as_deref(), self.jwks_uri.as_deref())
     }
 }
 
@@ -255,6 +373,10 @@ impl UpdateOAuth2Client {
             || self.tls_client_auth_san_dns.is_some()
             || self.tls_client_auth_san_uri.is_some()
             || self.self_signed_tls_client_auth_thumbprints.is_some()
+            || self.jwks.is_some()
+            || self.jwks_uri.is_some()
+            || self.dpop_bound_access_tokens.is_some()
+            || self.dpop_require_nonce.is_some()
     }
 }
 
@@ -308,6 +430,14 @@ impl OAuth2Client {
         if let Some(ref t) = update.self_signed_tls_client_auth_thumbprints {
             self.self_signed_tls_client_auth_thumbprints = t.clone();
         }
+        self.jwks = merge(self.jwks, update.jwks.as_ref());
+        self.jwks_uri = merge(self.jwks_uri, update.jwks_uri.as_ref());
+        if let Some(v) = update.dpop_bound_access_tokens {
+            self.dpop_bound_access_tokens = v;
+        }
+        if let Some(v) = update.dpop_require_nonce {
+            self.dpop_require_nonce = v;
+        }
         self
     }
 }
@@ -340,6 +470,18 @@ pub struct CreateOAuth2Client {
     pub self_signed_tls_client_auth_thumbprints: Vec<String>,
     #[serde(default)]
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// X5.1 — see [`OAuth2Client::jwks`].
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// X5.1 — see [`OAuth2Client::jwks_uri`].
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// X5.1 — see [`OAuth2Client::dpop_bound_access_tokens`].
+    #[serde(default)]
+    pub dpop_bound_access_tokens: bool,
+    /// X5.1 — see [`OAuth2Client::dpop_require_nonce`].
+    #[serde(default)]
+    pub dpop_require_nonce: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -372,6 +514,17 @@ pub struct UpdateOAuth2Client {
     pub tls_client_auth_san_uri: Option<String>,
     pub self_signed_tls_client_auth_thumbprints: Option<Vec<String>>,
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// X5.1 — see [`OAuth2Client::jwks`]. `Some("")` clears, for the same
+    /// reason [`Self::tls_client_auth_subject_dn`] does: without a way to say
+    /// "clear it", a client migrated from an inline key set to a `jwks_uri`
+    /// would keep both, and RFC 7591 permits at most one.
+    pub jwks: Option<String>,
+    /// X5.1 — see [`OAuth2Client::jwks_uri`]. `Some("")` clears.
+    pub jwks_uri: Option<String>,
+    /// X5.1 — see [`OAuth2Client::dpop_bound_access_tokens`].
+    pub dpop_bound_access_tokens: Option<bool>,
+    /// X5.1 — see [`OAuth2Client::dpop_require_nonce`].
+    pub dpop_require_nonce: Option<bool>,
 }
 
 /// Represents a stored OAuth2 authorization code (short-lived, single-use).

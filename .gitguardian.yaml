@@ -1,0 +1,22 @@
+# GitGuardian configuration.
+#
+# The only entries here are **published specification test vectors** — values
+# printed in an RFC as worked examples, reproduced verbatim because a test
+# vector that has been edited is not a test vector. They are not credentials,
+# they grant nothing, and they cannot be rotated because they are part of a
+# document.
+#
+# Nothing else belongs in this file. An ignore entry for a value that is
+# genuinely secret would be a way of turning the scanner off, which is the
+# opposite of what it is for — so every entry names its source document and
+# section, and a reviewer can check the claim against the RFC in one click.
+version: 2
+
+secret:
+  ignored-matches:
+    - name: >-
+        RFC 9449 §4.2 example access token — the `ath` worked example, used by
+        axiam-oauth2's jose::tests::ath_matches_the_rfc_9449_vector to check the
+        hash against the published expected output.
+        https://www.rfc-editor.org/rfc/rfc9449.html#section-4.2
+      match: Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU

@@ -830,7 +830,13 @@ mod tests {
     #[test]
     fn a_resource_server_proof_must_hash_the_token_it_accompanies() {
         let key = ed25519_key();
-        let token = "Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU";
+        // Any string works here: this test asserts that `ath` BINDS the proof
+        // to whatever token accompanied it, not that the hash function is
+        // right. Cross-checking the hash against RFC 9449 §4.2's published
+        // vector is `jose::tests::ath_matches_the_rfc_9449_vector`'s job, and
+        // keeping the vector in exactly one place stops a secret scanner
+        // finding the same high-entropy literal twice.
+        let token = "test-access-token-not-a-credential";
 
         let mut c = claims(NOW);
         c["htm"] = json!("GET");

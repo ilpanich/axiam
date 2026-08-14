@@ -433,6 +433,12 @@ mod tests {
     }
 
     /// RFC 9449 §4.2's worked `ath` example.
+    ///
+    /// The literal below is the **specification's** published example token,
+    /// reproduced verbatim because a test vector that has been edited is not a
+    /// test vector. It is not a credential and grants nothing; `.gitguardian.yaml`
+    /// records that so a secret scanner does not report it every time this file
+    /// is touched.
     #[test]
     fn ath_matches_the_rfc_9449_vector() {
         assert_eq!(

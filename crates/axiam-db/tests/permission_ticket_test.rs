@@ -406,11 +406,28 @@ mod single_use_serialisation {
     // in `tests/common/mod.rs`. They now use the engine we deploy, so a green
     // run here is a statement about the shipped system.
     //
-    // They remain single-round: unlike the permission ticket above, these four
-    // paths have never been observed failing, and one barrier-synchronised
-    // round each is the cheap regression guard. The permission-ticket test is
-    // the instrument — it runs 200 rounds because it is the path whose defect
-    // was actually measured.
+    // Three of the four remain single-round: they have never been observed
+    // failing, and one barrier-synchronised round each is the cheap regression
+    // guard. The permission-ticket test is the instrument — it runs 200 rounds
+    // because it is the path whose defect was actually measured.
+    //
+    // # The authorization code, v37
+    //
+    // `authorization_code_consume_serialises` is the exception, and now runs
+    // rounds of its own. That path picked up the layered mechanism the other
+    // three got from X6 — an explicit transaction, plus a per-attempt
+    // redemption nonce read back after the commit — and a single round is a
+    // weak guard for a mechanism that has just changed. It is deliberately far
+    // short of the ticket's 200: this is a regression guard, not an
+    // instrument, and the probe in `tools/surreal-race-probe` is what measures
+    // an engine.
+    //
+    // `an_authorization_code_redemption_stamps_its_nonce` is the deterministic
+    // half. Concurrency tests cannot tell "the nonce layer works" from "the
+    // nonce layer is absent and the engine carried it alone" — both yield
+    // exactly one winner on surrealkv. That test reads the stored
+    // `redemption_id` directly, so deleting the second layer fails a test
+    // instead of silently reverting the path to its pre-v37 shape.
 
     use axiam_core::models::oauth2_client::{
         CreateAuthorizationCode, CreateDeviceGrant, CreatePushedAuthRequest, CreateRefreshToken,
@@ -532,15 +549,78 @@ mod single_use_serialisation {
     /// bug the other two had.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn authorization_code_consume_serialises() {
+        const CODE_ROUNDS: usize = 50;
+
         // `_db` is bound rather than dropped: it owns the TempDir backing the
         // surrealkv datastore, and dropping it would delete the files underneath.
         let _db = db().await;
         let repo = SurrealAuthorizationCodeRepository::new(_db.handle());
         let tenant = Uuid::new_v4();
 
+        for round in 0..CODE_ROUNDS {
+            let hash = format!("code-hash-{round}");
+            repo.create(CreateAuthorizationCode {
+                tenant_id: tenant,
+                code_hash: hash.clone(),
+                client_id: "web-app".into(),
+                user_id: Uuid::new_v4(),
+                redirect_uri: "https://app.example/cb".into(),
+                scopes: vec!["openid".into()],
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                session_id: None,
+                expires_at: Utc::now() + Duration::seconds(60),
+            })
+            .await
+            .unwrap();
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+            let mut set = tokio::task::JoinSet::new();
+            for _ in 0..RACERS {
+                let repo = repo.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                let hash = hash.clone();
+                set.spawn(async move {
+                    barrier.wait().await;
+                    repo.consume(tenant, &hash, "web-app", "https://app.example/cb")
+                        .await
+                });
+            }
+
+            // This repository signals a lost race as `Err`, not `Ok(None)` —
+            // the assertion is on how many callers got a code, not on the
+            // error shape.
+            let mut winners = 0;
+            while let Some(r) = set.join_next().await {
+                if r.unwrap().is_ok() {
+                    winners += 1;
+                }
+            }
+            assert_eq!(
+                winners, 1,
+                "round {round}: an authorization code must be exchangeable exactly once"
+            );
+        }
+    }
+
+    /// The nonce layer, asserted directly rather than inferred from a race.
+    ///
+    /// Every concurrency test above passes whether `consume` carries the
+    /// redemption nonce or only the transaction — on surrealkv the engine
+    /// arbitrates either way, so "exactly one winner" cannot distinguish a
+    /// two-layer mechanism from a one-layer one. This reads the stored
+    /// `redemption_id` back, so removing the second layer breaks a test rather
+    /// than quietly returning the path to its pre-v37 shape.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_authorization_code_redemption_stamps_its_nonce() {
+        let _db = db().await;
+        let repo = SurrealAuthorizationCodeRepository::new(_db.handle());
+        let tenant = Uuid::new_v4();
+
         repo.create(CreateAuthorizationCode {
             tenant_id: tenant,
-            code_hash: "code-hash".into(),
+            code_hash: "nonce-probe".into(),
             client_id: "web-app".into(),
             user_id: Uuid::new_v4(),
             redirect_uri: "https://app.example/cb".into(),
@@ -554,29 +634,64 @@ mod single_use_serialisation {
         .await
         .unwrap();
 
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..RACERS {
-            let repo = repo.clone();
-            let barrier = std::sync::Arc::clone(&barrier);
-            set.spawn(async move {
-                barrier.wait().await;
-                repo.consume(tenant, "code-hash", "web-app", "https://app.example/cb")
-                    .await
-            });
-        }
-
-        // This repository signals a lost race as `Err`, not `Ok(None)` — the
-        // assertion is on how many callers got a code, not on the error shape.
-        let mut winners = 0;
-        while let Some(r) = set.join_next().await {
-            if r.unwrap().is_ok() {
-                winners += 1;
-            }
-        }
+        let stored_before: Vec<Option<String>> = _db
+            .query(
+                "SELECT VALUE redemption_id FROM oauth2_auth_code \
+                 WHERE code_hash = 'nonce-probe' LIMIT 1",
+            )
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
         assert_eq!(
-            winners, 1,
-            "an authorization code must be exchangeable exactly once"
+            stored_before.into_iter().flatten().next(),
+            None,
+            "an unredeemed code must carry no redemption nonce"
+        );
+
+        repo.consume(tenant, "nonce-probe", "web-app", "https://app.example/cb")
+            .await
+            .expect("the first redemption wins");
+
+        let stored_after: Vec<Option<String>> = _db
+            .query(
+                "SELECT VALUE redemption_id FROM oauth2_auth_code \
+                 WHERE code_hash = 'nonce-probe' LIMIT 1",
+            )
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let stamped = stored_after
+            .into_iter()
+            .flatten()
+            .next()
+            .expect("redemption must stamp a nonce (schema v37, layer 2)");
+        assert!(
+            Uuid::parse_str(&stamped).is_ok(),
+            "the nonce must be a per-attempt id, got {stamped:?}"
+        );
+
+        // And the ordinary replay still refuses, with the nonce undisturbed.
+        assert!(
+            repo.consume(tenant, "nonce-probe", "web-app", "https://app.example/cb")
+                .await
+                .is_err(),
+            "a second, non-concurrent redemption must refuse"
+        );
+        let stored_replay: Vec<Option<String>> = _db
+            .query(
+                "SELECT VALUE redemption_id FROM oauth2_auth_code \
+                 WHERE code_hash = 'nonce-probe' LIMIT 1",
+            )
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(
+            stored_replay.into_iter().flatten().next().as_deref(),
+            Some(stamped.as_str()),
+            "a refused replay must leave the winner's nonce in place"
         );
     }
 

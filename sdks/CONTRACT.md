@@ -2544,11 +2544,23 @@ endpoint (`client_secret_post`, per §12.1 rule 3), because it is a token-endpoi
    §16's idempotent-retry path, including on timeout, and including on `5xx` — and MUST
    surface the failure so the caller can request a **new** ticket.
 
-   Two reasons, and the second matters more than the first. A retried ticket answers
-   `invalid_grant`, so the retry is useless. And single-use is enforced by a mechanism with a
-   **measured residual** (ilpanich/axiam#302): under concurrency the server can admit a
-   second redemption at roughly 1 in 640. An SDK that retries is deliberately generating the
-   concurrent redemption that residual describes. Do not retry.
+   Two reasons. The first stands alone and always holds: a retried ticket answers
+   `invalid_grant`, so the retry is useless — it can only turn a clear failure into a
+   confusing one. The second is why violating this is a security bug rather than a usability
+   one.
+
+   That second reason is that single-use is a property of the *server's deployment*, not of
+   the protocol. The server decides the race with a transaction its storage engine must
+   arbitrate, plus a redemption nonce read back after that transaction commits
+   (ilpanich/axiam#302). It holds on a persistent storage engine, which an AXIAM deployment
+   is required to run — but an SDK is talking to a server it did not deploy and **cannot
+   attest**, and against one running an in-memory datastore the guarantee does not hold. An
+   SDK that retries is deliberately generating the concurrent redemption such a server can
+   admit twice.
+
+   So an SDK MUST NOT weaken this rule on the grounds that a particular server is well
+   deployed. It has no way to know that, the first reason applies either way, and there is
+   nothing to gain from the retry even when the second does not apply. Do not retry.
 
 7. **The `permissions` claim is a record, not a capability.** An RPT carries the pairs the
    engine allowed **at mint time**. An SDK that exposes them MUST NOT present them as a live
@@ -2959,9 +2971,10 @@ recorded here until one exists.
   additive — no existing signature changes, and SDKs remain conformant to §1–§19 without it.
   Two rules in it are load-bearing rather than stylistic: **§20.2 rule 6 makes the ticket
   grant an explicit exception to §16's retry policy** (a permission ticket is spent even on
-  failure, and retrying it is the concurrent redemption that ilpanich/axiam#302's measured
-  residual describes), and **§20.3 forbids the challenge-parsing helper from auto-exchanging**
-  the ticket it parsed, since the `as_uri` names a host the client has not chosen to trust.
+  failure, and retrying it is a concurrent redemption against a server the SDK cannot
+  attest — see contract 1.14, which restated the second half of that reasoning), and
+  **§20.3 forbids the challenge-parsing helper from auto-exchanging** the ticket it parsed,
+  since the `as_uri` names a host the client has not chosen to trust.
 
 - **2026-08 (§12.6 deferral lifted for Swift, C and C++)** — **non-breaking / additive**, with
   one narrow widening. §12.6 previously required `axiam-swift-sdk`, `axiam-c-sdk` and
@@ -2996,6 +3009,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.13 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature*
+*Contract version: 1.14 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

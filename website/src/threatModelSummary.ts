@@ -23,11 +23,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.6.0",
+ "version": "2.7.0",
  "diagramCount": 9,
- "total": 162,
+ "total": 165,
  "open": 23,
- "mitigated": 139,
+ "mitigated": 142,
  "areas": [
   {
    "id": 0,
@@ -44,7 +44,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 14,
+   "total": 16,
    "open": 0
   },
   {
@@ -74,7 +74,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 11,
+   "total": 12,
    "open": 7
   },
   {

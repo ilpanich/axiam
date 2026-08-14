@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.6.0",
+ "version": "2.7.0",
  "diagramCount": 9,
- "total": 162,
+ "total": 165,
  "open": 23,
- "mitigated": 139,
+ "mitigated": 142,
  "diagrams": [
   {
    "id": 0,
@@ -1717,7 +1717,7 @@ export const THREAT_MODEL: ThreatModel = {
    "title": "OAuth2 / OIDC authorization server",
    "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores.",
    "width": 1438,
-   "height": 848,
+   "height": 868,
    "boundaries": [
     {
      "id": "62545360-5217-533c-8fe0-9d3096b4e555",
@@ -1740,7 +1740,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 64,
      "w": 380,
-     "h": 700,
+     "h": 780,
      "label": "Data tier"
     }
    ],
@@ -2055,6 +2055,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Codes that are not expired or purged remain redeemable long after the flow completes, widening the replay window.",
        "mitigation": "Codes carry a short expiry, are deleted on redemption, and expired entries are swept."
+      },
+      {
+       "number": 164,
+       "title": "Two concurrent redemptions of one authorization code",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A code observed in a redirect or a proxy log and replayed at the same moment as the legitimate exchange could, if the two are not serialised, let both callers mint a token pair from one authorization. T-54 covers the sequential replay; this is the concurrent one, which the single-use flag alone does not decide.",
+       "mitigation": "Redemption is a single guarded UPDATE (used = false, plus client_id and redirect_uri matched in the same statement), so it runs in the engine's own transaction and two concurrent callers conflict on one key — the loser is aborted and sees no code. Note this path carries the engine layer only, not the redemption nonce the three credentials in T-163 also carry, so it depends on a persistent storage engine (T-165) with nothing behind it. authorization_code_consume_serialises is the regression test."
       }
      ],
      "open": 0
@@ -2099,6 +2108,35 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Removing a key from JWKS before its last token expires breaks verification; leaving a retired key indefinitely widens the window in which a compromised key is still trusted.",
        "mitigation": "JWKS publishes the active key plus a bounded overlap window matching the maximum token lifetime, then drops the retired kid."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "c237826a-f4f2-5097-ac9a-591ed35d79f6",
+     "kind": "store",
+     "x": 1079,
+     "y": 754,
+     "w": 170,
+     "h": 80,
+     "name": "single-use credentials (UMA tickets, device codes, PAR request_uris)",
+     "lines": [
+      "single-use credentials",
+      "(UMA tickets, device",
+      "codes, PAR",
+      "request_uris)"
+     ],
+     "description": "permission_ticket, device_grant and pushed_auth_request rows. Each is redeemable exactly once: a UMA ticket mints one RPT, a device code mints one token set, a PAR request_uri authorises one authorization request.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 163,
+       "title": "Concurrent redemption spends one credential twice",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Two redemptions of the same credential arriving together can both observe it unspent and both succeed, yielding two RPTs from one authorization decision, two token sets from one user approval, or a replayable authorization request. RFC 8628 makes this the normal shape of the device flow rather than an exotic case: the device polls on a short interval, so a poll is usually already in flight when the user approves.",
+       "mitigation": "Two independent layers, so a double redemption needs both to fail (ilpanich/axiam#302). The guarded UPDATE runs inside an explicit transaction, making two concurrent redemptions a write-write conflict the storage engine aborts the loser of; and a per-attempt nonce is read back in a separate query after that transaction commits, so a conflict the engine silently missed is still caught. The read-back stays outside the transaction deliberately — inside one, snapshot isolation shows every racer its own write. Measured with tools/surreal-race-probe: zero double redemptions in 40 000 contended attempts on surrealkv and 9 600 on rocksdb. Layer one is a property of the storage engine, so the guarantee is conditional on running a persistent one — see T-165."
       }
      ],
      "open": 0
@@ -2403,12 +2441,49 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealQL",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "73b64273-1551-5046-a08b-7b734c165fd3",
+     "path": "M503,371.7 L1101.4,754",
+     "name": "redeem ticket / device code",
+     "description": "",
+     "label": "redeem ticket / device code (SurrealQL)",
+     "labelLines": [
+      "redeem ticket / device code",
+      "(SurrealQL)"
+     ],
+     "lx": 802.2,
+     "ly": 562.8,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "a59b2622-0df1-5dd6-b209-92cd9dbdd180",
+     "path": "M496,190.9 L1119.7,754",
+     "name": "consume request_uri",
+     "description": "",
+     "label": "consume request_uri (SurrealQL)",
+     "labelLines": [
+      "consume request_uri (SurrealQL)"
+     ],
+     "lx": 807.8,
+     "ly": 472.5,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 14,
+   "total": 16,
    "open": 0,
    "bySeverity": {
-    "High": 6,
+    "High": 8,
     "Medium": 6,
     "Critical": 1,
     "Low": 1
@@ -5202,6 +5277,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "SurrealDB exposed on a Service without credentials, or with default credentials, hands over every tenant's data.",
        "mitigation": "The datastore runs on the private tier with no ingress and credentialed, namespaced connections sourced from Kubernetes Secrets. Verify no LoadBalancer or NodePort Service is created for it in your environment."
+      },
+      {
+       "number": 165,
+       "title": "A non-persistent storage engine removes single-use arbitration",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "SurrealDB's in-memory datastore does not reliably arbitrate the write-write conflict that decides a contended single-use redemption. It is not failing to arbitrate — it aborts contended attempts at the same ~54% rate the persistent engines do, then occasionally misses, silently, with both callers receiving the pre-transition row. An operator who points AXIAM at `surreal start memory` gets a server that boots cleanly and admits a second redemption in roughly 1% of contended rounds, defeating T-163 and T-164 from below.",
+       "mitigation": "The shipped deployments pin a persistent engine — all three compose files and k8s/surrealdb/statefulset.yml pass surrealkv: — and docs/deployment/README.md carries it as a MUST-level operator requirement. axiam-server attests the engine at startup and refuses a memory datastore unless AXIAM__DB__ALLOW_MEMORY_ENGINE=true; because SurrealDB 3.2.4 publishes no datastore identity over the wire, that attestation currently logs a WARN, and a unit test fails on the version bump that makes the name available. A CI gate re-runs tools/surreal-race-probe whenever Cargo.lock moves surrealdb, surrealdb-core or surrealkv, so a bump cannot remove the arbitration silently."
       }
      ],
      "open": 0
@@ -5463,10 +5547,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 11,
+   "total": 12,
    "open": 7,
    "bySeverity": {
-    "High": 7,
+    "High": 8,
     "Medium": 3,
     "Critical": 1
    }

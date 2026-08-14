@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 154 |
-| **Mitigated / Open** | 132 / 22 |
+| **Threats identified** | 165 |
+| **Mitigated / Open** | 142 / 23 |
 | **Owner** | ilpanich |
 
 ---
@@ -526,7 +526,7 @@ Bearer values placed in query strings end up in access logs, browser history and
 
 Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores.
 
-*14 threats — 1 critical, 6 high, 6 medium, 1 low; 0 open.*
+*16 threats — 1 critical, 8 high, 6 medium, 1 low; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -544,6 +544,8 @@ Authorization Code with PKCE, client credentials and refresh grants; consent, in
 | T-60 | authorization codes (single-use) <br/>*Store* | T | Codes outlive their intended window | Medium | Mitigated |
 | T-61 | OIDC signing keys (JWKS) <br/>*Store* | I | Stale key served in JWKS after rotation | Low | Mitigated |
 | T-62 | redirect with code <br/>*Flow* | I | Code leaked through the Referer header or browser history | Medium | Mitigated |
+| T-163 | single-use credentials (UMA tickets, device codes, PAR request_uris) <br/>*Store* | T | Concurrent redemption spends one credential twice | High | Mitigated |
+| T-164 | authorization codes (single-use) <br/>*Store* | T | Two concurrent redemptions of one authorization code | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -646,13 +648,27 @@ The authorization code travels in a URL, so it can leak to any third-party resou
 
 > PKCE makes a leaked code unusable without the verifier; codes are single-use and short-lived; Referrer-Policy is set by the security-headers middleware.
 
+**T-163 — Concurrent redemption spends one credential twice**  
+`single-use credentials (UMA tickets, device codes, PAR request_uris)` (Store) · Tampering · High · Mitigated
+
+Two redemptions of the same credential arriving together can both observe it unspent and both succeed, yielding two RPTs from one authorization decision, two token sets from one user approval, or a replayable authorization request. RFC 8628 makes this the normal shape of the device flow rather than an exotic case: the device polls on a short interval, so a poll is usually already in flight when the user approves.
+
+> Two independent layers, so a double redemption needs both to fail (ilpanich/axiam#302). The guarded UPDATE runs inside an explicit transaction, making two concurrent redemptions a write-write conflict the storage engine aborts the loser of; and a per-attempt nonce is read back in a separate query after that transaction commits, so a conflict the engine silently missed is still caught. The read-back stays outside the transaction deliberately — inside one, snapshot isolation shows every racer its own write. Measured with tools/surreal-race-probe: zero double redemptions in 40 000 contended attempts on surrealkv and 9 600 on rocksdb. Layer one is a property of the storage engine, so the guarantee is conditional on running a persistent one — see T-165.
+
+**T-164 — Two concurrent redemptions of one authorization code**  
+`authorization codes (single-use)` (Store) · Tampering · High · Mitigated
+
+A code observed in a redirect or a proxy log and replayed at the same moment as the legitimate exchange could, if the two are not serialised, let both callers mint a token pair from one authorization. T-54 covers the sequential replay; this is the concurrent one, which the single-use flag alone does not decide.
+
+> Redemption is a single guarded UPDATE (used = false, plus client_id and redirect_uri matched in the same statement), so it runs in the engine's own transaction and two concurrent callers conflict on one key — the loser is aborted and sees no code. Note this path carries the engine layer only, not the redemption nonce the three credentials in T-163 also carry, so it depends on a persistent storage engine (T-165) with nothing behind it. authorization_code_consume_serialises is the regression test.
+
 </details>
 
 ### 5.4 Federation — SAML SP & OIDC relying party
 
 Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning.
 
-*15 threats — 3 critical, 5 high, 6 medium, 1 low; 0 open.*
+*23 threats — 4 critical, 7 high, 10 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -671,6 +687,14 @@ Inbound federation from external identity providers: OIDC discovery and code exc
 | T-75 | JWKS / discovery cache <br/>*Store* | T | Cache poisoning extends a compromised key's lifetime | Medium | Mitigated |
 | T-76 | IdP signing certificates <br/>*Store* | T | Expired or revoked IdP certificate still trusted | Medium | Mitigated |
 | T-77 | SAML response (POST binding) <br/>*Flow* | I | Assertion readable in transit or in browser history | Medium | Mitigated |
+| T-155 | OIDC RP (discovery, code exchange) <br/>*Process* | E | A partner's token is accepted as an AXIAM credential (X4) | Critical | Mitigated |
+| T-156 | OIDC RP (discovery, code exchange) <br/>*Process* | S | A token not addressed to AXIAM is replayed at the exchange (X4) | High | Mitigated |
+| T-157 | OIDC RP (discovery, code exchange) <br/>*Process* | E | Trust composes transitively across three domains (X4) | High | Mitigated |
+| T-158 | OIDC RP (discovery, code exchange) <br/>*Process* | E | A long-lived partner token becomes a long replay window (X4) | Medium | Mitigated |
+| T-159 | OIDC RP (discovery, code exchange) <br/>*Process* | S | An ID token or refresh token is presented as a subject token (X4) | Medium | Mitigated |
+| T-160 | Attribute mapping & JIT provisioning <br/>*Process* | E | A suspended user is revived through the exchange path (X4) | Medium | Mitigated |
+| T-161 | Attribute mapping & JIT provisioning <br/>*Process* | D | A partner's IdP silently populates the AXIAM user table (X4) | Low | Open |
+| T-162 | federation_config (encrypted secrets) <br/>*Store* | T | A malformed trust block is enabled without review (X4) | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -779,6 +803,62 @@ A SAML IdP certificate left in place after rotation or revocation keeps validati
 SAML assertions carry identity attributes and travel through the user's browser.
 
 > HTTP-POST binding keeps the assertion out of the URL; TLS 1.3 protects it in transit; assertion encryption is supported where the IdP offers it.
+
+**T-155 — A partner's token is accepted as an AXIAM credential (X4)**  
+`OIDC RP (discovery, code exchange)` (Process) · Elevation of privilege · Critical · Mitigated
+
+External-IdP token exchange (RFC 8693, X4) lets a client present a token minted by a partner's IdP and receive an AXIAM token. If the partner's assertions were trusted as authorization, the partner's administrator would be able to name AXIAM scopes and grant their own users authority in this tenant.
+
+> An external subject token is treated as evidence of authentication only. The issued token's scopes are the intersection of an AXIAM-admin-authored deny-by-default scope_map, the exchanging client's registration, and the RBAC engine's answer for the resolved user at mint time (deny-override applied at its broadest reading). Trust is off by default per provider, and enabling it requires a non-empty accepted_audiences list.
+
+**T-156 — A token not addressed to AXIAM is replayed at the exchange (X4)**  
+`OIDC RP (discovery, code exchange)` (Process) · Spoofing · High · Mitigated
+
+A token the partner minted for a third party — or for their own internal service — is captured and presented to AXIAM's token endpoint. Without an audience check, any token from the partner's estate becomes an AXIAM credential.
+
+> accepted_audiences is required and non-empty whenever token exchange is enabled; there is deliberately no accept-all value. Matching is exact string equality in both directions (no trailing-slash forgiveness, no case folding), and aud may be a string or an array, of which at least one member must match.
+
+**T-157 — Trust composes transitively across three domains (X4)**  
+`OIDC RP (discovery, code exchange)` (Process) · Elevation of privilege · High · Mitigated
+
+AXIAM trusts partner B; B trusts partner C. Without a barrier, a token C minted can be exchanged at B and the result exchanged at AXIAM, giving C authority nobody configured and neither configuration reveals.
+
+> Every token minted from an external subject token carries an ext_exchange provenance claim naming the foreign issuer, and BOTH exchange paths refuse a subject token that carries it. An exchanged token can never be re-exchanged, ours or theirs.
+
+**T-158 — A long-lived partner token becomes a long replay window (X4)**  
+`OIDC RP (discovery, code exchange)` (Process) · Elevation of privilege · Medium · Mitigated
+
+A partner IdP that issues 24-hour access tokens would, without an independent bound, hand a captured token a 24-hour window in which it can be turned into AXIAM credentials.
+
+> max_token_age_secs bounds the token's age independently of its own exp (default 300 s, hard ceiling 3600 s), and an iat in the future beyond 60 s of skew is refused. The issued token's lifetime is the minimum of the partner token's remaining life, the per-provider ceiling, and the server-wide exchange maximum.
+
+**T-159 — An ID token or refresh token is presented as a subject token (X4)**  
+`OIDC RP (discovery, code exchange)` (Process) · Spoofing · Medium · Mitigated
+
+An ID token is an assertion to a client about a login, which an OIDC deployment distributes more widely and gives a longer life than an access token; a refresh token is a re-authentication credential. Either accepted as a subject token would let an artefact the partner considers low-risk buy an AXIAM credential.
+
+> Both are refused by name at the subject_token_type check, and — since a caller can mislabel a token — again by shape: the ID-token-only claims nonce, at_hash, c_hash and s_hash, and typ headers or claims naming an ID or refresh token, are rejected even when the signature verifies.
+
+**T-160 — A suspended user is revived through the exchange path (X4)**  
+`Attribute mapping & JIT provisioning` (Process) · Elevation of privilege · Medium · Mitigated
+
+An AXIAM user who has been locked, deactivated or anonymized would, if the exchange path skipped the status gate, still be able to obtain tokens for as long as their partner IdP kept authenticating them.
+
+> The resolved user's status is checked after subject resolution and before any token is minted; Locked, Inactive and Anonymized are refused. PendingVerification is allowed deliberately: federation provisioning never moves a federated user off it, so requiring Active would refuse the whole population the feature serves while stopping nobody.
+
+**T-161 — A partner's IdP silently populates the AXIAM user table (X4)**  
+`Attribute mapping & JIT provisioning` (Process) · Denial of service · Low · Open
+
+With subject_mapping set to jit_provision, every previously-unseen subject the partner vouches for creates an AXIAM user row. A partner with a large or hostile user population can grow the table without an AXIAM administrator acting.
+
+> Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit.
+
+**T-162 — A malformed trust block is enabled without review (X4)**  
+`federation_config (encrypted secrets)` (Store) · Tampering · Medium · Mitigated
+
+A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown subject_mapping value stored while token exchange is disabled becomes live the moment an administrator ticks the enable box — which is not where they expect to be told their configuration was wrong.
+
+> The trust block is validated at the API edge on every write, whether or not it is enabled (only the non-empty-audience rule is conditional). On read, every hydration failure resolves towards the default, and enabled is read from its own column so a corrupt neighbouring column can never switch exchange on. A provider whose stored trust block fails validation is skipped at resolution time with a warning rather than being used.
 
 </details>
 
@@ -1239,7 +1319,7 @@ AXIAM enforces TLS to the provider, but the provider-to-recipient hop is outside
 
 Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
 
-*11 threats — 1 critical, 7 high, 3 medium; 7 open.*
+*12 threats — 1 critical, 8 high, 3 medium; 7 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1254,6 +1334,7 @@ Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monit
 | T-132 | Secrets / ConfigMap <br/>*Store* | I | Secret material placed in a ConfigMap or plain env var | High | Open |
 | T-133 | Backups / volume snapshots <br/>*Store* | I | Backup media accessible outside the cluster | High | Open |
 | T-134 | scheduled backup <br/>*Flow* | I | Backup stream unencrypted in transit | Medium | Open |
+| T-165 | SurrealDB StatefulSet (cluster) <br/>*Store* | T | A non-persistent storage engine removes single-use arbitration | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1334,6 +1415,13 @@ Backups contain everything the live datastore does, usually under weaker access 
 A backup written across the network without encryption exposes the entire datastore to anyone who can observe that path.
 
 > Deployment responsibility: use an encrypted transport and server-side encryption on the backup target.
+
+**T-165 — A non-persistent storage engine removes single-use arbitration**  
+`SurrealDB StatefulSet (cluster)` (Store) · Tampering · High · Mitigated
+
+SurrealDB's in-memory datastore does not reliably arbitrate the write-write conflict that decides a contended single-use redemption. It is not failing to arbitrate — it aborts contended attempts at the same ~54% rate the persistent engines do, then occasionally misses, silently, with both callers receiving the pre-transition row. An operator who points AXIAM at `surreal start memory` gets a server that boots cleanly and admits a second redemption in roughly 1% of contended rounds, defeating T-163 and T-164 from below.
+
+> The shipped deployments pin a persistent engine — all three compose files and k8s/surrealdb/statefulset.yml pass surrealkv: — and docs/deployment/README.md carries it as a MUST-level operator requirement. axiam-server attests the engine at startup and refuses a memory datastore unless AXIAM__DB__ALLOW_MEMORY_ENGINE=true; because SurrealDB 3.2.4 publishes no datastore identity over the wire, that attestation currently logs a WARN, and a unit test fails on the version bump that makes the name available. A CI gate re-runs tools/surreal-race-probe whenever Cargo.lock moves surrealdb, surrealdb-core or surrealkv, so a bump cannot remove the arbitration silently.
 
 </details>
 
@@ -1473,7 +1561,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-22 of 154 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+23 of 165 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1499,6 +1587,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
 | T-153 | Medium | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*PKI, certificates & IoT device identity* | Staleness never hard-fails ingestion (a transient FIDO Alliance outage must not brick registration), so a since-revoked authenticator model keeps passing policy until the next… |
 | T-119 | Low | Unbounded audit growth degrades the datastore | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements. |
+| T-161 | Low | A partner's IdP silently populates the AXIAM user table (X4) | Attribute mapping & JIT provisioning <br/>*Federation — SAML SP & OIDC relying party* | Off by default (`linked_only` refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit. |
 
 ### Grouping
 
@@ -1518,6 +1607,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - Edge protection (WAF, connection limits) in front of the ingress
 - Alerting on scheduled-job completion, so a missed GDPR erasure or certificate-expiry run is noticed
 - Kubernetes audit logging, since cluster-admin bypasses the AXIAM audit trail entirely
+- Running SurrealDB on a **persistent** storage engine (`surrealkv:` or `rocksdb:`, never `memory:`). This is a correctness control, not a durability preference: the first layer deciding a contended single-use redemption is the engine aborting the loser of a write-write conflict, which the in-memory datastore does not do reliably (T-163, T-164, T-165). The shipped compose files and k8s StatefulSet already pin it, and the server cannot verify it for you — SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a WARN that the engine could not be attested
 - Re-supplying the local FIDO MDS3 BLOB file on air-gapped deployments (`AXIAM__PKI__MDS_BLOB_PATH`) — there is no automatic refresh path off the public network, so an operator who never updates the file never gets the newer BLOB's revocations either
 
 **Genuine gaps worth scheduling**
@@ -1532,21 +1622,21 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 | Category | Threats |
 |---|---|
-| Spoofing | 38 |
-| Tampering | 32 |
+| Spoofing | 40 |
+| Tampering | 36 |
 | Repudiation | 5 |
 | Information disclosure | 43 |
-| Denial of service | 15 |
-| Elevation of privilege | 21 |
+| Denial of service | 16 |
+| Elevation of privilege | 25 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 23 | 1 |
-| High | 63 | 9 |
-| Medium | 62 | 11 |
-| Low | 6 | 1 |
+| Critical | 24 | 1 |
+| High | 68 | 9 |
+| Medium | 66 | 11 |
+| Low | 7 | 2 |
 
 **By diagram**
 
@@ -1554,12 +1644,12 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 |---|---|---|
 | System diagram | 26 | 3 |
 | Authentication & session management | 22 | 1 |
-| OAuth2 / OIDC authorization server | 14 | 0 |
-| Federation — SAML SP & OIDC relying party | 15 | 0 |
+| OAuth2 / OIDC authorization server | 16 | 0 |
+| Federation — SAML SP & OIDC relying party | 23 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 15 | 1 |
 | PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 11 | 7 |
+| Deployment & platform (Kubernetes) | 12 | 7 |
 | Client SDKs & admin UI integration surface | 15 | 4 |
 
 ## 8. Assumptions

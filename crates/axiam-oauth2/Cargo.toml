@@ -25,6 +25,9 @@ base64 = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 subtle = { workspace = true }
+# X5.1 — RFC 8705 client authentication reads the subject DN and SANs out of
+# the certificate rustls already verified during the handshake.
+x509-parser = { workspace = true }
 
 [dev-dependencies]
 # X4 external-exchange unit tests mint an Ed25519 keypair for the AuthConfig

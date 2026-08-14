@@ -23,7 +23,9 @@ use axiam_core::repository::{
     RefreshTokenRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use axiam_oauth2::error::OAuth2Error;
-use axiam_oauth2::token::{IntrospectRequest, RevokeRequest, TokenRequest, TokenService};
+use axiam_oauth2::token::{
+    IntrospectRequest, RevokeRequest, TokenRequest, TokenRequestContext, TokenService,
+};
 use chrono::Utc;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -32,6 +34,17 @@ const SECRET: &str = "correct-client-secret";
 // RFC 7636 Appendix B PKCE test vector.
 const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+/// The transport context of a request that arrived over a connection carrying
+/// no client certificate — which is every request in this file except the ones
+/// that say otherwise, and every request an ordinary AXIAM deployment serves.
+///
+/// Named rather than inlined as `TokenRequestContext::default()` so that a
+/// reader of any single assertion can see that "no certificate" is a stated
+/// property of the scenario, not an argument nobody thought about.
+fn no_cert() -> TokenRequestContext {
+    TokenRequestContext::default()
+}
 
 fn not_found() -> AxiamError {
     AxiamError::NotFound {
@@ -512,6 +525,14 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         post_logout_redirect_uris: Vec::new(),
         backchannel_logout_uri: None,
         require_par: false,
+        profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+        token_endpoint_auth_method:
+            axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: vec![],
+        tls_client_certificate_bound_access_tokens: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     })
@@ -636,7 +657,7 @@ async fn exchange_unsupported_grant_type() {
         MockRefreshRepo::new(),
     );
     let err = svc
-        .exchange(Uuid::new_v4(), base_req("password"))
+        .exchange(Uuid::new_v4(), base_req("password"), &no_cert())
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), "unsupported_grant_type");
@@ -665,7 +686,7 @@ async fn auth_code_missing_code() {
     let mut req = auth_code_req(None);
     req.code = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -684,7 +705,7 @@ async fn auth_code_missing_redirect_uri() {
     let mut req = auth_code_req(None);
     req.redirect_uri = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -703,7 +724,7 @@ async fn auth_code_missing_client_id() {
     let mut req = auth_code_req(None);
     req.client_id = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -720,7 +741,7 @@ async fn auth_code_client_not_found() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -737,7 +758,7 @@ async fn auth_code_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -754,7 +775,7 @@ async fn auth_code_client_not_authorized_for_grant() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -773,7 +794,7 @@ async fn auth_code_missing_client_secret() {
     let mut req = auth_code_req(None);
     req.client_secret = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -792,7 +813,7 @@ async fn auth_code_wrong_client_secret() {
     let mut req = auth_code_req(None);
     req.client_secret = Some("wrong".into());
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -809,7 +830,7 @@ async fn auth_code_code_lookup_fails() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -826,7 +847,7 @@ async fn auth_code_pkce_missing_verifier() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -844,7 +865,7 @@ async fn auth_code_pkce_wrong_verifier() {
     );
     let bad = "wrong-verifier-padded-to-forty-three-characters";
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(Some(bad)))
+        svc.exchange(Uuid::new_v4(), auth_code_req(Some(bad)), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -863,7 +884,7 @@ async fn auth_code_consume_fails() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -880,7 +901,7 @@ async fn auth_code_tenant_not_found() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -897,7 +918,7 @@ async fn auth_code_tenant_db_outage_server_error() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -914,7 +935,7 @@ async fn auth_code_success_no_refresh_no_openid() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), auth_code_req(None))
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
         .await
         .unwrap();
     assert_eq!(resp.token_type, "Bearer");
@@ -935,7 +956,11 @@ async fn auth_code_success_with_pkce_refresh_and_openid() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), auth_code_req(Some(PKCE_VERIFIER)))
+        .exchange(
+            Uuid::new_v4(),
+            auth_code_req(Some(PKCE_VERIFIER)),
+            &no_cert(),
+        )
         .await
         .unwrap();
     assert!(resp.refresh_token.is_some());
@@ -957,7 +982,7 @@ async fn auth_code_refresh_create_failure_is_server_error() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), auth_code_req(None))
+        svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -980,7 +1005,7 @@ async fn cc_missing_client_id() {
     let mut req = base_req("client_credentials");
     req.client_id = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -999,7 +1024,7 @@ async fn cc_missing_secret() {
     let mut req = base_req("client_credentials");
     req.client_secret = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1016,7 +1041,7 @@ async fn cc_client_not_found() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1035,7 +1060,7 @@ async fn cc_wrong_secret() {
     let mut req = base_req("client_credentials");
     req.client_secret = Some("nope".into());
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1052,7 +1077,7 @@ async fn cc_not_authorized_for_grant() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1071,7 +1096,7 @@ async fn cc_invalid_requested_scope() {
     let mut req = base_req("client_credentials");
     req.scope = Some("api forbidden".into());
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1088,7 +1113,7 @@ async fn cc_tenant_not_found() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1106,7 +1131,7 @@ async fn cc_success_with_requested_scope_subset() {
     );
     let mut req = base_req("client_credentials");
     req.scope = Some("read".into());
-    let resp = svc.exchange(Uuid::new_v4(), req).await.unwrap();
+    let resp = svc.exchange(Uuid::new_v4(), req, &no_cert()).await.unwrap();
     assert_eq!(resp.scope.as_deref(), Some("read"));
     assert!(resp.refresh_token.is_none());
     assert!(resp.id_token.is_none());
@@ -1121,7 +1146,7 @@ async fn cc_success_defaults_to_client_scopes() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), base_req("client_credentials"))
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
         .await
         .unwrap();
     assert_eq!(resp.scope.as_deref(), Some("api read"));
@@ -1136,7 +1161,7 @@ async fn cc_success_empty_scopes_yields_none() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), base_req("client_credentials"))
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
         .await
         .unwrap();
     assert!(resp.scope.is_none());
@@ -1163,7 +1188,7 @@ async fn refresh_missing_token() {
     let mut req = base_req("refresh_token");
     req.refresh_token = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1182,7 +1207,7 @@ async fn refresh_missing_client_id() {
     let mut req = refresh_req("tok");
     req.client_id = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1201,7 +1226,7 @@ async fn refresh_missing_secret() {
     let mut req = refresh_req("tok");
     req.client_secret = None;
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1218,7 +1243,7 @@ async fn refresh_client_not_found() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1237,7 +1262,7 @@ async fn refresh_wrong_secret() {
     let mut req = refresh_req("tok");
     req.client_secret = Some("bad".into());
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1254,7 +1279,7 @@ async fn refresh_not_authorized_for_grant() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1271,7 +1296,7 @@ async fn refresh_token_lookup_fails() {
         MockRefreshRepo::new(), // get = NotFound
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1293,7 +1318,7 @@ async fn refresh_token_client_mismatch() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1315,7 +1340,7 @@ async fn refresh_success_user_token_with_openid() {
         refresh,
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
         .await
         .unwrap();
     assert!(resp.refresh_token.is_some());
@@ -1333,7 +1358,7 @@ async fn refresh_success_machine_token_no_user() {
         refresh,
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
         .await
         .unwrap();
     assert!(resp.refresh_token.is_some());
@@ -1353,7 +1378,7 @@ async fn refresh_revoke_old_not_found_is_invalid_grant() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1373,7 +1398,7 @@ async fn refresh_revoke_old_db_error_is_server_error() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1618,7 +1643,7 @@ async fn auth_code_success_empty_scopes_yields_none_scope() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), auth_code_req(None))
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
         .await
         .unwrap();
     assert!(resp.scope.is_none());
@@ -1634,7 +1659,7 @@ async fn cc_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1651,7 +1676,7 @@ async fn cc_tenant_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1668,7 +1693,7 @@ async fn refresh_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1687,7 +1712,7 @@ async fn refresh_tenant_not_found_is_invalid_request() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1706,7 +1731,7 @@ async fn refresh_tenant_db_outage_is_server_error() {
         refresh,
     );
     assert_eq!(
-        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap_err()
             .error_code(),
@@ -1726,7 +1751,7 @@ async fn refresh_success_openid_scope_but_no_user_yields_no_id_token() {
         refresh,
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
         .await
         .unwrap();
     assert!(resp.id_token.is_none());
@@ -1744,7 +1769,7 @@ async fn refresh_success_empty_scopes_yields_none_scope() {
         refresh,
     );
     let resp = svc
-        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
         .await
         .unwrap();
     assert!(resp.scope.is_none());
@@ -1866,7 +1891,7 @@ async fn legacy_sha256_client_secret_still_authenticates_and_is_upgraded() {
     );
 
     let res = svc
-        .exchange(Uuid::new_v4(), base_req("client_credentials"))
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
         .await;
     assert!(res.is_ok(), "legacy row must still authenticate: {res:?}");
 
@@ -1902,7 +1927,7 @@ async fn failed_verification_against_a_legacy_row_writes_nothing() {
     let mut req = base_req("client_credentials");
     req.client_secret = Some("wrong-secret".into());
     let err = svc
-        .exchange(Uuid::new_v4(), req)
+        .exchange(Uuid::new_v4(), req, &no_cert())
         .await
         .expect_err("a wrong secret must be rejected under the legacy scheme too");
     assert_eq!(err.error_code(), "invalid_client");
@@ -1924,7 +1949,7 @@ async fn current_scheme_client_authenticates_without_any_write() {
     );
 
     assert!(
-        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
             .await
             .is_ok()
     );
@@ -1947,7 +1972,10 @@ async fn wrong_secret_under_the_current_scheme_is_rejected() {
 
     let mut req = base_req("client_credentials");
     req.client_secret = Some("wrong-secret".into());
-    let err = svc.exchange(Uuid::new_v4(), req).await.unwrap_err();
+    let err = svc
+        .exchange(Uuid::new_v4(), req, &no_cert())
+        .await
+        .unwrap_err();
     assert_eq!(err.error_code(), "invalid_client");
     assert!(log.lock().unwrap().is_empty());
 }
@@ -1966,7 +1994,9 @@ async fn legacy_rows_are_upgraded_on_the_refresh_token_grant_too() {
         MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["api:read"])),
     );
 
-    let res = svc.exchange(Uuid::new_v4(), refresh_req("tok")).await;
+    let res = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await;
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(log.lock().unwrap().len(), 1);
 }
@@ -2056,6 +2086,7 @@ async fn a_service_account_can_authenticate_with_client_credentials() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+            &no_cert(),
         )
         .await
         .expect("service account authenticates");
@@ -2086,6 +2117,7 @@ async fn a_wrong_service_account_secret_is_rejected() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+            &no_cert(),
         )
         .await
         .expect_err("a wrong secret must not authenticate");
@@ -2110,6 +2142,7 @@ async fn a_disabled_service_account_cannot_authenticate() {
             .exchange(
                 tenant,
                 sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+                &no_cert(),
             )
             .await
             .expect_err("a non-active service account must not authenticate");
@@ -2129,6 +2162,7 @@ async fn an_unknown_service_account_is_invalid_client() {
         .exchange(
             Uuid::new_v4(),
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "x"),
+            &no_cert(),
         )
         .await
         .expect_err("unknown client");
@@ -2148,7 +2182,7 @@ async fn a_service_account_cannot_request_a_scope() {
     req.scope = Some("admin:everything".into());
 
     let err = svc
-        .exchange(tenant, req)
+        .exchange(tenant, req, &no_cert())
         .await
         .expect_err("a service account registers no scopes");
     assert!(matches!(err, OAuth2Error::InvalidScope(_)), "got {err:?}");
@@ -2167,6 +2201,7 @@ async fn a_legacy_service_account_hash_authenticates_and_migrates() {
     svc.exchange(
         tenant,
         sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+        &no_cert(),
     )
     .await
     .expect("a legacy row still authenticates");
@@ -2202,6 +2237,7 @@ async fn a_failed_service_account_auth_never_migrates() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+            &no_cert(),
         )
         .await;
 
@@ -2239,6 +2275,7 @@ async fn a_service_account_keyed_to_a_previous_pepper_migrates_on_use() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+            &no_cert(),
         )
         .await;
 
@@ -2290,6 +2327,7 @@ async fn a_service_account_from_another_tenant_is_refused() {
             // The correct secret — so the refusal is attributable to the tenant
             // mismatch alone and not to a credential failure.
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", secret),
+            &no_cert(),
         )
         .await
         .expect_err("a service account must not authenticate outside its tenant");
@@ -2335,6 +2373,7 @@ async fn an_unknown_client_is_indistinguishable_from_a_wrong_secret() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+            &no_cert(),
         )
         .await
         .expect_err("wrong secret");
@@ -2342,6 +2381,7 @@ async fn an_unknown_client_is_indistinguishable_from_a_wrong_secret() {
         .exchange(
             tenant,
             sa_req("sa_deadbeefdeadbeefdeadbeefdeadbeef", "wrong"),
+            &no_cert(),
         )
         .await
         .expect_err("unknown client");
@@ -2397,7 +2437,7 @@ async fn authorization_code_does_not_reveal_whether_a_client_exists() {
         );
         let mut req = auth_code_req(None);
         req.client_secret = secret.map(String::from);
-        svc.exchange(Uuid::new_v4(), req)
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
             .await
             .expect_err("must not succeed")
     }

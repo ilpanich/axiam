@@ -227,6 +227,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "authorization_code_redemption_nonce",
         sql: SCHEMA_V37,
     },
+    Migration {
+        version: 38,
+        name: "fapi2_client_profile_and_mtls_client_auth",
+        sql: SCHEMA_V38,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1999,6 +2004,55 @@ DEFINE INDEX IF NOT EXISTS idx_federation_config_tenant_tx ON TABLE federation_c
 // redeemed after it simply has no prior nonce to disturb.
 const SCHEMA_V37: &str = "\
 DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE oauth2_auth_code TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v38 — FAPI 2.0 client profile and mTLS client credentials (X5.1)
+// -----------------------------------------------------------------------
+//
+// Seven additive client-registration fields, and every one of them defaults to
+// the behaviour a pre-v38 client already had. That is the whole point of the
+// design: the FAPI posture is ONE switch (`profile`), and a deployment that
+// never touches it cannot be changed by this migration.
+//
+// - `profile` defaults to `'standard'`, so every existing row keeps the exact
+//   constraint set it was registered under. It is a string rather than a bool
+//   because the next profile (FAPI Message Signing, or a national variant)
+//   should be a new value here, not a second boolean that can contradict the
+//   first.
+// - `token_endpoint_auth_method` defaults to `'client_secret_post'`, which is
+//   what every client did before this migration and what the discovery
+//   document advertised.
+// - The three `tls_client_auth_*` fields are `option<string>` and mutually
+//   exclusive per RFC 8705 §2.1.2. The exclusivity is enforced in the
+//   application layer (`OAuth2Client::mtls_binding_count`) rather than by a
+//   SurrealDB assertion, because the check spans three fields and needs to
+//   produce a caller-facing error message naming which ones collided.
+// - `self_signed_tls_client_auth_thumbprints` defaults to `[]`, which reads
+//   correctly as "no self-signed certificate is accepted for this client" —
+//   the same fail-closed reading as an empty `post_logout_redirect_uris`.
+// - `tls_client_certificate_bound_access_tokens` defaults false, so no
+//   existing token gains a `cnf` claim and no existing resource server starts
+//   seeing a confirmation it does not know how to check.
+//
+// No backfill and no index. These fields are read on the client-authentication
+// path, which already loads the whole row by `(tenant_id, client_id)` through
+// `idx_oauth2_tenant_client_id`; indexing a field that is only ever read
+// alongside that lookup would cost writes and buy nothing.
+const SCHEMA_V38: &str = "\
+DEFINE FIELD IF NOT EXISTS profile ON TABLE oauth2_client TYPE string DEFAULT 'standard';
+DEFINE FIELD IF NOT EXISTS token_endpoint_auth_method ON TABLE oauth2_client
+    TYPE string DEFAULT 'client_secret_post';
+DEFINE FIELD IF NOT EXISTS tls_client_auth_subject_dn ON TABLE oauth2_client
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS tls_client_auth_san_dns ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS tls_client_auth_san_uri ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS self_signed_tls_client_auth_thumbprints ON TABLE oauth2_client
+    TYPE array DEFAULT [];
+DEFINE FIELD IF NOT EXISTS self_signed_tls_client_auth_thumbprints.* ON TABLE oauth2_client
+    TYPE string;
+DEFINE FIELD IF NOT EXISTS tls_client_certificate_bound_access_tokens ON TABLE oauth2_client
+    TYPE bool DEFAULT false;
 ";
 
 // -----------------------------------------------------------------------

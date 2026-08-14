@@ -4,6 +4,109 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Which security posture a client is registered under (X5.1).
+///
+/// This is the FAPI "one switch". FAPI 2.0 is not a single feature but a
+/// bundle of constraints — mandatory PAR, mandatory PKCE with `S256`,
+/// mandatory strong client authentication, mandatory sender-constrained
+/// tokens, and a refusal of every relaxation the base specs permit. Encoding
+/// them as one profile rather than a dozen independent booleans means an
+/// operator cannot register a client that is *nearly* FAPI, and a reviewer
+/// can answer "is this client financial-grade?" by reading one field.
+///
+/// The same philosophy as the rate-limit postures: ordinary clients see no
+/// behaviour change at all, because [`Standard`](Self::Standard) is the serde
+/// default and every row written before schema v38 decodes to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientProfile {
+    /// Everything AXIAM did before X5. No added requirements.
+    #[default]
+    Standard,
+    /// FAPI 2.0 Security Profile (Final). See [`ClientProfile`] for what the
+    /// switch turns on, and `axiam_oauth2::fapi` for where each constraint is
+    /// enforced.
+    Fapi2,
+}
+
+impl ClientProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fapi2 => "fapi2",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised — a caller
+    /// must fail closed rather than silently degrade an unknown profile to
+    /// `Standard`, which would turn a typo into a downgrade.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "fapi2" => Some(Self::Fapi2),
+            _ => None,
+        }
+    }
+
+    /// Whether this profile demands FAPI 2.0's constraint bundle.
+    pub const fn is_fapi2(self) -> bool {
+        matches!(self, Self::Fapi2)
+    }
+}
+
+/// How a client proves its identity at the token endpoint (RFC 8705 §2,
+/// OIDC Core §9 naming).
+///
+/// Only the methods AXIAM actually implements are representable. There is
+/// deliberately no `none` variant: every AXIAM client is confidential today
+/// (see `handle_authorization_code`), and adding a public-client value here
+/// before the rest of the server understands one would let an operator
+/// register a client whose authentication is silently skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuthMethod {
+    /// The shared secret in the request body (RFC 6749 §2.3.1). AXIAM's
+    /// historical and default method.
+    #[default]
+    ClientSecretPost,
+    /// PKI-based mutual TLS (RFC 8705 §2.1): the client presents a
+    /// certificate issued by a CA the deployment's mTLS listener trusts, and
+    /// AXIAM matches the *registered* expected subject DN or SAN against the
+    /// certificate rustls already verified during the handshake.
+    TlsClientAuth,
+    /// Self-signed mutual TLS (RFC 8705 §2.2): the certificate chains to
+    /// nothing, so the *certificate itself* is the registered credential —
+    /// matched by its SHA-256 thumbprint.
+    SelfSignedTlsClientAuth,
+}
+
+impl ClientAuthMethod {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientSecretPost => "client_secret_post",
+            Self::TlsClientAuth => "tls_client_auth",
+            Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised — see
+    /// [`ClientProfile::from_wire`] for why this does not default.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "client_secret_post" => Some(Self::ClientSecretPost),
+            "tls_client_auth" => Some(Self::TlsClientAuth),
+            "self_signed_tls_client_auth" => Some(Self::SelfSignedTlsClientAuth),
+            _ => None,
+        }
+    }
+
+    /// Whether this method authenticates with a client certificate rather
+    /// than a shared secret.
+    pub const fn is_mtls(self) -> bool {
+        matches!(self, Self::TlsClientAuth | Self::SelfSignedTlsClientAuth)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuth2Client {
     pub id: Uuid,
@@ -38,8 +141,175 @@ pub struct OAuth2Client {
     /// the per-client switch the FAPI profile turns on.
     #[serde(default)]
     pub require_par: bool,
+    /// X5.1 — the FAPI switch. See [`ClientProfile`].
+    #[serde(default)]
+    pub profile: ClientProfile,
+    /// X5.1 — how this client authenticates at the token endpoint.
+    ///
+    /// `serde(default)` resolves rows written before schema v38 to
+    /// `client_secret_post`, which is exactly what they were doing.
+    #[serde(default)]
+    pub token_endpoint_auth_method: ClientAuthMethod,
+    /// RFC 8705 §2.1.2 `tls_client_auth_subject_dn` — the expected subject
+    /// distinguished name, in RFC 4514 string form, of the certificate a
+    /// `tls_client_auth` client presents.
+    ///
+    /// RFC 8705 requires that **exactly one** of the `tls_client_auth_*`
+    /// metadata parameters be registered, because two would create an
+    /// ambiguity about which one authenticates. [`Self::mtls_binding_count`]
+    /// is how that invariant is checked at registration time.
+    #[serde(default)]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 §2.1.2 `tls_client_auth_san_dns` — the expected dNSName SAN.
+    #[serde(default)]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 §2.1.2 `tls_client_auth_san_uri` — the expected
+    /// uniformResourceIdentifier SAN.
+    #[serde(default)]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// Certificate thumbprints accepted for `self_signed_tls_client_auth`,
+    /// as base64url-encoded SHA-256 digests of the DER certificate — the same
+    /// `x5t#S256` encoding RFC 8705 §3.1 uses for token binding.
+    ///
+    /// RFC 8705 §2.2 registers these as certificates inside the client's
+    /// `jwks`/`jwks_uri`. AXIAM stores the thumbprint instead: the comparison
+    /// the spec ultimately performs on a self-signed certificate is an
+    /// equality check against a registered key, and a thumbprint is that
+    /// check with no JWKS parser on the authentication path. The trade-off is
+    /// recorded in the operator guide — it means AXIAM cannot rotate a
+    /// self-signed client's certificate by having the client republish a
+    /// `jwks_uri`; the new thumbprint must be registered. A list rather than a
+    /// single value so a rotation can overlap.
+    #[serde(default)]
+    pub self_signed_tls_client_auth_thumbprints: Vec<String>,
+    /// RFC 8705 §3.4 `tls_client_certificate_bound_access_tokens` — when set,
+    /// tokens issued to this client carry a `cnf.x5t#S256` confirmation claim
+    /// naming the certificate presented at the token endpoint, and are
+    /// therefore usable only by the holder of that certificate's private key.
+    ///
+    /// Independent of [`Self::token_endpoint_auth_method`] on purpose: a
+    /// client may authenticate with a secret over an mTLS connection and
+    /// still want its tokens bound to the certificate it presented. The FAPI
+    /// profile requires this to be true; nothing else does.
+    #[serde(default)]
+    pub tls_client_certificate_bound_access_tokens: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// How many of the mutually exclusive `tls_client_auth_*` metadata parameters
+/// are registered (RFC 8705 §2.1.2 permits exactly one).
+///
+/// A free function so that the registered client, a pending registration and a
+/// merged update all count the same way. Three copies of this rule would be
+/// three chances for the counter and the matcher to disagree about whether
+/// `Some("")` is registered — and they must not, because the matcher's `else`
+/// branch is reached exactly when the counter said one.
+pub fn count_mtls_bindings(
+    subject_dn: Option<&str>,
+    san_dns: Option<&str>,
+    san_uri: Option<&str>,
+) -> usize {
+    [subject_dn, san_dns, san_uri]
+        .iter()
+        .filter(|v| v.is_some_and(|s| !s.trim().is_empty()))
+        .count()
+}
+
+impl OAuth2Client {
+    /// See [`count_mtls_bindings`].
+    pub fn mtls_binding_count(&self) -> usize {
+        count_mtls_bindings(
+            self.tls_client_auth_subject_dn.as_deref(),
+            self.tls_client_auth_san_dns.as_deref(),
+            self.tls_client_auth_san_uri.as_deref(),
+        )
+    }
+}
+
+impl CreateOAuth2Client {
+    /// See [`count_mtls_bindings`]. Used to validate a registration *before*
+    /// it is written, so an impossible client is never created.
+    pub fn mtls_binding_count(&self) -> usize {
+        count_mtls_bindings(
+            self.tls_client_auth_subject_dn.as_deref(),
+            self.tls_client_auth_san_dns.as_deref(),
+            self.tls_client_auth_san_uri.as_deref(),
+        )
+    }
+}
+
+impl UpdateOAuth2Client {
+    /// Whether this patch touches any field the security-profile rules read.
+    ///
+    /// The caller uses it to decide whether validating the update needs the
+    /// stored row merged in. A patch that only renames a client cannot change
+    /// whether the client satisfies its profile, so it should not pay for a
+    /// read.
+    pub fn touches_security_profile(&self) -> bool {
+        self.profile.is_some()
+            || self.token_endpoint_auth_method.is_some()
+            || self.require_par.is_some()
+            || self.tls_client_certificate_bound_access_tokens.is_some()
+            || self.tls_client_auth_subject_dn.is_some()
+            || self.tls_client_auth_san_dns.is_some()
+            || self.tls_client_auth_san_uri.is_some()
+            || self.self_signed_tls_client_auth_thumbprints.is_some()
+    }
+}
+
+impl OAuth2Client {
+    /// A copy of this client with `update`'s security-profile fields applied,
+    /// for validating a patch against the row it will produce.
+    ///
+    /// Only the profile-relevant fields are merged — the result exists to be
+    /// handed to `axiam_oauth2::fapi::validate_registration`, which reads
+    /// nothing else, and merging the rest would invite the copy to be mistaken
+    /// for the row that is about to be written.
+    ///
+    /// The empty-string "clear it" sentinel is honoured here exactly as the
+    /// repository honours it, so validation sees the same DN/SAN the write
+    /// will store. If these two disagreed, an update that clears the last
+    /// `tls_client_auth_*` parameter would validate against the old value and
+    /// then store a client that can authenticate nothing.
+    pub fn with_update_applied(mut self, update: &UpdateOAuth2Client) -> Self {
+        fn merge(current: Option<String>, patch: Option<&String>) -> Option<String> {
+            match patch {
+                None => current,
+                Some(v) if v.trim().is_empty() => None,
+                Some(v) => Some(v.clone()),
+            }
+        }
+
+        if let Some(p) = update.profile {
+            self.profile = p;
+        }
+        if let Some(m) = update.token_endpoint_auth_method {
+            self.token_endpoint_auth_method = m;
+        }
+        if let Some(v) = update.require_par {
+            self.require_par = v;
+        }
+        if let Some(v) = update.tls_client_certificate_bound_access_tokens {
+            self.tls_client_certificate_bound_access_tokens = v;
+        }
+        self.tls_client_auth_subject_dn = merge(
+            self.tls_client_auth_subject_dn,
+            update.tls_client_auth_subject_dn.as_ref(),
+        );
+        self.tls_client_auth_san_dns = merge(
+            self.tls_client_auth_san_dns,
+            update.tls_client_auth_san_dns.as_ref(),
+        );
+        self.tls_client_auth_san_uri = merge(
+            self.tls_client_auth_san_uri,
+            update.tls_client_auth_san_uri.as_ref(),
+        );
+        if let Some(ref t) = update.self_signed_tls_client_auth_thumbprints {
+            self.self_signed_tls_client_auth_thumbprints = t.clone();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +325,21 @@ pub struct CreateOAuth2Client {
     pub backchannel_logout_uri: Option<String>,
     #[serde(default)]
     pub require_par: bool,
+    /// X5.1 — see [`OAuth2Client::profile`].
+    #[serde(default)]
+    pub profile: ClientProfile,
+    #[serde(default)]
+    pub token_endpoint_auth_method: ClientAuthMethod,
+    #[serde(default)]
+    pub tls_client_auth_subject_dn: Option<String>,
+    #[serde(default)]
+    pub tls_client_auth_san_dns: Option<String>,
+    #[serde(default)]
+    pub tls_client_auth_san_uri: Option<String>,
+    #[serde(default)]
+    pub self_signed_tls_client_auth_thumbprints: Vec<String>,
+    #[serde(default)]
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -75,6 +360,18 @@ pub struct UpdateOAuth2Client {
     /// decommissioned.
     pub backchannel_logout_uri: Option<String>,
     pub require_par: Option<bool>,
+    /// X5.1 — see [`OAuth2Client::profile`].
+    pub profile: Option<ClientProfile>,
+    pub token_endpoint_auth_method: Option<ClientAuthMethod>,
+    /// `Some("")` clears, for the same reason
+    /// [`Self::backchannel_logout_uri`] does — an empty DN/SAN is not a legal
+    /// value, so it cannot collide with a real one, and without a way to say
+    /// "clear it" a client migrated off mTLS would keep a stale expectation.
+    pub tls_client_auth_subject_dn: Option<String>,
+    pub tls_client_auth_san_dns: Option<String>,
+    pub tls_client_auth_san_uri: Option<String>,
+    pub self_signed_tls_client_auth_thumbprints: Option<Vec<String>>,
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
 }
 
 /// Represents a stored OAuth2 authorization code (short-lived, single-use).

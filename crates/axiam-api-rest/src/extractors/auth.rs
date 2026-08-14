@@ -607,6 +607,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             act: None,
             permissions: None,
             ext_exchange: None,
+            cnf: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
         let header = Header::new(Algorithm::EdDSA);

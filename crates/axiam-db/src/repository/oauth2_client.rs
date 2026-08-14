@@ -3,7 +3,9 @@
 use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
+use axiam_core::models::oauth2_client::{
+    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client,
+};
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
 use rand::RngExt;
@@ -20,6 +22,18 @@ fn generate_client_id() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
     format!("oa_{}", hex::encode(bytes))
+}
+
+/// Collapse a blank string to `None` before it is stored.
+///
+/// An empty or whitespace-only `tls_client_auth_*` value must never reach the
+/// matcher: `""` is not a DN anybody holds, but a matcher that compared it
+/// literally would authenticate any certificate whose corresponding field is
+/// also absent. Storing `None` makes the "registered nothing" case
+/// unambiguous, and `mtls_client_auth` refuses to authenticate a client with
+/// no registered expectation at all.
+fn normalise_optional(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 /// Generate a random client secret (64 hex chars = 32 bytes of entropy).
@@ -46,6 +60,22 @@ struct OAuth2ClientRow {
     backchannel_logout_uri: Option<String>,
     #[surreal(default)]
     require_par: bool,
+    // X5.1. Rows written before schema v38 have none of these; every default
+    // reproduces the pre-v38 behaviour exactly (see `SCHEMA_V38`).
+    #[surreal(default)]
+    profile: Option<String>,
+    #[surreal(default)]
+    token_endpoint_auth_method: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_subject_dn: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_san_dns: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_san_uri: Option<String>,
+    #[surreal(default)]
+    self_signed_tls_client_auth_thumbprints: Vec<String>,
+    #[surreal(default)]
+    tls_client_certificate_bound_access_tokens: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -68,8 +98,90 @@ struct OAuth2ClientRowWithId {
     backchannel_logout_uri: Option<String>,
     #[surreal(default)]
     require_par: bool,
+    // X5.1 — see `OAuth2ClientRow`.
+    #[surreal(default)]
+    profile: Option<String>,
+    #[surreal(default)]
+    token_endpoint_auth_method: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_subject_dn: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_san_dns: Option<String>,
+    #[surreal(default)]
+    tls_client_auth_san_uri: Option<String>,
+    #[surreal(default)]
+    self_signed_tls_client_auth_thumbprints: Vec<String>,
+    #[surreal(default)]
+    tls_client_certificate_bound_access_tokens: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+/// Decode the stored `profile` string.
+///
+/// An **absent** value is a pre-v38 row and correctly reads as `Standard`. An
+/// **unrecognised** value is not: it means this binary is older than the row
+/// it is reading, and guessing `Standard` there would silently strip a client
+/// of the constraint bundle it was registered under — a downgrade performed by
+/// a rollback. That is refused, loudly, as a migration error.
+fn decode_profile(raw: Option<&str>) -> Result<ClientProfile, DbError> {
+    match raw {
+        None => Ok(ClientProfile::default()),
+        Some(s) => ClientProfile::from_wire(s).ok_or_else(|| {
+            DbError::Migration(format!(
+                "oauth2_client.profile holds an unrecognised value {s:?}; this binary cannot \
+                 safely serve a client registered under a profile it does not implement"
+            ))
+        }),
+    }
+}
+
+/// Decode the stored `token_endpoint_auth_method`. Fails closed for the same
+/// reason [`decode_profile`] does — resolving an unknown method to
+/// `client_secret_post` would let a certificate-authenticated client be
+/// authenticated by a secret instead.
+fn decode_auth_method(raw: Option<&str>) -> Result<ClientAuthMethod, DbError> {
+    match raw {
+        None => Ok(ClientAuthMethod::default()),
+        Some(s) => ClientAuthMethod::from_wire(s).ok_or_else(|| {
+            DbError::Migration(format!(
+                "oauth2_client.token_endpoint_auth_method holds an unrecognised value {s:?}; \
+                 this binary cannot authenticate a client by a method it does not implement"
+            ))
+        }),
+    }
+}
+
+impl OAuth2ClientRow {
+    fn try_into_client(self, id: Uuid) -> Result<OAuth2Client, DbError> {
+        let tenant_id = Uuid::parse_str(&self.tenant_id)
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        Ok(OAuth2Client {
+            id,
+            tenant_id,
+            client_id: self.client_id,
+            client_secret_hash: self.client_secret_hash,
+            name: self.name,
+            redirect_uris: self.redirect_uris,
+            grant_types: self.grant_types,
+            scopes: self.scopes,
+            post_logout_redirect_uris: self.post_logout_redirect_uris,
+            backchannel_logout_uri: self.backchannel_logout_uri,
+            require_par: self.require_par,
+            profile: decode_profile(self.profile.as_deref())?,
+            token_endpoint_auth_method: decode_auth_method(
+                self.token_endpoint_auth_method.as_deref(),
+            )?,
+            tls_client_auth_subject_dn: self.tls_client_auth_subject_dn,
+            tls_client_auth_san_dns: self.tls_client_auth_san_dns,
+            tls_client_auth_san_uri: self.tls_client_auth_san_uri,
+            self_signed_tls_client_auth_thumbprints: self.self_signed_tls_client_auth_thumbprints,
+            tls_client_certificate_bound_access_tokens: self
+                .tls_client_certificate_bound_access_tokens,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
 }
 
 impl OAuth2ClientRowWithId {
@@ -90,6 +202,16 @@ impl OAuth2ClientRowWithId {
             post_logout_redirect_uris: self.post_logout_redirect_uris,
             backchannel_logout_uri: self.backchannel_logout_uri,
             require_par: self.require_par,
+            profile: decode_profile(self.profile.as_deref())?,
+            token_endpoint_auth_method: decode_auth_method(
+                self.token_endpoint_auth_method.as_deref(),
+            )?,
+            tls_client_auth_subject_dn: self.tls_client_auth_subject_dn,
+            tls_client_auth_san_dns: self.tls_client_auth_san_dns,
+            tls_client_auth_san_uri: self.tls_client_auth_san_uri,
+            self_signed_tls_client_auth_thumbprints: self.self_signed_tls_client_auth_thumbprints,
+            tls_client_certificate_bound_access_tokens: self
+                .tls_client_certificate_bound_access_tokens,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -133,7 +255,14 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  scopes = $scopes, \
                  post_logout_redirect_uris = $post_logout_redirect_uris, \
                  backchannel_logout_uri = $backchannel_logout_uri, \
-                 require_par = $require_par",
+                 require_par = $require_par, \
+                 profile = $profile, \
+                 token_endpoint_auth_method = $token_endpoint_auth_method, \
+                 tls_client_auth_subject_dn = $tls_client_auth_subject_dn, \
+                 tls_client_auth_san_dns = $tls_client_auth_san_dns, \
+                 tls_client_auth_san_uri = $tls_client_auth_san_uri, \
+                 self_signed_tls_client_auth_thumbprints = $self_signed_thumbprints, \
+                 tls_client_certificate_bound_access_tokens = $cert_bound_tokens",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -146,6 +275,31 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .bind(("post_logout_redirect_uris", input.post_logout_redirect_uris))
             .bind(("backchannel_logout_uri", input.backchannel_logout_uri))
             .bind(("require_par", input.require_par))
+            .bind(("profile", input.profile.as_str()))
+            .bind((
+                "token_endpoint_auth_method",
+                input.token_endpoint_auth_method.as_str(),
+            ))
+            .bind((
+                "tls_client_auth_subject_dn",
+                normalise_optional(input.tls_client_auth_subject_dn),
+            ))
+            .bind((
+                "tls_client_auth_san_dns",
+                normalise_optional(input.tls_client_auth_san_dns),
+            ))
+            .bind((
+                "tls_client_auth_san_uri",
+                normalise_optional(input.tls_client_auth_san_uri),
+            ))
+            .bind((
+                "self_signed_thumbprints",
+                input.self_signed_tls_client_auth_thumbprints,
+            ))
+            .bind((
+                "cert_bound_tokens",
+                input.tls_client_certificate_bound_access_tokens,
+            ))
             .await
             .map_err(DbError::from)?;
 
@@ -156,24 +310,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
-        let tenant_id = Uuid::parse_str(&row.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
-
-        let client = OAuth2Client {
-            id,
-            tenant_id,
-            client_id: row.client_id,
-            client_secret_hash: row.client_secret_hash,
-            name: row.name,
-            redirect_uris: row.redirect_uris,
-            grant_types: row.grant_types,
-            scopes: row.scopes,
-            post_logout_redirect_uris: row.post_logout_redirect_uris,
-            backchannel_logout_uri: row.backchannel_logout_uri,
-            require_par: row.require_par,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        };
+        let client = row.try_into_client(id)?;
 
         Ok((client, raw_secret))
     }
@@ -196,24 +333,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
-        let tenant_id = Uuid::parse_str(&row.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
-
-        Ok(OAuth2Client {
-            id,
-            tenant_id,
-            client_id: row.client_id,
-            client_secret_hash: row.client_secret_hash,
-            name: row.name,
-            redirect_uris: row.redirect_uris,
-            grant_types: row.grant_types,
-            scopes: row.scopes,
-            post_logout_redirect_uris: row.post_logout_redirect_uris,
-            backchannel_logout_uri: row.backchannel_logout_uri,
-            require_par: row.require_par,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
+        Ok(row.try_into_client(id)?)
     }
 
     async fn get_by_client_id(
@@ -276,6 +396,27 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.require_par.is_some() {
             sets.push("require_par = $require_par");
         }
+        if input.profile.is_some() {
+            sets.push("profile = $profile");
+        }
+        if input.token_endpoint_auth_method.is_some() {
+            sets.push("token_endpoint_auth_method = $token_endpoint_auth_method");
+        }
+        if input.tls_client_auth_subject_dn.is_some() {
+            sets.push("tls_client_auth_subject_dn = $tls_client_auth_subject_dn");
+        }
+        if input.tls_client_auth_san_dns.is_some() {
+            sets.push("tls_client_auth_san_dns = $tls_client_auth_san_dns");
+        }
+        if input.tls_client_auth_san_uri.is_some() {
+            sets.push("tls_client_auth_san_uri = $tls_client_auth_san_uri");
+        }
+        if input.self_signed_tls_client_auth_thumbprints.is_some() {
+            sets.push("self_signed_tls_client_auth_thumbprints = $self_signed_thumbprints");
+        }
+        if input.tls_client_certificate_bound_access_tokens.is_some() {
+            sets.push("tls_client_certificate_bound_access_tokens = $cert_bound_tokens");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -315,6 +456,32 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if let Some(require_par) = input.require_par {
             builder = builder.bind(("require_par", require_par));
         }
+        if let Some(profile) = input.profile {
+            builder = builder.bind(("profile", profile.as_str()));
+        }
+        if let Some(method) = input.token_endpoint_auth_method {
+            builder = builder.bind(("token_endpoint_auth_method", method.as_str()));
+        }
+        // The three `tls_client_auth_*` parameters take the empty string as
+        // their "clear it" sentinel, same as `backchannel_logout_uri` above:
+        // neither a DN nor a SAN can legally be empty, so the sentinel cannot
+        // collide with a real value, and a client migrated off `tls_client_auth`
+        // must be able to shed the expectation rather than carry it forever.
+        if let Some(dn) = input.tls_client_auth_subject_dn {
+            builder = builder.bind(("tls_client_auth_subject_dn", normalise_optional(Some(dn))));
+        }
+        if let Some(dns) = input.tls_client_auth_san_dns {
+            builder = builder.bind(("tls_client_auth_san_dns", normalise_optional(Some(dns))));
+        }
+        if let Some(uri) = input.tls_client_auth_san_uri {
+            builder = builder.bind(("tls_client_auth_san_uri", normalise_optional(Some(uri))));
+        }
+        if let Some(thumbprints) = input.self_signed_tls_client_auth_thumbprints {
+            builder = builder.bind(("self_signed_thumbprints", thumbprints));
+        }
+        if let Some(bound) = input.tls_client_certificate_bound_access_tokens {
+            builder = builder.bind(("cert_bound_tokens", bound));
+        }
 
         let result = builder.await.map_err(DbError::from)?;
         let mut result = result
@@ -324,24 +491,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
-        let tenant_id = Uuid::parse_str(&row.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
-
-        Ok(OAuth2Client {
-            id,
-            tenant_id,
-            client_id: row.client_id,
-            client_secret_hash: row.client_secret_hash,
-            name: row.name,
-            redirect_uris: row.redirect_uris,
-            grant_types: row.grant_types,
-            scopes: row.scopes,
-            post_logout_redirect_uris: row.post_logout_redirect_uris,
-            backchannel_logout_uri: row.backchannel_logout_uri,
-            require_par: row.require_par,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
+        Ok(row.try_into_client(id)?)
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {

@@ -128,6 +128,57 @@ pub struct AccessTokenClaims {
     ///    therefore A trusts C, which nobody configured and nobody can see.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_exchange: Option<ExtExchangeClaim>,
+    /// RFC 7800 / RFC 8705 §3.1 confirmation claim (X5.1) — present **only**
+    /// on a sender-constrained token.
+    ///
+    /// Its presence changes what the token *is*. An ordinary AXIAM access
+    /// token is a bearer credential: whoever holds it may use it. A token
+    /// carrying `cnf` is not — it names a key, and a resource server that
+    /// accepts it without checking that the caller holds that key has silently
+    /// converted it back into a bearer token. That is why the SDK contract
+    /// (§10.1, contract 1.15) makes the check mandatory rather than optional,
+    /// and why it is phrased as "reject when you cannot verify" rather than
+    /// "verify when you can": a middleware that does not understand `cnf` must
+    /// refuse the token, not ignore the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<CnfClaim>,
+}
+
+/// RFC 7800 confirmation claim. Only the certificate-thumbprint method is
+/// representable, because it is the only sender-constraining mechanism AXIAM
+/// implements today.
+///
+/// Deliberately a struct with one optional field rather than an enum: RFC 7800
+/// permits several confirmation methods in one claim, and a token that arrived
+/// carrying a method AXIAM does not implement must still round-trip through
+/// `serde` intact rather than fail to decode. What it must *not* do is
+/// validate — see [`CnfClaim::certificate_thumbprint`], which answers `None`
+/// for exactly that case, and the callers that treat `None` as "refuse".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CnfClaim {
+    /// RFC 8705 §3.1 `x5t#S256` — the base64url-encoded (unpadded) SHA-256
+    /// digest of the DER-encoded client certificate the token was issued to.
+    #[serde(rename = "x5t#S256", default, skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
+}
+
+impl CnfClaim {
+    /// Build a certificate-thumbprint confirmation.
+    pub fn from_certificate_thumbprint(thumbprint: impl Into<String>) -> Self {
+        Self {
+            x5t_s256: Some(thumbprint.into()),
+        }
+    }
+
+    /// The certificate thumbprint this token is bound to, or `None` when the
+    /// confirmation names some other (unimplemented) method.
+    ///
+    /// A caller that gets `None` from a token that *has* a `cnf` claim is
+    /// looking at a constraint it cannot check, and must refuse the token. It
+    /// must never treat it as unconstrained.
+    pub fn certificate_thumbprint(&self) -> Option<&str> {
+        self.x5t_s256.as_deref()
+    }
 }
 
 /// X4 provenance claim: which foreign issuer's token this one came from.
@@ -187,6 +238,38 @@ pub fn issue_access_token(
     jti: String,
     aud: &str,
 ) -> Result<String, AuthError> {
+    issue_access_token_bound(user_id, tenant_id, org_id, scopes, config, jti, aud, None)
+}
+
+/// [`issue_access_token`], optionally **sender-constrained** to a client
+/// certificate (X5.1, RFC 8705 §3).
+///
+/// Passing `Some(cnf)` adds the confirmation claim; passing `None` produces a
+/// byte-identical token to [`issue_access_token`], which is why that function
+/// is a one-line delegation rather than a copy. Every existing caller keeps
+/// issuing unbound tokens without knowing this parameter exists — the FAPI
+/// posture stays one switch on one client, not a change to token issuance
+/// everywhere.
+///
+/// # Cost
+///
+/// One `Option<CnfClaim>` move and, when bound, ~60 extra bytes inside the
+/// signed payload. No extra cryptography: the certificate was verified during
+/// the TLS handshake and its thumbprint is a SHA-256 over bytes already in
+/// memory. This is the basis of X5.1's "certificate-bound tokens at IoT
+/// prices" claim — see `benchmarks/` `bench-quick` for the measurement, and
+/// the X5.1 table for the measured figure rather than the predicted one.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_access_token_bound(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    jti: String,
+    aud: &str,
+    cnf: Option<CnfClaim>,
+) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
         None
@@ -208,6 +291,7 @@ pub fn issue_access_token(
         act: None,
         permissions: None,
         ext_exchange: None,
+        cnf,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -314,6 +398,16 @@ pub fn issue_exchanged_token(
         // authorised it.
         permissions: None,
         ext_exchange,
+        // An exchange does not inherit the subject token's sender constraint,
+        // and must not invent one. RFC 8705 §3 binds a token to the
+        // certificate presented *at the token endpoint by the party the token
+        // is for*; the exchanging client is a different party from the subject,
+        // so copying the subject's `cnf` would bind the new token to a
+        // certificate its holder does not have — breaking every request — and
+        // minting a fresh one would assert a constraint the exchange never
+        // verified. Sender-constrained exchange is a distinct piece of work,
+        // deliberately not smuggled in here.
+        cnf: None,
     };
 
     let owned;
@@ -344,6 +438,25 @@ pub fn issue_client_credentials_token(
     scopes: &[String],
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
+    issue_client_credentials_token_bound(client_id, tenant_id, org_id, scopes, config, None)
+}
+
+/// [`issue_client_credentials_token`], optionally sender-constrained to a
+/// client certificate (X5.1, RFC 8705 §3).
+///
+/// This is the grant where certificate binding matters most: a
+/// client-credentials token has no user behind it and typically a long tail of
+/// machine callers, so a leaked one is usable by anything that can reach the
+/// resource server. Binding it to the certificate the client already presents
+/// on every connection removes that.
+pub fn issue_client_credentials_token_bound(
+    client_id: &str,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    cnf: Option<CnfClaim>,
+) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
         None
@@ -367,6 +480,7 @@ pub fn issue_client_credentials_token(
         act: None,
         permissions: None,
         ext_exchange: None,
+        cnf,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -433,6 +547,7 @@ pub fn issue_rpt(
         // fact belongs to *that* token and its audit record; re-stamping it
         // here would attribute this decision to a provenance it does not have.
         ext_exchange: None,
+        cnf: None,
     };
 
     let owned;
@@ -501,6 +616,7 @@ pub fn issue_service_account_token(
         act: None,
         permissions: None,
         ext_exchange: None,
+        cnf: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -572,6 +688,7 @@ pub fn issue_service_account_client_credentials_token(
         act: None,
         permissions: None,
         ext_exchange: None,
+        cnf: None,
     };
 
     let owned;
@@ -753,6 +870,71 @@ pub fn validate_access_token(
     config: &AuthConfig,
 ) -> Result<ValidatedClaims, AuthError> {
     decode_access_token(token, config).map(ValidatedClaims)
+}
+
+/// Enforce a token's sender constraint against the certificate the caller
+/// actually presented on *this* connection (X5.1, RFC 8705 §3.2).
+///
+/// This is the half of certificate binding that makes the other half worth
+/// anything. Issuing a `cnf` claim costs an attacker nothing if every resource
+/// server ignores it; the constraint only exists at the point of use.
+///
+/// The three cases, and why each answers as it does:
+///
+/// | token `cnf` | presented certificate | result | why |
+/// |---|---|---|---|
+/// | absent | anything | `Ok` | an ordinary bearer token; binding was never claimed, and a resource server must not start demanding certificates from callers holding perfectly valid unbound tokens |
+/// | `x5t#S256` | matching thumbprint | `Ok` | the caller holds the private key for the certificate the token was issued to — that is the whole proof |
+/// | `x5t#S256` | absent, different, or unparseable | `Err` | a bound token in the hands of something that cannot prove it is the intended holder |
+/// | present, no `x5t#S256` | anything | `Err` | the token names a confirmation method this build cannot check, so it cannot be honoured — see [`CnfClaim::certificate_thumbprint`] |
+///
+/// The last row is the one that is easy to get wrong. A `cnf` claim carrying,
+/// say, a DPoP `jkt` would return `None` from `certificate_thumbprint()`, and
+/// treating that as "unbound" would downgrade a sender-constrained token to a
+/// bearer token exactly when a newer authorization server started issuing a
+/// constraint this validator predates. Fail closed.
+///
+/// `presented_thumbprint` is the base64url-unpadded SHA-256 of the DER client
+/// certificate — `axiam_oauth2::mtls::thumbprint_s256` produces it, and the
+/// REST/gRPC layers derive it from the certificate rustls verified during the
+/// handshake. Passing a value from anywhere else (a header, a request body)
+/// would make the whole mechanism decorative.
+pub fn verify_certificate_binding(
+    claims: &AccessTokenClaims,
+    presented_thumbprint: Option<&str>,
+) -> Result<(), AuthError> {
+    let Some(cnf) = claims.cnf.as_ref() else {
+        return Ok(());
+    };
+
+    let Some(expected) = cnf.certificate_thumbprint() else {
+        return Err(AuthError::TokenInvalid(
+            "token carries a confirmation claim naming a method this server cannot verify".into(),
+        ));
+    };
+
+    let Some(presented) = presented_thumbprint else {
+        return Err(AuthError::TokenInvalid(
+            "token is certificate-bound but no client certificate was presented".into(),
+        ));
+    };
+
+    // Constant-time for the same reason `axiam_oauth2::mtls` is: the value is
+    // usually public, but the one case where it is not — an attacker probing
+    // which certificate a stolen token is bound to — should not be a
+    // character-at-a-time oracle.
+    let matches: bool = {
+        use subtle::ConstantTimeEq;
+        expected.as_bytes().ct_eq(presented.as_bytes()).into()
+    };
+
+    if matches {
+        Ok(())
+    } else {
+        Err(AuthError::TokenInvalid(
+            "token is bound to a different client certificate than the one presented".into(),
+        ))
+    }
 }
 
 /// Generate a cryptographically random opaque refresh token
@@ -1347,6 +1529,135 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             }),
             "the provenance claim is what makes the exchange non-transitive; \
              a decode that loses it silently restores transitivity"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // X5.1 — RFC 8705 §3 certificate binding
+    // -----------------------------------------------------------------------
+
+    /// A thumbprint of the right shape. The value itself is arbitrary; what
+    /// matters is that it is the same string on both sides of the comparison.
+    const TP: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    const OTHER_TP: &str = "bWluZS1ub3QteW91cnMtdGhpcy1pcy00My1jaGFyc18";
+
+    fn claims_with_cnf(cnf: Option<CnfClaim>) -> AccessTokenClaims {
+        AccessTokenClaims {
+            sub: Uuid::new_v4().to_string(),
+            tenant_id: Uuid::new_v4().to_string(),
+            org_id: Uuid::new_v4().to_string(),
+            iss: "axiam-test".into(),
+            iat: 0,
+            exp: i64::MAX,
+            jti: Uuid::new_v4().to_string(),
+            aud: Some(AUD_M2M.into()),
+            scope: None,
+            sub_kind: SubjectKind::OAuth2Client,
+            act: None,
+            permissions: None,
+            ext_exchange: None,
+            cnf,
+        }
+    }
+
+    /// An unbound token is a bearer token, and must not start demanding
+    /// certificates. This is the regression test for "X5.1 broke every
+    /// existing deployment".
+    #[test]
+    fn an_unbound_token_is_accepted_with_or_without_a_certificate() {
+        let claims = claims_with_cnf(None);
+        assert!(verify_certificate_binding(&claims, None).is_ok());
+        assert!(verify_certificate_binding(&claims, Some(TP)).is_ok());
+    }
+
+    #[test]
+    fn a_bound_token_is_accepted_only_with_its_own_certificate() {
+        let claims = claims_with_cnf(Some(CnfClaim::from_certificate_thumbprint(TP)));
+        assert!(verify_certificate_binding(&claims, Some(TP)).is_ok());
+        assert!(verify_certificate_binding(&claims, Some(OTHER_TP)).is_err());
+        assert!(verify_certificate_binding(&claims, None).is_err());
+    }
+
+    /// The row that is easiest to get wrong: a confirmation naming a method
+    /// this build cannot check must be REFUSED, never read as "unbound". Read
+    /// as unbound, a sender-constrained token silently degrades to a bearer
+    /// token the moment a newer AS issues a constraint this validator
+    /// predates.
+    #[test]
+    fn an_unrecognised_confirmation_method_is_refused_not_ignored() {
+        // A `cnf` object carrying something other than `x5t#S256` — e.g. a
+        // DPoP `jkt` — decodes to a `CnfClaim` with no thumbprint.
+        let cnf: CnfClaim =
+            serde_json::from_str(r#"{"jkt":"0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}"#)
+                .expect("a cnf naming another method must still decode");
+        assert_eq!(cnf.certificate_thumbprint(), None);
+
+        let claims = claims_with_cnf(Some(cnf));
+        assert!(verify_certificate_binding(&claims, Some(TP)).is_err());
+        assert!(verify_certificate_binding(&claims, None).is_err());
+    }
+
+    /// The claim must serialize under RFC 8705's exact key. `x5t#S256` is not
+    /// a legal Rust identifier, so it can only be right by way of the serde
+    /// rename — which is exactly the kind of thing that gets dropped in a
+    /// refactor and produces a claim no conforming resource server reads.
+    #[test]
+    fn cnf_serializes_under_the_rfc_8705_key() {
+        let json = serde_json::to_string(&CnfClaim::from_certificate_thumbprint(TP)).unwrap();
+        assert_eq!(json, format!(r#"{{"x5t#S256":"{TP}"}}"#));
+    }
+
+    /// A bound token must survive a real encode/decode round trip with the
+    /// claim intact — the unit tests above operate on in-memory claims, which
+    /// would not catch a `skip_serializing_if` that dropped the field.
+    #[test]
+    fn a_bound_token_round_trips_through_a_real_jwt() {
+        let config = test_config();
+        let token = issue_client_credentials_token_bound(
+            "oa_test",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Some(CnfClaim::from_certificate_thumbprint(TP)),
+        )
+        .expect("issue bound token");
+
+        let claims = validate_access_token(&token, &config).expect("validate").0;
+        assert_eq!(
+            claims
+                .cnf
+                .as_ref()
+                .and_then(CnfClaim::certificate_thumbprint),
+            Some(TP)
+        );
+        assert!(verify_certificate_binding(&claims, Some(TP)).is_ok());
+        assert!(verify_certificate_binding(&claims, Some(OTHER_TP)).is_err());
+    }
+
+    /// An unbound token must carry NO `cnf` key at all, not `"cnf":null`.
+    /// A null would still be an unknown key to a strict resource server, and
+    /// it would grow every token AXIAM has ever issued by six bytes for no
+    /// reason.
+    #[test]
+    fn an_unbound_token_carries_no_cnf_key() {
+        let config = test_config();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .expect("issue");
+        let payload = token.split('.').nth(1).expect("payload");
+        let decoded = URL_SAFE_NO_PAD.decode(payload).expect("b64");
+        let json: serde_json::Value = serde_json::from_slice(&decoded).expect("json");
+        assert!(
+            json.get("cnf").is_none(),
+            "an unbound token must not carry a cnf key at all, got {json}"
         );
     }
 }

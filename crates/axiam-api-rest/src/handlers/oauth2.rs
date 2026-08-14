@@ -10,11 +10,13 @@ use axiam_oauth2::device_service::{
 };
 use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::jwks_cache::JwksCacheResponse;
+use axiam_oauth2::mtls::PresentedCertificate;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document,
 };
 use axiam_oauth2::token::{
-    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
+    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenRequestContext,
+    TokenResponse,
 };
 use axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE;
 use axiam_oauth2::uma::UmaError;
@@ -28,6 +30,7 @@ use axiam_core::repository::{AuditLogRepository, TenantRepository};
 use axiam_db::{SurrealAuditLogRepository, SurrealTenantRepository};
 
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::cert_auth::VerifiedClientCert;
 use crate::extractors::client_info::{client_ip, peer_ip};
 use crate::state::AppState;
 
@@ -231,6 +234,7 @@ pub async fn authorize<C: Connection + Clone>(
                     if let Some(ref state) = resp.state {
                         url.query_pairs_mut().append_pair("state", state);
                     }
+                    append_issuer(&mut url, &state.auth_config);
                     HttpResponse::Found()
                         .append_header(("Location", url.to_string()))
                         .finish()
@@ -262,7 +266,12 @@ pub async fn authorize<C: Connection + Clone>(
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
-                    build_error_redirect(&resolved_redirect_uri, &e, resolved_state.as_deref())
+                    build_error_redirect(
+                        &resolved_redirect_uri,
+                        &e,
+                        resolved_state.as_deref(),
+                        &state.auth_config,
+                    )
                 }
             }
         }
@@ -372,7 +381,11 @@ pub async fn token<C: Connection + Clone>(
         return handle_uma_ticket(tenant_id, form, &state, &authz).await;
     }
 
-    match state.token_service.exchange(tenant_id, form).await {
+    match state
+        .token_service
+        .exchange(tenant_id, form, &token_request_context(&req))
+        .await
+    {
         Ok(resp) => {
             let exchange_us = started.elapsed().as_micros() as u64;
 
@@ -443,6 +456,44 @@ pub async fn token<C: Connection + Clone>(
                 });
             }
             build_oauth2_error_response(&e)
+        }
+    }
+}
+
+/// Build the token endpoint's transport context from the connection (X5.1).
+///
+/// The certificate comes from [`VerifiedClientCert`], which `axiam-server`'s
+/// `on_connect` hook populates from the peer chain **rustls verified during
+/// the TLS 1.3 handshake**. Nothing else is consulted: in particular the
+/// `X-Client-Certificate` header that `CertificateAuthenticated` accepts as a
+/// proxy fallback is deliberately not read here, because an OAuth2 client
+/// credential must not be assertable by anything that can set a header. See
+/// `axiam_oauth2::mtls`'s module docs for the full argument.
+///
+/// Cost on the ordinary path: one `conn_data` lookup that misses, and no
+/// allocation. The DER re-parse happens only on connections that actually
+/// carried a client certificate — i.e. mTLS deployments, which are the ones
+/// that asked for it.
+fn token_request_context(req: &HttpRequest) -> TokenRequestContext {
+    let Some(verified) = req.conn_data::<VerifiedClientCert>() else {
+        return TokenRequestContext::default();
+    };
+    match PresentedCertificate::from_der(&verified.der) {
+        Ok(cert) => TokenRequestContext {
+            client_certificate: Some(cert),
+        },
+        Err(e) => {
+            // rustls parsed these same bytes to verify the chain, so this is
+            // not reachable in practice. If it ever were, the safe reading is
+            // "no certificate": an unparseable certificate must not
+            // authenticate anybody, and every path that needs one refuses
+            // when it is absent.
+            tracing::error!(
+                error = %e,
+                "could not parse the client certificate rustls verified on this connection; \
+                 treating the request as having presented none"
+            );
+            TokenRequestContext::default()
         }
     }
 }
@@ -837,10 +888,50 @@ pub async fn userinfo<C: Connection + Clone>(
 
 /// Build a redirect response with error parameters per RFC 6749
 /// section 4.1.2.1.
+/// Append the RFC 9207 `iss` authorization-response parameter (X5.1).
+///
+/// # Why this matters, and why it is unconditional
+///
+/// RFC 9207 exists because of the **mix-up attack**: a client that talks to
+/// more than one authorization server, and receives an authorization response
+/// on a shared redirect URI, cannot otherwise tell which server sent it. An
+/// attacker who controls one of those servers can therefore have a code minted
+/// by an honest server delivered to the attacker's own token endpoint — or the
+/// reverse. `iss` names the sender, so the client can check that the response
+/// came from the server it started the flow with.
+///
+/// Emitted for **every** client, not just FAPI ones. RFC 9207 §2.4 says an AS
+/// that supports the parameter SHOULD include it in every authorization
+/// response; a client that does not understand it ignores an unknown query
+/// parameter, which is the behaviour RFC 6749 §4.1.2 already requires of it.
+/// Making it conditional would mean a client only gets mix-up protection when
+/// somebody remembered to switch it on — and mix-up is precisely the attack a
+/// client does not know it is under.
+///
+/// It goes on the **error** redirect too. RFC 9207 §2.4 is explicit about
+/// this, and it is not a formality: one variant of the mix-up attack works by
+/// injecting an error response, so a client that validates `iss` on success
+/// and skips it on failure has left the door it just closed ajar.
+fn append_issuer(url: &mut url::Url, auth_config: &AuthConfig) {
+    let issuer = auth_config.effective_issuer();
+    if issuer.is_empty() {
+        // Nothing sensible to assert. Emitting an empty `iss` would be worse
+        // than omitting it: a client comparing it against its configured
+        // issuer would fail every flow, and one comparing loosely might pass
+        // anything.
+        tracing::warn!(
+            "no issuer is configured, so the RFC 9207 `iss` authorization-response              parameter cannot be emitted; clients cannot detect a mix-up attack"
+        );
+        return;
+    }
+    url.query_pairs_mut().append_pair("iss", issuer);
+}
+
 fn build_error_redirect(
     redirect_uri: &str,
     error: &OAuth2Error,
     state: Option<&str>,
+    auth_config: &AuthConfig,
 ) -> HttpResponse {
     let mut url = match url::Url::parse(redirect_uri) {
         Ok(u) => u,
@@ -858,6 +949,9 @@ fn build_error_redirect(
     if let Some(state) = state {
         url.query_pairs_mut().append_pair("state", state);
     }
+    // RFC 9207 §2.4 — see `append_issuer`. Error responses carry `iss` too,
+    // because one form of the mix-up attack is an injected error response.
+    append_issuer(&mut url, auth_config);
     HttpResponse::Found()
         .append_header(("Location", url.to_string()))
         .finish()

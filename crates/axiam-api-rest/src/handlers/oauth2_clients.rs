@@ -1,7 +1,9 @@
 //! OAuth2 client management endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
+use axiam_core::models::oauth2_client::{
+    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client,
+};
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,40 @@ pub struct CreateOAuth2ClientRequest {
     /// `/oauth2/par` (RFC 9126) rather than sending them through the browser.
     #[serde(default)]
     pub require_par: bool,
+    /// X5.1 — the security posture this client is registered under.
+    ///
+    /// `"standard"` (the default) is every AXIAM client that has ever existed.
+    /// `"fapi2"` turns on the whole FAPI 2.0 constraint bundle at once, and
+    /// the registration is refused unless it also sets `require_par`, an mTLS
+    /// `token_endpoint_auth_method`, and
+    /// `tls_client_certificate_bound_access_tokens`. See the FAPI operator
+    /// guide.
+    #[serde(default)]
+    pub profile: ClientProfile,
+    /// X5.1 — how this client authenticates at the token endpoint
+    /// (RFC 8705 §2). Defaults to `client_secret_post`.
+    #[serde(default)]
+    pub token_endpoint_auth_method: ClientAuthMethod,
+    /// RFC 8705 §2.1.2 — expected certificate subject DN, RFC 4514 form.
+    /// Exactly one of the three `tls_client_auth_*` parameters may be set.
+    #[serde(default)]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 §2.1.2 — expected `dNSName` SAN.
+    #[serde(default)]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 §2.1.2 — expected `uniformResourceIdentifier` SAN.
+    #[serde(default)]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// Accepted certificate thumbprints for `self_signed_tls_client_auth`,
+    /// as base64url-unpadded SHA-256 digests of the DER certificate (the same
+    /// `x5t#S256` encoding as the `cnf` claim). More than one permits an
+    /// overlapping rotation.
+    #[serde(default)]
+    pub self_signed_tls_client_auth_thumbprints: Vec<String>,
+    /// RFC 8705 §3.4 — issue certificate-bound (sender-constrained) access
+    /// tokens to this client. Independent of the authentication method.
+    #[serde(default)]
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -53,6 +89,15 @@ pub struct UpdateOAuth2ClientRequest {
     /// edit an operator makes when an RP is decommissioned.
     pub backchannel_logout_uri: Option<String>,
     pub require_par: Option<bool>,
+    /// X5.1 — see [`CreateOAuth2ClientRequest::profile`].
+    pub profile: Option<ClientProfile>,
+    pub token_endpoint_auth_method: Option<ClientAuthMethod>,
+    /// Pass an empty string to clear, as with `backchannel_logout_uri`.
+    pub tls_client_auth_subject_dn: Option<String>,
+    pub tls_client_auth_san_dns: Option<String>,
+    pub tls_client_auth_san_uri: Option<String>,
+    pub self_signed_tls_client_auth_thumbprints: Option<Vec<String>>,
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -65,6 +110,20 @@ pub struct OAuth2ClientResponse {
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
     pub scopes: Vec<String>,
+    /// X5.1 — the registered posture and mTLS credentials. Read-back matters:
+    /// an operator auditing which clients are financial-grade should be able
+    /// to answer it from this endpoint rather than from the database.
+    pub profile: ClientProfile,
+    pub token_endpoint_auth_method: ClientAuthMethod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_subject_dn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_dns: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_uri: Option<String>,
+    pub self_signed_tls_client_auth_thumbprints: Vec<String>,
+    pub tls_client_certificate_bound_access_tokens: bool,
+    pub require_par: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -79,6 +138,15 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             redirect_uris: c.redirect_uris,
             grant_types: c.grant_types,
             scopes: c.scopes,
+            profile: c.profile,
+            token_endpoint_auth_method: c.token_endpoint_auth_method,
+            tls_client_auth_subject_dn: c.tls_client_auth_subject_dn,
+            tls_client_auth_san_dns: c.tls_client_auth_san_dns,
+            tls_client_auth_san_uri: c.tls_client_auth_san_uri,
+            self_signed_tls_client_auth_thumbprints: c.self_signed_tls_client_auth_thumbprints,
+            tls_client_certificate_bound_access_tokens: c
+                .tls_client_certificate_bound_access_tokens,
+            require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -198,19 +266,34 @@ pub async fn create<C: Connection + Clone>(
         validate_redirect_uris(&req.redirect_uris)?;
     }
 
-    let (client, raw_secret) = state
-        .oauth2_client_repo
-        .create(CreateOAuth2Client {
-            tenant_id: user.tenant_id,
-            name: req.name,
-            redirect_uris: req.redirect_uris,
-            grant_types: req.grant_types,
-            scopes: req.scopes,
-            post_logout_redirect_uris: req.post_logout_redirect_uris,
-            backchannel_logout_uri: req.backchannel_logout_uri,
-            require_par: req.require_par,
-        })
-        .await?;
+    let create = CreateOAuth2Client {
+        tenant_id: user.tenant_id,
+        name: req.name,
+        redirect_uris: req.redirect_uris,
+        grant_types: req.grant_types,
+        scopes: req.scopes,
+        post_logout_redirect_uris: req.post_logout_redirect_uris,
+        backchannel_logout_uri: req.backchannel_logout_uri,
+        require_par: req.require_par,
+        profile: req.profile,
+        token_endpoint_auth_method: req.token_endpoint_auth_method,
+        tls_client_auth_subject_dn: req.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: req.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: req.tls_client_auth_san_uri,
+        self_signed_tls_client_auth_thumbprints: req.self_signed_tls_client_auth_thumbprints,
+        tls_client_certificate_bound_access_tokens: req.tls_client_certificate_bound_access_tokens,
+    };
+
+    // X5.1 — refuse a registration that could not satisfy the profile it
+    // declares, BEFORE it is written. A `fapi2` client missing PAR or mTLS
+    // would otherwise be created and then fail every request it ever made,
+    // which is a configuration error discovered by the client's users rather
+    // than by the operator making it. A `standard` client with a secret — every
+    // client that predates X5.1 — passes without a check running.
+    axiam_oauth2::fapi::validate_registration(&create)
+        .map_err(|e| validation_err(e.to_string()))?;
+
+    let (client, raw_secret) = state.oauth2_client_repo.create(create).await?;
 
     Ok(HttpResponse::Created().json(OAuth2ClientCreatedResponse {
         id: client.id,
@@ -361,21 +444,41 @@ pub async fn update<C: Connection + Clone>(
         validate_redirect_uris(&existing.redirect_uris)?;
     }
 
+    let update = UpdateOAuth2Client {
+        name: req.name,
+        redirect_uris: req.redirect_uris,
+        grant_types: req.grant_types,
+        scopes: req.scopes,
+        post_logout_redirect_uris: req.post_logout_redirect_uris,
+        backchannel_logout_uri: req.backchannel_logout_uri,
+        require_par: req.require_par,
+        profile: req.profile,
+        token_endpoint_auth_method: req.token_endpoint_auth_method,
+        tls_client_auth_subject_dn: req.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: req.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: req.tls_client_auth_san_uri,
+        self_signed_tls_client_auth_thumbprints: req.self_signed_tls_client_auth_thumbprints,
+        tls_client_certificate_bound_access_tokens: req.tls_client_certificate_bound_access_tokens,
+    };
+
+    // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to
+    // `fapi2` on a client that has none of the rest is a perfectly well-formed
+    // patch and a completely broken client; validating the patch alone would
+    // wave it through. The extra read happens only when the patch touches a
+    // profile-relevant field, so an ordinary rename still costs one write.
+    if update.touches_security_profile() {
+        let merged = state
+            .oauth2_client_repo
+            .get_by_id(user.tenant_id, id)
+            .await?
+            .with_update_applied(&update);
+        axiam_oauth2::fapi::validate_registration(&merged)
+            .map_err(|e| validation_err(e.to_string()))?;
+    }
+
     let client = state
         .oauth2_client_repo
-        .update(
-            user.tenant_id,
-            id,
-            UpdateOAuth2Client {
-                name: req.name,
-                redirect_uris: req.redirect_uris,
-                grant_types: req.grant_types,
-                scopes: req.scopes,
-                post_logout_redirect_uris: req.post_logout_redirect_uris,
-                backchannel_logout_uri: req.backchannel_logout_uri,
-                require_par: req.require_par,
-            },
-        )
+        .update(user.tenant_id, id, update)
         .await?;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
 }

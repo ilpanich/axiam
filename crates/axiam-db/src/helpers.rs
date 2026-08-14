@@ -92,12 +92,18 @@ pub fn classify_write_error<E: std::fmt::Display>(err: E, entity: &str) -> DbErr
 /// serialise concurrent callers on its own. Measured: eight concurrent
 /// redemptions of one row, up to four of them "winning".
 ///
-/// Wrapping the statements in `BEGIN`/`COMMIT` makes the datastore detect the
-/// conflict and abort every loser with this error. For a single-use consume
-/// that abort is not a fault — it is the datastore reporting that someone else
-/// got there first, which is the answer the caller wanted. Callers translate
-/// it to "no row consumed"; propagating it would turn a correctly-refused
-/// replay into a 500.
+/// Wrapping the statements in `BEGIN`/`COMMIT` makes a persistent datastore
+/// detect the conflict and abort every loser with this error — 54% of
+/// contended attempts on `surrealkv`, with zero double winners in 40 000
+/// (`tools/surreal-race-probe`). That abort is the first of the two layers the
+/// three single-use consume paths run since X6 (#302); the second is a nonce
+/// read back after the commit, which is why the read-back lives in a query of
+/// its own and this error can also surface on that second query.
+///
+/// For a single-use consume the abort is not a fault — it is the datastore
+/// reporting that someone else got there first, which is the answer the caller
+/// wanted. Callers translate it to "no row consumed"; propagating it would turn
+/// a correctly-refused replay into a 500.
 ///
 /// Matched on the message because the driver surfaces it as an opaque error
 /// rather than a typed variant. Deliberately narrow: only a conflict is

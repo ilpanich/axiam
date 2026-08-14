@@ -1,54 +1,56 @@
 //! SurrealDB implementation of [`PermissionTicketRepository`] (UMA 2.0 / X2).
 //!
-//! # Why `consume` decides the race itself instead of asking the datastore
+//! # Why `consume` layers a transaction under a nonce
 //!
 //! UMA 2.0 §3.3 makes a permission ticket single-use, so a read-then-write
 //! would let two concurrent redemptions both spend one ticket. Putting the
 //! precondition — unconsumed, unexpired, right tenant, right client — in the
-//! `WHERE` clause of a single `UPDATE` is necessary but **not sufficient**:
-//! measured against SurrealDB, eight concurrent redemptions of one ticket all
-//! succeed without an explicit transaction around it. The conflict is simply
-//! not detected.
+//! `WHERE` clause of a single `UPDATE` is necessary but **not sufficient**: on
+//! its own, without an explicit transaction around it, eight concurrent
+//! redemptions of one ticket all succeed.
 //!
-//! Wrapping it in `BEGIN`/`COMMIT` is *also* not sufficient, which is what this
-//! module previously claimed. Measured over 1200 rounds of 8 racers, 8 rounds
-//! saw two transactions both commit — zero errors on either, both returning the
-//! pre-transition row. SurrealDB 3.2.3 does not reliably detect the write-write
-//! conflict, so a design that waits to be told about one waits for a signal
-//! that does not always arrive.
+//! Single-use **is** guaranteed here, conditional on running an attested
+//! persistent storage engine (X6, #302). It is not one mechanism but two, and
+//! a double redemption needs both to fail on the same ticket:
 //!
-//! Nor does a uniqueness constraint help: a claim keyed on a record ID is far
-//! worse (30/1200), and a `UNIQUE` index tripled the failure rate in this path
-//! (3/320 against 1/320) because the extra write lengthens the window without
-//! reliably being enforced. `SCHEMA_V31` carries the full comparison.
+//!   1. **The engine arbitrates.** The guarded `UPDATE` runs inside an explicit
+//!      `BEGIN`/`COMMIT`, so two concurrent redemptions are a write-write
+//!      conflict on one key and the loser is aborted. Measured with
+//!      `tools/surreal-race-probe` on the engines AXIAM deploys: 0 double
+//!      redemptions in 5000 rounds of 8 racers on `surrealkv` (what compose and
+//!      the k8s StatefulSet run) and 0 in 1200 on `rocksdb`, with the engine
+//!      aborting 54% of contended attempts. `kv-mem` aborts at the same rate
+//!      and then silently misses 23 times in 1200 — which is what "conditional
+//!      on a persistent engine" means, and why `axiam-server` attests the
+//!      engine at startup (`axiam_db::engine_attestation`).
+//!   2. **The nonce audits it.** Each attempt stamps its own `redemption_id`,
+//!      and after the transaction commits a separate query reads the row back;
+//!      only the caller whose nonce survived reports a redemption. This asks
+//!      the engine for nothing, so a conflict the engine misses is still caught
+//!      here — it is what turns 0-in-40 000 from strong evidence into a
+//!      mechanism that does not depend on that evidence holding.
 //!
-//! So `consume` decides for itself. Each attempt stamps a nonce, and the caller
-//! whose nonce survives is the one redemption — a fact about the stored row
-//! rather than an event the engine has to report. See `SCHEMA_V31` for why the
-//! read-back must stay outside a transaction.
+//! The read-back **must** stay outside the transaction, in a query of its own
+//! after the commit. Inside it, snapshot isolation shows every racer its own
+//! write and every racer believes it won — the occasional double redemption
+//! becomes a guaranteed one. `SCHEMA_V31` records that trap and the layering.
 //!
-//! # What the engine turned out to contribute (2026-08)
+//! On `kv-mem` single-use is explicitly **not** guaranteed: the nonce leaks
+//! there too (6 rounds in 1200). Running it is now an operator's deliberate,
+//! logged choice rather than an accident — see `ALLOW_MEMORY_ENGINE_ENV`.
 //!
-//! Everything above was measured on `kv-mem` — the engine this crate's tests
-//! open, and one AXIAM never deploys. Re-measured with
-//! `tools/surreal-race-probe` on the engines that are deployed, the v30 shape
-//! this module abandoned admits ZERO double redemptions: 0 in 5000 rounds on
-//! `surrealkv` (what compose and the k8s StatefulSet run) and 0 in 1200 on
-//! `rocksdb`, against 23 in 1200 on `kv-mem`. The conflict IS detected on the
-//! engines that matter; `kv-mem` detects it 54% of the time and then misses,
-//! silently, which is the behaviour every measurement above was reading.
-//!
-//! The nonce stays — see the addendum in `SCHEMA_V31` for why keeping it is the
-//! better trade — but its role is smaller than this module used to claim. It is
-//! defence in depth behind an engine that serialises, not the thing doing the
-//! serialising. Read "this is not a guarantee of single-use" as: 0 in 40 000 is
-//! strong evidence rather than proof, and nothing here excuses running `memory`
-//! in a deployment, where the nonce leaks too (6 rounds in 1200).
+//! Neither is a uniqueness constraint an alternative: a claim keyed on a record
+//! ID is far worse (30/1200), and a `UNIQUE` index tripled the failure rate in
+//! this path (3/320 against 1/320) because the extra write lengthens the window
+//! without reliably being enforced. `SCHEMA_V31` carries the full comparison,
+//! and #302 records why no fifth query-layer mechanism was sought.
 //!
 //! `concurrent_redemptions_yield_exactly_one_winner` is the regression test. It
 //! runs on `surrealkv` and over many rounds as of 2026-08; before that it ran
 //! one unsynchronised round against `kv-mem`, which is why the residual it was
-//! meant to guard went unobserved in CI for as long as it did.
+//! meant to guard went unobserved in CI for as long as it did. The test that
+//! fails the OLD mechanism reliably — #302's acceptance bar — is the probe
+//! itself, `surreal-race-probe mem tx 1200 8`; see its README.
 //!
 //! # Why `client_id` is in that clause and not checked afterwards
 //!
@@ -206,33 +208,34 @@ impl<C: Connection> PermissionTicketRepository for SurrealPermissionTicketReposi
         // "never existed" for the audit trail, even though both answer
         // `invalid_grant` on the wire.
         //
-        // Matching the `UPDATE` is necessary but does not decide the race —
-        // measured, two concurrent callers can both match and both commit. The
-        // decision is the nonce: every racer stamps its own, the last write is
-        // the one that persists, and the third statement reads back to see
-        // whose it was. Exactly one nonce can be the stored one, so exactly one
-        // caller reports a redemption, with no conflict for the engine to
-        // detect and no constraint for it to enforce — the two things this
-        // datastore was measured not to do reliably (see `SCHEMA_V31`).
+        // Two layers, in two queries (X6/#302 — see the module header).
         //
-        // Deliberately **not** wrapped in `BEGIN`/`COMMIT`. Inside one
-        // transaction the read-back would see this caller's own write under
-        // snapshot isolation and every racer would believe it won, turning an
-        // occasional double-redemption into a guaranteed one.
+        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction,
+        // so two concurrent redemptions conflict on one key and the deployed
+        // engine aborts the loser. `WHERE consumed = false` is still required
+        // — it is what makes a later, non-concurrent replay match nothing and
+        // leave the first winner's nonce undisturbed.
+        //
+        // Layer 2, in the SEPARATE query below: read the nonce back after this
+        // transaction has committed. It must not be folded into the statements
+        // here. Under snapshot isolation a racer inside the transaction sees
+        // its own write, so every racer would read back its own nonce and
+        // believe it won — an occasional double redemption would become a
+        // certain one (`SCHEMA_V31`).
         let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "LET $before = (UPDATE permission_ticket \
+                "BEGIN TRANSACTION; \
+                 LET $before = (UPDATE permission_ticket \
                      SET consumed = true, redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND ticket_hash = $hash \
                      AND client_id = $client_id \
                      AND consumed = false AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 SELECT VALUE redemption_id FROM permission_ticket \
-                     WHERE tenant_id = $tenant_id AND ticket_hash = $hash LIMIT 1"
+                 COMMIT TRANSACTION"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", ticket_hash.to_string()))
@@ -240,18 +243,17 @@ impl<C: Connection> PermissionTicketRepository for SurrealPermissionTicketReposi
             .bind(("nonce", nonce.clone()))
             .await;
 
-        // Each statement is its own transaction here, so a conflict is still
-        // possible even without an explicit one. A loser's conflict is this
-        // method's "someone else redeemed first" answer, not a server fault;
-        // propagating it would turn a correctly-refused replay into a 500.
+        // A loser's abort is this method's "someone else redeemed first"
+        // answer, not a server fault; propagating it would turn a
+        // correctly-refused replay into a 500.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // LET=0, SELECT rows=1, SELECT nonce=2.
-        let rows: Vec<PermissionTicketRow> = match result.take::<Vec<PermissionTicketRow>>(1) {
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<PermissionTicketRow> = match result.take::<Vec<PermissionTicketRow>>(2) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
@@ -262,7 +264,23 @@ impl<C: Connection> PermissionTicketRepository for SurrealPermissionTicketReposi
             return Ok(None);
         }
 
-        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+        // Layer 2: outside, and after, the transaction above.
+        let stored = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE redemption_id FROM permission_ticket \
+                 WHERE tenant_id = $tenant_id AND ticket_hash = $hash LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("hash", ticket_hash.to_string()))
+            .await;
+        let mut stored = match stored {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let stored: Vec<Option<String>> = match stored.take::<Vec<Option<String>>>(0) {
             Ok(v) => v,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),

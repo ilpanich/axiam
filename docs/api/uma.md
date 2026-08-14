@@ -205,20 +205,28 @@ leaked to another client is not merely unusable by them — their failed attempt
 does not *burn* it either. Checking after the fact would let anyone who obtained
 a ticket destroy the rightful holder's.
 
-## Known limitation: single-use is not guaranteed
+## Single-use: guaranteed on a persistent storage engine
 
-Ticket single-use is enforced by a per-attempt redemption nonce rather than by
-datastore conflict detection, which SurrealDB 3.2.3 was measured not to provide
-reliably. That mechanism has a **measured residual of roughly 1 in 640** under
-saturated concurrency — see
+Ticket single-use is enforced in two layers: the guarded `UPDATE` runs inside an
+explicit transaction, so the storage engine arbitrates and aborts every loser of
+a concurrent redemption, and a per-attempt redemption nonce is read back after
+that transaction commits, so a conflict the engine silently missed is still
+caught. A second redemption needs both to fail on the same ticket.
+
+The first layer is a property of the engine, so the guarantee is **conditional
+on running a persistent one**. On `surrealkv` (what `docker-compose` and the k8s
+StatefulSet run) and on `rocksdb`, the probe in `tools/surreal-race-probe`
+measured zero double redemptions in 40 000 and 9 600 contended attempts
+respectively. On SurrealDB's in-memory `memory` datastore it is **not**
+guaranteed — that engine arbitrates at the same rate and then silently misses —
+and a deployment MUST NOT use it. See
 [ilpanich/axiam#302](https://github.com/ilpanich/axiam/issues/302) for the
-measurements, the repairs that proved worse, and what closing the window would
-require.
+history: the earlier nonce-only mechanism, its measured ~1-in-640 residual, and
+the repairs that proved worse than the defect.
 
-The practical consequence for a client: **never retry a ticket exchange.** A
-failed exchange has already spent the ticket, so a retry is useless — and under
-concurrency it is precisely the second redemption the residual describes.
-Request a new ticket instead.
+The practical consequence for a client is unchanged: **never retry a ticket
+exchange.** A failed exchange has already spent the ticket, so a retry is
+useless regardless of how the race was decided. Request a new ticket instead.
 
 ## Not implemented in v1
 

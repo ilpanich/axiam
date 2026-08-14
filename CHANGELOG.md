@@ -270,6 +270,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expires (up to 15 minutes). This was always true; it is now written down,
   and `AXIAM__GRPC__STRICT_REVOCATION=true` changes it.
 
+### Security
+
+- **Single-use redemption is now a guarantee, conditional on a persistent
+  storage engine (X6, closes #302).** UMA permission tickets, RFC 8628 device
+  grants and RFC 9126 PAR `request_uri`s could each admit a second concurrent
+  redemption at a measured ~1 in 640 — two RPTs from one authorization
+  decision, two token sets from one user approval, or a replayable
+  authorization request. All three consume paths now run **two** layers rather
+  than choosing between them: the guarded `UPDATE` is back inside an explicit
+  transaction, so the storage engine arbitrates and aborts every loser, and the
+  per-attempt redemption nonce is read back in a separate query *after* that
+  transaction commits, catching any conflict the engine silently missed. The
+  read-back must stay outside the transaction — inside one, snapshot isolation
+  shows every racer its own write and all of them believe they won.
+
+  A double redemption now needs two independent failures. The first layer is a
+  measured property of the engine (`tools/surreal-race-probe`: zero double
+  winners in 40 000 contended attempts on `surrealkv` and 9 600 on `rocksdb`,
+  against 12–23 in 1 200 on the in-memory engine), so **a deployment MUST run
+  `surrealkv:` or `rocksdb:` and MUST NOT run `memory:`** — see the new section
+  at the top of `docs/deployment/README.md`. The shipped compose files and k8s
+  StatefulSet already comply.
+
+  `axiam-server` now attests the storage engine at startup. SurrealDB 3.2.4
+  publishes no datastore identity over the wire — neither `/version`, nor
+  `INFO FOR ROOT` including its `system`/`nodes`/`config` sections, nor any
+  `session::*` function — so today that attestation logs a WARN saying the
+  engine could not be attested. The hard guard is written and tested: when a
+  SurrealDB release does expose the engine, startup refuses a `memory`
+  datastore unless `AXIAM__DB__ALLOW_MEMORY_ENGINE=true`, and a unit test fails
+  on the bump that makes the name available.
+
+  The probe becomes a version-bump gate: `.github/workflows/surreal-race-probe.yml`
+  re-measures `surrealkv` at 5000 × 8 in both shapes whenever `Cargo.lock` moves
+  `surrealdb`, `surrealdb-core` or `surrealkv`, and fails on any double-winner
+  round. Results are recorded, version-pinned, in
+  `tools/surreal-race-probe/RESULTS.md`.
+
 ## [1.0.0-alpha24] - 2026-08-04
 
 ### Added

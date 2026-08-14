@@ -5,13 +5,18 @@ edition = "2021"
 publish = false
 description = "Measures whether a SurrealDB storage engine serialises concurrent read-modify-writes (see README.md)"
 
-# Pinned deliberately: the measurements in README.md are statements about one
-# version of one engine, and conflict detection is not a documented guarantee.
-# Bump this on purpose, re-run the probe, and update the table — do not let it
-# float.
+# Pinned deliberately: the measurements in README.md and RESULTS.md are
+# statements about one version of one engine, and conflict detection is not a
+# documented guarantee. Bump this on purpose, re-run the probe, and update
+# RESULTS.md — do not let it float.
+#
+# This pin MUST track what the workspace resolves for `surrealdb` /
+# `surrealdb-core` / `surrealkv`, or the gate measures an engine the server does
+# not run. `.github/workflows/surreal-race-probe.yml` asserts that, and
+# `scripts/check-probe-pin.sh` is the same check runnable locally.
 
 [dependencies]
-surrealdb = { version = "=3.2.3", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 

@@ -1,17 +1,37 @@
 //! SurrealDB implementation of [`PushedAuthRequestRepository`] (RFC 9126 / B5).
 //!
-//! # Why `consume` is one statement
+//! # Why `consume` layers a transaction under a nonce
 //!
 //! Same reason as the device grant's `redeem` and refresh-token rotation: a
 //! `request_uri` is single-use by RFC 9126 §2.2, and a read-then-write would
 //! let two concurrent authorize requests both spend one pushed request. The
 //! precondition — unconsumed, unexpired, right tenant — lives in the `WHERE`
-//! clause so the datastore serialises the racers and exactly one sees the
-//! before-image.
+//! clause, which is what makes a later, non-concurrent replay match nothing.
 //!
 //! Expiry is part of that same clause rather than a check in the service, so a
 //! request cannot be consumed in the window between the service reading it and
 //! writing it back.
+//!
+//! Single-use is a **guarantee, conditional on an attested persistent storage
+//! engine** (X6, #302), carried by the same two layers as
+//! `permission_ticket.consume` and `device_grant.redeem`:
+//!
+//!   1. The guarded `UPDATE` runs inside an explicit `BEGIN`/`COMMIT`, so two
+//!      concurrent authorize requests conflict on one key and the deployed
+//!      engine aborts the loser — 0 double consumes in 5000 rounds of 8 racers
+//!      on `surrealkv` and 0 in 1200 on `rocksdb` (`tools/surreal-race-probe`),
+//!      against 23 in 1200 on `kv-mem`, which arbitrates at the same 54% rate
+//!      and then silently misses.
+//!   2. A per-attempt nonce is read back **after** the commit, in a query of
+//!      its own; only the caller whose nonce survived reports a consume. It
+//!      asks the engine for nothing, so it catches a conflict the engine
+//!      missed, and it must stay outside the transaction — inside one, every
+//!      racer sees its own write and believes it won (`SCHEMA_V31`).
+//!
+//! RFC 9126 §2.2 makes `request_uri` one-time-use precisely because a
+//! replayable one is a replayable authorization request. On `kv-mem` the
+//! guarantee does not hold and is not claimed; `axiam-server` attests the
+//! engine at startup (`axiam_db::engine_attestation`).
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
@@ -166,57 +186,47 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
         // "never existed" in an audit trail, even though both answer
         // `invalid_request` on the wire.
         //
-        // The `consumed = false` guard is what makes a later, non-concurrent
-        // authorize request match nothing. It does not decide a *concurrent*
-        // one. The `BEGIN`/`COMMIT` this used to rely on was measured not to
-        // either — but on `kv-mem`, the engine this crate's tests opened and
-        // one AXIAM does not deploy. Re-measured in 2026-08
-        // (`tools/surreal-race-probe`), `surrealkv` and `rocksdb` both admit
-        // exactly one winner in every contended round; `kv-mem` does not. The
-        // addendum in `SCHEMA_V31` has the table.
+        // Two layers, in two queries (X6/#302 — see the module header).
         //
-        // RFC 9126 §2.2 makes `request_uri` one-time-use precisely because a
-        // replayable one is a replayable authorization request, which is why
-        // the nonce stays even now that the engine looks sufficient on its own.
+        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction,
+        // so two concurrent authorize requests conflict on one key and the
+        // deployed engine aborts the loser. `consumed = false` stays in the
+        // clause — it is what makes a later, non-concurrent replay match
+        // nothing.
         //
-        // So the race is decided here as well: each attempt stamps a nonce, the
-        // last write persists, and the third statement reads back to see whose
-        // it was. See `SCHEMA_V31` for the measurements and for what the engine
-        // rather than this code contributes.
-        //
-        // Deliberately **not** in a transaction: inside one the read-back would
-        // see this caller's own write under snapshot isolation and every racer
-        // would believe it won.
+        // Layer 2, in the SEPARATE query below: the per-attempt nonce read back
+        // after this transaction has committed, never folded into it (inside a
+        // transaction every racer sees its own write and believes it won —
+        // `SCHEMA_V31`).
         let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "LET $before = (UPDATE pushed_auth_request \
+                "BEGIN TRANSACTION; \
+                 LET $before = (UPDATE pushed_auth_request \
                      SET consumed = true, redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
                      AND consumed = false AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 SELECT VALUE redemption_id FROM pushed_auth_request \
-                     WHERE tenant_id = $tenant_id AND request_uri_hash = $hash LIMIT 1"
+                 COMMIT TRANSACTION"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", request_uri_hash.to_string()))
             .bind(("nonce", nonce.clone()))
             .await;
 
-        // Each statement is its own transaction, so a conflict is still
-        // possible. A loser's conflict is this method's "someone else consumed
-        // it" answer, not a server fault.
+        // A loser's abort is this method's "someone else consumed it" answer,
+        // not a server fault.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // LET=0, SELECT rows=1, SELECT nonce=2.
-        let rows: Vec<PushedAuthRequestRow> = match result.take::<Vec<PushedAuthRequestRow>>(1) {
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<PushedAuthRequestRow> = match result.take::<Vec<PushedAuthRequestRow>>(2) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
@@ -226,7 +236,23 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
             return Ok(None);
         }
 
-        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+        // Layer 2: outside, and after, the transaction above.
+        let stored = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE redemption_id FROM pushed_auth_request \
+                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("hash", request_uri_hash.to_string()))
+            .await;
+        let mut stored = match stored {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let stored: Vec<Option<String>> = match stored.take::<Vec<Option<String>>>(0) {
             Ok(v) => v,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),

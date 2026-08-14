@@ -15,6 +15,7 @@
 
 pub mod attestation_metadata_source;
 mod connection;
+pub mod engine_attestation;
 mod error;
 mod handle;
 pub mod helpers;
@@ -29,6 +30,10 @@ pub mod seeder;
 pub mod session_validation_cache;
 
 pub use connection::{DbConfig, DbManager};
+pub use engine_attestation::{
+    ALLOW_MEMORY_ENGINE_ENV, Attestation, MemoryEngineRefused, attest_storage_engine,
+    memory_engine_override_enabled,
+};
 pub use error::DbError;
 pub use handle::DbHandle;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};

@@ -11,8 +11,33 @@
 //! until something changes. So the moment a user approves, there is very
 //! likely a poll already in flight, and a read-then-write redeem would let two
 //! polls both observe `approved` and both mint a token set from one approval.
-//! Putting the precondition in the statement makes the datastore serialise
-//! them, and exactly one sees the before-image.
+//! Putting the precondition in the statement is what makes a later,
+//! non-concurrent poll match nothing.
+//!
+//! # Single-use, and what it is conditional on
+//!
+//! `redeem` is the single-use path, and it carries the same two layers as
+//! `permission_ticket.consume` and `pushed_auth_request.consume` (X6, #302).
+//! Single-use is a **guarantee, conditional on an attested persistent storage
+//! engine**; a double redemption needs both layers to fail on one grant:
+//!
+//!   1. The guarded `UPDATE` runs inside an explicit `BEGIN`/`COMMIT`, so two
+//!      concurrent polls conflict on one key and the deployed engine aborts the
+//!      loser — 0 double redemptions in 5000 rounds of 8 racers on `surrealkv`
+//!      and 0 in 1200 on `rocksdb` (`tools/surreal-race-probe`), with 54% of
+//!      contended attempts aborted. `kv-mem` aborts at the same rate and then
+//!      silently misses, 23 times in 1200.
+//!   2. A per-attempt nonce is read back **after** the commit, in a query of
+//!      its own, and only the caller whose nonce survived reports a redemption.
+//!      That layer asks the engine for nothing, so it catches a conflict the
+//!      engine missed. It must stay outside the transaction: inside it every
+//!      racer sees its own write and believes it won (`SCHEMA_V31`).
+//!
+//! What is at stake if both fail: one user approval minting two token sets,
+//! on a flow whose normal shape is a device polling on a short interval and
+//! retrying. On `kv-mem` the guarantee does not hold and is not claimed —
+//! `axiam-server` attests the engine at startup so running one is a deliberate,
+//! logged choice (`axiam_db::engine_attestation`).
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
@@ -245,62 +270,48 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         tenant_id: Uuid,
         device_code_hash: &str,
     ) -> AxiamResult<Option<DeviceGrant>> {
-        // Single-use. `RETURN BEFORE` yields the pre-transition row, and the
+        // Single-use, in two layers and two queries (X6/#302 — see the module
+        // header). `RETURN BEFORE` yields the pre-transition row, and the
         // `status = 'approved'` guard is what makes a later, non-concurrent
         // poll match nothing.
         //
-        // The guard does not decide a *concurrent* race. The `BEGIN`/`COMMIT`
-        // this used to rely on was measured not to either — but on `kv-mem`,
-        // which is what this crate's tests opened and not an engine AXIAM
-        // deploys. Re-measured in 2026-08 (`tools/surreal-race-probe`), the
-        // deployed engines DO detect that conflict: 0 double redemptions in
-        // 5000 rounds on `surrealkv` and 1200 on `rocksdb`, against 23 in 1200
-        // on `kv-mem`. See the addendum in `SCHEMA_V31`.
+        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction,
+        // so two concurrent polls conflict on one key and the deployed engine
+        // aborts the loser.
         //
-        // What is at stake if it is ever wrong: one user approval minting two
-        // token sets, with a device polling on a short interval and retrying —
-        // the normal shape of RFC 8628 §3.4, not an exotic case. That is why
-        // the nonce below stays even though the engine now looks sufficient.
-        //
-        // So the race is decided here as well: each attempt stamps a nonce, the
-        // last write persists, and the third statement reads back to see whose
-        // it was. Exactly one nonce can be the stored one. See `SCHEMA_V31` for
-        // the measurements, including two repairs that proved worse than the
-        // defect, and for what the engine rather than this code contributes.
-        //
-        // Deliberately **not** in a transaction: inside one the read-back would
-        // see this caller's own write under snapshot isolation and every racer
-        // would believe it won.
+        // Layer 2, in the SEPARATE query below: the per-attempt nonce read back
+        // after this transaction has committed. It must not be folded into the
+        // statements here — under snapshot isolation every racer would see its
+        // own write and believe it won (`SCHEMA_V31`).
         let nonce = new_id().to_string();
         let result = self
             .db
             .current()
             .query(format!(
-                "LET $before = (UPDATE device_grant \
+                "BEGIN TRANSACTION; \
+                 LET $before = (UPDATE device_grant \
                      SET status = 'redeemed', redemption_id = $nonce \
                      WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
                      AND status = 'approved' AND expires_at > time::now() \
                      RETURN BEFORE); \
                  SELECT {SELECT_FIELDS} FROM $before; \
-                 SELECT VALUE redemption_id FROM device_grant \
-                     WHERE tenant_id = $tenant_id AND device_code_hash = $hash LIMIT 1"
+                 COMMIT TRANSACTION"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("hash", device_code_hash.to_string()))
             .bind(("nonce", nonce.clone()))
             .await;
 
-        // Each statement is its own transaction, so a conflict is still
-        // possible. A loser's conflict is this method's "already redeemed"
-        // answer, not a server fault.
+        // A loser's abort is this method's "already redeemed" answer, not a
+        // server fault.
         let mut result = match result {
             Ok(r) => r,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
         };
 
-        // LET=0, SELECT rows=1, SELECT nonce=2.
-        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(1) {
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(2) {
             Ok(rows) => rows,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),
@@ -311,7 +322,23 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
             return Ok(None);
         }
 
-        let stored: Vec<Option<String>> = match result.take::<Vec<Option<String>>>(2) {
+        // Layer 2: outside, and after, the transaction above.
+        let stored = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE redemption_id FROM device_grant \
+                 WHERE tenant_id = $tenant_id AND device_code_hash = $hash LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("hash", device_code_hash.to_string()))
+            .await;
+        let mut stored = match stored {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let stored: Vec<Option<String>> = match stored.take::<Vec<Option<String>>>(0) {
             Ok(v) => v,
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
             Err(e) => return Err(DbError::from(e).into()),

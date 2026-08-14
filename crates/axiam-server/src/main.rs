@@ -311,6 +311,24 @@ async fn main() -> std::io::Result<()> {
             .expect("Failed to connect to SurrealDB"),
     );
 
+    // X6/#302: attest the storage engine before this process serves anything.
+    // Single-use redemption of UMA permission tickets, RFC 8628 device grants
+    // and RFC 9126 PAR request_uris is guaranteed only on a persistent engine;
+    // on `memory` it is measurably not. SurrealDB 3.2.4 publishes no datastore
+    // identity over the wire (the enumeration is in `engine_attestation`), so in
+    // practice this logs the "cannot attest" WARN and enforcement rests on the
+    // deployment layer — compose and the k8s StatefulSet pin `surrealkv:`, and
+    // `docs/deployment/README.md` carries the MUST. The hard refusal below is
+    // already wired for the day a SurrealDB release does expose the engine.
+    if let Err(refused) = axiam_db::attest_storage_engine(
+        &pool.handle_for_repo().current(),
+        axiam_db::memory_engine_override_enabled(),
+    )
+    .await
+    {
+        panic!("{refused}");
+    }
+
     // Run schema migrations
     axiam_db::run_migrations(&pool.handle_for_repo().current())
         .await

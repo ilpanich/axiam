@@ -1019,7 +1019,7 @@ async fn mfa_setup_full_flow_sets_cookies() {
     let secret_base32 = body["secret_base32"].as_str().unwrap();
 
     // Step 3: Generate TOTP code.
-    let secret = totp_rs::Secret::try_from_base32(secret_base32.to_string()).unwrap();
+    let secret = totp_rs::Secret::try_from_base32(secret_base32).unwrap();
     let secret_bytes = secret.as_bytes().to_vec();
     let totp = totp_rs::Builder::new()
         .with_algorithm(totp_rs::Algorithm::SHA1)
@@ -1551,7 +1551,7 @@ async fn enroll_and_confirm_mfa_then_login_requires_verify() {
     // already consumed in step 3 (no real sleep needed — skew=1 accepts the
     // next step early).
     let gen_code_at_offset = |secret_b32: &str, step_offset: i64| -> String {
-        let secret = totp_rs::Secret::try_from_base32(secret_b32.to_string()).unwrap();
+        let secret = totp_rs::Secret::try_from_base32(secret_b32).unwrap();
         let secret_bytes = secret.as_bytes().to_vec();
         let totp = totp_rs::Builder::new()
             .with_algorithm(totp_rs::Algorithm::SHA1)

@@ -661,7 +661,7 @@ async fn mfa_enroll_and_confirm() {
     assert!(enrollment.totp_uri.starts_with("otpauth://totp/"));
 
     // Step 2: generate a valid TOTP code from the secret.
-    let secret = totp_rs::Secret::try_from_base32(enrollment.secret_base32.clone()).unwrap();
+    let secret = totp_rs::Secret::try_from_base32(&enrollment.secret_base32).unwrap();
     let secret_bytes = secret.as_bytes().to_vec();
     let totp = totp_rs::Builder::new()
         .with_algorithm(totp_rs::Algorithm::SHA1)
@@ -695,7 +695,7 @@ async fn mfa_login_challenge_flow() {
 
     // Enroll and confirm MFA.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
-    let secret = totp_rs::Secret::try_from_base32(enrollment.secret_base32.clone()).unwrap();
+    let secret = totp_rs::Secret::try_from_base32(&enrollment.secret_base32).unwrap();
     let secret_bytes = secret.as_bytes().to_vec();
     let totp = totp_rs::Builder::new()
         .with_algorithm(totp_rs::Algorithm::SHA1)
@@ -1077,7 +1077,7 @@ async fn exponential_backoff_increases_lockout() {
 
 /// Helper: build a TOTP verifier from a base32 secret returned by enrollment.
 fn totp_from_secret(secret_base32: &str, email: &str) -> totp_rs::Totp {
-    let secret = totp_rs::Secret::try_from_base32(secret_base32.to_string()).unwrap();
+    let secret = totp_rs::Secret::try_from_base32(secret_base32).unwrap();
     let secret_bytes = secret.as_bytes().to_vec();
     totp_rs::Builder::new()
         .with_algorithm(totp_rs::Algorithm::SHA1)

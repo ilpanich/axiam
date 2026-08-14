@@ -624,7 +624,6 @@ mod tests {
             c_hash: None,
             s_hash: None,
             ext_exchange: None,
-            cnf: None,
             typ: None,
         }
     }

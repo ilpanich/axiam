@@ -215,22 +215,28 @@ conformance-up:
     echo "[conformance] the suite did not become ready; check 'docker compose -f conformance/docker-compose.yml logs'" >&2
     exit 1
 
-# Register the two fapi2 clients against a running AXIAM and update suite.env.
+# Register the fapi2 clients against a running AXIAM and update suite.env.
 conformance-register:
     bash conformance/scripts/register-clients.sh
 
-# Drive both FAPI 2.0 plans and collect their results.
+# Drive all three FAPI 2.0 plans and collect their results.
 #
-# Exits non-zero if either plan has a module that did not pass — deliberately,
+# Exits non-zero if any plan has a module that did not pass — deliberately,
 # so this can be wired into a manually-triggered CI workflow without silently
-# going green on a red run. Both plans always run: stopping at the first red
-# one would hide the second variant's failures behind the first's.
+# going green on a red run. Every plan always runs: stopping at the first red
+# one would hide the later variants' failures behind the first's.
+#
+# The third variant (private_key_jwt + DPoP) is what makes this cover both of
+# FAPI's client-authentication FAMILIES rather than both of RFC 8705's mTLS
+# methods. It needs no mTLS listener, which also makes it a diagnostic: if the
+# first two fail at client authentication and the third passes, the problem is
+# the listener's client-CA bundle rather than AXIAM.
 conformance-run:
     #!/usr/bin/env bash
     set -uo pipefail
     PLAN_NAME="${CONFORMANCE_PLAN_NAME:-fapi2-security-profile-final-test-plan}"
     rc=0
-    for variant in mtls self-signed; do
+    for variant in mtls self-signed private-key-jwt; do
       cfg="conformance/plans/fapi2-security-profile-final-${variant}.json"
       echo
       echo "=== ${variant} client authentication ==="

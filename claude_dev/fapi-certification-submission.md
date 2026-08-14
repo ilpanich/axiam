@@ -13,36 +13,70 @@ already got a green local run and are ready to make it official.
 
 ## Read this before anything else
 
-**The implementation is not yet submittable for the scope §X5.4's letter
-promises.** One gap decides your whole path through this document:
+### The A/B/C decision: **option B was taken** (2026-08-14)
+
+This section used to open by saying the implementation was not submittable for
+the scope §X5.4's letter promises, because of one gap:
 
 > **`private_key_jwt` (RFC 7523) client authentication is not implemented.**
 
+**It is implemented now.** The decision below is recorded rather than deleted,
+because the reasoning is what a reader needs to evaluate whether the right
+option was taken — and because "why was there a gap at all" is the question the
+certification team is most likely to ask.
+
 FAPI 2.0 §5.3.1.1 permits two *families* of client authentication —
-`private_key_jwt` and mutual TLS. AXIAM implements the mutual-TLS family, and
-both of its RFC 8705 methods (`tls_client_auth` and
-`self_signed_tls_client_auth`). The conformance harness therefore runs **both
-mTLS methods**, which is not the same thing as both FAPI families.
+`private_key_jwt` and mutual TLS. AXIAM implemented the mutual-TLS family first
+and both of its RFC 8705 methods (`tls_client_auth` and
+`self_signed_tls_client_auth`), because mTLS is the project's differentiator and
+the listener infrastructure already existed. The conformance harness therefore
+ran **both mTLS methods**, which is not the same thing as both FAPI families —
+and §X5.4's fee-waiver letter, drafted earlier, promised a submission covering
+both families.
 
-That leaves you three options, and you must pick one before you send anything:
+The three options were:
 
-| Option | What it means | Consequence |
-|---|---|---|
-| **A. Certify mTLS-only** | Submit with `client_auth_type: mtls` only, and say so plainly | Legitimate — check with the certification team whether the profile requires both families for the mark you want. **Amend §X5.4's letter** (see below). |
-| **B. Implement `private_key_jwt` first** | The second half of X5.1's client-auth row | Delays submission; produces the coverage the letter as drafted already claims |
-| **C. Ask the Foundation** | Send the fee-waiver request without a submission scope, and ask | Slowest, but it costs nothing and the answer decides A vs B for you |
+| Option | What it means | Consequence | Status |
+|---|---|---|---|
+| **A. Certify mTLS-only** | Submit with `client_auth_type: mtls` only, and say so plainly | Legitimate, but requires **amending §X5.4's letter** to a narrower scope | not taken |
+| **B. Implement `private_key_jwt` first** | The second half of X5.1's client-auth row | Delays submission; produces the coverage the letter as drafted already claims | **✅ taken — landed 2026-08-14** |
+| **C. Ask the Foundation** | Send the fee-waiver request without a submission scope, and ask | Slowest, costs nothing, and the answer decides A vs B for you | not needed |
 
-**Whichever you pick, do not send §X5.4's letter as currently drafted.** It
-says:
+**Why B rather than A or C.** Option A would have bought an earlier submission
+at the price of editing a commitment downward before it had ever been sent —
+and the narrower scope would then have had to be widened again as soon as
+`private_key_jwt` landed, which is a second conversation with the certification
+team for no engineering reason. Option C's only advantage was that it cost
+nothing, but its answer would have been useful only if the answer were "A is
+fine", and B was a bounded piece of work: key resolution reusing the federation
+JWKS cache, an SSRF guard that already existed, and a single-use `jti` store
+following the pattern `saml_replay` and `amqp_nonce_replay` already set. Nothing
+in it needed inventing.
 
-> "…covering both `private_key_jwt` and mutual-TLS client authentication
-> variants."
+**The consequence for the letter, stated plainly because the previous revision
+of this document said the opposite:**
 
-That sentence is ahead of the implementation. Under option A, replace it with
-something true — a suggested rewrite is at the end of this document. Under
-option B, implement first and the sentence becomes accurate. Sending an
-inaccurate scope claim to a certification body is the one mistake in this whole
-process that is genuinely hard to walk back.
+> §X5.4's letter says "…covering both `private_key_jwt` and mutual-TLS client
+> authentication variants."
+>
+> **That sentence is now accurate as originally drafted. It needs no amendment.
+> Send the letter as written.**
+
+The previous instruction — "whichever you pick, do not send §X5.4's letter as
+currently drafted" — is withdrawn, and the suggested narrower rewrite that used
+to sit at the end of this document is no longer applicable. Sending an
+inaccurate scope claim to a certification body remains the one mistake in this
+process that is genuinely hard to walk back; the way that risk was closed here
+was by making the claim true.
+
+### What DPoP changes for the submission
+
+The sender-constraining row's second half landed in the same pass. AXIAM now
+implements **both** RFC 8705 certificate binding and RFC 9449 DPoP, so the
+submission can claim either or both. Nothing in the letter turns on this — it
+does not mention sender-constraining — but the conformance report will show a
+third plan (`…-private-key-jwt.json`) whose client is DPoP-bound, and a reviewer
+comparing the report against the letter should not be surprised by it.
 
 ---
 
@@ -55,9 +89,11 @@ because a completed test plan materially strengthens the request.
 
 So the ordering is:
 
-1. Get a green run (§X5.2, and the amendment above about what "green" covers).
-2. Amend the letter's scope sentence.
-3. Send it, with the report attached.
+1. Get a green run (§X5.2). "Green" now covers both client-authentication
+   families across three methods.
+2. **Send the letter unmodified.** Its scope sentence is accurate; do not edit
+   it.
+3. Send it with the report attached.
 4. **Wait for the answer before paying anything.** §X5.3 is explicit: do not pay
    before the waiver answer arrives.
 
@@ -164,14 +200,18 @@ not a summary in this file, because the mechanics change. Broadly it is:
    an authorised representative of the implementer — this is the step that needs
    a human identity, not an agent).
 2. Attach the conformance-suite results from step 2.
-3. Name the **exact profile and variants** you are certifying. Per the gap
-   above, that is FAPI 2.0 Security Profile (Final), OP, mutual-TLS client
-   authentication — and *not* `private_key_jwt`, unless you took option B.
+3. Name the **exact profile and variants** you are certifying. Since option B
+   was taken, that is FAPI 2.0 Security Profile (Final), OP, covering **both
+   client-authentication families**: mutual TLS (`tls_client_auth` and
+   `self_signed_tls_client_auth`) and `private_key_jwt`.
 4. Reference the fee waiver if it was granted, or pay the fee.
 5. Submit and wait for the Foundation's review.
 
-**Keep the submission scope and the letter's scope identical.** If you amended
-the letter (you should have), the submission must match the amendment.
+**Keep the submission scope and the letter's scope identical.** The letter is
+sent unmodified, so the submission must claim both families — which is what the
+three conformance plans produce evidence for. Do not narrow the submission to
+mTLS-only out of caution: a submission narrower than the letter is the same
+mismatch as one wider than it, and the evidence supports the wider claim.
 
 ---
 
@@ -179,8 +219,11 @@ the letter (you should have), the submission must match the amendment.
 
 - **Publish the mark** on the website, per the Foundation's usage guidelines.
   Use it accurately: the mark covers the profile, variants and version you
-  certified, and nothing else. Do not let a marketing page widen it into "FAPI
-  2.0 certified" without qualification if you certified mTLS-only.
+  certified, and nothing else. The submission covers both client-authentication
+  families, so "FAPI 2.0 Security Profile (Final), OP" is accurate without a
+  client-auth qualifier — but it does **not** cover FAPI Message Signing (JARM
+  and friends), which is a separate optional certification. Do not let a
+  marketing page widen it into that.
 - **Link the evidence.** The mark should sit next to the published reports and
   the image digest, so a reader can verify rather than trust.
 - **Re-certification.** The letter commits to "maintaining certification across
@@ -193,48 +236,24 @@ the letter (you should have), the submission must match the amendment.
 
 ---
 
-## The §X5.4 letter, amended for option A
+## The §X5.4 letter: no amendment needed (option A's rewrite, retired)
 
-If you are certifying mTLS-only, replace the letter's scope sentence. The rest
-of the letter stands as drafted.
+**Send §X5.4's letter exactly as drafted.** Option B was taken, so its scope
+sentence —
 
-> **Replace:**
->
-> > We have reviewed the self-certification process and expect to submit results
-> > for the FAPI 2.0 Security Profile (Final) OP test plan, covering both
-> > `private_key_jwt` and mutual-TLS client authentication variants.
->
-> **With:**
->
-> > We have reviewed the self-certification process and expect to submit results
-> > for the FAPI 2.0 Security Profile (Final) OP test plan, covering **mutual-TLS
-> > client authentication** — both the PKI (`tls_client_auth`) and self-signed
-> > (`self_signed_tls_client_auth`) methods of RFC 8705. AXIAM implements
-> > mutual TLS natively and treats it as a first-class deployment mode rather
-> > than an option, which is why we have built the mTLS family out first;
-> > `private_key_jwt` is on our roadmap and we would welcome the Foundation's
-> > guidance on whether it is required for the certification scope we are
-> > requesting.
+> We have reviewed the self-certification process and expect to submit results
+> for the FAPI 2.0 Security Profile (Final) OP test plan, covering both
+> `private_key_jwt` and mutual-TLS client authentication variants.
 
-That last clause turns the gap into a question, which is both honest and
-useful — the answer tells you whether option A was ever viable, and asking it in
-the letter costs you nothing.
+— is accurate. `private_key_jwt` (RFC 7523 §2.2) and both RFC 8705 mutual-TLS
+methods are implemented, and `conformance/plans/` carries a plan template for
+each.
 
----
+This document previously ended with a narrower rewrite of that sentence, for use
+if option A had been taken. It is retired rather than kept, because a stale
+"replace this with that" instruction sitting under a heading is the kind of
+thing somebody follows without reading the option table above it — and the
+result would be a submission that under-claims what the evidence supports.
 
-## Checklist
-
-- [ ] Decided A / B / C on the `private_key_jwt` gap
-- [ ] Amended §X5.4's scope sentence to match that decision
-- [ ] Sent the fee-waiver letter, with a conformance report attached
-- [ ] Waited for the waiver answer — **paid nothing before it arrived**
-- [ ] Tagged a release and resolved it to an immutable digest
-- [ ] Ran the CI workflow against that digest
-- [ ] Completed the interactive modules against the same digest
-- [ ] Read every `REVIEW` verdict rather than counting it as a pass
-- [ ] Both variants genuinely green
-- [ ] Reports committed under `docs/conformance/`, earlier ones kept
-- [ ] Digest recorded next to the reports
-- [ ] Submitted with a scope identical to the letter's
-- [ ] Mark published accurately, with the evidence linked
-- [ ] Re-certification reminder set somewhere durable
+If a future release ever *removes* a client-authentication family, this is the
+paragraph to come back to.

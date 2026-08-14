@@ -323,7 +323,11 @@ pub fn authenticate_mtls_client(
                 false
             }
         }
-        ClientAuthMethod::ClientSecretPost => false,
+        // Neither of these authenticates by certificate. Reaching here at all
+        // means a caller routed a non-mTLS client into the mTLS path, which the
+        // `debug_assert` above catches in tests; in release the answer is
+        // "not authenticated", never "authenticated by default".
+        ClientAuthMethod::ClientSecretPost | ClientAuthMethod::PrivateKeyJwt => false,
     };
 
     if !matched {
@@ -377,6 +381,10 @@ mod tests {
             tls_client_auth_san_uri: None,
             self_signed_tls_client_auth_thumbprints: vec![],
             tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

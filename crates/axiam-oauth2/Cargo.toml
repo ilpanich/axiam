@@ -28,6 +28,13 @@ subtle = { workspace = true }
 # X5.1 — RFC 8705 client authentication reads the subject DN and SANs out of
 # the certificate rustls already verified during the handshake.
 x509-parser = { workspace = true }
+# X5.1 second half — a `jwks_uri` on an OAuth2 client is the same threat
+# surface as a federated IdP's, so it is fetched through the SAME cache: TTL,
+# stale-while-revalidate, and the SEC-054 SSRF guard. `default-features = false`
+# leaves samael/libxml out of this crate's graph; only `jwks_cache` is needed
+# and it is in the OIDC (non-SAML) half.
+axiam-federation = { workspace = true, default-features = false }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 # X4 external-exchange unit tests mint an Ed25519 keypair for the AuthConfig

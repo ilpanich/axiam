@@ -232,6 +232,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "fapi2_client_profile_and_mtls_client_auth",
         sql: SCHEMA_V38,
     },
+    Migration {
+        version: 39,
+        name: "private_key_jwt_dpop_and_proof_replay",
+        sql: SCHEMA_V39,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2053,6 +2058,66 @@ DEFINE FIELD IF NOT EXISTS self_signed_tls_client_auth_thumbprints.* ON TABLE oa
     TYPE string;
 DEFINE FIELD IF NOT EXISTS tls_client_certificate_bound_access_tokens ON TABLE oauth2_client
     TYPE bool DEFAULT false;
+";
+
+// -----------------------------------------------------------------------
+// Schema v39 — private_key_jwt client auth and DPoP binding (X5.1)
+// -----------------------------------------------------------------------
+//
+// The second half of two X5.1 rows: the `private_key_jwt` client-authentication
+// family (RFC 7523 §2.2) and DPoP sender-constraining (RFC 9449). Same rule v38
+// set and this migration keeps: **every new field defaults to pre-v39
+// behaviour.**
+//
+// - `jwks` / `jwks_uri` are `option<string>`, absent for every existing row.
+//   Mutually exclusive per RFC 7591 §2, enforced in the application layer
+//   (`OAuth2Client::jwks_source_count`) for the same reason the
+//   `tls_client_auth_*` exclusivity is: the check spans two fields and owes the
+//   caller an error naming which ones collided.
+// - `jwks` holds the raw JSON document rather than a parsed structure. A client
+//   may legitimately publish a key type this build does not implement, and the
+//   right place to discover that is the authentication path — where it is one
+//   client failing to authenticate — not row decoding, where it is a client
+//   that cannot be read at all.
+// - `dpop_bound_access_tokens` defaults false, so no existing token gains a
+//   `cnf.jkt` and no resource server starts seeing a confirmation it cannot
+//   check.
+// - `dpop_require_nonce` defaults false, so enabling DPoP does not silently
+//   turn every first request into two round trips.
+//
+// The replay table is new, and is the reason this migration is not purely
+// additive-to-`oauth2_client`. It carries a UNIQUE index over
+// `(tenant_id, kind, scope, jti)` and that index is the entire replay
+// mechanism: `CREATE` either succeeds — first sighting — or violates the index,
+// which the repository reads as `ReplayDetected`. There is deliberately no
+// SELECT anywhere in that path. A read-then-write check would leave a window in
+// which two concurrent copies of one proof both pass, which is the race #316
+// and #318 closed for authorization codes and which a proof-of-possession
+// credential can afford even less.
+//
+// `idx_proof_replay_expires_at` exists for the cleanup sweep only. Without it
+// the sweep is a full table scan over a table whose whole purpose is to be
+// written to on every authenticated request.
+const SCHEMA_V39: &str = "\
+DEFINE FIELD IF NOT EXISTS jwks ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS jwks_uri ON TABLE oauth2_client TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS dpop_bound_access_tokens ON TABLE oauth2_client
+    TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS dpop_require_nonce ON TABLE oauth2_client
+    TYPE bool DEFAULT false;
+DEFINE TABLE IF NOT EXISTS oauth2_proof_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE oauth2_proof_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS kind ON TABLE oauth2_proof_replay TYPE string
+    ASSERT $value IN ['client_assertion', 'dpop_proof'];
+DEFINE FIELD IF NOT EXISTS scope ON TABLE oauth2_proof_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS jti ON TABLE oauth2_proof_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE oauth2_proof_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE oauth2_proof_replay TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_proof_replay_uniq ON TABLE oauth2_proof_replay \
+    COLUMNS tenant_id, kind, scope, jti UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_proof_replay_expires_at ON TABLE oauth2_proof_replay \
+    COLUMNS expires_at;
 ";
 
 // -----------------------------------------------------------------------

@@ -1303,6 +1303,83 @@ pub trait AmqpNonceRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth2 proof-of-possession replay (X5.1)
+// ---------------------------------------------------------------------------
+
+/// Repository for the single-use `jti` values that make RFC 7523 client
+/// assertions and RFC 9449 DPoP proofs non-replayable.
+///
+/// Structurally the same guarantee [`AssertionReplayRepository`] and
+/// [`AmqpNonceRepository`] provide, and deliberately the same mechanism: a
+/// `CREATE` against a table carrying a `UNIQUE` index, where the index
+/// violation **is** the "already seen" answer. Nothing here reads before it
+/// writes.
+///
+/// That matters more here than anywhere else in the tree. A read-then-write
+/// replay check has a window between the two in which a second copy of the same
+/// proof passes the read — which is precisely the race #316 and #318 spent real
+/// effort closing for authorization codes. A proof-of-possession credential
+/// that can be replayed once concurrently is not a proof of anything.
+///
+/// # Two scopes, one mechanism
+///
+/// The two kinds are separated by their `scope` rather than by two tables,
+/// because the uniqueness key differs only in what the second component means:
+///
+/// | Kind | Scope | Why |
+/// |---|---|---|
+/// | client assertion | `client_id` | RFC 7523 §3 scopes `jti` uniqueness to the issuer, and the issuer of a client assertion *is* the client. Two clients that both pick `jti: "1"` have not replayed anything. |
+/// | DPoP proof | `jkt` | RFC 9449 §11.1 scopes it to the proof key. The same reasoning: the key is the issuer. |
+///
+/// Both are further scoped by tenant, like everything else in AXIAM.
+pub trait ProofReplayRepository: Send + Sync {
+    /// Record a consumed `jti`.
+    ///
+    /// Returns `Ok(())` the first time a `(tenant_id, kind, scope, jti)` tuple
+    /// is seen and `Err(AxiamError::ReplayDetected)` on every subsequent
+    /// attempt — decided by the UNIQUE index, not by a preceding read.
+    fn insert_proof_jti(
+        &self,
+        tenant_id: Uuid,
+        kind: ProofKind,
+        scope: &str,
+        jti: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired rows across all tenants. Returns the number deleted.
+    ///
+    /// A row is only useful until the credential it records could no longer be
+    /// accepted anyway: past that point replaying it fails on `exp` (assertions)
+    /// or `iat` freshness (DPoP proofs) without consulting this table at all.
+    fn cleanup_expired_proofs(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Which proof-of-possession credential a replay row records.
+///
+/// An explicit discriminator rather than two tables because the two rows are
+/// identical in shape and lifetime, and one table means one cleanup job and one
+/// index to reason about. It is *not* merely cosmetic: without it, a client
+/// whose `client_id` happened to equal some key's `jkt` would share a
+/// uniqueness namespace with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofKind {
+    /// RFC 7523 §2.2 `client_assertion`, scoped by `client_id`.
+    ClientAssertion,
+    /// RFC 9449 DPoP proof, scoped by the proof key's `jkt`.
+    DpopProof,
+}
+
+impl ProofKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientAssertion => "client_assertion",
+            Self::DpopProof => "dpop_proof",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PKI / Certificates
 // ---------------------------------------------------------------------------
 

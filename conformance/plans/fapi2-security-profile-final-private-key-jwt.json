@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "OIDF conformance test-plan configuration — FAPI 2.0 Security Profile (Final),",
+    "OpenID Provider, private_key_jwt client authentication + DPoP",
+    "sender-constraining (X5.1 second half).",
+    "",
+    "This is the THIRD plan, and the one that makes the harness cover both of",
+    "FAPI's client-authentication FAMILIES rather than both of RFC 8705's mTLS",
+    "methods. The runbook's 'Known gaps' section used to explain at length why",
+    "the harness could not do that; it now explains why it can.",
+    "",
+    "Placeholders of the form ${NAME} are substituted by",
+    "conformance/scripts/render-plan.sh from conformance/suite.env, so this file",
+    "is committed with no client ids, no secrets and no host-specific paths. The",
+    "rendered copy lands under conformance/.run/ (gitignored) and is what the",
+    "suite actually reads.",
+    "",
+    "Plan name to select in the suite UI or the API:",
+    "  fapi2-security-profile-final-test-plan",
+    "with variant { client_auth_type: private_key_jwt, sender_constrain: dpop,",
+    "               fapi_client_type: plain_oauth, openid: plain_oauth,",
+    "               fapi_request_method: pushed }.",
+    "",
+    "WHAT IS DIFFERENT FROM THE OTHER TWO PLANS",
+    "",
+    "1. No mTLS block. This plan needs no client certificate and no mTLS",
+    "   listener at all, which is both its point and a useful diagnostic: if the",
+    "   two mTLS plans fail at client authentication and this one passes, the",
+    "   problem is your listener's client-CA bundle, not AXIAM.",
+    "",
+    "2. The suite's own JWKS is the credential. `client.jwks` carries the PUBLIC",
+    "   half of the key the suite signs its client assertions with, and",
+    "   conformance-register registers that same document as the AXIAM client's",
+    "   inline `jwks`.",
+    "",
+    "3. INLINE `jwks`, DELIBERATELY NOT `jwks_uri`. AXIAM fetches a registered",
+    "   jwks_uri through the SSRF-guarded JWKS cache, which REFUSES private and",
+    "   loopback addresses — and a conformance suite running on",
+    "   host.docker.internal publishes its key set at exactly such an address.",
+    "   Registering the document inline sidesteps a guard that is working",
+    "   correctly. A production client on a public host would use jwks_uri and",
+    "   the guard would never fire. The runbook's failure table says so too,",
+    "   because this is discoverable only as an opaque invalid_client otherwise.",
+    "",
+    "4. sender_constrain: dpop. The registered client carries",
+    "   dpop_bound_access_tokens rather than",
+    "   tls_client_certificate_bound_access_tokens, so this plan exercises the",
+    "   DPoP half of sender-constraining end to end — proof at the token",
+    "   endpoint, cnf.jkt on the issued token, and proof again at the resource",
+    "   server. The suite generates the proof key; nothing in",
+    "   conformance/certs/ is involved.",
+    "",
+    "   dpop_require_nonce is left FALSE on the registered client. The nonce",
+    "   challenge path has its own unit coverage; turning it on here would add a",
+    "   round trip to every module for no additional assertion, and some suite",
+    "   versions handle the challenge only once per module.",
+    "",
+    "Why 'pushed' rather than 'unsigned': FAPI 2.0 §5.3.1.2 requires PAR, and a",
+    "fapi2-profile AXIAM client is registered require_par=true, so a plan run",
+    "with an unpushed request method would fail every authorization step for a",
+    "reason that is the profile working correctly. See the runbook."
+  ],
+
+  "alias": "axiam-fapi2-private-key-jwt",
+  "description": "AXIAM — FAPI 2.0 Security Profile (Final), private_key_jwt client auth + DPoP sender-constraining",
+
+  "server": {
+    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration?tenant_id=${AXIAM_TENANT_ID}"
+  },
+
+  "client": {
+    "client_id": "${CLIENT_PRIVATE_KEY_JWT_ID}",
+    "scope": "openid",
+    "jwks": ${CLIENT_PRIVATE_KEY_JWT_JWKS}
+  },
+
+  "client2": {
+    "client_id": "${CLIENT_PRIVATE_KEY_JWT_2_ID}",
+    "scope": "openid",
+    "jwks": ${CLIENT_PRIVATE_KEY_JWT_2_JWKS}
+  },
+
+  "resource": {
+    "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
+  },
+
+  "variant": {
+    "client_auth_type": "private_key_jwt",
+    "sender_constrain": "dpop",
+    "fapi_client_type": "plain_oauth",
+    "openid": "plain_oauth",
+    "fapi_request_method": "pushed",
+    "fapi_response_mode": "plain_response"
+  }
+}

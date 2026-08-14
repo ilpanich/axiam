@@ -60,6 +60,15 @@ pub struct OidcDiscoveryDocument {
     /// this document is scoped to the server, and a per-client answer here
     /// would leak one client's posture to every reader.
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// RFC 9449 §5.1 — X5.1 second half. The JWS algorithms AXIAM accepts on a
+    /// DPoP proof.
+    ///
+    /// Its **presence** is what tells a client DPoP is supported at all; RFC
+    /// 9449 defines no separate boolean. The list is the profile's three, and
+    /// notably excludes `RS256` — the omission a client library defaulting to
+    /// RSA will hit first, and the reason advertising the list matters rather
+    /// than merely advertising support.
+    pub dpop_signing_alg_values_supported: Vec<String>,
 }
 
 /// Build a fully-populated OIDC discovery document for the given issuer URL.
@@ -93,6 +102,11 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
             // other on a multi-listener deployment.
             "tls_client_auth".into(),
             "self_signed_tls_client_auth".into(),
+            // X5.1 second half / RFC 7523 §2.2. Unlike the two mTLS methods
+            // this one needs nothing from the deployment's listeners at all,
+            // so advertising it carries no caveat: every AXIAM deployment can
+            // serve it.
+            "private_key_jwt".into(),
         ],
         claims_supported: vec![
             "sub".into(),
@@ -124,6 +138,7 @@ pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
         ],
         authorization_response_iss_parameter_supported: true,
         tls_client_certificate_bound_access_tokens: true,
+        dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
     }
 }
 

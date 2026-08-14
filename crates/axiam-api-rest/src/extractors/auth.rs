@@ -168,7 +168,7 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
     let token = if let Some(cookie) = req.cookie("axiam_access") {
         cookie.value().to_owned()
     } else {
-        // Fall back to Authorization: Bearer header for non-browser clients.
+        // Fall back to the Authorization header for non-browser clients.
         let header = req
             .headers()
             .get("Authorization")
@@ -177,15 +177,20 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
                 reason: "missing authentication credentials".into(),
             })?;
 
-        // Parse `Authorization` as case-insensitive Bearer with flexible whitespace.
+        // Parse `Authorization` as a case-insensitive scheme with flexible
+        // whitespace. `DPoP` joins `Bearer` here (X5.1, RFC 9449 §7.1): a
+        // DPoP-bound token arrives under its own scheme, and a guard that only
+        // ever splits on `Bearer ` would not find the token at all.
         let header = header.trim();
         let mut parts = header.splitn(2, char::is_whitespace);
         let scheme = parts.next().unwrap_or("");
         let credentials = parts.next().unwrap_or("").trim();
 
-        if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
+        let known_scheme =
+            scheme.eq_ignore_ascii_case("bearer") || axiam_oauth2::dpop::is_dpop_scheme(scheme);
+        if !known_scheme || credentials.is_empty() {
             return Err(AxiamError::AuthenticationFailed {
-                reason: "invalid Authorization scheme, expected Bearer".into(),
+                reason: "invalid Authorization scheme, expected Bearer or DPoP".into(),
             }
             .into());
         }
@@ -193,7 +198,105 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
     };
 
     let validated = validate_access_token(&token, config).map_err(AxiamError::from)?;
+    enforce_sender_constraint(req, &token, &validated.0)?;
     Ok(validated)
+}
+
+/// Enforce a token's `cnf` sender constraint against what this request actually
+/// proved (X5.1; RFC 8705 §3.2 and RFC 9449 §7.1).
+///
+/// AXIAM's own API is a resource server for its own tokens, so it owes the same
+/// obligation the SDK contract's §10.1 rule 9 places on every SDK: **a token
+/// carrying `cnf` is not a bearer token, and a `cnf` naming a method this
+/// validator cannot check is refused rather than read as unbound.**
+///
+/// # Ordinary callers are untouched
+///
+/// A token with no `cnf` — which is every token AXIAM issued before X5.1 and
+/// every token it issues to a client that has not asked for binding — returns
+/// `Ok` here without any evidence being gathered, and without either header
+/// being read. That is the property `an_unbound_token_is_never_asked_for_a_proof`
+/// pins, and it is the one this function is most likely to break.
+///
+/// # The replay caveat, stated rather than hidden
+///
+/// The proof's signature, `typ`, `alg`, `htm`, `htu`, `iat` freshness, `ath` and
+/// `jkt` are all checked. Its `jti` is **not** recorded here, because actix
+/// extractors are synchronous and the replay store is not. Within the 60-second
+/// freshness window a captured proof for *this exact method and URI*, presented
+/// with *the same token*, would therefore be accepted a second time on this
+/// path. The token endpoint — which is async and does hold the repository —
+/// does record it. This is exactly the limitation §21.7.2's row 8 requires an
+/// implementation to document rather than paper over, and closing it means
+/// moving this check into middleware that can await.
+fn enforce_sender_constraint(
+    req: &HttpRequest,
+    token: &str,
+    claims: &axiam_auth::token::AccessTokenClaims,
+) -> Result<(), AxiamApiError> {
+    use axiam_auth::token::{PresentedProofs, verify_token_binding};
+
+    // The fast path, and the common one: nothing to enforce, nothing read.
+    if claims.cnf.is_none() {
+        return Ok(());
+    }
+
+    let certificate_thumbprint = req
+        .conn_data::<crate::extractors::cert_auth::VerifiedClientCert>()
+        .map(|v| axiam_oauth2::mtls::thumbprint_s256(&v.der));
+
+    let dpop_thumbprint = verified_dpop_thumbprint(req, token);
+
+    verify_token_binding(
+        claims,
+        PresentedProofs {
+            certificate_thumbprint: certificate_thumbprint.as_deref(),
+            dpop_thumbprint: dpop_thumbprint.as_deref(),
+        },
+    )
+    .map_err(AxiamError::from)?;
+    Ok(())
+}
+
+/// The `jkt` of a DPoP proof on this request that **verified**, or `None`.
+///
+/// `None` for "no proof", "malformed proof" and "proof that failed
+/// verification" alike, which is the correct collapsing: every one of them means
+/// the caller has not proved possession, and
+/// [`axiam_auth::token::verify_token_binding`] refuses a `jkt`-bound token for
+/// all three. Returning a thumbprint from an unverified proof — the obvious
+/// shortcut, since the `jkt` is right there in the header — would turn DPoP
+/// into a self-signed permission slip.
+fn verified_dpop_thumbprint(req: &HttpRequest, token: &str) -> Option<String> {
+    use axiam_oauth2::dpop::{DpopExpectation, verify_dpop_proof};
+
+    let raw = req
+        .headers()
+        .get("DPoP")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    // RFC 9449 §4.3 step 2: more than one proof is a malformed request, not a
+    // choice of proofs.
+    if req.headers().get_all("DPoP").count() > 1 {
+        return None;
+    }
+
+    let htu = req.full_url().to_string();
+    let expect = DpopExpectation::at_resource_server(
+        req.method().as_str(),
+        &htu,
+        token,
+        chrono::Utc::now().timestamp(),
+    );
+
+    match verify_dpop_proof(raw, &expect) {
+        Ok(proof) => Some(proof.jkt),
+        Err(e) => {
+            tracing::debug!(error = %e, "a DPoP proof on a resource request did not verify");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

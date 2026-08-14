@@ -100,6 +100,18 @@ pub struct TokenRequest {
     /// Declared format of `claim_token`. Only the AXIAM access-token URN is
     /// accepted in v1; anything else is refused rather than guessed at.
     pub claim_token_format: Option<String>,
+
+    // --- X5.1 / RFC 7521 §4.2 client assertion ---------------------------
+    /// The signed JWT a `private_key_jwt` client authenticates with.
+    ///
+    /// Carried here rather than in a second form type for the same reason the
+    /// RFC 8693 parameters are: actix deserializes one body once, and the
+    /// token endpoint cannot know which client-authentication method applies
+    /// until it has read `client_id` out of that body and loaded the
+    /// registration.
+    pub client_assertion: Option<String>,
+    /// Must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`.
+    pub client_assertion_type: Option<String>,
 }
 
 impl TokenRequest {
@@ -222,6 +234,27 @@ pub struct TokenRequestContext {
     /// `crate::mtls`'s module docs for why the `X-Client-Certificate` proxy
     /// header is deliberately not a source here.
     pub client_certificate: Option<PresentedCertificate>,
+    /// A DPoP proof that has **already been verified** for this request, and
+    /// whose `jti` has already been recorded (X5.1, RFC 9449).
+    ///
+    /// The same discipline as [`Self::client_certificate`] and for the same
+    /// reason: this field carries a *conclusion*, never an input. The REST
+    /// layer verifies the `DPoP` header against the actual method and URI —
+    /// which only it knows — and hands the result here. A caller that
+    /// populated this from an unverified header would have turned DPoP into a
+    /// self-signed permission slip, which is why the type is
+    /// `VerifiedDpopProof` and not `String`.
+    pub dpop_proof: Option<crate::dpop::VerifiedDpopProof>,
+    /// The `client_assertion` form parameter, verbatim (RFC 7521 §4.2).
+    ///
+    /// Unlike the two fields above this is a request *body* parameter, not a
+    /// property of the connection, and it is carried here rather than passed
+    /// down from the form because `authenticate_client_credential` is reached
+    /// from four grants that share no request type. It is deliberately the raw
+    /// string: nothing has verified it at this point, and the type says so.
+    pub client_assertion: Option<String>,
+    /// The `client_assertion_type` form parameter.
+    pub client_assertion_type: Option<String>,
 }
 
 impl TokenRequestContext {
@@ -230,6 +263,31 @@ impl TokenRequestContext {
         self.client_certificate
             .as_ref()
             .map(|c| c.thumbprint_s256.as_str())
+    }
+
+    /// The `jkt` of the verified DPoP proof, if any.
+    pub fn dpop_thumbprint(&self) -> Option<&str> {
+        self.dpop_proof.as_ref().map(|p| p.jkt.as_str())
+    }
+
+    /// Copy the RFC 7521 assertion parameters out of a decoded token request.
+    ///
+    /// A method rather than a field the REST layer sets by hand, so that
+    /// adding a third assertion parameter cannot be half-wired at one of the
+    /// endpoints that build a context.
+    #[must_use]
+    pub fn with_assertion_from(mut self, req: &TokenRequest) -> Self {
+        self.client_assertion = req.client_assertion.clone().filter(|a| !a.is_empty());
+        self.client_assertion_type = req.client_assertion_type.clone().filter(|t| !t.is_empty());
+        self
+    }
+
+    /// What this request actually proved, for `crate::fapi`'s gate.
+    pub fn evidence(&self) -> crate::fapi::TokenRequestEvidence {
+        crate::fapi::TokenRequestEvidence {
+            presented_certificate: self.client_certificate.is_some(),
+            verified_dpop_proof: self.dpop_proof.is_some(),
+        }
     }
 }
 
@@ -242,6 +300,14 @@ impl TokenRequestContext {
 #[derive(Clone)]
 pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     client_repo: OC,
+    /// X5.1 — resolves a `private_key_jwt` client's keys, verifies its
+    /// assertion, and records the `jti`.
+    ///
+    /// `None` means no client may authenticate with `private_key_jwt` in this
+    /// deployment — a refusal for clients registered for the method, never a
+    /// fallback to a weaker credential. See
+    /// [`crate::private_key_jwt::ClientAssertionVerifier`].
+    assertion_verifier: Option<std::sync::Arc<dyn crate::private_key_jwt::ClientAssertionVerifier>>,
     /// Service-account repository (client-credentials for `sa_…` clients).
     service_account_repo: SA,
     code_repo: AC,
@@ -274,6 +340,7 @@ where
     ) -> Self {
         Self {
             client_repo,
+            assertion_verifier: None,
             service_account_repo,
             code_repo,
             tenant_repo,
@@ -282,6 +349,22 @@ where
             auth_config,
             refresh_token_lifetime_secs,
         }
+    }
+
+    /// Enable `private_key_jwt` client authentication (X5.1).
+    ///
+    /// Builder-style rather than a ninth `new` parameter so every existing
+    /// construction site keeps compiling and keeps its current behaviour —
+    /// which is the same property `issue_access_token_bound`'s extra parameter
+    /// preserves in `axiam-auth`, and for the same reason: X5.1 must be
+    /// invisible to a deployment that does not ask for it.
+    #[must_use]
+    pub fn with_assertion_verifier(
+        mut self,
+        verifier: std::sync::Arc<dyn crate::private_key_jwt::ClientAssertionVerifier>,
+    ) -> Self {
+        self.assertion_verifier = Some(verifier);
+        self
     }
 
     /// Verify a presented client secret against the stored hash — the single
@@ -380,9 +463,48 @@ where
             return crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref());
         }
 
+        if client.token_endpoint_auth_method.is_private_key_jwt() {
+            return self
+                .authenticate_client_assertion(tenant_id, client, ctx)
+                .await;
+        }
+
         let secret = presented_secret
             .ok_or_else(|| OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))?;
         self.verify_client_secret(tenant_id, client, secret).await
+    }
+
+    /// `private_key_jwt` client authentication (X5.1, RFC 7523 §2.2).
+    ///
+    /// The assertion comes from the request body, which is why it is read out
+    /// of [`TokenRequestContext`]'s sibling — the form — rather than the
+    /// context: unlike a certificate or a DPoP proof, it is not a property of
+    /// the connection. Everything else about the shape matches the mTLS branch
+    /// exactly: the **registration** decides the method, the credential is
+    /// checked against what the client registered, and every failure answers
+    /// the same `invalid_client`.
+    async fn authenticate_client_assertion(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        ctx: &TokenRequestContext,
+    ) -> Result<(), OAuth2Error> {
+        let Some(verifier) = self.assertion_verifier.as_ref() else {
+            tracing::error!(
+                client_id = %client.client_id,
+                "a client is registered for private_key_jwt but this deployment has no assertion \
+                 verifier configured; refusing rather than falling back to another credential"
+            );
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        };
+
+        let Some(assertion) = ctx.client_assertion.as_deref() else {
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        };
+        crate::private_key_jwt::check_assertion_type(ctx.client_assertion_type.as_deref())
+            .map_err(OAuth2Error::from)?;
+
+        verifier.verify(tenant_id, client, assertion).await
     }
 
     /// Decide the `cnf` confirmation claim for a token about to be issued
@@ -403,21 +525,57 @@ where
         client: &OAuth2Client,
         ctx: &TokenRequestContext,
     ) -> Result<Option<axiam_auth::token::CnfClaim>, OAuth2Error> {
-        if !crate::fapi::wants_certificate_binding(client) {
-            return Ok(None);
-        }
-        match ctx.certificate_thumbprint() {
-            Some(thumbprint) => Ok(Some(
-                axiam_auth::token::CnfClaim::from_certificate_thumbprint(thumbprint),
-            )),
-            None => {
+        let mut cnf: Option<axiam_auth::token::CnfClaim> = None;
+
+        if crate::fapi::wants_certificate_binding(client) {
+            let Some(thumbprint) = ctx.certificate_thumbprint() else {
                 tracing::warn!(
                     client_id = %client.client_id,
                     "client requires certificate-bound access tokens but presented no client \
                      certificate; refusing rather than issuing an unbound token"
                 );
-                Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))
-            }
+                return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+            };
+            cnf = Some(axiam_auth::token::CnfClaim::from_certificate_thumbprint(
+                thumbprint,
+            ));
+        }
+
+        if crate::fapi::wants_dpop_binding(client) {
+            let Some(jkt) = ctx.dpop_thumbprint() else {
+                tracing::warn!(
+                    client_id = %client.client_id,
+                    "client requires DPoP-bound access tokens but presented no verified DPoP \
+                     proof; refusing rather than issuing an unbound token"
+                );
+                return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+            };
+            // A client that asked for both gets both, in one `cnf`. The
+            // resource server then has to satisfy both — see
+            // `axiam_auth::token::verify_token_binding`, where "both present"
+            // is a conjunction.
+            cnf = Some(match cnf {
+                Some(existing) => existing.with_dpop_thumbprint(jkt),
+                None => axiam_auth::token::CnfClaim::from_dpop_thumbprint(jkt),
+            });
+        }
+
+        Ok(cnf)
+    }
+
+    /// RFC 9449 §5: the `token_type` a response should carry.
+    ///
+    /// `DPoP` when the token is DPoP-bound, `Bearer` otherwise — including for
+    /// a certificate-bound token, which RFC 8705 leaves as a bearer token at
+    /// the HTTP layer (the constraint is enforced by the TLS connection, not by
+    /// a different authorization scheme).
+    ///
+    /// A client that has never heard of DPoP therefore sees `Bearer`, exactly
+    /// as it always has. That is the property the whole design turns on.
+    fn token_type_for(cnf: Option<&axiam_auth::token::CnfClaim>) -> String {
+        match cnf {
+            Some(c) if c.dpop_thumbprint().is_some() => crate::dpop::TOKEN_TYPE_DPOP.to_owned(),
+            _ => crate::dpop::TOKEN_TYPE_BEARER.to_owned(),
         }
     }
 
@@ -715,7 +873,7 @@ where
         // oracle on a path that just spent three comment blocks closing one.
         self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
-        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
+        crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
         // Verify client is authorized for authorization_code grant
         if !client.grant_types.iter().any(|s| s == "authorization_code") {
@@ -776,6 +934,9 @@ where
         // certificate binding, which makes this byte-identical to what the
         // pre-X5 call produced.
         let cnf = self.certificate_binding_for(&client, ctx)?;
+        // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
+        // token is announced as such, and everything else stays `Bearer`.
+        let token_type = Self::token_type_for(cnf.as_ref());
         let access_token = issue_access_token_bound(
             auth_code.user_id,
             tenant_id,
@@ -847,7 +1008,7 @@ where
 
         Ok(TokenResponse {
             access_token,
-            token_type: "Bearer".into(),
+            token_type,
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token,
             scope,
@@ -993,7 +1154,7 @@ where
             .await;
         let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
         secret_result?;
-        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
+        crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
         // Verify grant type is allowed
         if !client.grant_types.iter().any(|s| s == "client_credentials") {
@@ -1040,6 +1201,9 @@ where
         // issued for client_credentials, so there is no persist stage.
         let t_token_mint = std::time::Instant::now();
         let cnf = self.certificate_binding_for(&client, ctx)?;
+        // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
+        // token is announced as such, and everything else stays `Bearer`.
+        let token_type = Self::token_type_for(cnf.as_ref());
         let access_token = issue_client_credentials_token_bound(
             client_id,
             tenant_id,
@@ -1078,7 +1242,7 @@ where
 
         Ok(TokenResponse {
             access_token,
-            token_type: "Bearer".into(),
+            token_type,
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: None,
             scope,
@@ -1140,7 +1304,7 @@ where
 
         self.authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
             .await?;
-        crate::fapi::enforce_token_request(&client, ctx.client_certificate.is_some())?;
+        crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
         // Verify client is authorized for refresh_token grant
         if !client.grant_types.iter().any(|s| s == "refresh_token") {
@@ -1186,6 +1350,9 @@ where
         // renewing tokens bound to it, and would survive a certificate
         // rotation the operator performed precisely to revoke access.
         let cnf = self.certificate_binding_for(&client, ctx)?;
+        // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
+        // token is announced as such, and everything else stays `Bearer`.
+        let token_type = Self::token_type_for(cnf.as_ref());
         let access_token = if let Some(user_id) = stored.user_id {
             issue_access_token_bound(
                 user_id,
@@ -1306,7 +1473,7 @@ where
 
         Ok(TokenResponse {
             access_token,
-            token_type: "Bearer".into(),
+            token_type,
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: Some(new_raw_refresh),
             scope,

@@ -2852,6 +2852,8 @@
                           "token_endpoint_auth_method",
                           "self_signed_tls_client_auth_thumbprints",
                           "tls_client_certificate_bound_access_tokens",
+                          "dpop_bound_access_tokens",
+                          "dpop_require_nonce",
                           "require_par",
                           "created_at",
                           "updated_at"
@@ -2864,6 +2866,12 @@
                             "type": "string",
                             "format": "date-time"
                           },
+                          "dpop_bound_access_tokens": {
+                            "type": "boolean"
+                          },
+                          "dpop_require_nonce": {
+                            "type": "boolean"
+                          },
                           "grant_types": {
                             "type": "array",
                             "items": {
@@ -2873,6 +2881,19 @@
                           "id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "jwks": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "X5.1 — echoed so an operator can confirm which key source is registered.\nThe document itself is public key material, so returning it leaks\nnothing; a `jwks_uri` is likewise public by construction."
+                          },
+                          "jwks_uri": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "name": {
                             "type": "string"
@@ -9104,7 +9125,8 @@
         "enum": [
           "client_secret_post",
           "tls_client_auth",
-          "self_signed_tls_client_auth"
+          "self_signed_tls_client_auth",
+          "private_key_jwt"
         ]
       },
       "ClientProfile": {
@@ -9117,8 +9139,15 @@
       },
       "CnfClaim": {
         "type": "object",
-        "description": "RFC 7800 confirmation claim. Only the certificate-thumbprint method is\nrepresentable, because it is the only sender-constraining mechanism AXIAM\nimplements today.\n\nDeliberately a struct with one optional field rather than an enum: RFC 7800\npermits several confirmation methods in one claim, and a token that arrived\ncarrying a method AXIAM does not implement must still round-trip through\n`serde` intact rather than fail to decode. What it must *not* do is\nvalidate — see [`CnfClaim::certificate_thumbprint`], which answers `None`\nfor exactly that case, and the callers that treat `None` as \"refuse\".",
+        "description": "RFC 7800 confirmation claim, carrying either or both of the two\nsender-constraining methods AXIAM implements.\n\nDeliberately a struct of optional fields rather than an enum: RFC 7800\npermits several confirmation methods in one claim, and a token that arrived\ncarrying a method AXIAM does not implement must still round-trip through\n`serde` intact rather than fail to decode. What it must *not* do is\nvalidate — see [`CnfClaim::names_only_known_methods`], which answers `false`\nfor exactly that case, and [`verify_token_binding`], which treats it as a\nrefusal.\n\n# Both at once is a conjunction, never a disjunction\n\nA `cnf` carrying both `x5t#S256` and `jkt` means the holder must satisfy\n**both**. Reading it as \"either will do\" would let a client that had asked\nfor two constraints be used with one — which is strictly weaker than what it\nasked for, and is the failure mode of every \"check whichever we can\" binding\nvalidator.",
         "properties": {
+          "jkt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 9449 §6.1 `jkt` — the base64url-encoded (unpadded) SHA-256 RFC 7638\nthumbprint of the public key whose DPoP proof was presented at the token\nendpoint.\n\nA token carrying this is usable only by a caller that can sign a fresh\nDPoP proof with the corresponding private key, on every request. That is\na different cost class from `x5t#S256` — an asymmetric verification per\nrequest rather than one SHA-256 — and `axiam_oauth2::dpop`'s module docs\nsay so with a measured number."
+          },
           "x5t#S256": {
             "type": [
               "string",
@@ -9466,12 +9495,34 @@
             ],
             "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
           },
+          "dpop_bound_access_tokens": {
+            "type": "boolean",
+            "description": "RFC 9449 §5.2 — issue DPoP-bound (sender-constrained) access tokens to\nthis client. Independent of both the authentication method and\n`tls_client_certificate_bound_access_tokens`; a client may ask for both\nconstraints, and a token carrying both must satisfy both."
+          },
+          "dpop_require_nonce": {
+            "type": "boolean",
+            "description": "RFC 9449 §8 — require this client's DPoP proofs to carry a\nserver-issued nonce. Costs a round trip on the first request of each\nnonce window; `false` (the default) is the pre-v39 behaviour."
+          },
           "grant_types": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "Grant types this client is authorized to use."
+          },
+          "jwks": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 — the client's public key set, inline, for\n`private_key_jwt`. Exactly one of `jwks` and `jwks_uri` may be set."
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 — where the client publishes its public key set. Must be an\nabsolute `https` URL, and is fetched through the SSRF-guarded JWKS\ncache, which refuses private and loopback addresses."
           },
           "name": {
             "type": "string",
@@ -9486,7 +9537,7 @@
           },
           "profile": {
             "$ref": "#/components/schemas/ClientProfile",
-            "description": "X5.1 — the security posture this client is registered under.\n\n`\"standard\"` (the default) is every AXIAM client that has ever existed.\n`\"fapi2\"` turns on the whole FAPI 2.0 constraint bundle at once, and\nthe registration is refused unless it also sets `require_par`, an mTLS\n`token_endpoint_auth_method`, and\n`tls_client_certificate_bound_access_tokens`. See the FAPI operator\nguide."
+            "description": "X5.1 — the security posture this client is registered under.\n\n`\"standard\"` (the default) is every AXIAM client that has ever existed.\n`\"fapi2\"` turns on the whole FAPI 2.0 constraint bundle at once, and\nthe registration is refused unless it also sets `require_par`, a strong\n`token_endpoint_auth_method` (either mTLS method or `private_key_jwt`),\nand at least one sender-constraining mechanism\n(`tls_client_certificate_bound_access_tokens` or\n`dpop_bound_access_tokens`). See the FAPI operator guide."
           },
           "redirect_uris": {
             "type": "array",
@@ -11415,6 +11466,8 @@
           "token_endpoint_auth_method",
           "self_signed_tls_client_auth_thumbprints",
           "tls_client_certificate_bound_access_tokens",
+          "dpop_bound_access_tokens",
+          "dpop_require_nonce",
           "require_par",
           "created_at",
           "updated_at"
@@ -11427,6 +11480,12 @@
             "type": "string",
             "format": "date-time"
           },
+          "dpop_bound_access_tokens": {
+            "type": "boolean"
+          },
+          "dpop_require_nonce": {
+            "type": "boolean"
+          },
           "grant_types": {
             "type": "array",
             "items": {
@@ -11436,6 +11495,19 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "jwks": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "X5.1 — echoed so an operator can confirm which key source is registered.\nThe document itself is public key material, so returning it leaks\nnothing; a `jwks_uri` is likewise public by construction."
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "name": {
             "type": "string"
@@ -11634,7 +11706,8 @@
           "claims_supported",
           "grant_types_supported",
           "authorization_response_iss_parameter_supported",
-          "tls_client_certificate_bound_access_tokens"
+          "tls_client_certificate_bound_access_tokens",
+          "dpop_signing_alg_values_supported"
         ],
         "properties": {
           "authorization_endpoint": {
@@ -11661,6 +11734,13 @@
           "device_authorization_endpoint": {
             "type": "string",
             "description": "RFC 8628 §4 — B2. Advertised unconditionally because the grant is\nalways mounted; a device that reads discovery is exactly the client\nthat cannot be told the URL out of band."
+          },
+          "dpop_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 9449 §5.1 — X5.1 second half. The JWS algorithms AXIAM accepts on a\nDPoP proof.\n\nIts **presence** is what tells a client DPoP is supported at all; RFC\n9449 defines no separate boolean. The list is the profile's three, and\nnotably excludes `RS256` — the omission a client library defaulting to\nRSA will hit first, and the reason advertising the list matters rather\nthan merely advertising support."
           },
           "end_session_endpoint": {
             "type": "string",
@@ -13748,6 +13828,20 @@
             ],
             "description": "Declared format of `claim_token`. Only the AXIAM access-token URN is\naccepted in v1; anything else is refused rather than guessed at."
           },
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The signed JWT a `private_key_jwt` client authenticates with.\n\nCarried here rather than in a second form type for the same reason the\nRFC 8693 parameters are: actix deserializes one body once, and the\ntoken endpoint cannot know which client-authentication method applies\nuntil it has read `client_id` out of that body and loaded the\nregistration."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`."
+          },
           "client_id": {
             "type": [
               "string",
@@ -14066,6 +14160,18 @@
             ],
             "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
           },
+          "dpop_bound_access_tokens": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dpop_require_nonce": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "grant_types": {
             "type": [
               "array",
@@ -14074,6 +14180,20 @@
             "items": {
               "type": "string"
             }
+          },
+          "jwks": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "X5.1 — see the create DTO. `Some(\"\")` clears, so a client can be\nmigrated from an inline key set to a published one."
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "X5.1 — see the create DTO. `Some(\"\")` clears."
           },
           "name": {
             "type": [

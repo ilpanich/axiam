@@ -63,12 +63,13 @@ use axiam_db::{
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
+    SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -362,6 +363,10 @@ pub struct AppState<C: Connection + Clone> {
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
     pub federation_link_repo: SurrealFederationLinkRepository<C>,
     pub assertion_replay_repo: SurrealAssertionReplayRepository<C>,
+    /// X5.1 — single-use `jti` store for RFC 7523 client assertions and
+    /// RFC 9449 DPoP proofs. Decides replay by a `UNIQUE` index violation
+    /// rather than by reading first; see the repository's module docs.
+    pub proof_replay_repo: SurrealProofReplayRepository<C>,
     pub federation_login_state_repo: SurrealFederationLoginStateRepository<C>,
     pub http_client: reqwest::Client,
     /// Federation JWKS cache: caches REMOTE identity providers' JWKS
@@ -551,6 +556,7 @@ impl<C: Connection + Clone> AppState<C> {
             axiam_db::SurrealEmailVerificationTokenRepository::new(db.clone());
         let federation_config_repo = SurrealFederationConfigRepository::new(db.clone());
         let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.clone());
+        let proof_replay_repo = SurrealProofReplayRepository::new(db.clone());
 
         let auth_service = AuthService::new(
             user_repo.clone(),
@@ -708,6 +714,7 @@ impl<C: Connection + Clone> AppState<C> {
             federation_config_repo: federation_config_repo.clone(),
             federation_link_repo: federation_link_repo.clone(),
             assertion_replay_repo: assertion_replay_repo.clone(),
+            proof_replay_repo,
             federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),

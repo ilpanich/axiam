@@ -247,6 +247,10 @@ async fn setup() -> Fixture {
             tls_client_auth_san_uri: None,
             self_signed_tls_client_auth_thumbprints: vec![],
             tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
         })
         .await
         .unwrap();
@@ -268,6 +272,10 @@ async fn setup() -> Fixture {
             tls_client_auth_san_uri: None,
             self_signed_tls_client_auth_thumbprints: vec![],
             tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
         })
         .await
         .unwrap();

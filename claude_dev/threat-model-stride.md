@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 165 |
-| **Mitigated / Open** | 142 / 23 |
+| **Threats identified** | 168 |
+| **Mitigated / Open** | 145 / 23 |
 | **Owner** | ilpanich |
 
 ---
@@ -546,6 +546,8 @@ Authorization Code with PKCE, client credentials and refresh grants; consent, in
 | T-62 | redirect with code <br/>*Flow* | I | Code leaked through the Referer header or browser history | Medium | Mitigated |
 | T-163 | single-use credentials (UMA tickets, device codes, PAR request_uris) <br/>*Store* | T | Concurrent redemption spends one credential twice | High | Mitigated |
 | T-164 | authorization codes (single-use) <br/>*Store* | T | Two concurrent redemptions of one authorization code | High | Mitigated |
+| T-166 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | Stolen client credential replayed from anywhere on the network | High | Mitigated |
+| T-168 | redirect with code <br/>*Flow* | S | Authorization-server mix-up delivers an honest server's code to an attacker's token endpoint | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -661,6 +663,20 @@ Two redemptions of the same credential arriving together can both observe it uns
 A code observed in a redirect or a proxy log and replayed at the same moment as the legitimate exchange could, if the two are not serialised, let both callers mint a token pair from one authorization. T-54 covers the sequential replay; this is the concurrent one, which the single-use flag alone does not decide.
 
 > Two independent layers, the same pair the three credentials in T-163 carry (schema v37). The guarded UPDATE — used = false, with client_id and redirect_uri matched in the same statement so a wrong-client attempt cannot burn the code — runs inside an explicit transaction, so two concurrent redemptions conflict on one key and the engine aborts the loser; and a per-attempt redemption nonce is read back in a separate query after that transaction commits, catching a conflict the engine silently missed. Before v37 this path had the first layer implicitly (a lone statement runs in the engine's own transaction) and the second not at all, which left it resting on T-165 with nothing behind it. Guarded by authorization_code_consume_serialises over 50 rounds of 8 racers, and by an_authorization_code_redemption_stamps_its_nonce, which asserts the second layer directly — a race test cannot distinguish a two-layer mechanism from a one-layer one when the engine arbitrates either way.
+
+**T-166 — Stolen client credential replayed from anywhere on the network**  
+`/oauth2/token (code, refresh, client credentials)` (Process) · Spoofing · High · Mitigated
+
+A confidential client's `client_secret` leaks — through a log, a CI variable, a config repository or an operator's shell history — and an attacker presents it from an arbitrary host to mint tokens as that client. A shared secret carries no evidence of *where* it is being used from, so the authorization server cannot distinguish the legitimate client from the thief.
+
+> X5.1 adds RFC 8705 mutual-TLS client authentication. A client registered `tls_client_auth` or `self_signed_tls_client_auth` authenticates by presenting a certificate rustls verified during the TLS 1.3 handshake, matched against the registration's subject DN / SAN or its `x5t#S256` thumbprint. The private key never leaves the client, so the credential cannot be copied out of a log. Three details do the load-bearing work: the **registration** selects which credential authenticates and never the request, so the two methods can never become an OR an attacker may pick from; the `X-Client-Certificate` proxy header that the device-auth path accepts is deliberately not a source here, because a client credential must not be assertable by anything that can set a header; and every failure returns one uniform `invalid_client` description, so SEC-086's property — client existence stays undecidable to an unauthenticated caller — survives the new method. Certificate binding (T-167) then addresses the *tokens* the same way this addresses the credential.
+
+**T-168 — Authorization-server mix-up delivers an honest server's code to an attacker's token endpoint**  
+`redirect with code` (Flow) · Spoofing · High · Mitigated
+
+A client configured against more than one authorization server receives an authorization response on a redirect URI shared between them. A bare `code`+`state` response names no sender, so an attacker controlling one of those servers can arrange for a code minted by an honest server to be redeemed at the attacker's token endpoint, or the reverse. The client's own `state` check does not help: the state is the client's, and it matches.
+
+> X5.1 implements RFC 9207 — every AXIAM authorization response carries an `iss` parameter naming the issuer, and discovery advertises `authorization_response_iss_parameter_supported: true`. It is emitted for **every** client regardless of profile, and on the **error** redirect as well as the success one: mix-up is the attack a client does not know it is under, so gating it on a setting would mean protection only where somebody remembered; and one variant of the attack works by injecting an error response, so a client that validates `iss` on success and skips it on failure has left ajar the door it just closed. Contract 1.15 §21.4 requires SDKs implementing the §12 relying-party flow to compare it against the issuer the flow began with. **Residual risk sits with the relying party**: a client that ignores the parameter gains nothing from it, which is why §21.4 is written as a SHOULD that any SDK talking to more than one issuer should treat as a MUST.
 
 </details>
 
@@ -1442,6 +1458,7 @@ The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#
 | T-141 | SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go) <br/>*Process* | T | Contract drift between server and SDKs | Medium | Mitigated |
 | T-142 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | S | JWKS URI taken from discovery without validation | High | Mitigated |
 | T-143 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Local JWT verification misses a revoked entitlement | Medium | Open |
+| T-167 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Certificate-bound access token accepted as a bearer token by a resource server that ignores `cnf` | High | Mitigated |
 | T-144 | SDK AMQP consumer (HMAC verify, nonce) <br/>*Process* | S | HMAC verification present but inoperative | Critical | Mitigated |
 | T-145 | Webhook receiver helper (§13) <br/>*Process* | T | Receiver acts on an unverified webhook delivery | Medium | Mitigated |
 | T-146 | SDK configuration (client secrets, CA bundles) <br/>*Store* | I | Long-lived client secret committed to a repository | High | Open |
@@ -1515,6 +1532,15 @@ An SDK that verifies the access token locally cannot see a role removal or accou
 
 > Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should call gRPC introspection or CheckAccess rather than verifying locally.
 
+**T-167 — Certificate-bound access token accepted as a bearer token by a resource server that ignores `cnf`**  
+`SDK token verification (JWKS cache, iss/aud)` (Process) · Elevation of privilege · High · Mitigated
+
+An operator turns on certificate-bound access tokens (RFC 8705 §3) and the server duly stamps `cnf.x5t#S256` into every token it issues for that client. A resource server whose middleware does not understand the claim accepts the token anyway: the binding is decorative, a leaked token works exactly as it did before, and the operator believes otherwise. A subtler form of the same failure: a validator looks for `x5t#S256`, does not find it because the `cnf` names some *other* confirmation method, and concludes the token is unconstrained — downgrading a sender-constrained token to a bearer token precisely when a newer authorization server begins issuing a constraint that validator predates.
+
+Note where this threat lives. Issuing the claim is the easy half and the server does it; the mechanism's entire security value depends on the **relying party**, which is why this is filed against SDK token verification rather than against the token service.
+
+> Contract 1.15 makes the check normative for all eleven SDKs (§10.1 rule 9): a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one. The rule is written as a four-row table whose last row is exactly the subtle failure above — a `cnf` naming an unimplemented method MUST be refused, never read as unconstrained — and the presented thumbprint MUST come from the transport, never from a caller-supplied header, or the mechanism is decorative for a different reason. Server-side, `axiam_auth::token::verify_certificate_binding` implements that table and is the reference; introspection exposes `cnf` (RFC 8705 §3.3) so an introspecting resource server cannot disagree with a locally-validating one. The contract additionally requires a *positive* regression test — an **unbound** token is still accepted with or without a certificate — because the likeliest wrong implementation of this rule is one that starts demanding certificates from every caller and breaks every existing deployment. Per-SDK conformance is verified in each SDK repository.
+
 **T-144 — HMAC verification present but inoperative**  
 `SDK AMQP consumer (HMAC verify, nonce)` (Process) · Spoofing · Critical · Mitigated
 
@@ -1561,7 +1587,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-23 of 165 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+23 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|

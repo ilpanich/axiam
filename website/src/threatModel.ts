@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 165,
+ "total": 168,
  "open": 23,
- "mitigated": 142,
+ "mitigated": 145,
  "diagrams": [
   {
    "id": 0,
@@ -1898,6 +1898,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A client requests broader scopes at the token endpoint than the user consented to at the authorize endpoint.",
        "mitigation": "Granted scope is fixed at authorization time and stored with the code; the token endpoint can only narrow it, never widen it, and refresh never re-expands scope."
+      },
+      {
+       "number": 166,
+       "title": "Stolen client credential replayed from anywhere on the network",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A confidential client's client_secret leaks — through a log, a CI variable, a config repository or an operator's shell history — and an attacker presents it from an arbitrary host to mint tokens as that client. A shared secret carries no evidence of where it is being used from, so the authorization server cannot distinguish the legitimate client from the thief.",
+       "mitigation": "X5.1 adds RFC 8705 mutual-TLS client authentication: a client registered tls_client_auth or self_signed_tls_client_auth authenticates by presenting a certificate rustls verifies during the TLS 1.3 handshake, matched against the registration's subject DN / SAN or its x5t#S256 thumbprint. The private key never leaves the client, so the credential cannot be copied out of a log. The REGISTRATION selects which credential authenticates, never the request, so the two methods can never become an OR an attacker may pick from; and the X-Client-Certificate proxy header the device-auth path accepts is deliberately not a source here, because a client credential must not be assertable by anything that can set a header. Every failure returns one uniform invalid_client description (SEC-086), so client existence stays undecidable to an unauthenticated caller."
       }
      ],
      "open": 0
@@ -2203,6 +2212,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The authorization code travels in a URL, so it can leak to any third-party resource loaded by the redirect target.",
        "mitigation": "PKCE makes a leaked code unusable without the verifier; codes are single-use and short-lived; Referrer-Policy is set by the security-headers middleware."
+      },
+      {
+       "number": 168,
+       "title": "Authorization-server mix-up delivers an honest server's code to an attacker's token endpoint",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A client configured against more than one authorization server receives an authorization response on a redirect URI shared between them. A bare code+state response names no sender, so an attacker controlling one of those servers can arrange for a code minted by an honest server to be redeemed at the attacker's token endpoint, or the reverse. The client's own state check does not help: the state is the client's, and it matches.",
+       "mitigation": "X5.1 implements RFC 9207: every AXIAM authorization response carries an iss parameter naming the issuer, and discovery advertises authorization_response_iss_parameter_supported: true. Emitted for EVERY client regardless of profile and on the ERROR redirect as well as the success one — unconditionally, because mix-up is the attack a client does not know it is under, and because one variant works by injecting an error response, so a client validating iss on success and skipping it on failure has left ajar the door it just closed. Contract 1.15 §21.4 requires SDKs implementing the §12 relying-party flow to compare it against the issuer the flow began with. Residual risk sits with the relying party: a client that ignores the parameter gains nothing, which is why §21.4 is a SHOULD any SDK talking to multiple issuers should treat as a MUST."
       }
      ],
      "open": 0
@@ -2480,10 +2498,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 16,
+   "total": 18,
    "open": 0,
    "bySeverity": {
-    "High": 8,
+    "High": 10,
     "Medium": 6,
     "Critical": 1,
     "Low": 1
@@ -5770,6 +5788,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Open",
        "description": "An SDK that verifies the access token locally cannot see a role removal or account disable until the token expires — the client-side face of the stateless-verification trade-off recorded on the token service.",
        "mitigation": "Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should call gRPC introspection or CheckAccess rather than verifying locally."
+      },
+      {
+       "number": 167,
+       "title": "Certificate-bound access token accepted as a bearer token by a resource server that ignores cnf",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An operator turns on certificate-bound access tokens (RFC 8705 §3) and the server duly stamps cnf.x5t#S256 into every token for that client. A resource server whose middleware does not understand the claim accepts the token anyway: the binding is decorative, a leaked token works exactly as before, and the operator believes otherwise. A subtler form: a validator looks for x5t#S256, does not find it because the cnf names another confirmation method, and concludes the token is unconstrained — downgrading a sender-constrained token to a bearer token precisely when a newer authorization server begins issuing a constraint that validator predates.",
+       "mitigation": "Contract 1.15 makes the check normative for all eleven SDKs (§10.1 rule 9): a token carrying cnf is not a bearer token and MUST NOT be accepted as one. The rule is a four-row table whose last row is the failure above — a cnf naming an unimplemented method MUST be refused, never read as unconstrained — and the thumbprint MUST come from the transport, never from a caller-supplied header. Server-side, axiam_auth::token::verify_certificate_binding implements exactly that table. Introspection exposes cnf (RFC 8705 §3.3) so an introspecting resource server cannot disagree with a locally-validating one. The contract also requires a positive regression test — an UNBOUND token is still accepted with or without a certificate — because the likeliest wrong implementation is one that starts demanding certificates from every caller."
       }
      ],
      "open": 1
@@ -6165,10 +6192,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 15,
+   "total": 16,
    "open": 4,
    "bySeverity": {
-    "High": 8,
+    "High": 9,
     "Medium": 5,
     "Critical": 2
    }

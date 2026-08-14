@@ -838,6 +838,77 @@ would never have honoured.
 | 6 | `aud` | **Checked when the SDK is configured with an expected audience.** When configured, a token whose `aud` does not contain it MUST be rejected. SDKs guarding a user-facing resource server SHOULD expect `axiam:user`; one guarding a **machine-facing** resource server SHOULD expect `axiam:m2m`, which is what *every* service-account token now carries — both the client-credentials grant and the mTLS device path (§12.1). |
 | 7 | clock skew | Rules 2 and 3 MAY allow a **small, named, documented** leeway (RECOMMENDED 60 s). It MUST be a named constant, not an inline literal, and MUST NOT be operator-configurable to an unbounded value. |
 | 8 | subject of the decision | The guard MUST decide on **the caller's credential and no other**. When that credential fails any rule above, the guard MUST reject. It MUST NOT retry, refresh, or fall back to a *different* credential — in particular not the SDK client's own session — and MUST NOT admit the request under any identity other than the one the caller presented. |
+| 9 | `cnf` | **A token carrying `cnf` is not a bearer token, and MUST NOT be accepted as one.** When the claim is present the guard MUST verify the sender constraint, or reject. See the normative rules below. |
+
+**Rule 9 — sender-constrained tokens (contract 1.15, RFC 8705 §3 / RFC 7800).**
+
+AXIAM can issue **certificate-bound** access tokens: a client registered with
+`tls_client_certificate_bound_access_tokens` receives tokens carrying
+
+```json
+"cnf": { "x5t#S256": "<base64url-unpadded SHA-256 of the DER client certificate>" }
+```
+
+The claim's presence changes what the token *is*. An ordinary AXIAM access token
+is a bearer credential — whoever holds it may use it. A token with `cnf` names a
+key, and a resource server that accepts it without checking that the caller
+holds that key has silently converted it back into a bearer token, discarding
+the entire protection the operator turned on. That is why this is a rule and not
+a recommendation.
+
+An SDK guard MUST behave exactly as follows:
+
+| Token's `cnf` | Certificate the caller presented on **this** connection | Guard MUST |
+|---|---|---|
+| absent | anything | **accept** (subject to rules 1–8) |
+| `x5t#S256` present | a certificate whose `x5t#S256` equals it | **accept** (subject to rules 1–8) |
+| `x5t#S256` present | a different certificate, or none | **reject** |
+| present, but with no `x5t#S256` | anything | **reject** |
+
+The last row is the one that is easy to get wrong and the one that matters most.
+A `cnf` naming a confirmation method the SDK does not implement — a DPoP `jkt`,
+say — MUST be treated as *an unverifiable constraint*, never as *no constraint*.
+An SDK that reads "no `x5t#S256`, therefore unbound" downgrades a
+sender-constrained token to a bearer token the moment a newer AXIAM issues a
+confirmation that SDK predates. **Fail closed**, consistently with every other
+rule in this section.
+
+Normative details:
+
+1. **The thumbprint is base64url without padding** (RFC 7515 §2), computed over
+   the **DER** encoding of the leaf certificate. A padded value, standard-base64
+   (`+`/`/`), or a hex digest will not compare equal. A well-formed value is
+   exactly 43 characters.
+2. **The comparison input MUST come from the transport.** The certificate must
+   be the one the TLS layer verified for *this* connection — the peer
+   certificate, or a value a **trusted** terminating proxy forwarded over a
+   channel the application controls. An SDK MUST NOT take it from a
+   request header supplied by the caller, and MUST NOT document doing so as a
+   supported deployment. A forgeable input makes the whole mechanism decorative.
+3. **When the SDK cannot see any client certificate at all** — a deployment
+   behind a TLS terminator that forwards nothing — a bound token MUST be
+   rejected, and the SDK's documentation MUST say that guarding bound tokens
+   requires the certificate to be made available. Silently accepting is
+   forbidden; silently rejecting without saying why in the docs is a support
+   burden.
+4. **Introspection carries it too.** An SDK verifying through
+   `POST /oauth2/introspect` rather than locally MUST apply this same rule to
+   the response's `cnf` field (RFC 8705 §3.3), which AXIAM populates for bound
+   tokens. Local-verification SDKs and introspecting SDKs must not disagree
+   about whether a token is a bearer token.
+5. **Comparison SHOULD be constant-time** where the language makes it
+   available. The thumbprint is usually public, so this is defence in depth
+   rather than load-bearing — but it costs nothing and matches the discipline
+   §10.1 applies elsewhere.
+
+**Required negative tests** (in addition to those listed below): a bound token
+presented with **no** certificate; a bound token presented with a **different**
+certificate; a token whose `cnf` carries a non-`x5t#S256` method. And one
+positive regression test that matters more than it looks: **an unbound token
+MUST still be accepted with or without a certificate present.** Rule 9 must not
+become a requirement that every caller present a certificate — that would break
+every existing deployment, and it is the most likely way to implement this rule
+wrongly.
 
 **Rule 8 is about control flow, not claims.** Rules 1–7 ask *"is this token
 good?"*; rule 8 asks *"is this the token the decision is about?"*. A guard can
@@ -3003,12 +3074,101 @@ recorded here until one exists.
   conformance statement still follows the code: each of the three claims §1–§12 only once its own
   port has landed.
 
+## §21 FAPI 2.0 Profile and mTLS Client Credentials (X5)
+
+AXIAM 1.0-alpha24 adds a per-client **security profile** and RFC 8705 mutual-TLS
+client credentials. Most of this is server-side and invisible to an SDK. This
+section states the parts that are not, so that eleven SDKs do not each invent
+their own answer.
+
+### §21.1 What an SDK MUST do (normative)
+
+Exactly one thing is mandatory, and it is **§10.1 rule 9** — verifying the `cnf`
+sender constraint when it is present. Everything else in this section is
+informative or optional.
+
+That asymmetry is deliberate. The mechanism's security depends entirely on the
+*relying party*: the authorization server can stamp `cnf` into every token it
+issues, and it buys nothing at all if resource servers ignore the claim.
+Issuing is the easy half.
+
+### §21.2 Client registration fields (informative)
+
+`POST /api/v1/oauth2-clients` and `PATCH /api/v1/oauth2-clients/{id}` accept:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `profile` | `"standard"` \| `"fapi2"` | The security posture. Default `"standard"` — what every client registered before this contract version already is. |
+| `token_endpoint_auth_method` | `"client_secret_post"` \| `"tls_client_auth"` \| `"self_signed_tls_client_auth"` | Default `"client_secret_post"`. |
+| `tls_client_auth_subject_dn` | string | RFC 8705 §2.1.2. Exactly one of the three `tls_client_auth_*` parameters may be set. |
+| `tls_client_auth_san_dns` | string | RFC 8705 §2.1.2. |
+| `tls_client_auth_san_uri` | string | RFC 8705 §2.1.2. |
+| `self_signed_tls_client_auth_thumbprints` | string[] | Accepted `x5t#S256` values for `self_signed_tls_client_auth`. More than one permits an overlapping rotation. |
+| `tls_client_certificate_bound_access_tokens` | bool | RFC 8705 §3.4. Default `false`. Independent of the auth method — a client MAY authenticate with a secret and still receive bound tokens. |
+
+`profile: "fapi2"` is a **switch, not a label**: the server refuses the
+registration unless it also sets `require_par`, an mTLS
+`token_endpoint_auth_method`, and `tls_client_certificate_bound_access_tokens`.
+An SDK exposing client management SHOULD surface the server's `400` message
+verbatim rather than pre-validating the combination itself — the bundle is the
+server's to define, and a client-side copy of it will drift.
+
+### §21.3 Authenticating as an mTLS client (informative)
+
+An SDK acting as an OAuth2 **client** against a `tls_client_auth` or
+`self_signed_tls_client_auth` registration presents its certificate through the
+same transport configuration §6.1 already defines for device mTLS, and sends
+**no** `client_secret`. The server selects the credential from the
+*registration*, never from the request, so sending a secret as well is neither
+required nor harmful — but omitting the certificate is fatal, and produces the
+same uniform `invalid_client` as every other client-authentication failure.
+
+SDKs are NOT required to implement mTLS client authentication. Where an SDK does
+not, it MUST NOT claim §21 conformance for the client role; §10.1 rule 9 (the
+guard role) is required of everyone regardless.
+
+### §21.4 RFC 9207 `iss` on authorization responses (informative, act on it)
+
+Every AXIAM authorization response — success and error, for every client,
+whatever its profile — now carries an `iss` query parameter naming the issuer.
+Discovery advertises `authorization_response_iss_parameter_supported: true`.
+
+An SDK implementing the §12 relying-party flow **SHOULD** compare it against the
+issuer it began the flow with and reject a mismatch. That comparison is the
+entire defence against the **mix-up attack**, in which a response minted by one
+authorization server is delivered to a client's callback as though it came from
+another. This is a SHOULD only because an SDK that ignores an unknown query
+parameter is not *broken* — but an SDK that talks to more than one issuer and
+skips it is exposed, and the check is three lines.
+
+**It must be checked on the error redirect too.** One variant of the attack works
+by injecting an error response; a client that validates `iss` on success and
+skips it on failure has left ajar the door it just closed.
+
+### §21.5 Discovery additions (informative)
+
+| Field | Value | Meaning |
+|---|---|---|
+| `authorization_response_iss_parameter_supported` | `true` | §21.4 |
+| `tls_client_certificate_bound_access_tokens` | `true` | The server can issue bound tokens. Whether a *given* client receives them is that client's registration and is deliberately not discoverable — this document is scoped to the server, and a per-client answer here would leak one client's posture to every reader. |
+| `token_endpoint_auth_methods_supported` | now includes `tls_client_auth`, `self_signed_tls_client_auth` | Advertised unconditionally; whether an mTLS listener is reachable is a deployment's listener configuration, discovered at connect time. |
+
+### §21.6 What is NOT in this contract version
+
+- **`private_key_jwt`** (RFC 7523) client authentication: not implemented
+  server-side. Do not add SDK support for it against this server.
+- **DPoP** (RFC 9449): not implemented. `cnf` will only ever carry `x5t#S256`
+  from this server — but see §10.1 rule 9's last table row for why an SDK must
+  still fail closed on a `cnf` it does not recognise rather than assuming that.
+
+---
+
 ### OpenAPI Export Feature Flag
 
 `openapi.json` (kept in this directory, and mirrored into every SDK repo) is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
 
 ---
 
-*Contract version: 1.14 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent*
+*Contract version: 1.15 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

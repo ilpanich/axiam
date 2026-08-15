@@ -21,7 +21,8 @@ that actually own them:
 
   - crates/axiam-api-rest/src/config/rate_limit.rs
     (`impl Default for RateLimitConfig`: login/register/password_reset/mfa/
-    token/introspect/revoke/authz_check, each already expressed per-minute)
+    token/introspect/revoke/authz_check, the B2/B3/X2 device, token-exchange
+    and UMA buckets, and the B4 `scim` bucket — each already per-minute)
   - crates/axiam-api-grpc/src/config.rs + .../middleware/rate_limit.rs
     (`default_grpc_authz_per_sec()`, `IDENTITY_PER_SEC_MULTIPLE`,
     `ADMIN_PER_SEC_DEFAULT`, `INFRA_PER_SEC`, and `WINDOW_SECS` — the I1 fix
@@ -84,7 +85,9 @@ TOLERANCE = 0.10
 # `token_exchange_per_min` (B3, RFC 8693) and the two UMA 2.0 buckets (X2,
 # `uma_perm_per_min`/`uma_ticket_per_min`) all shipped with a configured
 # limit and no scenario driving it — the same hole J1c closed for
-# revoke/grpc_admin/grpc_infra in run 5.
+# revoke/grpc_admin/grpc_infra in run 5. The R5.2 tail then closed the
+# inverse hole for SCIM: a shipped ENDPOINT with no configured limit at all.
+# Every rate-limited family AXIAM ships now has a row here.
 ENDPOINTS = {
     "login_per_min": ("oauth2_password_login.js", "POST /api/v1/auth/login"),
     "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
@@ -107,21 +110,17 @@ ENDPOINTS = {
     "token_exchange_per_min": ("token_exchange.js", "POST /oauth2/token (token-exchange grant, RFC 8693)"),
     "uma_perm_per_min": ("uma2_perm.js", "POST /uma2/perm (UMA 2.0 permission ticket)"),
     "uma_ticket_per_min": ("uma_ticket_grant.js", "POST /oauth2/token (uma-ticket grant)"),
+    # R5.2 tail: SCIM (B4) was the last family with no bucket at all —
+    # `axiam-scim` landed in R3.1 exposing /scim/v2 with no `scim_*_per_min`
+    # field anywhere in `crates/`. It now has one, sized at the gRPC Admin
+    # family's absolute 600/min ceiling (see `RateLimitConfig::scim_per_min`).
+    # ONE bucket covers the whole scope — reads, writes and the RFC 7643
+    # discovery endpoints — so there is one row here, not two.
+    "scim_per_min": (
+        "scim_provisioning.js",
+        "PATCH /scim/v2/Users/{id} (SCIM 2.0 provisioning, B4; one bucket spans all of /scim/v2)",
+    ),
 }
-
-# B4 SCIM (R3.1) is not yet a checkable family: `axiam-scim` has not landed,
-# so there is no `scim_*_per_min` field in `RateLimitConfig` for
-# `read_configured_defaults()` to extract yet — adding one to `ENDPOINTS`
-# above would make EVERY run of this script raise (it extracts every field
-# unconditionally), breaking the seven families that already work. This list
-# is deliberately separate and carries no numeric "configured" value; it only
-# renders as an honest, explicit "pending" row so the crate landing isn't
-# read as "silently forgotten" the way an absent row would be. Once R3.1
-# lands a `scim_*_per_min` field, fold its family into `ENDPOINTS` above
-# (with `scenarios/scim_provisioning.js`, already written) and delete this.
-PENDING_ENDPOINTS = [
-    ("POST/PATCH /scim/v2/Users, /scim/v2/Groups (SCIM 2.0 provisioning, B4)", "pending R3.1 — axiam-scim crate not yet merged"),
-]
 
 
 def _extract_int(text, pattern, label, path):
@@ -161,7 +160,9 @@ def read_configured_defaults():
                   "revoke_per_min", "authz_check_per_min",
                   # R5.2: B2/B3/X2 buckets — same extraction, no special-casing.
                   "device_authorization_per_min", "device_verify_per_min",
-                  "token_exchange_per_min", "uma_perm_per_min", "uma_ticket_per_min"):
+                  "token_exchange_per_min", "uma_perm_per_min", "uma_ticket_per_min",
+                  # R5.2 tail: B4 SCIM — same extraction, no special-casing.
+                  "scim_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 
@@ -246,12 +247,6 @@ def check(results, target, profile, configured_overrides):
         if verdict == "FAIL":
             any_fail = True
         rows.append((label, configured_limit, admitted, verdict))
-
-    # Pending families never affect any_fail — "not yet buildable" is not a
-    # regression, and must never be conflated with one (see PENDING_ENDPOINTS
-    # above for why SCIM can't just become a tenth ENDPOINTS row today).
-    for label, note in PENDING_ENDPOINTS:
-        rows.append((label, None, None, note))
 
     return rows, any_fail
 

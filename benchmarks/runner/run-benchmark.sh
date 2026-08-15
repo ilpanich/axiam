@@ -235,16 +235,28 @@ skip_oauth2() {
   return 1
 }
 
-# R5.2 / B4: scenarios written against a documented contract whose crate has
-# not landed yet (SCIM, R3.1 — see scim_provisioning.js's own header). Auto-
-# discovery (`ls ./*.js` above) would otherwise pick these up and run them
-# against a server with no route to answer, turning "not built yet" into a
-# spurious 404 failure on every matrix pass. Skipped unconditionally unless
+# Scenarios written against a documented contract that the deployment cannot
+# satisfy yet. Auto-discovery (`ls ./*.js` above) would otherwise pick these
+# up and run them against a server that cannot answer, turning "not wired up
+# yet" into a spurious failure on every matrix pass. Skipped unconditionally
+# unless
 # BENCH_ENABLE_PENDING_SCENARIOS=1 (this applies even to an explicit
 # `--scenario scim_provisioning.js` invocation — there is no separate bypass
 # for that) — the same escape hatch shape as BENCH_SCENARIO_EXCLUDE below,
 # inverted. Remove a scenario from this list in the same commit that lands
-# the feature it was pending on.
+# the LAST thing it was pending on — not the first.
+#
+# R5.2 / B4: scim_provisioning.js — the reason CHANGED, so read this before
+# assuming it is still blocked on the same thing. `axiam-scim` HAS landed
+# (R3.1) and `/scim/v2` now answers, and the R5.2 tail gave it a real
+# `scim_per_min` bucket, so rl_prod_check.py checks the family for real. What
+# is still missing is on the harness side: seed.sh registers the bench client
+# with scopes ["openid","uma_protection"] only, and there is no
+# `scim:provision` grant for it, so this scenario's setup() would fail loudly
+# minting its token. Seeding that grant is a seed.sh change (a tenant user +
+# role holding `scim:provision`, per docs/api/scim-provisioning.md's setup
+# steps), not part of the limiter work. Drop this from the list in the commit
+# that lands it.
 # R2.4: oauth2_client_credentials_reactor_hook.js — pending two things, in
 # order (an admin-session helper for k6 scenarios, then the lapin reactor
 # transport / a real no-op reactor process); see that file's own header for

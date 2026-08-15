@@ -123,6 +123,28 @@ module docs for the full statement of this property, and
 adversarial cases it's checked against (cross-tenant GET/PUT/PATCH/DELETE
 and list-by-token, not merely "no token at all").
 
+### Rate limiting
+
+The whole `/scim/v2` scope sits behind **one** rate-limit bucket,
+`AXIAM__RATE_LIMIT__SCIM_PER_MIN` (shipped default **600/min per IP**) —
+Users, Groups and the discovery endpoints, reads and writes alike. Past the
+limit, requests get the standard AXIAM `429` with `Retry-After: 60`; a
+well-behaved SCIM client retries.
+
+600/min is the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (10/s), the
+other fully-privileged machine-driven administrative surface: creating a
+SCIM user generates and Argon2id-hashes an initial password, and a
+`password` PATCH re-hashes one, so this ceiling is a CPU guard rather than a
+throughput number. No `AXIAM__RATE_LIMIT__PROFILE` preset moves it
+(SEC-079: a service-mesh capacity decision must not silently widen an
+administrative surface).
+
+For scale: at a typical IdP page size of 200, a full import of a
+100 000-user directory is roughly 500 `GET /scim/v2/Users` calls, well
+inside one minute's budget. Pin the env var if a very large tenant's
+reconciliation sweep needs more. See
+[`../deployment/rate-limit-sizing.md`](../deployment/rate-limit-sizing.md).
+
 ### A known limitation: the bearer principal is a user, not a service account
 
 AXIAM has a `service_account` concept explicitly for machine-to-machine

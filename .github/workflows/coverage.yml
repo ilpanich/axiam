@@ -115,19 +115,31 @@ jobs:
       # Regression gate: fail the build if workspace line coverage drops below
       # the floor. The round-2 coverage pass added ~210 tests across api-rest,
       # db, federation, amqp, auth, pki and server, and excluded the untestable
-      # main.rs binary root (above). Excluding main.rs alone lifts the ~78.7%
-      # pre-pass raw figure to ~80.3%, and the new tests raise it further, so the
-      # floor is ratcheted 77 -> 80 — still safely below the achieved TOTAL
-      # printed to the job summary below. Ratchet upward toward that TOTAL as it
-      # stabilizes (target: >=90%). Note the raw cargo-llvm-cov number differs
-      # from the Coveralls display number. Reuses the profdata collected above.
+      # main.rs binary root (above). Excluding main.rs alone lifted the ~78.7%
+      # pre-pass raw figure to ~80.3%, which is why the floor went 77 -> 80.
+      #
+      # R5.9: ratcheted 80 -> 88 against a MEASURED number rather than an
+      # estimate. This job's own summary step (below) printed, on the merge
+      # commit of the 2026-08-15 remediation plan:
+      #
+      #   TOTAL  ... 87.40% (regions)  79.32% (functions)  88.60% (lines)
+      #
+      # i.e. 60898 lines with 6942 missed. `--fail-under-lines` gates on LINES,
+      # so 88.60% is the figure that matters here — not the lower region or
+      # function numbers in the same row. The floor is set 0.6pp under it,
+      # comparable to the 0.3pp margin the 77 -> 80 ratchet used.
+      #
+      # Keep ratcheting toward the >=90% target as it stabilizes, and only ever
+      # to a value this job has actually printed — never to an estimate. Note
+      # the raw cargo-llvm-cov number differs from the Coveralls display number.
+      # Reuses the profdata collected above.
       - name: Enforce coverage floor
         run: |
           # Surface the achieved per-file + TOTAL coverage on the run's summary page.
           cargo llvm-cov report --summary-only \
             --ignore-filename-regex 'crates/axiam-server/src/main\.rs' \
             | tee -a "$GITHUB_STEP_SUMMARY"
-          cargo llvm-cov report --fail-under-lines 80 \
+          cargo llvm-cov report --fail-under-lines 88 \
             --ignore-filename-regex 'crates/axiam-server/src/main\.rs'
 
       - name: Upload to Coveralls

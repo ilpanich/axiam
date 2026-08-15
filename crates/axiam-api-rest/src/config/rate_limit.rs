@@ -208,6 +208,8 @@ pub const ENV_DEVICE_AUTHORIZATION_PER_MIN: &str =
     "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` — B2, never preset.
 pub const ENV_DEVICE_VERIFY_PER_MIN: &str = "AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN";
+/// `AXIAM__RATE_LIMIT__SCIM_PER_MIN` — R3.1/B4, never preset (SEC-079 shape).
+pub const ENV_SCIM_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` — human endpoint, never preset.
 pub const ENV_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__LOGIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` — human endpoint, never preset.
@@ -404,6 +406,61 @@ pub struct RateLimitConfig {
     /// the real defence there is that an unverifiable `id_token_hint` ends
     /// nothing at all.
     pub end_session_per_min: u32,
+    /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
+    ///
+    /// **One bucket for the whole `/scim/v2` surface**, reads and writes
+    /// alike. The nearest neighbour is not a REST bucket at all: it is the
+    /// gRPC `Admin` family
+    /// (`axiam_api_grpc::middleware::rate_limit::ADMIN_PER_SEC_DEFAULT`,
+    /// 10/s = **600/min per IP**), the other fully-privileged, machine-driven
+    /// administrative surface AXIAM exposes. That constant's own rationale
+    /// transfers line for line:
+    ///
+    /// - it is sized as a **CPU guard on Argon2id**, not as a throughput
+    ///   ceiling on a read — and SCIM has exactly that cost: `POST
+    ///   /scim/v2/Users` generates and Argon2id-hashes an initial password,
+    ///   and a `password` PATCH re-hashes one (`axiam-scim` depends on
+    ///   `axiam-auth` for precisely this);
+    /// - 600/min is documented there as "well above any real admin console or
+    ///   **M2M provisioning loop**" — a SCIM client *is* an M2M provisioning
+    ///   loop (Okta/Entra) — "and roughly an order of magnitude below the
+    ///   point at which concurrent Argon2id verifications become the server's
+    ///   dominant cost";
+    /// - it is an **absolute** number, deliberately decoupled from any
+    ///   posture preset (SEC-079), so that widening a mesh/gateway capacity
+    ///   ceiling can never silently widen an administrative one. This field is
+    ///   therefore absent from [`MachineLimitPreset`] for the same reason: a
+    ///   preset must not be able to move it.
+    ///
+    /// **Why not the 120 tier** (`token`/`token_exchange`/`par`/`uma_*`):
+    /// those are per-end-user-transaction endpoints. A SCIM reconciliation is
+    /// a *burst* — an IdP pages the whole directory in one sweep — so 120/min
+    /// would stall a legitimate full import of any directory larger than 120
+    /// entries into multi-minute retry loops. That is exactly the failure mode
+    /// I3 corrected when it raised the machine defaults.
+    ///
+    /// **Why not the 1 800 tier** (`authz_check_per_min`): that tier is
+    /// explicitly reserved for "the endpoint a real service calls per
+    /// request", and it carries the tightest capacity margin in the table
+    /// (~25x). SCIM is called per *provisioning event*, orders of magnitude
+    /// rarer, and unlike an authz check it both allocates state and burns
+    /// Argon2id.
+    ///
+    /// **Why one bucket rather than a read/write split.** The gRPC `Admin`
+    /// family is the precedent and it holds an administrative read
+    /// (`GetUser`) and the Argon2id op (`ValidateCredentials`) in a single
+    /// 600/min bucket; `device_verify_per_min` likewise spans the two routes
+    /// of one flow. The counter-precedent is the `/users` split
+    /// (`tests/users_rate_limit_split_test.rs`), but that split was forced by
+    /// a *human* registration limit of 5/min landing on an admin list — a
+    /// three-orders-of-magnitude mismatch. There is no equivalent mismatch
+    /// here: SCIM read volume is bounded by directory size / page size (a
+    /// 100 000-user directory at Okta's 200-per-page is ~500 GETs), which fits
+    /// inside the same 600/min ceiling, and both halves are the same
+    /// privileged `scim:provision` client doing one job. If a real
+    /// reconciliation ever measures past this, split it then — with the
+    /// measurement, not ahead of it.
+    pub scim_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -462,6 +519,12 @@ impl Default for RateLimitConfig {
             uma_ticket_per_min: 120,
             par_per_min: 120,
             end_session_per_min: 30,
+            // --- R3.1/B4 SCIM: the REST administrative surface -------------
+            // 600/min == the gRPC Admin family's absolute ceiling
+            // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
+            // same stated reason: privileged M2M provisioning traffic whose
+            // real cost is Argon2id. Never preset — see the field docs.
+            scim_per_min: 600,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -647,6 +710,7 @@ impl RateLimitConfig {
             self.end_session_per_min >= 1,
             "end_session_per_min must be >= 1"
         );
+        assert!(self.scim_per_min >= 1, "scim_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
         // guessing against a code space of 20^8 over the grant's 10-minute
@@ -772,6 +836,12 @@ mod tests {
             (ENV_INTROSPECT_PER_MIN, d.introspect_per_min),
             (ENV_REVOKE_PER_MIN, d.revoke_per_min),
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
+            (
+                ENV_DEVICE_AUTHORIZATION_PER_MIN,
+                d.device_authorization_per_min,
+            ),
+            (ENV_DEVICE_VERIFY_PER_MIN, d.device_verify_per_min),
+            (ENV_SCIM_PER_MIN, d.scim_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -825,20 +895,25 @@ mod tests {
             );
 
             // Human endpoints: identical to shipped, in the doc AND in code.
+            // SCIM joins them here for a different reason with the same
+            // consequence (SEC-079): the provisioning surface is an absolute
+            // administrative CPU guard, so no capacity preset may move it.
             assert_eq!(cfg.login_per_min, shipped.login_per_min);
             assert_eq!(cfg.register_per_min, shipped.register_per_min);
             assert_eq!(cfg.password_reset_per_min, shipped.password_reset_per_min);
             assert_eq!(cfg.mfa_per_min, shipped.mfa_per_min);
+            assert_eq!(cfg.scim_per_min, shipped.scim_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
                 ENV_PASSWORD_RESET_PER_MIN,
                 ENV_MFA_PER_MIN,
+                ENV_SCIM_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
                     documented_u32(&table, env, 0),
-                    "{POSTURE_DOC}: {profile:?} must not change the human endpoint {env}"
+                    "{POSTURE_DOC}: {profile:?} must not change the never-preset knob {env}"
                 );
             }
         }
@@ -1043,6 +1118,45 @@ mod tests {
         assert_eq!(d.register_per_min, 5);
         assert_eq!(d.password_reset_per_min, 3);
         assert_eq!(d.mfa_per_min, 5);
+    }
+
+    /// R3.1/B4: the SCIM bucket is pinned to the gRPC `Admin` family's
+    /// absolute per-minute ceiling (`ADMIN_PER_SEC_DEFAULT` 10/s x 60), which
+    /// is where the number came from and the only reason it is defensible.
+    /// If that constant is ever retuned, this test is the prompt to decide
+    /// deliberately whether the REST provisioning surface moves with it.
+    #[test]
+    fn scim_default_tracks_the_grpc_admin_ceiling() {
+        const GRPC_ADMIN_PER_SEC: u32 = 10;
+        assert_eq!(
+            RateLimitConfig::default().scim_per_min,
+            GRPC_ADMIN_PER_SEC * 60,
+            "scim_per_min is the REST twin of axiam-api-grpc's \
+             ADMIN_PER_SEC_DEFAULT (an absolute Argon2id CPU guard on a \
+             privileged M2M provisioning surface) — changing one without \
+             deciding about the other is the SEC-079 mistake in a new place"
+        );
+    }
+
+    /// SEC-079 shape, applied to REST: no posture preset may widen the SCIM
+    /// provisioning surface. A `gateway`/`mesh` deployment is a statement
+    /// about machine *capacity*, not about how fast a provisioning client may
+    /// mint Argon2id-hashed users.
+    #[test]
+    fn no_profile_touches_the_scim_bucket() {
+        let shipped = RateLimitConfig::default();
+        for profile in [
+            RateLimitProfile::Internet,
+            RateLimitProfile::Gateway,
+            RateLimitProfile::Mesh,
+        ] {
+            let mut cfg = RateLimitConfig {
+                profile,
+                ..RateLimitConfig::default()
+            };
+            cfg.apply_profile(|_| false);
+            assert_eq!(cfg.scim_per_min, shipped.scim_per_min, "{profile:?}");
+        }
     }
 
     /// I3 sizing rule: every revised machine default stays at least 25x

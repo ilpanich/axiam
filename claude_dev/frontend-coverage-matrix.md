@@ -26,30 +26,30 @@
 |---|---|---|---|
 | `audit` | `audit/AuditLogsPage` | covered | |
 | `auth` | `LoginPage`, `auth/*`, `profile/ChangePasswordPage` | covered | login, MFA verify, password reset/change, email verification |
-| `authz_check` | — | **gap (P1)** | No "effective access" explorer. Now more visible than it was: with deny-override (B1) an admin can compose rules whose net effect is genuinely non-obvious, and the only way to find out is to call the endpoint. See §Planned below. |
+| `authz_check` | `resources/EffectiveAccessPanel` (on `resources/ResourcesPage`) | covered | R4.2e. Pick a subject (self, or any user with `authz:check_as`) and an action/scope against the selected resource; calls `POST /api/v1/authz/check` and shows Allow/Deny/No-grant plus the raw `reason_code`. A `denied_by_rule` result triggers a `POST /api/v1/authz/check/batch` sweep of every descendant of the checked resource and feeds the denied ids to `ResourceTree`'s new red **DENY** badge — the inheritance preview. Previews the tree's current *saved* state only; there is no what-if-I-added-this-grant endpoint to preview an unsaved edit against |
 | `bootstrap` | `BootstrapPage` | covered | |
 | `ca_certificates` | `certificates/CertificatesPage` | partial | CA listing is visible; CA creation/rotation is API-only |
 | `certificates` | `certificates/CertificatesPage` | covered | |
-| `device` | — | **gap (P1)** | B2's verification page. The device-flow API is complete and the *only* way a user can approve a device today is to call `/api/v1/device/verify` and `/api/v1/device/decide` by hand — which no owner of a television is going to do. A `/device` route that takes a code (or reads `?user_code=` from the QR link), shows the requesting client and scopes, and offers Approve/Deny is what makes the grant usable. Small page; it is the last thing standing between B2 and a working feature |
-| `email_config` | `settings/SettingsPage` | **gap (P2)** | Provider config is editable, but there is no **test-send** button — so the only way to find out an SMTP config is wrong is a user failing to receive a password reset |
+| `device` | `device/DevicePage` | covered | R4.1. `/device` (no permission gate — authentication only, same class as `/profile`): enter/paste a user code (or land via `?user_code=` from a QR link), see the requesting client and scopes from `GET /api/v1/device/verify`, then Approve/Deny via `POST /api/v1/device/decide`. All three verify failure modes (unknown/expired/already-decided) render one generic message per the handler's own doc comment |
+| `email_config` | `settings/SettingsPage` | **gap (P2), unresolved — no backend endpoint** | Provider config is editable, but there is no test-send capability, and unlike the rest of R4.2 this is not a UI-only gap: `crates/axiam-api-rest/src/handlers/email_config.rs` has no test-send route at all (`grep`-confirmed; no `test_email`/`send_test_email` anywhere in the crate), so there is nothing for a frontend button to call. Building one would mean fabricating a request against an endpoint that doesn't exist. Needs a backend handler first |
 | `email_verification` | `auth/VerifyEmailPage` | covered | |
 | `federation` | `federation/FederationPage` | covered | |
-| `gdpr` | — | **gap (P1)** | Export and erasure requests are API-only. These are the operations with statutory deadlines attached, which makes "there is a CLI for it" a weak answer |
+| `gdpr` | `privacy/PrivacyPage` | covered | R4.2a. `/privacy` (no permission gate — self-service by default): request an export (`POST /api/v1/account/export`), redeem a mailed download token (`GET /api/v1/account/export/{token}`, triggers a browser download), request erasure with a confirm dialog (`POST /api/v1/account/delete`), and cancel a pending erasure with a mailed token (public `GET /api/v1/auth/account/delete/cancel`). Admins with `gdpr:export` / `users:erase` get an additional "act on behalf of" user-id field on export/erasure respectively |
 | `groups` | `groups/GroupsPage`, `groups/GroupDetailPage` | covered | |
 | `mds` | `settings/AttestationPolicyPage` | covered | X3 wave 4. `GET /api/v1/mds/status` renders serial (`no`), `next_update`, `entry_count`, `last_refreshed_at`, and a Fresh/Stale badge; `POST /api/v1/mds/refresh` is an admin-only "Refresh now" button (gated on `ca_certificates:generate`) whose outcome (Initial/Replaced/NoOpRefresh/RollbackRejected) is shown verbatim. A never-ingested deployment gets an explanatory message rather than blank fields. A viewer with `webauthn_policy:read` but not `ca_certificates:list` sees a permission note instead of a failed request |
 | `mfa_methods` | `profile/MfaManagementPage` | covered | includes passkeys and security keys since C1 |
 | `mod` | — | n/a | module wiring, not a surface |
 | `notification_rules` | `notifications/NotificationRulesPage` | covered | |
-| `oauth2` | — | headless | the OAuth2/OIDC protocol endpoints are for clients, not admins. The **device-verification page** (`/device`) is the one exception and is planned with B2 |
-| `oauth2_clients` | `oauth2/OAuth2ClientsPage` | covered | |
+| `oauth2` | — | headless | the OAuth2/OIDC protocol endpoints are for clients, not admins. The **device-verification page** (`/device`) is the one exception (R4.1, shipped) |
+| `oauth2_clients` | `oauth2/OAuth2ClientsPage` | **partial (P3)** | R4.2d added B5 session/logout settings to the create/edit forms: a per-client `post_logout_redirect_uris` allow-list and `backchannel_logout_uri`, both submitted on create/update. **Known backend gap**: `OAuth2ClientResponse` (`crates/axiam-api-rest/src/handlers/oauth2_clients.rs`) does not serialize either field back, even though `Create`/`UpdateOAuth2ClientRequest` both accept and persist them — so a save succeeds but the edit form cannot pre-fill the currently-saved value until that response DTO adds the two fields. Write path works today; read-back needs the backend fix |
 | `organizations` | `organizations/*` | covered | |
 | `password_reset` | `auth/ForgotPasswordPage`, `auth/ResetPasswordPage` | covered | |
-| `permissions` | `permissions/PermissionsPage`, `roles/RoleDetailPage` | **partial (P3)** | The **deny-effect selector** shipped in B1's API now has UI: `roles/RoleDetailPage` grants an Allow/Deny effect with an explicit radiogroup (deny is not styled as "a red allow"), a confirming caption on selecting deny, and a red **DENY** badge on granted-permission rows so a deny rule doesn't read like every other grant. What's still missing is the ResourceTree-level piece — an inheritance preview showing which descendant resources a deny reaches — tracked under the effective-access preview panel in §Planned |
+| `permissions` | `permissions/PermissionsPage`, `roles/RoleDetailPage` | covered | The **deny-effect selector** shipped in B1's API has UI: `roles/RoleDetailPage` grants an Allow/Deny effect with an explicit radiogroup (deny is not styled as "a red allow"), a confirming caption on selecting deny, and a red **DENY** badge on granted-permission rows so a deny rule doesn't read like every other grant. R4.2e closed the remaining ResourceTree-level gap — see the `authz_check` row for the inheritance preview |
 | `pgp_keys` | `pgp/PgpKeysPage` | covered | |
 | `reactors` | `reactors/ReactorsPage` | **partial (P3)** | List, editor and delete are covered, and the event options render from `GET /api/v1/reactors/events` rather than a hard-coded list. Health is covered for the two signals the API exposes: `last_seen_at` distinguishes never-connected from silent-since, and `fail_closed` carries a badge. The third planned signal — **recent timeouts and vetoes** — is blocked on the server, not on the UI: the dispatcher builds `ChainResult.failures` but no caller persists it and no reactor audit action exists, so there is nothing to render. See §Planned |
 | `resources` | `resources/ResourcesPage` | covered | includes the `ResourceTree` |
 | `roles` | `roles/RolesPage`, `roles/RoleDetailPage` | covered | |
-| `scopes` | `permissions/PermissionsPage` | partial | scopes are selectable when granting; there is no standalone scope CRUD |
+| `scopes` | `permissions/PermissionsPage`, `resources/ScopesPanel` (on `resources/ResourcesPage`) | covered | R4.2c. Scopes are still selectable when granting a permission (`permissions/PermissionsPage`); standalone CRUD now lives on `resources/ScopesPanel`, shown for the currently-selected resource since scopes are always nested under one (`/api/v1/resources/{resource_id}/scopes`). Create is gated on `scopes:create` |
 | `service_accounts` | `service-accounts/ServiceAccountsPage` | covered | |
 | `settings` | `settings/SettingsPage` | covered | |
 | `tenants` | `tenants/TenantsPage`, `organizations/TenantDetailPage` | covered | |
@@ -63,17 +63,13 @@
 
 These follow from features this improvement plan adds, and are tracked here so
 the matrix stays the single place that answers "can an admin actually do this".
+Everything that shipped in R4.1/R4.2 has moved to its row above; two items
+remain genuinely open.
 
 | Surface | Follows | What it needs |
 |---|---|---|
-| Deny-effect selector on the role/permission editor | B1 | An effect control on the grant form, a visually distinct **DENY** badge (deny is not "a red allow" — it is the rule that beats every allow, and the UI has to make that legible), and inheritance preview on the `ResourceTree` showing which descendants a deny reaches |
-| Effective-access preview panel | B1 | Pick a subject and a resource, call `authz/check`, and show the outcome **and its `reason_code`** before saving. With deny-override the net effect of a rule set is genuinely not obvious by inspection; this is the difference between an admin who can reason about their rules and one who tries them in production |
-| `/device` verification page | B2 | Enter user code → authenticate → consent → approve. Public route, since the point is that the device cannot show it |
 | Reactor failure history | X1 | **Server-side first.** The console ships without the "recent timeouts and vetoes" panel because the data does not exist: `ChainResult.failures` is computed in `axiam-amqp`'s dispatcher and dropped on the floor — no caller writes it to the audit trail, and the audit action catalogue has no reactor entry. A `fail_open` timeout is invisible in the outcome by design, so absent an audit record it is invisible everywhere, which is exactly the case the dispatcher's own comment says must not happen. Persist the failures, then the panel is a small page change |
-| SCIM token management | B4 | Issue/revoke provisioning tokens, scoped to `scim:provision` |
-| Session/logout settings | B5 | Per-client `post_logout_redirect_uri` allow-list and back-channel logout URI |
-| GDPR export/erasure console | existing gap | Above; statutory deadlines make this the highest-value existing gap |
-| Email test-send | existing gap | One button on the email config panel |
+| SCIM token management | B4 | Issue/revoke provisioning tokens, scoped to `scim:provision`. Deliberately deferred: `crates/axiam-scim` is still being written (R3.1 dependency) as of this pass — see `email_config` and `oauth2_clients` rows above for two more R4.2 items that closed except for a named backend gap |
 
 ## How the CI check works
 

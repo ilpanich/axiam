@@ -102,7 +102,10 @@ log "client_id=${CLIENT_ID}"
 #    its config — resolved here from the admin session, which is the closest
 #    equivalent this script has.
 # ---------------------------------------------------------------------------
-TENANT_ID=$(curl -sS -b "${ADMIN_JAR}" "${AXIAM_URL}/api/v1/auth/me" | jq -r '.tenant_id')
+# /api/v1/auth/me returns MeResponse { user: LoginUserInfo { .. } }, so the
+# tenant lives at `.user.tenant_id` — not at the top level. b1's walkthrough
+# reads the same shape out of the login response.
+TENANT_ID=$(curl -sS -b "${ADMIN_JAR}" "${AXIAM_URL}/api/v1/auth/me" | jq -r '.user.tenant_id')
 if [ "${TENANT_ID}" = "null" ] || [ -z "${TENANT_ID}" ]; then
   fail "could not resolve tenant_id from /api/v1/auth/me"
 fi

@@ -552,10 +552,15 @@ const WHY_AXIAM = [
     title: "Security posture as measured defaults, not documentation",
     body: "AXIAM is the only target here that ships abuse rate-limits on by default — sized from these measurements, with human endpoints locked strictly regardless of posture (and login enforcement measured exact under flood; the machine-endpoint enforcement gaps above are published, tracked bugs, not fine print). Argon2id, EdDSA short-lived tokens, single-use rotating refresh tokens, append-only audit and encrypted-at-rest secrets are defaults, not options. And the process is part of the posture: this benchmark series has now found, published and fixed a synchronous rate-limit write, a ×60 limiter units bug, a Nagle-induced TLS latency cliff and two authorization table scans — and currently carries an open refresh regression and a gRPC flood-behaviour bug in public view. We think an IAM vendor that measures itself adversarially and publishes the misses is itself a security feature.",
   },
+  {
+    n: "4",
+    title: "Deny-override RBAC and a real device flow, not just device-shaped marketing",
+    body: "The RBAC engine is default-deny with deny-override: an explicit deny grant beats every allow, at any depth of the resource hierarchy and at equal specificity — the semantic gap incumbent additive-only engines leave open. And the OAuth2 Device Authorization Grant ships end to end — enter a code, authenticate, consent, approve or deny — for the headless devices and CLIs a browser-redirect flow can't reach. Both shipped ahead of this benchmark series; neither is a roadmap promise.",
+  },
 ];
 
 const WHY_AXIAM_CONS =
-  "AXIAM is alpha: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community; Zitadel's resting stack is smaller than ours (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak wins one whole-stack efficiency cell outright; our RBAC engine is additive-only in v1.0-beta (no deny-override); SurrealDB is a younger storage engine than Postgres by a decade; and every number in this document comes from one consumer laptop until the server-class re-run lands. Choosing AXIAM today means choosing a young system whose performance-per-watt, machine-first design and measurement culture you value over incumbent breadth. That trade is exactly the niche the incumbents leave open — and the measurements above are why we believe the niche is worth serving.";
+  "AXIAM is alpha: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community; Zitadel's resting stack is smaller than ours (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak wins one whole-stack efficiency cell outright; SurrealDB is a younger storage engine than Postgres by a decade; and every number in this document comes from one consumer laptop until the server-class re-run lands. Choosing AXIAM today means choosing a young system whose performance-per-watt, machine-first design and measurement culture you value over incumbent breadth. That trade is exactly the niche the incumbents leave open — and the measurements above are why we believe the niche is worth serving.";
 
 /* ---- page -------------------------------------------------------------- */
 

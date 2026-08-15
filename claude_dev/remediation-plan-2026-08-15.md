@@ -468,3 +468,82 @@ types omit the field — previously undocumented anywhere, and now pinned by the
   real DTOs once `axiam-scim` lands, and folded into `ENDPOINTS` then.
 - **R7**: every measurement cell remains unrun. The two previously-missing scenarios
   (`device-flow-poll`, `token-exchange`) now exist and are registered.
+
+### Execution log — update 2 (end of the 2026-08-15 pass)
+
+**Wave status.** R1 complete. R2.1–R2.4 and R2.6 complete; R2.5 (the 8-runtime SDK fan-out) not started —
+it is gated on the main-repo PR merging so the SDKs receive one stable artifact set. R3 complete. R4
+complete except R4.2b. R5: R5.1, R5.2, R5.3, R5.4, R5.6, R5.7, R5.10, R5.11 complete; R5.8 not started
+(same merge gate); R5.9 half done; R5.5 deliberately not implemented. R6 complete, and its three HIGH
+findings are fixed. R7 authoring half complete; no cell executed. R8 untouched, as scoped.
+
+**The contract is at 1.19, not 1.18.** R2.1 took it to 1.18 (§22 Reactors); R5.6's SDK-Q10 erratum took it
+to 1.19. R5.8's re-vendor must therefore ship `CONTRACT.md` **and** `proto/` together — the proto changed
+in the same step, so shipping the contract alone would leave every SDK describing a wire it does not have.
+
+**R5.5 — not implemented, deliberately.** Two independent blockers, either sufficient: there is no
+per-client or per-profile lifetime mechanism to extend (every other row in `fapi.rs`'s table gates on a
+field already on `OAuth2Client`; lifetimes are global `AuthConfig` values), and FAPI 2.0 core does not pin
+numeric bounds for code/refresh lifetimes the way it pins PAR, PKCE and sender-constraining. Choosing 60 s
+or 300 s would be inventing a requirement and citing it as FAPI. Needs a decision on the actual bound and
+its citation, plus whether it is a per-client override (schema change) or a global fapi2 knob.
+
+**R5.9 — half done.** Frontend measured at 94.41% lines (808 tests, 67 files) and gated at 92.4 in
+`vitest.config.ts`, which had never had a threshold. The Rust half did NOT complete: the instrumented
+workspace build consumed ~10 GB in six minutes and was stopped at 1.5 GB free rather than risk ENOSPC. No
+TOTAL was obtained and none was invented; `coverage.yml` remains at `--fail-under-lines 80`. Finishing it
+needs ~6 GB of headroom and a re-run of the three commands `coverage.yml` uses. Worth knowing: the docker
+daemon is absent but `dockerd` IS installed, and native RabbitMQ + SurrealDB were installed successfully as
+substitutes for the CI service containers — so service-dependent work is not as blocked here as assumed.
+Frontend outlier for follow-up: `FederationTrustEditor.tsx` at 28.57% lines.
+
+**R6 findings and disposition.** 15 findings, SEC-093..SEC-107. The three HIGHs are fixed in this branch:
+SEC-093 (five OAuth2 endpoints authenticated by shared secret regardless of the registered
+`token_endpoint_auth_method`), SEC-094 (SSRF guard did not canonicalise IPv4-mapped IPv6, so
+`::ffff:169.254.169.254` passed and was then pinned), SEC-095 (`login.post_auth` never fired on SAML ACS or
+OIDC callback). The twelve medium/low findings are NOT fixed and are the natural next queue — SEC-096
+(token exchange strips sender-constraining), SEC-097 (`dpop_require_nonce` persisted and never read, with an
+adjacent comment asserting the opposite), SEC-098 (SCIM can set any tenant user's password and revokes no
+sessions), SEC-099/SEC-100 (reactor cap and unreadable-registry paths), SEC-101 (nothing but a boot warning
+stops an admin self-inflicting a login outage), through SEC-107.
+
+**SEC-093 forced a wire change.** `RevokeRequest`, `IntrospectRequest` and the PAR body all marked
+`client_secret` required and carried no `client_assertion`, so refusing the secret alone would have locked
+strong-auth clients out of those endpoints entirely. `client_secret` is now optional and RFC 7521
+assertions are accepted — additive, so `client_secret_post` clients are unchanged — with `openapi.json`
+regenerated and CONTRACT §12.1 rule 4 amended because it stated the now-false invariant.
+
+**Further findings raised during execution, none of them in the plan.**
+- `KNOWN_GRANT_TYPES` omitted the device-code and token-exchange grants, so B2 and B3 were unreachable
+  through the admin REST API despite both shipping. Fixed, with a regression test.
+  `may-impersonate` is deliberately still excluded and a test pins that; R6 agreed, noting the design
+  comment conflated where a capability is stored with who may write it.
+- OIDC discovery returned 500 for the entire e2e stack: `AXIAM__AUTH__OAUTH2_ISSUER_URL` was set nowhere,
+  so `effective_issuer()` fell back to `jwt_issuer`, a bare name that fails `url::Url::parse`. Nothing
+  exercised discovery until the B5 example did. Fixed in `docker-compose.e2e.yml`.
+- `/oauth2/end_session` requires a `tenant_id` query parameter that OIDC RP-Initiated Logout 1.0 does not
+  define, so a generic RP library fails deserialization before the handler runs. Same for
+  `/oauth2/device_authorization`. Documented in the examples; worth considering whether the extension
+  should be advertised in discovery.
+- SSO sessions record no IP or user agent — both federated handlers pass `None, None` to
+  `create_session_and_tokens` while every password login records them. An audit/forensics gap, distinct
+  from SEC-095. Not fixed.
+- `org_id` is `Uuid::nil()` on both federated paths (pre-existing `TODO(T19.15)`).
+- `GroupRepository::delete` returns Ok without checking affected rows, so a cross-tenant delete silently
+  "succeeds". Fixed in the SCIM handler; the native `/api/v1/groups` handler still has it. R6 rates it Low
+  (no data crosses tenants, uniform 204 so no oracle) and says the fix belongs in `axiam-db`.
+- `RoleRepository::assign_to_user` hard-scopes the `has_role` edge to the `user` table, so a
+  `service_account` subject can hold no RBAC permission at all. The SCIM bearer principal must therefore be
+  a tenant user, not a service account.
+- The examples are separate Cargo workspaces, so `cargo clippy --workspace` does not cover them; the b3
+  example broke its own CI job during R5.6 and only its dedicated smoke job would have caught it.
+
+**Process notes worth carrying forward.**
+- Verify with CI's own command (`cargo clippy --workspace --all-targets -- -D warnings`), not scoped
+  per-crate equivalents. Scoped checks let findings through to CI twice in this pass.
+- Test fixtures should generate credentials rather than carry literals; four separate secret-scanner
+  findings in this branch were all fixture literals, one of which had been suppressed with an inline
+  scanner directive rather than removed.
+- The examples' runtime smoke job earned its keep: it found five real defects (two wrong status codes, a
+  missing query parameter, a wrong JSON path, and the server-side OIDC issuer gap) that shellcheck, `bash
+  -n` and review had all passed.

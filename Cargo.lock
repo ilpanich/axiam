@@ -841,6 +841,7 @@ dependencies = [
 name = "axiam-api-grpc"
 version = "1.0.0-alpha24"
 dependencies = [
+ "axiam-amqp",
  "axiam-auth",
  "axiam-authz",
  "axiam-core",

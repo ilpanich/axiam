@@ -98,6 +98,43 @@ function LivenessCell({ reactor }: { reactor: Reactor }) {
   );
 }
 
+/**
+ * R2.3 — recent timeouts and vetoes, read from the audit trail R2.2 started
+ * writing. A timeout is the reactor not answering; a veto is the reactor
+ * working as designed. They are shown separately for that reason — a
+ * frequently-vetoing reactor and a frequently-timing-out one need different
+ * operator attention.
+ */
+function HealthCell({ reactor }: { reactor: Reactor }) {
+  if (reactor.mode !== "intercept") {
+    return <span className="text-muted-foreground text-sm">—</span>;
+  }
+  const { recent_timeout_count: timeouts, recent_veto_count: vetoes } = reactor;
+  if (timeouts === 0 && vetoes === 0) {
+    return <span className="text-muted-foreground text-sm">Clean (24h)</span>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      {timeouts > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30"
+          title={`${timeouts} timeout${timeouts === 1 ? "" : "s"} in the last 24h`}
+        >
+          {timeouts} timeout{timeouts === 1 ? "" : "s"}
+        </span>
+      )}
+      {vetoes > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-500/15 text-cyan-400 border border-cyan-500/30"
+          title={`${vetoes} veto${vetoes === 1 ? "" : "s"} in the last 24h`}
+        >
+          {vetoes} veto{vetoes === 1 ? "" : "s"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // ─── Event selector ───────────────────────────────────────────────────────────
 
 interface EventSelectorProps {
@@ -718,6 +755,11 @@ export function ReactorsPage() {
       key: "last_seen_at",
       header: "Last seen",
       render: (row) => <LivenessCell reactor={row} />,
+    },
+    {
+      key: "health",
+      header: "Health (24h)",
+      render: (row) => <HealthCell reactor={row} />,
     },
     {
       key: "enabled",

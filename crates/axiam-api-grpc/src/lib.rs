@@ -12,3 +12,4 @@ pub mod proto {
 
 pub use config::GrpcConfig;
 pub use server::start_grpc_server;
+pub use services::ReactorAdminServiceImpl;

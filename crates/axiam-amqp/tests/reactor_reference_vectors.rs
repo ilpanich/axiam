@@ -298,6 +298,19 @@ fn build_fixture() -> serde_json::Value {
         uuid(REPLY_NONCE),
         now - chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS + 1),
     );
+    // §22.13: "an `issued_at` outside ±300s is refused in BOTH directions
+    // (stale and future)". `stale` above covers the past; this is the future
+    // half — a timestamp ahead of the verifier's clock is not "extra fresh",
+    // it is the shape of a captured message held for later.
+    let stale_future = reply(
+        "login.post_auth",
+        ReplyDecision::Allow,
+        None,
+        None,
+        false,
+        uuid(REPLY_NONCE),
+        now + chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS + 1),
+    );
     let forbidden = reply(
         "token.pre_issue",
         ReplyDecision::Mutate,
@@ -307,6 +320,27 @@ fn build_fixture() -> serde_json::Value {
         uuid(REPLY_NONCE),
         now,
     );
+    // §22.13: "a `key_version` below 2 is refused before the signature is
+    // even computed." Built by downgrading an already-signed, otherwise
+    // valid reply — the signature the fixture carries is therefore the
+    // ORIGINAL (now-mismatched) one, which is the point: rejection must come
+    // from the key_version check alone, before whatever the signature says is
+    // ever consulted (§22.4's fixed order: identity, then freshness, then
+    // signature, then semantics — key_version is checked as part of that
+    // fixed order, ahead of the signature).
+    let key_version_too_old = {
+        let mut r = reply(
+            "login.post_auth",
+            ReplyDecision::Allow,
+            None,
+            None,
+            false,
+            uuid(REPLY_NONCE),
+            now,
+        );
+        r.key_version = 1;
+        r
+    };
     let veto_only_mutation = reply(
         "grant.pre_assign",
         ReplyDecision::Mutate,
@@ -416,6 +450,24 @@ fn build_fixture() -> serde_json::Value {
                 "canonical_signed_json": canonical_of_reply(&stale),
                 "hmac_signature_hex": stale.hmac_signature.clone().unwrap(),
                 "expected_rejection": rejection_name(&resolve(&stale, uuid(CORRELATION_ID), now).unwrap_err()),
+            },
+            "stale_future": {
+                "_comment": "the other half of §22.13's 'both directions' requirement — a \
+                    timestamp ahead of the verifier's clock, rejected the same way as one \
+                    behind it",
+                "message": serde_json::to_value(&stale_future).unwrap(),
+                "canonical_signed_json": canonical_of_reply(&stale_future),
+                "hmac_signature_hex": stale_future.hmac_signature.clone().unwrap(),
+                "expected_rejection": rejection_name(&resolve(&stale_future, uuid(CORRELATION_ID), now).unwrap_err()),
+            },
+            "key_version_too_old": {
+                "_comment": "key_version downgraded AFTER signing, so the committed \
+                    hmac_signature_hex does not match this body — rejection must come from the \
+                    key_version check alone, which §22.4 places before the signature check",
+                "message": serde_json::to_value(&key_version_too_old).unwrap(),
+                "canonical_signed_json": canonical_of_reply(&key_version_too_old),
+                "hmac_signature_hex": key_version_too_old.hmac_signature.clone().unwrap(),
+                "expected_rejection": rejection_name(&resolve(&key_version_too_old, uuid(CORRELATION_ID), now).unwrap_err()),
             },
             "forbidden_patch_field": {
                 "message": serde_json::to_value(&forbidden).unwrap(),
@@ -615,6 +667,8 @@ fn test_verify_direction_resolves_replies_and_rejects_the_negatives() {
 
     for key in [
         "stale",
+        "stale_future",
+        "key_version_too_old",
         "forbidden_patch_field",
         "mutation_on_veto_only_event",
         "correlation_replay",
@@ -663,6 +717,76 @@ fn test_a_valid_reply_is_not_valid_for_a_different_event() {
         rejection_name(&resolve(&replayed, uuid(OTHER_CORRELATION_ID), now).unwrap_err()),
         "wrong_correlation"
     );
+}
+
+/// §22.13, stated directly rather than left to fall out of the byte-equality
+/// check above: "Assert the omission rules directly: a reply built with
+/// `require_mfa = false` MUST NOT serialize the field." Also covers the two
+/// other conditionally-omitted reply fields (`reason`, `patch`) and the
+/// event/reply's `"hmac_signature":null` placeholder, which is the opposite
+/// rule — present, not omitted, and set to JSON `null` rather than absent.
+#[test]
+fn test_omission_rules_are_explicit_not_incidental() {
+    let fixture = load_fixture();
+
+    let allow = fixture["reactor_to_server"]["allow"]["canonical_signed_json"]
+        .as_str()
+        .unwrap();
+    assert!(
+        !allow.contains("\"require_mfa\""),
+        "require_mfa=false must be omitted, not serialized as false"
+    );
+    assert!(
+        !allow.contains("\"reason\""),
+        "an absent reason must be omitted, not serialized as null"
+    );
+    assert!(
+        !allow.contains("\"patch\""),
+        "an absent patch must be omitted, not serialized as null"
+    );
+
+    let deny = fixture["reactor_to_server"]["deny"]["canonical_signed_json"]
+        .as_str()
+        .unwrap();
+    assert!(
+        deny.contains("\"reason\":\"embargoed region\""),
+        "a present reason must be serialized, not omitted"
+    );
+    assert!(!deny.contains("\"require_mfa\""));
+    assert!(!deny.contains("\"patch\""));
+
+    let mutate = fixture["reactor_to_server"]["mutate"]["canonical_signed_json"]
+        .as_str()
+        .unwrap();
+    assert!(
+        mutate.contains("\"patch\":{"),
+        "a present patch must be serialized, not omitted"
+    );
+    assert!(!mutate.contains("\"require_mfa\""));
+    assert!(!mutate.contains("\"reason\""));
+
+    let require_mfa = fixture["reactor_to_server"]["require_mfa"]["canonical_signed_json"]
+        .as_str()
+        .unwrap();
+    assert!(
+        require_mfa.contains("\"require_mfa\":true"),
+        "require_mfa=true must be serialized explicitly"
+    );
+
+    // The opposite rule: hmac_signature is SERIALIZED AS `null` while
+    // signing, on both message types — never simply absent.
+    for vector in [
+        &fixture["server_to_reactor"]["token_pre_issue"],
+        &fixture["server_to_reactor"]["login_post_auth"],
+        &fixture["reactor_to_server"]["allow"],
+        &fixture["reactor_to_server"]["mutate"],
+    ] {
+        let canonical = vector["canonical_signed_json"].as_str().unwrap();
+        assert!(
+            canonical.contains("\"hmac_signature\":null"),
+            "hmac_signature must be present and null in the signed bytes, not omitted: {canonical}"
+        );
+    }
 }
 
 /// The nonce is signed: swapping it changes the MAC, so a captured reply

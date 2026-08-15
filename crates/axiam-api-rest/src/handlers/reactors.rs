@@ -8,6 +8,10 @@
 //! whichever nobody was looking at.
 
 use actix_web::{HttpResponse, web};
+use axiam_amqp::reactor::gate::{
+    DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS, ReactorHealth,
+    recent_health,
+};
 use axiam_core::models::reactor::{
     CreateReactor, DEFAULT_TIMEOUT_MS, EVENT_REGISTRY, FailurePolicy, Reactor, ReactorMode,
     UpdateReactor, default_failure_policy_for, validate_registration,
@@ -22,6 +26,37 @@ use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::state::AppState;
+
+// ---------------------------------------------------------------------------
+// Per-reactor health (R2.3)
+// ---------------------------------------------------------------------------
+//
+// R2.2 started writing `ChainResult.failures` and a chain-level deny to the
+// audit trail; `axiam_amqp::reactor::gate::recent_health` is where that
+// finally becomes visible to an operator, in the same response the admin
+// console already renders `last_seen_at` from. It is shared with the gRPC
+// admin service (`axiam-api-grpc`'s `ReactorAdminServiceImpl`) rather than
+// duplicated, so the two transports report the same numbers from the same
+// query.
+
+/// Read one reactor's health using this handler's fixed lookback + sample
+/// size — a thin wrapper so call sites below read `reactor_health(..)`
+/// rather than the longer shared-function call with its two tuning
+/// parameters repeated at every site.
+async fn reactor_health<A: axiam_core::repository::AuditLogRepository>(
+    audit_repo: &A,
+    tenant_id: Uuid,
+    reactor_id: Uuid,
+) -> ReactorHealth {
+    recent_health(
+        audit_repo,
+        tenant_id,
+        reactor_id,
+        chrono::Duration::hours(DEFAULT_HEALTH_LOOKBACK_HOURS),
+        DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT,
+    )
+    .await
+}
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -79,9 +114,24 @@ pub struct ReactorResponse {
     /// never connected — which the admin UI shows differently from "connected
     /// once, silent since".
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// R2.3: dispatch failures against this registration in the last 24h
+    /// whose cause was a timeout (as opposed to a rejected reply, a transport
+    /// failure, or overload), capped at 100 — a health signal read from the
+    /// audit trail R2.2 started writing, not a replacement for the audit log
+    /// itself (`GET /api/v1/audit-log` is that).
+    pub recent_timeout_count: u32,
+    /// R2.3: operations this reactor's own reply *denied* in the last 24h,
+    /// capped at 100. Distinct from `recent_timeout_count`: a veto is the
+    /// reactor working as designed; a timeout is the reactor not answering.
+    pub recent_veto_count: u32,
 }
 
 impl From<Reactor> for ReactorResponse {
+    /// Health defaults to zero. Call sites that have an audit repository in
+    /// scope (`list`, `get`) overwrite it via [`ReactorResponse::with_health`]
+    /// — a freshly created or just-updated reactor has nothing in the
+    /// lookback window to report anyway, so `create`/`update`/`delete` do not
+    /// pay the extra audit-trail round trips.
     fn from(r: Reactor) -> Self {
         Self {
             id: r.id,
@@ -97,7 +147,17 @@ impl From<Reactor> for ReactorResponse {
             created_at: r.created_at,
             updated_at: r.updated_at,
             last_seen_at: r.last_seen_at,
+            recent_timeout_count: 0,
+            recent_veto_count: 0,
         }
+    }
+}
+
+impl ReactorResponse {
+    fn with_health(mut self, health: ReactorHealth) -> Self {
+        self.recent_timeout_count = health.recent_timeout_count;
+        self.recent_veto_count = health.recent_veto_count;
+        self
     }
 }
 
@@ -242,12 +302,20 @@ pub async fn list<C: Connection + Clone>(
         .reactor_repo
         .list(user.tenant_id, pagination.into_inner())
         .await?;
+
+    // R2.3: one page of reactors is small (an admin console's page size, not
+    // the event-path scale reactors themselves dispatch at), so a sequential
+    // per-reactor health read is the honest cost of "current health" — the
+    // alternative is a stale cached number a fail_closed veto going quiet
+    // would not show up in promptly.
+    let mut items = Vec::with_capacity(result.items.len());
+    for reactor in result.items {
+        let health = reactor_health(&state.audit_repo, user.tenant_id, reactor.id).await;
+        items.push(ReactorResponse::from(reactor).with_health(health));
+    }
+
     Ok(HttpResponse::Ok().json(PaginatedResult {
-        items: result
-            .items
-            .into_iter()
-            .map(ReactorResponse::from)
-            .collect(),
+        items,
         total: result.total,
         offset: result.offset,
         limit: result.limit,
@@ -276,7 +344,8 @@ pub async fn get<C: Connection + Clone>(
         .reactor_repo
         .get_by_id(user.tenant_id, path.into_inner())
         .await?;
-    Ok(HttpResponse::Ok().json(ReactorResponse::from(reactor)))
+    let health = reactor_health(&state.audit_repo, user.tenant_id, reactor.id).await;
+    Ok(HttpResponse::Ok().json(ReactorResponse::from(reactor).with_health(health)))
 }
 
 /// `PUT /api/v1/reactors/{id}`

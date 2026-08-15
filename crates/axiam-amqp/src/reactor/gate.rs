@@ -319,6 +319,134 @@ pub const AUDIT_ACTION_DENIED: &str = "reactor.denied";
 /// Audit action for a chain that changed something.
 pub const AUDIT_ACTION_MUTATED: &str = "reactor.mutated";
 
+// ---------------------------------------------------------------------------
+// Per-reactor health (R2.3)
+// ---------------------------------------------------------------------------
+//
+// One function, called from both the REST handler and the gRPC admin
+// service, so the two transports report the same numbers from the same
+// query rather than each growing its own copy that can silently drift.
+
+/// How far back a health count looks by default. A ceiling on what counts as
+/// "recent" for a health panel, not a retention policy — the audit log
+/// itself is append-only and this reads it, never prunes it.
+pub const DEFAULT_HEALTH_LOOKBACK_HOURS: i64 = 24;
+
+/// How many of a reactor's most recent [`AUDIT_ACTION_FAILURE`] records are
+/// inspected by default to split out the timeout count. A page, not a full
+/// scan: a reactor that has failed more than this many times in the lookback
+/// window is already the worst-behaved reactor in the tenant by a wide
+/// margin, and "at least this many in the window" is what a health panel
+/// needs to say past that point, not an exact count.
+pub const DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT: u64 = 100;
+
+/// Recent-failure counts for one reactor, read from the audit trail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReactorHealth {
+    /// [`AUDIT_ACTION_FAILURE`] records in the lookback window whose
+    /// `failure_kind` metadata is `"timeout"` — the reactor did not answer in
+    /// time, as opposed to answering with something the server refused.
+    pub recent_timeout_count: u32,
+    /// [`AUDIT_ACTION_DENIED`] records in the lookback window resource-scoped
+    /// to this reactor — a genuine `decision: "deny"` reply, not a failure
+    /// resolved through `failure_policy` (those are counted above, not here;
+    /// see [`ChainResult::denied_by`]'s doc comment for why the two must not
+    /// be conflated).
+    pub recent_veto_count: u32,
+}
+
+/// Read one reactor's recent-failure health from the audit trail.
+///
+/// Two bounded queries, not a full-table scan: the timeout count inspects at
+/// most `failure_sample_limit` records (`failure_kind` lives in the metadata
+/// JSON, which [`axiam_core::repository::AuditLogFilter`] cannot filter on
+/// server-side, so it is read and counted client-side); the veto count only
+/// needs [`axiam_core::repository::PaginatedResult::total`] from a
+/// `resource_id`+`action`-filtered query, which the repository can answer
+/// without transferring the matching rows.
+///
+/// An audit-store error degrades to zero on both counts rather than
+/// propagating — a health panel that cannot be computed this instant is not a
+/// reason to hide the registration itself, and the failure is logged here so
+/// it is not silent.
+pub async fn recent_health<A: axiam_core::repository::AuditLogRepository>(
+    audit_repo: &A,
+    tenant_id: Uuid,
+    reactor_id: Uuid,
+    lookback: chrono::Duration,
+    failure_sample_limit: u64,
+) -> ReactorHealth {
+    use axiam_core::repository::{AuditLogFilter, Pagination};
+
+    let since = Utc::now() - lookback;
+
+    let recent_timeout_count = audit_repo
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                resource_id: Some(reactor_id),
+                action: Some(AUDIT_ACTION_FAILURE.to_string()),
+                from: Some(since),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: failure_sample_limit,
+            },
+        )
+        .await
+        .map(|page| {
+            page.items
+                .iter()
+                .filter(|entry| {
+                    entry.metadata.get("failure_kind").and_then(|v| v.as_str()) == Some("timeout")
+                })
+                .count() as u32
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "axiam::reactor",
+                tenant_id = %tenant_id,
+                reactor_id = %reactor_id,
+                error = %e,
+                "could not read reactor timeout health from the audit trail"
+            );
+            0
+        });
+
+    let recent_veto_count = audit_repo
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                resource_id: Some(reactor_id),
+                action: Some(AUDIT_ACTION_DENIED.to_string()),
+                from: Some(since),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 1,
+            },
+        )
+        .await
+        .map(|page| page.total as u32)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "axiam::reactor",
+                tenant_id = %tenant_id,
+                reactor_id = %reactor_id,
+                error = %e,
+                "could not read reactor veto health from the audit trail"
+            );
+            0
+        });
+
+    ReactorHealth {
+        recent_timeout_count,
+        recent_veto_count,
+    }
+}
+
 /// Knobs an operator can turn.
 #[derive(Debug, Clone, Copy)]
 pub struct ReactorGateConfig {
@@ -482,13 +610,25 @@ where
                         actor_id: Uuid::nil(),
                         actor_type: ActorType::System,
                         action: AUDIT_ACTION_DENIED.to_string(),
-                        resource_id: None,
+                        // R2.3: `denied_by` is `Some` exactly when a reply
+                        // (not a resolved failure) caused this deny — see its
+                        // doc comment on `ChainResult`. Recording it as the
+                        // audit resource_id is what lets the admin health
+                        // surface attribute a "recent veto" to one reactor
+                        // rather than only to the chain. A failure-resolved
+                        // deny is already attributed via the per-reactor
+                        // `reactor.dispatch_failed` records written above, so
+                        // leaving this `None` in that case avoids
+                        // double-counting one denial as both a veto and a
+                        // failure.
+                        resource_id: result.denied_by,
                         outcome: AuditOutcome::Denied,
                         ip_address: None,
                         metadata: Some(serde_json::json!({
                             "event": event,
                             "reason": reason,
                             "chain": reactor_ids,
+                            "denied_by": result.denied_by,
                         })),
                     })
                     .await;
@@ -930,11 +1070,9 @@ mod tests {
     #[tokio::test]
     async fn a_deny_is_returned_and_audited() {
         let tenant = Uuid::new_v4();
-        let source = VecSource::with(vec![reactor(
-            tenant,
-            "login.post_auth",
-            FailurePolicy::FailClosed,
-        )]);
+        let denying_reactor = reactor(tenant, "login.post_auth", FailurePolicy::FailClosed);
+        let denying_reactor_id = denying_reactor.id;
+        let source = VecSource::with(vec![denying_reactor]);
         let audit = CollectingAudit::default();
         let g = gate(
             source,
@@ -957,7 +1095,15 @@ mod tests {
                 reason: "embargoed region".into()
             }
         );
-        assert!(audit.actions().contains(&AUDIT_ACTION_DENIED.to_string()));
+        let entry = audit
+            .entries()
+            .into_iter()
+            .find(|e| e.action == AUDIT_ACTION_DENIED)
+            .expect("a deny must be audited");
+        // R2.3: the audit record's resource_id is the specific reactor whose
+        // reply caused the veto, so the admin health surface can attribute a
+        // "recent veto" to one reactor rather than only to the chain.
+        assert_eq!(entry.resource_id, Some(denying_reactor_id));
     }
 
     #[tokio::test]

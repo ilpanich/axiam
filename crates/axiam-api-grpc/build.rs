@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../proto/axiam/v1/user.proto",
                 "../../proto/axiam/v1/token.proto",
                 "../../proto/axiam/v1/userinfo.proto",
+                "../../proto/axiam/v1/reactor.proto",
             ],
             &["../../proto"],
         )?;

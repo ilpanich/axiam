@@ -151,6 +151,22 @@ pub struct ChainResult {
     /// not be invisible in the audit trail — that is the whole difference
     /// between "no reactor was configured" and "the reactor never answered".
     pub failures: Vec<(Uuid, DispatchFailure)>,
+    /// The reactor whose *reply* produced a terminal `Deny`, when the outcome
+    /// is `Deny` for that reason (§22.6 rule 1: deny short-circuits, so at
+    /// most one reactor's reply is ever the cause).
+    ///
+    /// `None` for every other outcome, and also `None` when the deny came
+    /// from resolving a *failure* through `failure_policy` (a timeout, a
+    /// rejected reply, a budget exhaustion) rather than from a genuine
+    /// `decision: "deny"` reply — that reactor is already attributed via
+    /// [`Self::failures`], which is where a health panel should count it.
+    /// Conflating the two would double-count one denial as both a veto and a
+    /// failure.
+    ///
+    /// R2.3: this is what lets the admin health surface attribute a "recent
+    /// veto" to the specific reactor that issued it, rather than only to the
+    /// chain as a whole.
+    pub denied_by: Option<Uuid>,
 }
 
 /// Resolve one reactor's failure through its policy.
@@ -212,6 +228,7 @@ pub async fn run_chain<T: ReactorTransport>(
         return ChainResult {
             outcome: ReactorOutcome::Allow,
             failures,
+            denied_by: None,
         };
     };
 
@@ -223,9 +240,13 @@ pub async fn run_chain<T: ReactorTransport>(
             let outcome = resolve_failure(reactor.failure_policy, &failure);
             failures.push((reactor.id, failure));
             if let ReactorOutcome::Deny { reason } = outcome {
+                // A budget-exhaustion deny is a *failure* resolved through
+                // policy, not a reply — already attributed via `failures`
+                // above, so `denied_by` stays `None` (see its doc comment).
                 return ChainResult {
                     outcome: ReactorOutcome::Deny { reason },
                     failures,
+                    denied_by: None,
                 };
             }
             continue;
@@ -272,9 +293,12 @@ pub async fn run_chain<T: ReactorTransport>(
 
         match step {
             Ok(ReactorOutcome::Deny { reason }) => {
+                // A genuine `decision: "deny"` reply — the only case
+                // `denied_by` is populated for.
                 return ChainResult {
                     outcome: ReactorOutcome::Deny { reason },
                     failures,
+                    denied_by: Some(reactor.id),
                 };
             }
             Ok(ReactorOutcome::Mutate { patch: p }) => {
@@ -288,9 +312,12 @@ pub async fn run_chain<T: ReactorTransport>(
                 let outcome = resolve_failure(reactor.failure_policy, &failure);
                 failures.push((reactor.id, failure));
                 if let ReactorOutcome::Deny { reason } = outcome {
+                    // Failure-resolved, not reply-resolved — already
+                    // attributed via `failures`.
                     return ChainResult {
                         outcome: ReactorOutcome::Deny { reason },
                         failures,
+                        denied_by: None,
                     };
                 }
             }
@@ -305,7 +332,11 @@ pub async fn run_chain<T: ReactorTransport>(
         ReactorOutcome::Mutate { patch }
     };
 
-    ChainResult { outcome, failures }
+    ChainResult {
+        outcome,
+        failures,
+        denied_by: None,
+    }
 }
 
 /// A gate that runs no reactors, used when the feature is off.
@@ -539,6 +570,7 @@ mod tests {
     #[tokio::test]
     async fn a_deny_short_circuits_the_rest_of_the_chain() {
         let first = reactor("first", 1, FailurePolicy::FailOpen, 500);
+        let first_id = first.id;
         let second = reactor("second", 2, FailurePolicy::FailOpen, 500);
         let t = Scripted::new(vec![("first", deny()), ("second", allow())]);
 
@@ -549,6 +581,47 @@ mod tests {
             vec!["first"],
             "nothing later can overturn a deny, so nothing later should be asked"
         );
+        // R2.3: a reply-driven deny is attributed to the reactor that issued
+        // it, so a health panel can count "recent vetoes" per reactor.
+        assert_eq!(result.denied_by, Some(first_id));
+    }
+
+    /// A deny resolved through `failure_policy` (a timeout, a rejected reply,
+    /// a budget exhaustion) is a *failure*, not a veto — it must not be
+    /// attributed via `denied_by`, or a health panel would double-count it as
+    /// both a failure and a veto.
+    #[tokio::test]
+    async fn a_failure_resolved_deny_is_not_attributed_as_denied_by() {
+        let r = reactor("fraud-check", 1, FailurePolicy::FailClosed, 500);
+        let t = Scripted::new(vec![("fraud-check", Step::Fail(DispatchFailure::Timeout))]);
+
+        let result = run(&t, &[r]).await;
+        assert!(!result.outcome.permits());
+        assert_eq!(
+            result.denied_by, None,
+            "a timeout resolved to a deny is a failure, already attributed via `failures`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_budget_exhausted_deny_is_not_attributed_as_denied_by() {
+        let lenient = reactor("lenient", 1, FailurePolicy::FailOpen, 500);
+        let veto = reactor("veto", 2, FailurePolicy::FailClosed, 500);
+        let t = Scripted::new(vec![("lenient", allow()), ("veto", allow())]);
+
+        let result = run_chain(
+            &t,
+            MASTER,
+            &[lenient, veto],
+            "token.pre_issue",
+            serde_json::json!({}),
+            Utc::now,
+            || MAX_CHAIN_BUDGET_MS,
+        )
+        .await;
+
+        assert!(!result.outcome.permits());
+        assert_eq!(result.denied_by, None);
     }
 
     /// A `fail_open` timeout must be invisible in the outcome and visible in

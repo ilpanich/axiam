@@ -4857,7 +4857,9 @@
                           "failure_policy",
                           "enabled",
                           "created_at",
-                          "updated_at"
+                          "updated_at",
+                          "recent_timeout_count",
+                          "recent_veto_count"
                         ],
                         "properties": {
                           "created_at": {
@@ -4900,6 +4902,18 @@
                           "priority": {
                             "type": "integer",
                             "format": "int32"
+                          },
+                          "recent_timeout_count": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "R2.3: dispatch failures against this registration in the last 24h\nwhose cause was a timeout (as opposed to a rejected reply, a transport\nfailure, or overload), capped at 100 — a health signal read from the\naudit trail R2.2 started writing, not a replacement for the audit log\nitself (`GET /api/v1/audit-log` is that).",
+                            "minimum": 0
+                          },
+                          "recent_veto_count": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "R2.3: operations this reactor's own reply *denied* in the last 24h,\ncapped at 100. Distinct from `recent_timeout_count`: a veto is the\nreactor working as designed; a timeout is the reactor not answering.",
+                            "minimum": 0
                           },
                           "tenant_id": {
                             "type": "string",
@@ -12414,7 +12428,9 @@
           "failure_policy",
           "enabled",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "recent_timeout_count",
+          "recent_veto_count"
         ],
         "properties": {
           "created_at": {
@@ -12457,6 +12473,18 @@
           "priority": {
             "type": "integer",
             "format": "int32"
+          },
+          "recent_timeout_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "R2.3: dispatch failures against this registration in the last 24h\nwhose cause was a timeout (as opposed to a rejected reply, a transport\nfailure, or overload), capped at 100 — a health signal read from the\naudit trail R2.2 started writing, not a replacement for the audit log\nitself (`GET /api/v1/audit-log` is that).",
+            "minimum": 0
+          },
+          "recent_veto_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "R2.3: operations this reactor's own reply *denied* in the last 24h,\ncapped at 100. Distinct from `recent_timeout_count`: a veto is the\nreactor working as designed; a timeout is the reactor not answering.",
+            "minimum": 0
           },
           "tenant_id": {
             "type": "string",

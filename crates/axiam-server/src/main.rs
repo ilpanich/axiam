@@ -1578,6 +1578,39 @@ async fn main() -> std::io::Result<()> {
             None => engine,
         }
     };
+    // X1 / R2.3 — `ReactorAdminServiceImpl`'s own `AuthorizationEngine`.
+    // `AuthorizationEngine` does not implement `Clone`, so it cannot share
+    // `grpc_engine`'s instance; built identically (same repositories, same
+    // decision cache, same invalidation broadcaster) so the two stay
+    // coherent — see `start_grpc_server`'s `reactor_engine` doc comment.
+    let grpc_reactor_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
+        );
+        let engine = match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
+            None => engine,
+        }
+    };
+    let grpc_reactor_repo = reactor_repo.clone();
+    // `pool` is moved into `health_checker` before this point (see the
+    // comment near `session_client_repo` above), so this reuses the
+    // `audit_repo` instance built earlier from `pool.handle_for_repo()`
+    // rather than calling `pool` again.
+    let grpc_reactor_audit_repo = audit_repo.clone();
+    let grpc_reactor_routing_invalidator = Arc::clone(&reactor_routing_invalidator);
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
@@ -1620,6 +1653,10 @@ async fn main() -> std::io::Result<()> {
             grpc_db,
             grpc_batch_max_concurrency,
             grpc_strict_revocation,
+            grpc_reactor_engine,
+            grpc_reactor_repo,
+            grpc_reactor_audit_repo,
+            grpc_reactor_routing_invalidator,
         )
         .await
         {

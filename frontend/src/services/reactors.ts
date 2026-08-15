@@ -27,6 +27,19 @@ export interface Reactor {
   updated_at: string;
   /** `null` means it has never connected — not the same as "silent since". */
   last_seen_at: string | null;
+  /**
+   * R2.3 — dispatch failures against this registration in the last 24h whose
+   * cause was a timeout (as opposed to a rejected reply, a transport
+   * failure, or overload), capped at 100. Read from the audit trail R2.2
+   * started writing.
+   */
+  recent_timeout_count: number;
+  /**
+   * R2.3 — operations this reactor's own reply *denied* in the last 24h,
+   * capped at 100. Distinct from `recent_timeout_count`: a veto is the
+   * reactor working as designed; a timeout is the reactor not answering.
+   */
+  recent_veto_count: number;
 }
 
 /**

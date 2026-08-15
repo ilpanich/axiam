@@ -36,12 +36,13 @@ use std::time::Duration;
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::repository::{
-    GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
-    UserRepository,
+    AuditLogRepository, GroupRepository, PermissionRepository, ReactorRepository,
+    ResourceRepository, RoleRepository, ScopeRepository, UserRepository,
 };
 use axiam_db::DbHandle;
 use surrealdb::Connection;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
+use uuid::Uuid;
 
 use crate::config::GrpcConfig;
 use crate::middleware::auth::AuthInterceptor;
@@ -50,11 +51,13 @@ use crate::middleware::rate_limit::{
 };
 use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
+use crate::proto::reactor_admin_service_server::ReactorAdminServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
 use crate::proto::user_info_service_server::UserInfoServiceServer;
 use crate::proto::user_service_server::UserServiceServer;
 use crate::services::{
-    AuthorizationServiceImpl, TokenServiceImpl, UserInfoServiceImpl, UserServiceImpl,
+    AuthorizationServiceImpl, ReactorAdminServiceImpl, TokenServiceImpl, UserInfoServiceImpl,
+    UserServiceImpl,
 };
 
 /// Start the gRPC server with all registered services.
@@ -99,7 +102,23 @@ use crate::services::{
 /// `None` keeps the shipped posture: gRPC trusts JWT lifetime, so revocation
 /// takes effect at token expiry (up to 15 min) rather than immediately. See
 /// [`crate::middleware::strict_revocation`] for the full posture table.
-pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
+///
+/// # `reactor_engine`, `reactor_repo`, `reactor_audit_repo`, `reactor_routing_invalidator` (X1 / R2.3)
+///
+/// `reactor_engine` is a SECOND [`AuthorizationEngine`] instance, built from
+/// the same repositories as `engine`. `AuthorizationEngine` does not
+/// implement `Clone`, so `ReactorAdminServiceImpl` cannot share `engine`'s
+/// instance — it is given its own, mirroring `AuthorizationServiceImpl`'s.
+/// Two engines over the same repositories is correct, not wasteful: the
+/// decision cache and invalidation broadcaster (when configured) are handed
+/// to both by the caller, so the two stay coherent with each other exactly as
+/// `axiam-server`'s REST `AuthzChecker` and this gRPC listener already do.
+/// `reactor_routing_invalidator` MUST be the same closure over the same
+/// `ReactorRoutingTable` the REST admin handlers invalidate through, or a
+/// registration written over gRPC would not take effect on this replica
+/// until the routing table's TTL expired.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     addr: SocketAddr,
     engine: AuthorizationEngine<R, P, Res, S, G>,
     user_repo: U,
@@ -108,6 +127,10 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     db: impl Into<DbHandle<C>>,
     batch_max_concurrency: usize,
     strict_revocation_checker: Option<Arc<dyn SessionRevocationCheck>>,
+    reactor_engine: AuthorizationEngine<R, P, Res, S, G>,
+    reactor_repo: Rr,
+    reactor_audit_repo: A,
+    reactor_routing_invalidator: Arc<dyn Fn(Uuid) + Send + Sync>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -117,6 +140,8 @@ where
     G: GroupRepository + 'static,
     U: UserRepository + Clone + 'static,
     C: Connection + 'static,
+    Rr: ReactorRepository + 'static,
+    A: AuditLogRepository + 'static,
 {
     // I2: per-family ceilings (unset knobs derived from the authz ceiling).
     let rate_limits = grpc_config.rate_limits();
@@ -184,6 +209,18 @@ where
     );
     let token_svc = TokenServiceServer::with_interceptor(
         TokenServiceImpl::new(auth_config.clone()),
+        AuthInterceptor::new(auth_config.clone()),
+    );
+    // X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST
+    // `/api/v1/reactors*` surface. Same `AuthInterceptor` chokepoint as every
+    // other authenticated service here.
+    let reactor_svc = ReactorAdminServiceServer::with_interceptor(
+        ReactorAdminServiceImpl::new(
+            reactor_repo,
+            reactor_engine,
+            reactor_audit_repo,
+            reactor_routing_invalidator,
+        ),
         AuthInterceptor::new(auth_config),
     );
 
@@ -264,6 +301,7 @@ where
                 .add_service(user_svc)
                 .add_service(user_info_svc)
                 .add_service(token_svc)
+                .add_service(reactor_svc)
                 .serve(addr)
                 .await
         }
@@ -277,6 +315,7 @@ where
                 .add_service(user_svc)
                 .add_service(user_info_svc)
                 .add_service(token_svc)
+                .add_service(reactor_svc)
                 .serve(addr)
                 .await
         }

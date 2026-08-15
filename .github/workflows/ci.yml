@@ -305,6 +305,18 @@ jobs:
       # UserInfoService integration tests (gRPC OIDC userinfo) — also gated on
       # the `client` feature for the generated client stubs.
       - run: cargo test -p axiam-api-grpc --features client --test grpc_userinfo_test
+      # ReactorAdminService integration tests (X1 / R2.3) — same `client`-feature
+      # gate as the two above (generated client stubs).
+      - run: cargo test -p axiam-api-grpc --features client --test grpc_reactor_test
+      # X1 / R2.4 — containerized-reactor integration test against the SAME
+      # live RabbitMQ this job already runs as a service container (see the
+      # `rabbitmq:` service block above). `#[ignore]`d for the same reason
+      # `webhook_consumer_test.rs`'s live-broker test is: `cargo test
+      # --workspace` above must not require a broker in every environment
+      # that runs it. This job has one, so run it explicitly here.
+      - run: |
+          cargo test -p axiam-amqp --test reactor_containerized_test \
+            -- --ignored --test-threads=1
 
   frontend-quality:
     name: Frontend Lint + Type Check

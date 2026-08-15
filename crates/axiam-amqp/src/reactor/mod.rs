@@ -28,9 +28,11 @@ pub use dispatcher::{
     resolve_failure, run_chain,
 };
 pub use gate::{
-    AUDIT_ACTION_DENIED, AUDIT_ACTION_FAILURE, AUDIT_ACTION_MUTATED, DEFAULT_ROUTING_TTL,
+    AUDIT_ACTION_DENIED, AUDIT_ACTION_FAILURE, AUDIT_ACTION_MUTATED,
+    DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS, DEFAULT_ROUTING_TTL,
     DispatchingReactorGate, EmptyReactorSource, NoopAuditSink, ReactorAuditSink, ReactorGateConfig,
-    ReactorRoutingTable, ReactorSource, RepositoryAuditSink, RepositoryReactorSource,
+    ReactorHealth, ReactorRoutingTable, ReactorSource, RepositoryAuditSink,
+    RepositoryReactorSource, recent_health,
 };
 pub use protocol::{
     REACTOR_EXCHANGE, ReactorEventMessage, ReactorReply, ReplyDecision, ReplyRejection, queue_name,

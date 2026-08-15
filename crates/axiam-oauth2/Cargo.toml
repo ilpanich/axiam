@@ -40,3 +40,7 @@ reqwest = { workspace = true }
 # X4 external-exchange unit tests mint an Ed25519 keypair for the AuthConfig
 # under test, the same way every other crate's token tests do.
 rcgen = { workspace = true }
+# R5.3 (X2 test gap) — property test: an RPT can never carry a
+# (resource, scope) pair the live engine would deny at mint time
+# (tests/uma_rpt_deny_property_test.rs).
+proptest = { workspace = true }

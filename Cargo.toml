@@ -151,6 +151,9 @@ rustls = "0.23"
 
 # Testing
 tokio-test = "0.4"
+# R5.3 (X2 test gap) — property test over the UMA RPT deny-override
+# invariant in axiam-oauth2/tests/uma_rpt_deny_property_test.rs.
+proptest = "1"
 
 # Internal crates
 axiam-core = { path = "crates/axiam-core" }

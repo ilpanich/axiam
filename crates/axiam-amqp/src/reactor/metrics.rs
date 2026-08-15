@@ -144,10 +144,7 @@ pub fn snapshot() -> Vec<(&'static str, u64)> {
         ("axiam_reactor_mutate_total", mutations()),
         ("axiam_reactor_require_mfa_total", step_ups()),
         ("axiam_reactor_timeout_total", timeouts()),
-        (
-            "axiam_reactor_budget_exhausted_total",
-            budget_exhaustions(),
-        ),
+        ("axiam_reactor_budget_exhausted_total", budget_exhaustions()),
         ("axiam_reactor_overload_total", overloads()),
         (
             "axiam_reactor_transport_failure_total",
@@ -186,7 +183,10 @@ mod tests {
             (DispatchFailure::Timeout, timeouts as fn() -> u64),
             (DispatchFailure::BudgetExhausted, budget_exhaustions),
             (DispatchFailure::Overloaded, overloads),
-            (DispatchFailure::Transport("down".into()), transport_failures),
+            (
+                DispatchFailure::Transport("down".into()),
+                transport_failures,
+            ),
             (
                 DispatchFailure::Rejected(ReplyRejection::BadSignature),
                 rejections,

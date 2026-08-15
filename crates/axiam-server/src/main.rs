@@ -623,9 +623,7 @@ async fn main() -> std::io::Result<()> {
             // failure policy, which is audited and counted. A deployment with
             // no registered reactor is unaffected; see the warning below.
             axiam_amqp::UnavailableReactorTransport,
-            axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(
-                pool.handle_for_repo(),
-            )),
+            axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(pool.handle_for_repo())),
             amqp_signing_key.clone(),
             axiam_amqp::ReactorGateConfig::default(),
         ));

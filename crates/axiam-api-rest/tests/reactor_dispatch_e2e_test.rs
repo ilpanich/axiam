@@ -360,10 +360,10 @@ async fn audit_actions(env: &Env) -> Vec<String> {
     )
     .await
     .expect("read the audit trail")
-        .items
-        .into_iter()
-        .map(|e| e.action)
-        .collect()
+    .items
+    .into_iter()
+    .map(|e| e.action)
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +511,11 @@ async fn a_silent_fail_open_interceptor_is_invisible_in_the_outcome_and_visible_
     .await;
 
     let resp = test::call_service(&app, login_request(&env).to_request()).await;
-    assert_eq!(resp.status().as_u16(), 200, "fail_open lets the login through");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "fail_open lets the login through"
+    );
     assert!(
         audit_actions(&env)
             .await
@@ -701,10 +705,7 @@ async fn token_pre_issue_enriches_a_client_credentials_token_over_http() {
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
-            .uri(&format!(
-                "/oauth2/token?tenant_id={}",
-                env.tenant_id
-            ))
+            .uri(&format!("/oauth2/token?tenant_id={}", env.tenant_id))
             .peer_addr(TEST_PEER.parse::<std::net::SocketAddr>().unwrap())
             .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -726,10 +727,7 @@ async fn token_pre_issue_enriches_a_client_credentials_token_over_http() {
         .0;
     let ext = claims.ext.expect("the reactor's claims are present");
     assert_eq!(ext["department"], "engineering");
-    assert_eq!(
-        claims.sub, client_id,
-        "and nothing outside `ext.` moved"
-    );
+    assert_eq!(claims.sub, client_id, "and nothing outside `ext.` moved");
 }
 
 // ---------------------------------------------------------------------------
@@ -816,7 +814,11 @@ async fn user_pre_update_is_consulted_and_can_veto_over_http() {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status().as_u16(), 200, "an allowing reactor is transparent");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "an allowing reactor is transparent"
+    );
     assert_eq!(reactor.calls()[0].0, "user.pre_update");
 
     // Now the same reactor refuses.

@@ -406,7 +406,8 @@ where
             metrics::record_failure(&failure);
             self.audit_failure(tenant_id, event, reactor.id, &failure)
                 .await;
-            if let ReactorOutcome::Deny { reason } = resolve_failure(reactor.failure_policy, &failure)
+            if let ReactorOutcome::Deny { reason } =
+                resolve_failure(reactor.failure_policy, &failure)
             {
                 outcome = ReactorOutcome::Deny { reason };
             }
@@ -943,7 +944,11 @@ mod tests {
         );
 
         let outcome = g
-            .intercept(tenant, "login.post_auth", serde_json::json!({"sub":"alice"}))
+            .intercept(
+                tenant,
+                "login.post_auth",
+                serde_json::json!({"sub":"alice"}),
+            )
             .await;
 
         assert_eq!(
@@ -1072,7 +1077,10 @@ mod tests {
             .intercept(tenant, "token.pre_issue", serde_json::json!({}))
             .await;
 
-        assert!(!outcome.permits(), "a reactor must not be able to set `sub`");
+        assert!(
+            !outcome.permits(),
+            "a reactor must not be able to set `sub`"
+        );
         let failure = audit
             .entries()
             .into_iter()
@@ -1170,15 +1178,12 @@ mod tests {
         // `>` rather than `== before + 1`: the counter is process-wide and the
         // other cap tests run concurrently in this binary.
         assert!(metrics::overloads() > before);
-        assert!(
-            audit
-                .entries()
-                .iter()
-                .any(|e| e.action == AUDIT_ACTION_FAILURE
-                    && e.metadata
-                        .as_ref()
-                        .is_some_and(|m| m.to_string().contains("overloaded")))
-        );
+        assert!(audit.entries().iter().any(|e| {
+            e.action == AUDIT_ACTION_FAILURE
+                && e.metadata
+                    .as_ref()
+                    .is_some_and(|m| m.to_string().contains("overloaded"))
+        }));
         assert_eq!(first.await.unwrap(), ReactorOutcome::Allow);
     }
 

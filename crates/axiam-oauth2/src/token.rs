@@ -10,10 +10,10 @@ use axiam_auth::token::{
     issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
 use axiam_core::error::AxiamError;
+use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
 };
-use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
 use axiam_core::models::uma::RptPermission;
 use axiam_core::models::user::UserStatus;
@@ -413,7 +413,9 @@ where
             .await
         {
             ReactorOutcome::Allow => Ok(None),
-            ReactorOutcome::Mutate { patch } => Ok(axiam_auth::token::ext_claims_from_patch(&patch)),
+            ReactorOutcome::Mutate { patch } => {
+                Ok(axiam_auth::token::ext_claims_from_patch(&patch))
+            }
             ReactorOutcome::Deny { reason } => {
                 tracing::info!(
                     target: "axiam::reactor",

@@ -95,8 +95,8 @@ fn apply_user_patch(
                     );
                     continue;
                 };
-                let object = metadata
-                    .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+                let object =
+                    metadata.get_or_insert_with(|| serde_json::Value::Object(Default::default()));
                 if !object.is_object() {
                     // The request supplied a non-object `metadata`. The patch
                     // namespace is defined in terms of object keys, so replace
@@ -182,12 +182,7 @@ pub async fn user_pre_update(
         ReactorOutcome::Deny { reason } => Err(veto("users:update", reason)),
         ReactorOutcome::Mutate { patch } => {
             let mut metadata = input.metadata.clone();
-            apply_user_patch(
-                &patch,
-                &mut input.username,
-                &mut input.email,
-                &mut metadata,
-            );
+            apply_user_patch(&patch, &mut input.username, &mut input.email, &mut metadata);
             input.metadata = metadata;
             Ok(())
         }
@@ -233,9 +228,8 @@ mod tests {
             _tenant_id: Uuid,
             _event: &'static str,
             _payload: serde_json::Value,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>,
-        > {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>>
+        {
             let outcome = self.0.clone();
             Box::pin(std::future::ready(outcome))
         }
@@ -259,7 +253,10 @@ mod tests {
             tenant_id: Uuid::new_v4(),
             username: "alice".into(),
             email: "alice@example.com".into(),
-            password: "s3cret-not-sent-to-a-reactor".into(),
+            // Generated, never a literal: a username/password pair sitting in
+            // source trips secret scanners, and this test only cares that the
+            // value survives untouched — not what it is.
+            password: format!("pw-{}", Uuid::new_v4()),
             metadata: None,
         }
     }
@@ -293,6 +290,7 @@ mod tests {
     #[tokio::test]
     async fn a_create_mutation_normalizes_the_allow_listed_fields() {
         let mut input = create_input();
+        let password_before = input.password.clone();
         user_pre_create(
             &gate(patch(&[
                 ("username", "alice.normalized"),
@@ -312,7 +310,7 @@ mod tests {
         assert_eq!(metadata["source"], "hr-sync");
         assert_eq!(metadata["cost_center"], "42");
         assert_eq!(
-            input.password, "s3cret-not-sent-to-a-reactor",
+            input.password, password_before,
             "the password is not a mutable field and must be untouched"
         );
     }

@@ -2763,5 +2763,9 @@ async fn the_refresh_grant_is_hooked_as_well() {
         .expect_err("a veto must refuse the refresh");
 
     assert_eq!(err.error_code(), "invalid_grant");
-    assert_eq!(seen.lock().unwrap().len(), 1, "the refresh path consulted the gate");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the refresh path consulted the gate"
+    );
 }

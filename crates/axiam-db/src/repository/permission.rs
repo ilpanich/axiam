@@ -427,22 +427,26 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         // role.delete. Without this guard a caller supplying a foreign-tenant
         // permission id could strip another tenant's grants edges. `.check()`
         // surfaces per-statement failures instead of swallowing them as Ok.
+        // SEC-104 — see `helpers::delete_existence_guard`.
+        let guard = crate::helpers::delete_existence_guard("permission");
         let query = format!(
             "BEGIN TRANSACTION; \
+             {guard} \
              DELETE grants WHERE out = permission:`{id_str}` AND out.tenant_id = $tenant_id; \
              DELETE type::record('permission', $id) WHERE tenant_id = $tenant_id; \
              COMMIT TRANSACTION"
         );
 
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(query)
-            .bind(("id", id_str))
+            .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(DbError::from)?;
+
+        crate::helpers::map_delete_errors(result.take_errors(), "permission", &id_str)?;
 
         Ok(())
     }

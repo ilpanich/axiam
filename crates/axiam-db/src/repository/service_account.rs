@@ -323,22 +323,26 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         // service-account id could strip another tenant's role bindings.
         // `.check()` surfaces per-statement failures instead of swallowing
         // them as Ok.
+        // SEC-104 — see `helpers::delete_existence_guard`.
+        let guard = crate::helpers::delete_existence_guard("service_account");
         let query = format!(
             "BEGIN TRANSACTION; \
+             {guard} \
              DELETE has_role WHERE in = service_account:`{id_str}` AND in.tenant_id = $tenant_id; \
              DELETE type::record('service_account', $id) WHERE tenant_id = $tenant_id; \
              COMMIT TRANSACTION"
         );
 
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(query)
-            .bind(("id", id_str))
+            .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(DbError::from)?;
+
+        crate::helpers::map_delete_errors(result.take_errors(), "service_account", &id_str)?;
 
         Ok(())
     }

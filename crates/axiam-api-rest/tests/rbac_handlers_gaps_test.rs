@@ -223,11 +223,22 @@ async fn update_permission_not_found_returns_404() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
-/// Unlike `get`/`update`, `delete` on a nonexistent permission is idempotent
-/// (204) rather than 404 — this locks in that actual repository behavior
-/// (deleting a row that's already absent is a no-op success, not an error).
+/// SEC-104: `delete` on a nonexistent permission answers **404**, matching
+/// `get`/`update` and matching `user`/`webhook`, which already did.
+///
+/// This test previously locked in a 204 and called it idempotence. It was not
+/// idempotence — the tenant predicate on the `DELETE` was correct and always
+/// had been, so no other tenant's row was ever touched; what the 204 meant was
+/// that the statement's result was never inspected. An administrator who
+/// deleted the wrong id was told it worked. `group`, `role`, `resource`,
+/// `permission` and `service_account` now run an existence guard as the first
+/// statement of the same transaction and abort with `NotFound`.
+///
+/// The answer stays uniform across "foreign tenant" and "does not exist", so
+/// this is still not an existence oracle — see
+/// `axiam-db/tests/sec104_delete_reports_not_found_test.rs`.
 #[actix_rt::test]
-async fn delete_permission_not_found_is_idempotent_204() {
+async fn delete_permission_not_found_returns_404() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
@@ -240,7 +251,7 @@ async fn delete_permission_not_found_is_idempotent_204() {
         .insert_header((h, v))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 204);
+    assert_eq!(resp.status().as_u16(), 404);
 }
 
 #[actix_rt::test]

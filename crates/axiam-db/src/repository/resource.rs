@@ -523,8 +523,13 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         // DELETE resource=6, COMMIT=7. delete() returns Ok(()) — no row
         // data to extract, .check() alone proves the transaction
         // committed (or surfaces the child-guard THROW).
+        // SEC-104: the existence guard runs before the child-count guard, so a
+        // delete against a foreign or unknown id answers `NotFound` rather
+        // than "no children, deleted nothing, 204".
+        let guard = crate::helpers::delete_existence_guard("resource");
         let query = format!(
             "BEGIN TRANSACTION; \
+             {guard} \
              LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:`{id_str}`); \
              IF array::len($children) > 0 {{ \
                  THROW 'cannot delete resource with children'; \
@@ -538,6 +543,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
              COMMIT TRANSACTION"
         );
 
+        let id_str_for_error = id_str.clone();
         let mut result = self
             .db
             .current()
@@ -568,6 +574,16 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                 return Err(AxiamError::Validation {
                     message: "cannot delete resource with children".into(),
                 });
+            }
+            // SEC-104: checked after the child guard, because a resource that
+            // both exists and has children must keep answering with the more
+            // specific refusal.
+            if combined.contains(crate::helpers::DELETE_TARGET_MISSING) {
+                return Err(DbError::NotFound {
+                    entity: "resource".into(),
+                    id: id_str_for_error,
+                }
+                .into());
             }
             return Err(DbError::Migration(combined).into());
         }

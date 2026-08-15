@@ -269,6 +269,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   who logs out keeps passing gRPC authorization until their access token
   expires (up to 15 minutes). This was always true; it is now written down,
   and `AXIAM__GRPC__STRICT_REVOCATION=true` changes it.
+- **gRPC `CheckAccessRequest.subject_id` is now optional**, the way the REST
+  check body's has always been: an **empty** value means "the subject in the
+  verified token" instead of being refused as a malformed UUID. A non-empty
+  value must still equal the token's subject — gRPC has no `authz:check_as`
+  cross-subject form. Empty carries the meaning rather than the field becoming
+  proto3 `optional`, because that is a cardinality change `buf breaking`
+  refuses. Purely a widening: every request that worked before still works.
+
+### Deprecated
+
+- **gRPC `CheckAccessResponse.deny_reason` — superseded by `reason`, removed at
+  2.0.** The REST decision body has always called the human-readable reason
+  `reason`; the gRPC one called the identical string `deny_reason`, so every SDK
+  speaking both transports reconciled the two names itself, and not all of them
+  reconciled them the same way (SDK-Q10). `CheckAccessResponse` now carries
+  **`reason` (field 4)** with explicit presence — absent on an allow, present on
+  every refusal, exactly the REST shape — and `deny_reason` is marked
+  `[deprecated = true]` while continuing to carry the identical string.
+
+  Nothing breaks today: both fields ship until **AXIAM 2.0**, where
+  `deny_reason` is removed. Renaming it now would have broken every deployed
+  gRPC client on the wire for no behavioural gain. Clients should read `reason`
+  and fall back to `deny_reason` only when `reason` is absent *on a refusal*,
+  which means the server predates this change. The rule, and the SDK-side
+  obligations that go with it, are in `sdks/CONTRACT.md` §11.2 rule 9
+  ("Amended 2026-08 (SDK-Q10)", contract 1.19).
 
 ### Security
 

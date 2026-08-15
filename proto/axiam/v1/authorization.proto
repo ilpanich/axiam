@@ -27,6 +27,19 @@ message CheckAccessRequest {
   // Tenant UUID — all checks are tenant-scoped.
   string tenant_id = 1;
   // Subject (user) UUID.
+  //
+  // SDK-Q10: optional in the same sense REST's `subject_id` is optional — an
+  // **empty** value means "the subject carried by the verified token", exactly
+  // as an absent `subject_id` does on `POST /api/v1/authz/check`. A non-empty
+  // value MUST equal the token's subject; a mismatch is refused (SEC-003).
+  // gRPC has no `authz:check_as` cross-subject form: over this transport the
+  // field can only ever restate the caller, so omitting it is now allowed
+  // rather than an INVALID_ARGUMENT.
+  //
+  // It stays a plain `string` rather than becoming a proto3 `optional`:
+  // switching an existing field to explicit presence is a cardinality change
+  // `buf breaking` rejects (verified against main), so — as in CONTRACT §10.3 —
+  // the empty string carries the meaning proto3 cannot express as absence.
   string subject_id = 2;
   // Action name (e.g. "read", "write", "delete").
   string action = 3;
@@ -40,7 +53,19 @@ message CheckAccessResponse {
   // Whether the access is allowed.
   bool allowed = 1;
   // Reason for denial (empty when allowed).
-  string deny_reason = 2;
+  //
+  // DEPRECATED (SDK-Q10, contract 1.19). Superseded by `reason` (field 4),
+  // which is what the REST decision body has always called this. Both fields
+  // ship with byte-identical content until AXIAM **2.0**, where this one is
+  // removed; new code MUST read `reason` and MUST NOT depend on this field
+  // surviving. Deprecating rather than renaming keeps every gRPC client built
+  // against the current schema working, which a rename would have broken on
+  // the wire for exactly no behavioural gain.
+  //
+  // When 2.0 removes it, field number 2 and the name `deny_reason` must be
+  // `reserved` rather than recycled — a future field reusing tag 2 would be
+  // silently misread as a deny reason by every 1.x client still on the wire.
+  string deny_reason = 2 [deprecated = true];
   // B1 (deny-override): machine-readable decision reason. One of:
   //   "allowed"        — an allow grant matched and no deny did
   //   "no_grant"       — nothing matched; default deny
@@ -52,6 +77,19 @@ message CheckAccessResponse {
   // has already decided. Field 3 is additive — proto3 clients built against
   // the previous schema ignore it.
   string reason_code = 3;
+  // SDK-Q10: the human-readable reason, under the name REST already uses.
+  //
+  // This is the canonical field; `deny_reason` (field 2) is the deprecated
+  // spelling of the same string. Presence is explicit so the gRPC shape
+  // matches the REST one exactly: REST omits `reason` on an allow, and so does
+  // this — absent on `allowed = true`, present on every refusal. Explicit
+  // presence also lets a client tell "this server does not send `reason` yet"
+  // (absent on a refusal — a pre-SDK-Q10 server, fall back to `deny_reason`)
+  // apart from "allowed, so there is nothing to say".
+  //
+  // Field 4 is additive, so clients built against the previous schema ignore it
+  // and keep reading `deny_reason` until 2.0.
+  optional string reason = 4;
 }
 
 message BatchCheckAccessRequest {

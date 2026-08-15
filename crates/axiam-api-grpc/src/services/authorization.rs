@@ -54,7 +54,48 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
         .map_err(|_| Status::invalid_argument(format!("invalid {field}")))
 }
 
+/// Resolve the request's subject against the verified token (SEC-003).
+///
+/// SDK-Q10: an **empty** `subject_id` means "the token's subject", mirroring
+/// REST, where the field is `Option<Uuid>` and `None` checks the caller
+/// (`crates/axiam-api-rest/src/handlers/authz_check.rs`). Proto3 cannot tell an
+/// absent string from an empty one and `buf breaking` refuses the cardinality
+/// change that would give the field explicit presence, so empty carries the
+/// meaning. A non-empty value must still parse and must still equal the token's
+/// subject — the cross-validation this transport has always done.
+fn resolve_subject(body_subject_id: &str, claims_subject_id: Uuid) -> Result<Uuid, Status> {
+    if body_subject_id.is_empty() {
+        return Ok(claims_subject_id);
+    }
+    let body_subject_id = parse_uuid(body_subject_id, "subject_id")?;
+    if body_subject_id != claims_subject_id {
+        return Err(Status::permission_denied(
+            "subject_id mismatch: body does not match token claims",
+        ));
+    }
+    Ok(claims_subject_id)
+}
+
+// `deny_reason` is deprecated in the proto (SDK-Q10) and prost propagates that
+// as `#[deprecated]`, so populating it warns — and `-D warnings` in CI would
+// stop the build. It is populated deliberately: the deprecation promises the
+// field keeps carrying the same string until 2.0. `expect` rather than `allow`
+// so that removing the field at 2.0 turns this into an *unfulfilled
+// expectation* error pointing at the exact line to delete, instead of a silent
+// leftover.
+#[expect(
+    deprecated,
+    reason = "SDK-Q10: deny_reason is populated on purpose until its 2.0 removal"
+)]
 fn to_check_response(decision: AccessDecision) -> CheckAccessResponse {
+    // SDK-Q10: `reason` is the canonical field and matches REST's shape —
+    // omitted on an allow, present on every refusal. `deny_reason` carries the
+    // identical string and is deprecated; it ships until 2.0 so existing gRPC
+    // clients keep working, which is why it is still populated here.
+    let reason = match &decision {
+        AccessDecision::Allow => None,
+        _ => Some(decision.reason().to_string()),
+    };
     CheckAccessResponse {
         allowed: decision.is_allowed(),
         deny_reason: decision.reason().to_string(),
@@ -62,6 +103,7 @@ fn to_check_response(decision: AccessDecision) -> CheckAccessResponse {
         // A client reading only `allowed` is unaffected; one that reads this
         // can tell "ask an admin" apart from "an admin already decided".
         reason_code: decision.reason_code().to_string(),
+        reason,
     }
 }
 
@@ -93,22 +135,20 @@ where
 
         // Cross-validate body fields against verified claims (reject on mismatch).
         let body_tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
-        let body_subject_id = parse_uuid(&req.subject_id, "subject_id")?;
 
         if body_tenant_id != claims_tenant_id {
             return Err(Status::permission_denied(
                 "tenant_id mismatch: body does not match token claims",
             ));
         }
-        if body_subject_id != claims_subject_id {
-            return Err(Status::permission_denied(
-                "subject_id mismatch: body does not match token claims",
-            ));
-        }
+        // SDK-Q10: empty means "the token's subject" (see `resolve_subject`).
+        // Checked after the tenant so a request wrong on both keeps reporting
+        // the tenant mismatch first, as it did before.
+        let subject_id = resolve_subject(&req.subject_id, claims_subject_id)?;
 
         let access_req = AccessRequest {
             tenant_id: claims_tenant_id,
-            subject_id: claims_subject_id,
+            subject_id,
             action: req.action,
             resource_id: parse_uuid(&req.resource_id, "resource_id")?,
             scope: req.scope,
@@ -146,22 +186,19 @@ where
         let mut access_requests = Vec::with_capacity(req.requests.len());
         for check_req in req.requests {
             let body_tenant_id = parse_uuid(&check_req.tenant_id, "tenant_id")?;
-            let body_subject_id = parse_uuid(&check_req.subject_id, "subject_id")?;
 
             if body_tenant_id != claims_tenant_id {
                 return Err(Status::permission_denied(
                     "tenant_id mismatch: body does not match token claims",
                 ));
             }
-            if body_subject_id != claims_subject_id {
-                return Err(Status::permission_denied(
-                    "subject_id mismatch: body does not match token claims",
-                ));
-            }
+            // SDK-Q10: per item, empty means "the token's subject". Checked
+            // after the tenant, as in the single-check path.
+            let subject_id = resolve_subject(&check_req.subject_id, claims_subject_id)?;
 
             access_requests.push(AccessRequest {
                 tenant_id: claims_tenant_id,
-                subject_id: claims_subject_id,
+                subject_id,
                 action: check_req.action,
                 resource_id: parse_uuid(&check_req.resource_id, "resource_id")?,
                 scope: check_req.scope,
@@ -431,9 +468,78 @@ mod tests {
                 "result[{i}] allowed mismatch between concurrent batch and sequential per-item check_access"
             );
             assert_eq!(
-                batch.deny_reason, expected.deny_reason,
-                "result[{i}] deny_reason mismatch between concurrent batch and sequential per-item check_access"
+                batch.reason, expected.reason,
+                "result[{i}] reason mismatch between concurrent batch and sequential per-item check_access"
             );
         }
+    }
+
+    // -- SDK-Q10 ---------------------------------------------------------
+
+    /// `reason` mirrors the REST decision body: absent on an allow, present on
+    /// every refusal — and carries exactly what the deprecated `deny_reason`
+    /// carries, which is the compatibility promise that lets `deny_reason`
+    /// survive until 2.0.
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "SDK-Q10: this test exists to assert the deprecated field still matches"
+    )]
+    fn reason_supersedes_deny_reason_and_matches_rest_shape() {
+        let allow = to_check_response(AccessDecision::Allow);
+        assert!(allow.allowed);
+        assert_eq!(
+            allow.reason, None,
+            "REST omits `reason` on an allow; gRPC must too"
+        );
+        assert_eq!(allow.deny_reason, "", "allow carries no deny reason");
+        assert_eq!(allow.reason_code, "allowed");
+
+        for decision in [
+            AccessDecision::Deny("no grant for read".into()),
+            AccessDecision::DeniedByRule("explicit deny on read".into()),
+        ] {
+            let expected_reason = decision.reason().to_string();
+            let resp = to_check_response(decision);
+            assert!(!resp.allowed);
+            assert_eq!(
+                resp.reason,
+                Some(expected_reason.clone()),
+                "`reason` is present on every refusal"
+            );
+            assert_eq!(
+                resp.deny_reason, expected_reason,
+                "the deprecated field keeps carrying the identical string until 2.0"
+            );
+        }
+    }
+
+    /// An empty `subject_id` means "the token's subject" (REST parity); a
+    /// non-empty one must still parse and still equal the token's subject.
+    #[test]
+    fn resolve_subject_treats_empty_as_the_tokens_subject() {
+        let claims_subject = Uuid::new_v4();
+
+        assert_eq!(
+            resolve_subject("", claims_subject).unwrap(),
+            claims_subject,
+            "omitted subject_id checks the caller, as REST's `None` does"
+        );
+        assert_eq!(
+            resolve_subject(&claims_subject.to_string(), claims_subject).unwrap(),
+            claims_subject,
+            "an explicit, matching subject_id is unchanged"
+        );
+
+        let other = Uuid::new_v4();
+        let err = resolve_subject(&other.to_string(), claims_subject).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = resolve_subject("not-a-uuid", claims_subject).unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "a malformed subject_id is still a bad request, not an empty one"
+        );
     }
 }

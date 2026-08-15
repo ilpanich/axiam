@@ -348,9 +348,115 @@ async fn check_access_allows_when_role_grants_permission() {
 
     assert!(
         resp.allowed,
-        "expected allowed=true, got deny: {}",
-        resp.deny_reason
+        "expected allowed=true, got deny: {:?}",
+        resp.reason
     );
+}
+
+/// SDK-Q10 — an omitted (empty) `subject_id` checks the token's subject, the
+/// way REST's absent `subject_id` does, and returns the same decision as
+/// spelling the subject out.
+#[tokio::test]
+async fn check_access_accepts_omitted_subject_id() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-omitted-subject").await;
+    grant_user_role_permission(
+        &db,
+        tenant_id,
+        user_id,
+        "viewer",
+        false,
+        "read",
+        Some(resource_id),
+    )
+    .await;
+
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
+
+    let omitted = client
+        .check_access(CheckAccessRequest {
+            tenant_id: tenant_id.to_string(),
+            // Left empty: proto3 cannot express absence for a plain string, so
+            // empty is what a client that does not set the field sends.
+            subject_id: String::new(),
+            action: "read".into(),
+            resource_id: resource_id.to_string(),
+            scope: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(
+        omitted.allowed,
+        "an omitted subject_id must check the caller, not fail: {:?}",
+        omitted.reason
+    );
+
+    let spelled_out = client
+        .check_access(CheckAccessRequest {
+            tenant_id: tenant_id.to_string(),
+            subject_id: user_id.to_string(),
+            action: "read".into(),
+            resource_id: resource_id.to_string(),
+            scope: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        omitted.allowed, spelled_out.allowed,
+        "omitting subject_id must not change the decision"
+    );
+    assert_eq!(omitted.reason_code, spelled_out.reason_code);
+}
+
+/// SDK-Q10 — a refusal carries the human-readable reason under `reason` (the
+/// name REST uses) and, until 2.0, the identical string under the deprecated
+/// `deny_reason`.
+#[tokio::test]
+#[expect(
+    deprecated,
+    reason = "SDK-Q10: asserting the deprecated field still mirrors `reason` until 2.0"
+)]
+async fn check_access_deny_carries_reason_and_deprecated_deny_reason() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-reason-parity").await;
+
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
+
+    let resp = client
+        .check_access(CheckAccessRequest {
+            tenant_id: tenant_id.to_string(),
+            subject_id: user_id.to_string(),
+            action: "read".into(),
+            resource_id: resource_id.to_string(),
+            scope: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.allowed, "expected a refusal");
+    let reason = resp
+        .reason
+        .as_deref()
+        .expect("`reason` is present on every refusal");
+    assert!(!reason.is_empty(), "a refusal states why");
+    assert_eq!(
+        resp.deny_reason, reason,
+        "the deprecated field must carry the identical string until 2.0"
+    );
+    assert_eq!(resp.reason_code, "no_grant");
 }
 
 /// T19.1 — check_access returns allowed=false when no role assigned.

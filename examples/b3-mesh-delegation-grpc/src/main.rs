@@ -450,9 +450,11 @@ async fn main() -> anyhow::Result<()> {
 
     println!("[8/8] AuthorizationService/CheckAccess");
     let response = grpc.check_access(request).await?.into_inner();
+    // SDK-Q10: read `reason`, not the deprecated `deny_reason` — the two carry
+    // the identical string until `deny_reason` is removed at 2.0.
     println!(
-        "      allowed={} reason_code={:?} deny_reason={:?}",
-        response.allowed, response.reason_code, response.deny_reason
+        "      allowed={} reason_code={:?} reason={:?}",
+        response.allowed, response.reason_code, response.reason
     );
 
     if !response.allowed || response.reason_code != "allowed" {

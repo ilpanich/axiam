@@ -45,7 +45,6 @@ interface EditFormProps {
   onEmailChange: (v: string) => void;
   onDisplayNameChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
-  error?: string;
 }
 
 function EditUserForm({
@@ -55,7 +54,6 @@ function EditUserForm({
   onEmailChange,
   onDisplayNameChange,
   onIsActiveChange,
-  error,
 }: EditFormProps) {
   return (
     <>
@@ -84,7 +82,6 @@ function EditUserForm({
         checked={isActive}
         onChange={onIsActiveChange}
       />
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -381,6 +378,8 @@ export function UserDetailPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="user-detail-edit-error"
       >
         <EditUserForm
           email={editEmail}
@@ -389,7 +388,6 @@ export function UserDetailPage() {
           onEmailChange={setEditEmail}
           onDisplayNameChange={setEditDisplayName}
           onIsActiveChange={setEditIsActive}
-          error={editError}
         />
       </FormDialog>
 
@@ -427,6 +425,8 @@ export function UserDetailPage() {
         onSubmit={handleAssignRoleSubmit}
         isLoading={assignRoleMutation.isPending}
         submitLabel="Assign"
+        error={assignError}
+        errorId="user-assign-role-error"
       >
         <div className="space-y-2">
           <Label htmlFor="assign-role-select">Role</Label>
@@ -457,9 +457,6 @@ export function UserDetailPage() {
             </select>
           )}
         </div>
-        {assignError && (
-          <p className="text-sm text-destructive">{assignError}</p>
-        )}
       </FormDialog>
     </div>
   );

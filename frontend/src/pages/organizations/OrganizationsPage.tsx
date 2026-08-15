@@ -27,7 +27,6 @@ interface OrgFormFieldsProps {
   onNameChange: (v: string) => void;
   onSlugChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
 }
 
 function OrgFormFields({
@@ -37,7 +36,6 @@ function OrgFormFields({
   onNameChange,
   onSlugChange,
   onDescriptionChange,
-  error,
 }: OrgFormFieldsProps) {
   return (
     <>
@@ -76,7 +74,6 @@ function OrgFormFields({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -310,6 +307,8 @@ export function OrganizationsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="organization-create-error"
       >
         <OrgFormFields
           name={createName}
@@ -318,7 +317,6 @@ export function OrganizationsPage() {
           onNameChange={handleCreateNameChange}
           onSlugChange={setCreateSlug}
           onDescriptionChange={setCreateDescription}
-          error={createError}
         />
       </FormDialog>
 
@@ -330,6 +328,8 @@ export function OrganizationsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="organization-edit-error"
       >
         <OrgFormFields
           name={editName}
@@ -341,7 +341,6 @@ export function OrganizationsPage() {
           }}
           onSlugChange={setEditSlug}
           onDescriptionChange={setEditDescription}
-          error={editError}
         />
       </FormDialog>
 

@@ -11,6 +11,17 @@ interface FormDialogProps {
   onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
   isLoading?: boolean;
   submitLabel?: string;
+  /**
+   * Form-level error message (e.g. a failed mutation). Mirrors the
+   * `error`/`aria-describedby` convention `Input` and `Textarea` use: when
+   * set, it's rendered as an alert and wired to the dialog via
+   * `aria-describedby` so assistive tech reliably surfaces it.
+   */
+  error?: string;
+  /**
+   * Explicit id for the rendered error node. Defaults to `form-dialog-error`.
+   */
+  errorId?: string;
 }
 
 export function FormDialog({
@@ -21,6 +32,8 @@ export function FormDialog({
   onSubmit,
   isLoading = false,
   submitLabel = "Save",
+  error,
+  errorId = "form-dialog-error",
 }: FormDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -78,6 +91,8 @@ export function FormDialog({
 
   if (!open) return null;
 
+  const resolvedErrorId = error ? errorId : undefined;
+
   return (
     <div
       ref={dialogRef}
@@ -85,6 +100,7 @@ export function FormDialog({
       aria-modal="true"
       role="dialog"
       aria-labelledby="form-dialog-title"
+      aria-describedby={resolvedErrorId}
     >
       {/* Backdrop */}
       <div
@@ -113,6 +129,16 @@ export function FormDialog({
             <X size={18} />
           </button>
         </div>
+
+        {error ? (
+          <p
+            id={resolvedErrorId}
+            role="alert"
+            className="mt-3 text-sm text-destructive"
+          >
+            {error}
+          </p>
+        ) : null}
 
         {/* Body + Footer */}
         {/* Body + Footer

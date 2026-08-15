@@ -117,7 +117,6 @@ interface ConfigFieldsProps {
   onIdpSigningCertPemChange: (v: string) => void;
   onAllowedAlgorithmsChange: (v: string) => void;
   onAttributeMapChange: (v: string) => void;
-  error?: string;
   idPrefix: string;
   isEditMode?: boolean;
 }
@@ -139,7 +138,6 @@ function ConfigFields({
   onIdpSigningCertPemChange,
   onAllowedAlgorithmsChange,
   onAttributeMapChange,
-  error,
   idPrefix,
   isEditMode = false,
 }: ConfigFieldsProps) {
@@ -299,8 +297,6 @@ function ConfigFields({
           Optional JSON object mapping IdP claims to AXIAM attributes.
         </p>
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -703,6 +699,8 @@ export function FederationPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createForm.error}
+        errorId="federation-create-error"
       >
         <ConfigFields
           provider={createForm.provider}
@@ -721,7 +719,6 @@ export function FederationPage() {
           onIdpSigningCertPemChange={createForm.setIdpSigningCertPem}
           onAllowedAlgorithmsChange={createForm.setAllowedAlgorithms}
           onAttributeMapChange={createForm.setAttributeMap}
-          error={createForm.error}
           idPrefix="create"
         />
       </FormDialog>
@@ -734,6 +731,8 @@ export function FederationPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editForm.error}
+        errorId="federation-edit-error"
       >
         <ConfigFields
           provider={editForm.provider}
@@ -752,7 +751,6 @@ export function FederationPage() {
           onIdpSigningCertPemChange={editForm.setIdpSigningCertPem}
           onAllowedAlgorithmsChange={editForm.setAllowedAlgorithms}
           onAttributeMapChange={editForm.setAttributeMap}
-          error={editForm.error}
           idPrefix="edit"
           isEditMode={true}
         />

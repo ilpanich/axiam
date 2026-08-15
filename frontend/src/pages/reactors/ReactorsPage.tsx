@@ -210,7 +210,6 @@ interface ReactorFieldsProps {
   onTimeoutMsChange: (v: string) => void;
   onFailurePolicyChange: (v: FailurePolicy | "") => void;
   onEnabledChange: (v: boolean) => void;
-  error?: string;
 }
 
 function ReactorFields({
@@ -232,7 +231,6 @@ function ReactorFields({
   onTimeoutMsChange,
   onFailurePolicyChange,
   onEnabledChange,
-  error,
 }: ReactorFieldsProps) {
   const inheritedPolicy = strictestDefaultPolicy(events, registry);
 
@@ -366,8 +364,6 @@ function ReactorFields({
         checked={enabled}
         onChange={onEnabledChange}
       />
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -797,6 +793,8 @@ export function ReactorsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="reactor-create-error"
       >
         <ReactorFields
           idPrefix="rc-create"
@@ -817,7 +815,6 @@ export function ReactorsPage() {
           onTimeoutMsChange={setCreateTimeout}
           onFailurePolicyChange={setCreatePolicy}
           onEnabledChange={setCreateEnabled}
-          error={createError}
         />
       </FormDialog>
 
@@ -829,6 +826,8 @@ export function ReactorsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="reactor-edit-error"
       >
         <ReactorFields
           idPrefix="rc-edit"
@@ -849,7 +848,6 @@ export function ReactorsPage() {
           onTimeoutMsChange={setEditTimeout}
           onFailurePolicyChange={setEditPolicy}
           onEnabledChange={setEditEnabled}
-          error={editError}
         />
       </FormDialog>
 

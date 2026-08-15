@@ -45,7 +45,6 @@ interface ResourceFormFieldsProps {
   onCustomTypeChange: (v: string) => void;
   onParentIdChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
   idPrefix: string;
   allResources: Resource[];
   excludeId?: string;
@@ -62,7 +61,6 @@ function ResourceFormFields({
   onCustomTypeChange,
   onParentIdChange,
   onDescriptionChange,
-  error,
   idPrefix,
   allResources,
   excludeId,
@@ -164,8 +162,6 @@ function ResourceFormFields({
           placeholder="Optional description…"
         />
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -521,6 +517,8 @@ export function ResourcesPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="resource-create-error"
       >
         <ResourceFormFields
           name={createName}
@@ -533,7 +531,6 @@ export function ResourcesPage() {
           onCustomTypeChange={setCreateCustomType}
           onParentIdChange={setCreateParentId}
           onDescriptionChange={setCreateDescription}
-          error={createError}
           idPrefix="create-res"
           allResources={resources}
         />
@@ -547,6 +544,8 @@ export function ResourcesPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="resource-edit-error"
       >
         <ResourceFormFields
           name={editName}
@@ -559,7 +558,6 @@ export function ResourcesPage() {
           onCustomTypeChange={setEditCustomType}
           onParentIdChange={setEditParentId}
           onDescriptionChange={setEditDescription}
-          error={editError}
           idPrefix="edit-res"
           allResources={resources}
           excludeId={editResource?.id}

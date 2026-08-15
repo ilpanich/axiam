@@ -105,7 +105,6 @@ interface ClientFormFieldsProps {
   onGrantTypesChange: (v: string[]) => void;
   onRedirectUrisChange: (v: string) => void;
   onScopesChange: (v: string[]) => void;
-  error?: string;
   idPrefix: string;
 }
 
@@ -118,7 +117,6 @@ function ClientFormFields({
   onGrantTypesChange,
   onRedirectUrisChange,
   onScopesChange,
-  error,
   idPrefix,
 }: ClientFormFieldsProps) {
   return (
@@ -164,8 +162,6 @@ function ClientFormFields({
         selected={scopes}
         onChange={onScopesChange}
       />
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -447,6 +443,8 @@ export function OAuth2ClientsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createForm.error}
+        errorId="oauth2-client-create-error"
       >
         <ClientFormFields
           name={createForm.name}
@@ -457,7 +455,6 @@ export function OAuth2ClientsPage() {
           onGrantTypesChange={createForm.setGrantTypes}
           onRedirectUrisChange={createForm.setRedirectUris}
           onScopesChange={createForm.setScopes}
-          error={createForm.error}
           idPrefix="create"
         />
       </FormDialog>
@@ -470,6 +467,8 @@ export function OAuth2ClientsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editForm.error}
+        errorId="oauth2-client-edit-error"
       >
         <ClientFormFields
           name={editForm.name}
@@ -480,7 +479,6 @@ export function OAuth2ClientsPage() {
           onGrantTypesChange={editForm.setGrantTypes}
           onRedirectUrisChange={editForm.setRedirectUris}
           onScopesChange={editForm.setScopes}
-          error={editForm.error}
           idPrefix="edit"
         />
       </FormDialog>

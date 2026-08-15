@@ -28,7 +28,6 @@ interface CreateFieldsProps {
   description: string;
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
 }
 
 function CreateFields({
@@ -36,7 +35,6 @@ function CreateFields({
   description,
   onNameChange,
   onDescriptionChange,
-  error,
 }: CreateFieldsProps) {
   return (
     <>
@@ -61,7 +59,6 @@ function CreateFields({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -75,7 +72,6 @@ interface EditFieldsProps {
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
-  error?: string;
 }
 
 function EditFields({
@@ -85,7 +81,6 @@ function EditFields({
   onNameChange,
   onDescriptionChange,
   onIsActiveChange,
-  error,
 }: EditFieldsProps) {
   return (
     <>
@@ -116,7 +111,6 @@ function EditFields({
         checked={isActive}
         onChange={onIsActiveChange}
       />
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -426,13 +420,14 @@ export function ServiceAccountsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="service-account-create-error"
       >
         <CreateFields
           name={createName}
           description={createDescription}
           onNameChange={setCreateName}
           onDescriptionChange={setCreateDescription}
-          error={createError}
         />
       </FormDialog>
 
@@ -444,6 +439,8 @@ export function ServiceAccountsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="service-account-edit-error"
       >
         <EditFields
           name={editName}
@@ -452,7 +449,6 @@ export function ServiceAccountsPage() {
           onNameChange={setEditName}
           onDescriptionChange={setEditDescription}
           onIsActiveChange={setEditIsActive}
-          error={editError}
         />
       </FormDialog>
 

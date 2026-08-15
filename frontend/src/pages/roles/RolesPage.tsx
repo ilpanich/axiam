@@ -46,7 +46,6 @@ interface RoleFormFieldsProps {
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   onIsGlobalChange: (v: boolean) => void;
-  error?: string;
   nameId: string;
   descriptionId: string;
   toggleId: string;
@@ -59,7 +58,6 @@ function RoleFormFields({
   onNameChange,
   onDescriptionChange,
   onIsGlobalChange,
-  error,
   nameId,
   descriptionId,
   toggleId,
@@ -93,7 +91,6 @@ function RoleFormFields({
         checked={isGlobal}
         onChange={onIsGlobalChange}
       />
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -291,6 +288,8 @@ export function RolesPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="role-create-error"
       >
         <RoleFormFields
           name={createName}
@@ -299,7 +298,6 @@ export function RolesPage() {
           onNameChange={setCreateName}
           onDescriptionChange={setCreateDescription}
           onIsGlobalChange={setCreateIsGlobal}
-          error={createError}
           nameId="create-role-name"
           descriptionId="create-role-description"
           toggleId="create-role-is-global"
@@ -314,6 +312,8 @@ export function RolesPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="role-edit-error"
       >
         <RoleFormFields
           name={editName}
@@ -322,7 +322,6 @@ export function RolesPage() {
           onNameChange={setEditName}
           onDescriptionChange={setEditDescription}
           onIsGlobalChange={setEditIsGlobal}
-          error={editError}
           nameId="edit-role-name"
           descriptionId="edit-role-description"
           toggleId="edit-role-is-global"

@@ -57,7 +57,6 @@ interface RuleFormFieldsProps {
   onRecipientEmailsChange: (v: string) => void;
   onEnabledChange: (v: boolean) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
   idPrefix: string;
 }
 
@@ -72,7 +71,6 @@ function RuleFormFields({
   onRecipientEmailsChange,
   onEnabledChange,
   onDescriptionChange,
-  error,
   idPrefix,
 }: RuleFormFieldsProps) {
   function toggleEvent(value: string, checked: boolean) {
@@ -154,8 +152,6 @@ function RuleFormFields({
           autoComplete="off"
         />
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -460,6 +456,8 @@ export function NotificationRulesPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createForm.error}
+        errorId="notification-rule-create-error"
       >
         <RuleFormFields
           name={createForm.name}
@@ -472,7 +470,6 @@ export function NotificationRulesPage() {
           onRecipientEmailsChange={createForm.setRecipientEmails}
           onEnabledChange={createForm.setEnabled}
           onDescriptionChange={createForm.setDescription}
-          error={createForm.error}
           idPrefix="create"
         />
       </FormDialog>
@@ -485,6 +482,8 @@ export function NotificationRulesPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editForm.error}
+        errorId="notification-rule-edit-error"
       >
         <RuleFormFields
           name={editForm.name}
@@ -497,7 +496,6 @@ export function NotificationRulesPage() {
           onRecipientEmailsChange={editForm.setRecipientEmails}
           onEnabledChange={editForm.setEnabled}
           onDescriptionChange={editForm.setDescription}
-          error={editForm.error}
           idPrefix="edit"
         />
       </FormDialog>

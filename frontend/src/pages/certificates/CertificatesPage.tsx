@@ -64,7 +64,6 @@ interface GenerateFieldsProps {
   onKeyAlgorithmChange: (v: KeyAlgorithm) => void;
   onValidityDaysChange: (v: number) => void;
   onIssuerCaIdChange: (v: string) => void;
-  error?: string;
 }
 
 function GenerateFields({
@@ -80,7 +79,6 @@ function GenerateFields({
   onKeyAlgorithmChange,
   onValidityDaysChange,
   onIssuerCaIdChange,
-  error,
 }: GenerateFieldsProps) {
   const noCas = !caLoading && caOptions.length === 0;
 
@@ -164,8 +162,6 @@ function GenerateFields({
           onChange={(e) => onValidityDaysChange(Number(e.target.value))}
         />
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -392,6 +388,8 @@ export function CertificatesPage() {
         onSubmit={handleGenerateSubmit}
         isLoading={generateMutation.isPending}
         submitLabel="Generate"
+        error={generateError}
+        errorId="certificate-generate-error"
       >
         <GenerateFields
           subject={subject}
@@ -406,7 +404,6 @@ export function CertificatesPage() {
           onKeyAlgorithmChange={setKeyAlgorithm}
           onValidityDaysChange={setValidityDays}
           onIssuerCaIdChange={setIssuerCaId}
-          error={generateError}
         />
       </FormDialog>
 

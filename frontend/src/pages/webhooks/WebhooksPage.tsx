@@ -79,7 +79,6 @@ interface CreateWebhookFieldsProps {
   onUrlChange: (v: string) => void;
   onEventTypesChange: (v: string[]) => void;
   onSecretChange: (v: string) => void;
-  error?: string;
 }
 
 function CreateWebhookFields({
@@ -89,7 +88,6 @@ function CreateWebhookFields({
   onUrlChange,
   onEventTypesChange,
   onSecretChange,
-  error,
 }: CreateWebhookFieldsProps) {
   return (
     <>
@@ -135,8 +133,6 @@ function CreateWebhookFields({
           Used for HMAC-SHA256 signature verification.
         </p>
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -150,7 +146,6 @@ interface EditWebhookFieldsProps {
   onUrlChange: (v: string) => void;
   onEnabledChange: (v: boolean) => void;
   onEventTypesChange: (v: string[]) => void;
-  error?: string;
 }
 
 function EditWebhookFields({
@@ -160,7 +155,6 @@ function EditWebhookFields({
   onUrlChange,
   onEnabledChange,
   onEventTypesChange,
-  error,
 }: EditWebhookFieldsProps) {
   return (
     <>
@@ -192,8 +186,6 @@ function EditWebhookFields({
           />
         </div>
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -418,6 +410,8 @@ export function WebhooksPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="webhook-create-error"
       >
         <CreateWebhookFields
           url={createUrl}
@@ -426,7 +420,6 @@ export function WebhooksPage() {
           onUrlChange={setCreateUrl}
           onEventTypesChange={setCreateEventTypes}
           onSecretChange={setCreateSecret}
-          error={createError}
         />
       </FormDialog>
 
@@ -438,6 +431,8 @@ export function WebhooksPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="webhook-edit-error"
       >
         <EditWebhookFields
           url={editUrl}
@@ -446,7 +441,6 @@ export function WebhooksPage() {
           onUrlChange={setEditUrl}
           onEnabledChange={setEditEnabled}
           onEventTypesChange={setEditEventTypes}
-          error={editError}
         />
       </FormDialog>
 

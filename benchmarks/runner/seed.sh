@@ -261,6 +261,45 @@ seed_axiam() {
   api_checked POST "/api/v1/roles/$ROLE_ID/users" \
     "{\"user_id\":\"$USER_ID\",\"resource_id\":\"$RESOURCE_ID\"}" >/dev/null
 
+  # scim_provisioning.js needs a principal holding `scim:provision`.
+  #
+  # This is an RBAC grant on the bench USER, not a scope on the bench client,
+  # and that distinction is the whole reason the scenario could not run before.
+  # `axiam-scim`'s `require_scim_provision` calls
+  # `RequirePermission::new("scim:provision", Uuid::nil()).check(...)` — an
+  # RBAC permission check against the token's subject, NOT an OAuth2 scope
+  # check. Adding "scim:provision" to the client's `scopes` list would
+  # therefore have changed nothing: the scope would ride on the token and the
+  # check would still deny.
+  #
+  # It also cannot be a client_credentials token. That grant mints a
+  # `sub_kind: ServiceAccount` subject (axiam-auth's
+  # `issue_service_account_client_credentials_token_enriched`), and AXIAM's
+  # role-assignment edge is hard-scoped to the `user` table today, so a
+  # service_account subject can hold no RBAC permission at all —
+  # `scim:provision` included. `crates/axiam-scim/src/auth.rs` documents this
+  # and docs/api/scim-provisioning.md's setup steps say the same: the SCIM
+  # principal must be a tenant user. The scenario mints a user token
+  # accordingly.
+  #
+  # The role is GLOBAL and the assignment carries no `resource_id`, because
+  # the permission is checked against `Uuid::nil()` (no resource). A
+  # resource-scoped grant like bench-reader's above would not satisfy it.
+  echo "[seed/axiam] creating global scim:provision role for the bench user"
+  local SCIM_ROLE_ID SCIM_PERM_ID
+  SCIM_ROLE_ID=$(create_or_find /api/v1/roles \
+    '{"name":"bench-scim","description":"Bench SCIM provisioning role","is_global":true}' \
+    name "bench-scim")
+  [ -n "$SCIM_ROLE_ID" ] || { echo "[seed/axiam] could not create/find bench scim role"; exit 1; }
+  SCIM_PERM_ID=$(create_or_find /api/v1/permissions \
+    '{"action":"scim:provision","description":"SCIM 2.0 provisioning (B4)"}' \
+    action "scim:provision")
+  [ -n "$SCIM_PERM_ID" ] || { echo "[seed/axiam] could not create/find scim:provision permission"; exit 1; }
+  api_checked POST "/api/v1/roles/$SCIM_ROLE_ID/permissions" \
+    "{\"permission_id\":\"$SCIM_PERM_ID\"}" >/dev/null
+  api_checked POST "/api/v1/roles/$SCIM_ROLE_ID/users" \
+    "{\"user_id\":\"$USER_ID\"}" >/dev/null
+
   echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh)"
   local CLIENT_RESP
   # R5.2: 'uma_protection' alongside 'openid' so uma2_perm.js / uma_ticket_grant.js

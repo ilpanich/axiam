@@ -3,20 +3,45 @@
 // the configured `scim_per_min`.
 //
 // ============================================================================
-// STATUS: STILL SKIPPED, BUT NOT FOR THE ORIGINAL REASON.
+// STATUS: SEEDING AND AUTH ARE FIXED. STILL PENDING ON ONE SUPERVISED RUN.
 //
 // `crates/axiam-scim` HAS landed (R3.1) and `/scim/v2` answers; the R5.2 tail
 // gave it a real rate-limit bucket (`AXIAM__RATE_LIMIT__SCIM_PER_MIN`,
 // shipped 600/min per IP) and folded the family into rl_prod_check.py's
-// ENDPOINTS. What is still missing is on the HARNESS side: `runner/seed.sh`
-// registers the bench client with scopes ["openid","uma_protection"] and
-// seeds no `scim:provision` grant, so `mintScimToken()` below still fails.
-// This file therefore stays in `runner/run-benchmark.sh`'s
-// `PENDING_SCENARIOS` list — it will not run, and will not break the matrix,
-// until seed.sh provisions a `scim:provision` principal (see
-// docs/api/scim-provisioning.md's setup steps) or
-// `BENCH_ENABLE_PENDING_SCENARIOS=1` opts it back in. See that file's header
-// comment for the exact mechanism.
+// ENDPOINTS. `runner/seed.sh` now provisions the missing principal: a GLOBAL
+// `bench-scim` role holding a `scim:provision` permission, assigned to the
+// bench user. `mintScimToken()` below mints a USER token accordingly.
+//
+// The earlier note here — "that is a seed.sh change" — was only half right,
+// and the half it got wrong is worth keeping written down. Two things had to
+// change, because `scim:provision` is an RBAC permission, not an OAuth2
+// scope:
+//
+//   1. Adding "scim:provision" to the bench client's `scopes` would have
+//      done nothing. `require_scim_provision` calls
+//      `RequirePermission::new("scim:provision", Uuid::nil()).check(...)`,
+//      an RBAC check against the token's SUBJECT. The scope would have ridden
+//      along on the token and the check would still have denied.
+//   2. A `client_credentials` token cannot work at all, whatever it is
+//      scoped for. That grant mints a `sub_kind: ServiceAccount` subject, and
+//      AXIAM's role-assignment edge is hard-scoped to the `user` table today,
+//      so a service_account subject can hold NO RBAC permission —
+//      `scim:provision` included (`crates/axiam-scim/src/auth.rs` says so
+//      explicitly). Hence the switch to a user token below.
+//
+// It stays in `runner/run-benchmark.sh`'s `PENDING_SCENARIOS` for ONE
+// remaining reason, and it is not a code reason: this scenario has still
+// never executed against a live server. Its field names and paths were
+// checked statically against the real DTOs (`users.rs`'s `userName` /
+// `externalId` / `emails[].primary` / `active`, and `patch.rs`'s `replace` on
+// path `active` with a boolean) and they match — but "matches on inspection"
+// is not "runs green", and un-pending it unrun would risk turning a skip into
+// a red matrix cell, which is the exact failure this list exists to prevent.
+//
+// TO CLOSE THIS OUT: run it once, supervised, with
+// `BENCH_ENABLE_PENDING_SCENARIOS=1`. If it passes, remove it from
+// `PENDING_SCENARIOS` and delete this block. No further code change is
+// expected to be needed.
 // ============================================================================
 //
 // Written against `improvement-after-run5-benchmark.md` B4's verbatim scope
@@ -35,7 +60,8 @@
 // attribute" op, the operation subset the plan names Okta/Entra actually
 // send, and (like oauth2_revoke.js reusing one token) idempotent enough that
 // no per-iteration resource accumulates.
-import { cfg, baseUrl, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
+import { baseUrl, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
+import { mintUserToken } from './lib/auth.js';
 import { doOp } from './lib/metrics.js';
 import http from 'k6/http';
 
@@ -50,44 +76,31 @@ export const options = Object.assign(
   tlsOptions(),
 );
 
-function formBody(obj) {
-  return Object.keys(obj)
-    .filter((k) => obj[k] !== undefined && obj[k] !== '')
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`)
-    .join('&');
-}
-
 const SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User';
 const SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
 
-// Bearer with the `scim:provision` permission (R3.1). The bench client is
-// still NOT registered for this scope: `runner/seed.sh` creates it with
-// scopes ["openid","uma_protection"] and seeds no `scim:provision` grant.
-// That is a seed.sh change (a tenant user + a role holding the permission,
-// per docs/api/scim-provisioning.md's setup steps) and is the ONLY thing
-// still blocking this scenario. Until then this mint fails loudly, same
-// shape as token_exchange.js's documented blocker.
+// Bearer for a principal holding the `scim:provision` RBAC permission (R3.1),
+// seeded by `runner/seed.sh` as a global `bench-scim` role on the bench USER.
+//
+// `mintUserToken()` (not `mintToken()`) because this MUST be a user token —
+// see this file's header for why a client_credentials/service-account subject
+// can hold no RBAC permission. `mintUserToken()` silently falls back to
+// client_credentials when a login fails, which for every other scenario is a
+// useful degradation and for this one is a wrong answer that would surface as
+// an opaque 403 from `/scim/v2` rather than as a seeding fault. So the
+// fallback is rejected explicitly here rather than being allowed to mislead.
 function mintScimToken() {
-  const res = http.post(
-    `${baseUrl()}/oauth2/token?tenant_id=${cfg.tenantId}`,
-    formBody({
-      grant_type: 'client_credentials',
-      client_id: cfg.clientId,
-      client_secret: cfg.clientSecret,
-      scope: 'openid scim:provision',
-    }),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
-  );
-  if (res.status !== 200) {
+  const t = mintUserToken();
+  if (!t.is_user_token) {
     throw new Error(
-      `scim_provisioning: could not mint a scim:provision token (status ${res.status}): ` +
-        `${String(res.body).slice(0, 200)} — expected until R3.1 lands and registers the bench ` +
-        "client for the 'scim:provision' scope; see this file's header.",
+      'scim_provisioning: mintUserToken fell back to client_credentials, which yields a ' +
+        'service_account subject. That subject can hold no RBAC permission (the role edge is ' +
+        "hard-scoped to the `user` table), so `scim:provision` can never be satisfied by it. " +
+        'Check that seed.sh ran and that the bench user login works.',
     );
   }
-  const access_token = res.json().access_token;
-  if (!access_token) throw new Error('scim_provisioning: client_credentials response carried no access_token');
-  return access_token;
+  if (!t.access_token) throw new Error('scim_provisioning: user login returned no access token');
+  return t.access_token;
 }
 
 function createUser(token) {

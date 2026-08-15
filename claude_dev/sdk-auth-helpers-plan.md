@@ -1,6 +1,17 @@
 # SDK Declarative Authorization Helpers — Implementation Plan
 
-> **Status: PLAN — not yet implemented.**
+> **Status: SHIPPED.** The helpers below are specified as CONTRACT §11
+> ("Declarative Authorization Helpers") in
+> [`sdks/CONTRACT.md`](../sdks/CONTRACT.md) — canonical vocabulary
+> `require_auth` / `require_access(action, resource[, scope])` /
+> `require_role(role...)`, composed strictly on top of the §10
+> middleware/route-guard — and are implemented across the SDK fleet
+> (`#[require_access(...)]` in Rust, `requireAccess(...)` in TypeScript,
+> `require_access(...)` in Python, `@AxiamRequireAccess` in Java,
+> `[AxiamAccess(...)]` in C#, `#[RequireAccess(...)]` in PHP,
+> `middleware.RequireAccess(...)` in Go). The plan below is kept as the
+> original design record; it is not being rewritten to past tense.
+>
 > Scope: all seven client SDKs (`axiam-rust-sdk`, `axiam-typescript-sdk`, `axiam-python-sdk`,
 > `axiam-java-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`, `axiam-go-sdk`) plus a contract
 > amendment in this repository (`sdks/CONTRACT.md`).

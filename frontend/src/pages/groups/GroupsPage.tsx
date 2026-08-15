@@ -25,7 +25,6 @@ interface GroupFormFieldsProps {
   description: string;
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
 }
 
 function GroupFormFields({
@@ -33,7 +32,6 @@ function GroupFormFields({
   description,
   onNameChange,
   onDescriptionChange,
-  error,
 }: GroupFormFieldsProps) {
   return (
     <>
@@ -58,7 +56,6 @@ function GroupFormFields({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -273,13 +270,14 @@ export function GroupsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="group-create-error"
       >
         <GroupFormFields
           name={createName}
           description={createDescription}
           onNameChange={setCreateName}
           onDescriptionChange={setCreateDescription}
-          error={createError}
         />
       </FormDialog>
 
@@ -291,13 +289,14 @@ export function GroupsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="group-edit-error"
       >
         <GroupFormFields
           name={editName}
           description={editDescription}
           onNameChange={setEditName}
           onDescriptionChange={setEditDescription}
-          error={editError}
         />
       </FormDialog>
 

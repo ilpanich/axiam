@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package axiam.v1;
+
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
+// PHP-only codegen options — must match authorization.proto's values so all
+// files in package axiam.v1 agree (buf PACKAGE_SAME_PHP_NAMESPACE). Ignored
+// by every other language's codegen.
+option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
+
+// Reactor admin CRUD (X1 / R2.3), mirroring the REST DTOs in
+// `crates/axiam-api-rest/src/handlers/reactors.rs` field-for-field so a
+// caller sees the same shape on either transport. `mode` and `failure_policy`
+// are wire strings rather than proto enums — the same choice `UserResponse`'s
+// `status` field already made in `user.proto` — because the valid values are
+// server data (`GET /api/v1/reactors/events`'s registry), not a fixed set a
+// generated enum should freeze.
+//
+// This is CRUD only: the wire protocol reactors actually run over (topology,
+// §8 v2 signing in both directions, the event registry, failure policy and
+// budget composition) is CONTRACT.md §22, which this service does not
+// restate — it only manages the registrations §22.9 describes.
+service ReactorAdminService {
+  // The hookable-event registry, verbatim — mirrors `GET /api/v1/reactors/events`.
+  rpc ListReactorEvents(ListReactorEventsRequest) returns (ListReactorEventsResponse);
+
+  // Register a reactor. Mirrors `POST /api/v1/reactors`.
+  rpc CreateReactor(CreateReactorRequest) returns (CreateReactorResponse);
+
+  // List this tenant's reactors, paginated. Mirrors `GET /api/v1/reactors`.
+  rpc ListReactors(ListReactorsRequest) returns (ListReactorsResponse);
+
+  // Read one reactor. Mirrors `GET /api/v1/reactors/{id}`.
+  rpc GetReactor(GetReactorRequest) returns (GetReactorResponse);
+
+  // Update a reactor. The server validates the MERGED registration, exactly
+  // as the REST `PUT` does — see that handler's docs for why a partial
+  // update cannot be validated against itself alone. Mirrors
+  // `PUT /api/v1/reactors/{id}`.
+  rpc UpdateReactor(UpdateReactorRequest) returns (UpdateReactorResponse);
+
+  // Delete a reactor. Mirrors `DELETE /api/v1/reactors/{id}`.
+  rpc DeleteReactor(DeleteReactorRequest) returns (DeleteReactorResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Event registry
+// ---------------------------------------------------------------------------
+
+message ListReactorEventsRequest {}
+
+message ListReactorEventsResponse {
+  repeated ReactorEventDescriptor events = 1;
+}
+
+message ReactorEventDescriptor {
+  string name = 1;
+  bool interceptable = 2;
+  bool mutable = 3;
+  // Exact field names, or a namespace prefix ending in `.` — `ext.` admits
+  // `ext.department` and nothing outside the namespace (CONTRACT §22.5).
+  repeated string mutable_fields = 4;
+  // "fail_open" | "fail_closed".
+  string default_failure_policy = 5;
+  string description = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Reactor CRUD
+// ---------------------------------------------------------------------------
+
+message CreateReactorRequest {
+  string name = 1;
+  string description = 2;
+  // Event names from the registry (`ListReactorEvents`).
+  repeated string events = 3;
+  // "intercept" | "listen".
+  string mode = 4;
+  int32 priority = 5;
+  // 0 (unset) takes the 500 ms server default. Refused outside 1..=5000.
+  optional uint32 timeout_ms = 6;
+  // "fail_open" | "fail_closed". Unset takes the strictest default among
+  // `events` (CONTRACT §22.8).
+  optional string failure_policy = 7;
+  optional bool enabled = 8;
+}
+
+message CreateReactorResponse {
+  ReactorResponse reactor = 1;
+}
+
+message ListReactorsRequest {
+  uint64 offset = 1;
+  uint64 limit = 2;
+}
+
+message ListReactorsResponse {
+  repeated ReactorResponse items = 1;
+  uint64 total = 2;
+  uint64 offset = 3;
+  uint64 limit = 4;
+}
+
+message GetReactorRequest {
+  string id = 1;
+}
+
+message GetReactorResponse {
+  ReactorResponse reactor = 1;
+}
+
+message UpdateReactorRequest {
+  string id = 1;
+  optional string name = 2;
+  optional string description = 3;
+  // Empty and unset are distinguished by `events_set` — a proto3 `repeated`
+  // field cannot itself be "unset", and replacing `events` with an empty
+  // list is meaningfully different from leaving it alone.
+  repeated string events = 4;
+  bool events_set = 5;
+  optional string mode = 6;
+  optional int32 priority = 7;
+  optional uint32 timeout_ms = 8;
+  optional string failure_policy = 9;
+  optional bool enabled = 10;
+}
+
+message UpdateReactorResponse {
+  ReactorResponse reactor = 1;
+}
+
+message DeleteReactorRequest {
+  string id = 1;
+}
+
+message DeleteReactorResponse {}
+
+// The registered reactor, as returned by every RPC above except delete.
+message ReactorResponse {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  repeated string events = 5;
+  // "intercept" | "listen".
+  string mode = 6;
+  int32 priority = 7;
+  uint32 timeout_ms = 8;
+  // "fail_open" | "fail_closed".
+  string failure_policy = 9;
+  bool enabled = 10;
+  // RFC 3339 timestamps.
+  string created_at = 11;
+  string updated_at = 12;
+  // When this reactor last consumed from its queue. Absent means it has
+  // never connected — which the admin UI shows differently from "connected
+  // once, silent since" (same distinction `last_seen_at: Option<..>` makes
+  // REST-side).
+  optional string last_seen_at = 13;
+  // R2.3 — recent health, read from the audit trail R2.2 started writing.
+  // See `ReactorResponse` in `handlers/reactors.rs` for the exact
+  // definition of "recent" (24h lookback, capped sample).
+  uint32 recent_timeout_count = 14;
+  uint32 recent_veto_count = 15;
+}

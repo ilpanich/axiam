@@ -154,7 +154,8 @@ honest.
    `setup()` (login as `benchuser`), then `POST {baseUrl}/api/v1/authz/check` with
    `{"action":"read","resource_id":"<BENCH_RESOURCE_ID>"}` (batch: `{"checks":[...]}`), bearer
    auth, using `doOp()` from `lib/metrics.js`. Body field names are `resource_id`, `checks`,
-   `results`, `reason` (note: gRPC's response field is `deny_reason`, REST's is `reason`).
+   `results`, `reason` (both transports now: SDK-Q10 gave the gRPC response a `reason` field
+   matching REST's and deprecated its `deny_reason`, which ships until 2.0).
 2. Mark them AXIAM-only in `runner/run-benchmark.sh`'s `filter_scenarios()` (same treatment as
    the gRPC pair) — no competitor has an equivalent endpoint.
 3. Update `sdk/collect.py` `OP_TO_SCENARIO`: `"check_access": "authz_check_rest"`,

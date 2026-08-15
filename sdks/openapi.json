@@ -4857,7 +4857,9 @@
                           "failure_policy",
                           "enabled",
                           "created_at",
-                          "updated_at"
+                          "updated_at",
+                          "recent_timeout_count",
+                          "recent_veto_count"
                         ],
                         "properties": {
                           "created_at": {
@@ -4900,6 +4902,18 @@
                           "priority": {
                             "type": "integer",
                             "format": "int32"
+                          },
+                          "recent_timeout_count": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "R2.3: dispatch failures against this registration in the last 24h\nwhose cause was a timeout (as opposed to a rejected reply, a transport\nfailure, or overload), capped at 100 — a health signal read from the\naudit trail R2.2 started writing, not a replacement for the audit log\nitself (`GET /api/v1/audit-log` is that).",
+                            "minimum": 0
+                          },
+                          "recent_veto_count": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "R2.3: operations this reactor's own reply *denied* in the last 24h,\ncapped at 100. Distinct from `recent_timeout_count`: a veto is the\nreactor working as designed; a timeout is the reactor not answering.",
+                            "minimum": 0
                           },
                           "tenant_id": {
                             "type": "string",
@@ -9544,7 +9558,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev)."
+            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev).\nSEC-089: this list doubles as the token-exchange audience allow-list\n— adding a URI here also authorises it as a token audience for this\nclient, so review additions on exchange-capable clients with that in\nmind (see `docs/api/token-exchange.md#audience`)."
           },
           "require_par": {
             "type": "boolean",
@@ -10652,18 +10666,32 @@
       },
       "IntrospectRequest": {
         "type": "object",
-        "description": "RFC 7662 token introspection request.",
+        "description": "RFC 7662 token introspection request.\n\nSame credential shape, and for the same reason, as [`RevokeRequest`].",
         "required": [
           "token",
-          "client_id",
-          "client_secret"
+          "client_id"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "token": {
             "type": "string"
@@ -12288,16 +12316,32 @@
         "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` is deliberately\nabsent: RFC 9126 §2.1 forbids pushing one, because a chained push would let\nthe second request inherit the first's authentication.",
         "required": [
           "client_id",
-          "client_secret",
           "response_type",
           "redirect_uri"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7521 §4.2 — `private_key_jwt` client authentication at PAR."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional since SEC-093: a client registered for `tls_client_auth` or\n`private_key_jwt` has no secret to present here, and presenting one no\nlonger authenticates it."
           },
           "code_challenge": {
             "type": [
@@ -12414,7 +12458,9 @@
           "failure_policy",
           "enabled",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "recent_timeout_count",
+          "recent_veto_count"
         ],
         "properties": {
           "created_at": {
@@ -12457,6 +12503,18 @@
           "priority": {
             "type": "integer",
             "format": "int32"
+          },
+          "recent_timeout_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "R2.3: dispatch failures against this registration in the last 24h\nwhose cause was a timeout (as opposed to a rejected reply, a transport\nfailure, or overload), capped at 100 — a health signal read from the\naudit trail R2.2 started writing, not a replacement for the audit log\nitself (`GET /api/v1/audit-log` is that).",
+            "minimum": 0
+          },
+          "recent_veto_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "R2.3: operations this reactor's own reply *denied* in the last 24h,\ncapped at 100. Distinct from `recent_timeout_count`: a veto is the\nreactor working as designed; a timeout is the reactor not answering.",
+            "minimum": 0
           },
           "tenant_id": {
             "type": "string",
@@ -12701,18 +12759,32 @@
       },
       "RevokeRequest": {
         "type": "object",
-        "description": "RFC 7009 token revocation request.",
+        "description": "RFC 7009 token revocation request.\n\n`client_secret` is optional and the two RFC 7521 assertion parameters are\npresent because RFC 7009 §2.1 says this endpoint authenticates the client\n\"the same way as the token endpoint\" — and since SEC-093 it genuinely does.\nA client registered for `private_key_jwt` posts `client_assertion` here and\nno secret; one registered for `tls_client_auth` posts neither and is\nauthenticated by the certificate on the connection.",
         "required": [
           "token",
-          "client_id",
-          "client_secret"
+          "client_id"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "token": {
             "type": "string"
@@ -13604,7 +13676,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Target audience for the issued token. **The allow-list is the\nclient's `redirect_uris`** (SEC-089): a target is accepted if it\nappears in the client's registered redirect URIs, or is one of\nAXIAM's own built-in audiences. There is no separate audience field\nin v1 — adding a redirect URI to a client also authorises it as a\ntoken audience for that client. This allow-list is checked at two\ncall sites in this file (same-domain exchange, and the X4 external\nexchange) — both are tagged `SEC-089` and must be touched together\n(and together with this comment) if a future dedicated\n`allowed_token_targets` field replaces this reuse. Full write-up in\n`docs/api/token-exchange.md#audience`."
           },
           "requested_token_type": {
             "type": [

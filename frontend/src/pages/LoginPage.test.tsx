@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -73,7 +73,12 @@ afterEach(() => {
 describe("LoginPage — org/tenant step", () => {
   it("requires both organization and tenant slug", async () => {
     renderWithProviders(<LoginPage />);
-    await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    // R4.7: the form no longer sets `noValidate`, so the required org/tenant
+    // fields being empty would block a native submit before the component's
+    // own validation runs — submit the form directly to exercise it.
+    fireEvent.submit(
+      screen.getByRole("button", { name: /Continue/ }).closest("form")!
+    );
     expect(
       await screen.findByText("Please enter both organization and tenant slug.")
     ).toBeInTheDocument();
@@ -95,7 +100,12 @@ describe("LoginPage — org/tenant step", () => {
 describe("LoginPage — credentials step", () => {
   it("requires username and password", async () => {
     await goToCredentials();
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    // R4.7: username/password are `required` and the form no longer sets
+    // `noValidate` — a native submit would be blocked before the click ever
+    // reaches the handler, so submit the form directly.
+    fireEvent.submit(
+      screen.getByRole("button", { name: "Sign in" }).closest("form")!
+    );
     expect(
       await screen.findByText("Please enter your username and password.")
     ).toBeInTheDocument();
@@ -148,7 +158,7 @@ describe("LoginPage — credentials step", () => {
     expect(useAuthStore.getState().orgSlug).toBe("acme");
   });
 
-  it("falls back to the login payload with empty permissions when /auth/me fails", async () => {
+  it("treats a null /auth/me after login as a hard failure (CQ-F30) — never silently logs in with no permissions", async () => {
     apiMock.post.mockImplementation((url: string) => {
       if (url === "/api/v1/auth/login") {
         return Promise.resolve(res({ user: loginUser }));
@@ -160,8 +170,12 @@ describe("LoginPage — credentials step", () => {
     await goToCredentials();
     await submitCredentials();
 
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
-    expect(useAuthStore.getState().user).toEqual({ ...loginUser, permissions: [] });
+    expect(
+      await screen.findByText("Authentication error. Please sign in again.")
+    ).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith("/login");
+    expect(navigate).not.toHaveBeenCalledWith("/dashboard");
+    expect(useAuthStore.getState().user).toBeNull();
   });
 
   it("moves to the MFA step when mfa_required is returned", async () => {
@@ -280,7 +294,12 @@ describe("LoginPage — MFA step", () => {
   it("requires a full 6-digit code", async () => {
     await goToMfa();
     await userEvent.type(screen.getByLabelText("Authentication code"), "123");
-    await userEvent.click(screen.getByRole("button", { name: "Verify" }));
+    // R4.7: the code field has `pattern="[0-9]{6}"` and the form no longer
+    // sets `noValidate` — a native submit would be blocked before the click
+    // ever reaches the handler, so submit the form directly.
+    fireEvent.submit(
+      screen.getByRole("button", { name: "Verify" }).closest("form")!
+    );
     expect(
       await screen.findByText(
         "Please enter the 6-digit code from your authenticator app."

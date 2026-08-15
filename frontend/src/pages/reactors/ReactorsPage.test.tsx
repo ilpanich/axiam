@@ -64,6 +64,8 @@ const reactors = [
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     last_seen_at: "2026-01-02T00:00:00Z",
+    recent_timeout_count: 3,
+    recent_veto_count: 1,
   },
   {
     id: "r2",
@@ -79,6 +81,8 @@ const reactors = [
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     last_seen_at: null,
+    recent_timeout_count: 0,
+    recent_veto_count: 0,
   },
 ];
 
@@ -121,6 +125,29 @@ describe("ReactorsPage", () => {
     expect(
       await screen.findByText("No reactors registered.")
     ).toBeInTheDocument();
+  });
+
+  // R2.3: recent timeouts and vetoes, read from the audit trail, are shown
+  // separately per reactor — a timeout is the reactor not answering, a veto
+  // is the reactor working as designed, and an operator needs to tell them
+  // apart. A listen-mode reactor has no failure path at all, so it shows a
+  // dash rather than a count of zero (which would imply a health signal that
+  // does not exist for it).
+  it("shows per-reactor recent timeout and veto counts, and a dash for listeners", async () => {
+    mockGets();
+    renderWithProviders(<ReactorsPage />);
+
+    expect(await screen.findByText("fraud-check")).toBeInTheDocument();
+    expect(screen.getByText("3 timeouts")).toBeInTheDocument();
+    expect(screen.getByText("1 veto")).toBeInTheDocument();
+  });
+
+  it("shows a clean bill of health when a reactor has no recent failures", async () => {
+    mockGets([
+      { ...reactors[0], recent_timeout_count: 0, recent_veto_count: 0 },
+    ]);
+    renderWithProviders(<ReactorsPage />);
+    expect(await screen.findByText("Clean (24h)")).toBeInTheDocument();
   });
 
   // The server models last_seen_at as an Option specifically so these two

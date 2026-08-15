@@ -22,9 +22,9 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealReactorRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -126,11 +126,37 @@ fn make_engine(db: &Surreal<TestDb>) -> TestEngine {
     )
 }
 
+/// X1 / R2.3 — the extra reactor-admin arguments every `start_grpc_server`
+/// call site below now needs: its own `AuthorizationEngine` instance (the
+/// type does not implement `Clone`, so `make_engine` is called again rather
+/// than reused), a reactor repository, an audit repository, and a routing
+/// invalidator. These boot tests never register a reactor, so a no-op
+/// invalidator is correct — nothing here exercises `ReactorAdminService`
+/// itself; that lives in the CRUD-level test coverage for the service.
+#[allow(clippy::type_complexity)]
+fn reactor_admin_args(
+    db: &Surreal<TestDb>,
+) -> (
+    TestEngine,
+    SurrealReactorRepository<TestDb>,
+    SurrealAuditLogRepository<TestDb>,
+    std::sync::Arc<dyn Fn(uuid::Uuid) + Send + Sync>,
+) {
+    (
+        make_engine(db),
+        SurrealReactorRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+        std::sync::Arc::new(|_tenant_id| {}),
+    )
+}
+
 #[tokio::test]
 async fn start_grpc_server_boots_in_plaintext_mode() {
     let _guard = env_guard().await;
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
+    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
+        reactor_admin_args(&db);
     let grpc_config = GrpcConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -150,10 +176,14 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         user_repo,
         test_auth_config(),
         &grpc_config,
-        db,
+        db.clone(),
         16,
         // A4/J10: strict revocation off — the shipped default posture.
         None,
+        reactor_engine,
+        reactor_repo,
+        reactor_audit_repo,
+        reactor_routing_invalidator,
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -184,6 +214,8 @@ async fn start_grpc_server_boots_in_tls_mode() {
     let _guard = env_guard().await;
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
+    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
+        reactor_admin_args(&db);
     let grpc_config = GrpcConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -212,10 +244,14 @@ async fn start_grpc_server_boots_in_tls_mode() {
         user_repo,
         test_auth_config(),
         &grpc_config,
-        db,
+        db.clone(),
         16,
         // A4/J10: strict revocation off — the shipped default posture.
         None,
+        reactor_engine,
+        reactor_repo,
+        reactor_audit_repo,
+        reactor_routing_invalidator,
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -263,6 +299,8 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
     let _guard = env_guard().await;
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
+    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
+        reactor_admin_args(&db);
     let grpc_config = GrpcConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -298,10 +336,14 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         user_repo,
         test_auth_config(),
         &grpc_config,
-        db,
+        db.clone(),
         16,
         // A4/J10: strict revocation off — the shipped default posture.
         None,
+        reactor_engine,
+        reactor_repo,
+        reactor_audit_repo,
+        reactor_routing_invalidator,
     )
     .await;
 }
@@ -314,6 +356,8 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
     let _guard = env_guard().await;
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
+    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
+        reactor_admin_args(&db);
     let grpc_config = GrpcConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -347,10 +391,14 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         user_repo,
         test_auth_config(),
         &grpc_config,
-        db,
+        db.clone(),
         16,
         // A4/J10: strict revocation off — the shipped default posture.
         None,
+        reactor_engine,
+        reactor_repo,
+        reactor_audit_repo,
+        reactor_routing_invalidator,
     )
     .await;
 }

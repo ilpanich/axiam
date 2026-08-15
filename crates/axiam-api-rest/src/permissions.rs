@@ -215,6 +215,18 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "webauthn_policy:write",
         "Update a tenant's WebAuthn attestation policy",
     ),
+    // SCIM 2.0 provisioning (R3.1/B4). A single dedicated permission gates
+    // every `/scim/v2/*` route (Users + Groups CRUD/PATCH) — the crate lives
+    // outside this one (`axiam-scim`) and is not part of `ROUTE_PERMISSION_MAP`
+    // (a different mount point, wired directly in `axiam-server`), but the
+    // permission itself is declared here, the same registry every other
+    // AXIAM permission is declared in, so it is seeded per-tenant exactly
+    // like `users:create` etc. See `axiam_scim::auth` for the enforcement
+    // code path.
+    (
+        "scim:provision",
+        "Provision/deprovision users and groups via the SCIM 2.0 endpoint",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

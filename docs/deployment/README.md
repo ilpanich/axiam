@@ -809,3 +809,24 @@ refuses to boot, which is easy to misread as an unrelated infrastructure fault.
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__ALLOW_PLAINTEXT` | `false` | Permit `amqp://` in a release build. |
+
+## Software Bill of Materials (SBOM)
+
+Every tagged release (`v*`) publishes a CycloneDX 1.5 SBOM for each Cargo
+workspace member plus one for the frontend's npm dependency tree, generated
+by the `sbom` job in
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml) via
+`cargo cyclonedx` and `@cyclonedx/cyclonedx-npm` respectively. They are
+attached as downloadable files (`*.cdx.json`) on the corresponding [GitHub
+Release](https://github.com/ilpanich/axiam/releases), alongside the binary
+tarballs — no separate registry or artifact host to check.
+
+CycloneDX (over SPDX) because both ecosystems here already have an actively
+maintained, OWASP-native generator that installs from the public
+crates.io/npm registries, keeping the two SBOMs in one consistent format
+with no paid registry or license key involved.
+
+This satisfies CRA's SBOM/supply-chain-transparency expectation and ISO
+27001 Annex A.5 asset-inventory theme; see `docs/compliance/FINDINGS.md`
+(#SBOM-01) and `docs/compliance/asvs-l2-checklist.md` (§V14, SBOM-01 row)
+for the compliance disposition.

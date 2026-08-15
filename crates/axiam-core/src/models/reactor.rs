@@ -262,6 +262,105 @@ pub trait ReactorGate: Send + Sync {
     ) -> impl std::future::Future<Output = ReactorOutcome> + Send;
 }
 
+/// The object-safe half of [`ReactorGate`].
+///
+/// [`ReactorGate`] returns `impl Future`, which is what keeps the no-op gate
+/// allocation-free — and which also makes it impossible to store behind a
+/// `dyn`. Every call site that needs one is reached through a struct that is
+/// *already* generic over half a dozen repositories (`AuthService`,
+/// `TokenService`, `AppState<C>`), so adding one more type parameter to each of
+/// them would push the broker choice into the signature of code that must not
+/// know a broker exists. This trait is the seam instead: one boxed allocation
+/// per *intercepted* event — never on the path where no reactor is registered,
+/// because that decision is made inside the implementation, after the call.
+///
+/// Implemented **blanket** for every [`ReactorGate`], so a gate author writes
+/// the ergonomic trait and gets this one for free.
+pub trait DynReactorGate: Send + Sync {
+    /// Object-safe [`ReactorGate::intercept`].
+    fn intercept_dyn<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        event: &'static str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>>;
+}
+
+impl<G: ReactorGate> DynReactorGate for G {
+    fn intercept_dyn<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        event: &'static str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
+        Box::pin(self.intercept(tenant_id, event, payload))
+    }
+}
+
+/// What the security-critical crates actually hold: a shared, type-erased gate.
+pub type SharedReactorGate = std::sync::Arc<dyn DynReactorGate>;
+
+/// So a call site can keep writing `gate.intercept(..)` whether it holds a
+/// concrete gate or the erased one. Without this, every hook would read
+/// `intercept_dyn` and a reader would have to know which of the two traits was
+/// in play to know whether the call was doing anything different (it is not).
+impl ReactorGate for SharedReactorGate {
+    async fn intercept(
+        &self,
+        tenant_id: Uuid,
+        event: &'static str,
+        payload: serde_json::Value,
+    ) -> ReactorOutcome {
+        (**self).intercept_dyn(tenant_id, event, payload).await
+    }
+}
+
+/// A gate that runs no reactors — what a deployment without AMQP composes, and
+/// the default every service is constructed with.
+///
+/// Exists so `axiam-auth`, `axiam-oauth2` and the REST handlers have exactly
+/// **one** code path whether or not reactors are configured. A call site that
+/// branches on `Option<Gate>` is a call site where the disabled build and the
+/// enabled build can drift, and the drift would be invisible until a reactor
+/// was registered in production.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopReactorGate;
+
+impl ReactorGate for NoopReactorGate {
+    async fn intercept(
+        &self,
+        _tenant_id: Uuid,
+        _event: &'static str,
+        _payload: serde_json::Value,
+    ) -> ReactorOutcome {
+        ReactorOutcome::Allow
+    }
+}
+
+/// The gate a service is built with until something hands it a real one.
+pub fn noop_reactor_gate() -> SharedReactorGate {
+    std::sync::Arc::new(NoopReactorGate)
+}
+
+/// The five v1 interceptor event names, as the `&'static str`s the gate takes.
+///
+/// Call sites use these rather than string literals so a typo is a compile
+/// error rather than an event that silently dispatches to nothing (which is
+/// exactly what [`crate::models::reactor::event_spec`] does with an unknown
+/// name, and correctly so — see the dispatcher's `run_chain`).
+pub mod events {
+    /// Before an access token is minted. Mutable: the `ext.` claim namespace.
+    pub const TOKEN_PRE_ISSUE: &str = "token.pre_issue";
+    /// After credentials verify, before a session is issued. Veto or step-up.
+    pub const LOGIN_POST_AUTH: &str = "login.post_auth";
+    /// Before a user row is written. Mutable: `username`, `email`, `metadata.`.
+    pub const USER_PRE_CREATE: &str = "user.pre_create";
+    /// Before a user row is updated. Mutable: `username`, `email`, `metadata.`.
+    pub const USER_PRE_UPDATE: &str = "user.pre_update";
+    /// Before a role is assigned to a user or a group. Veto only.
+    pub const GRANT_PRE_ASSIGN: &str = "grant.pre_assign";
+}
+
 // ---------------------------------------------------------------------------
 // Persistence model
 // ---------------------------------------------------------------------------
@@ -656,6 +755,43 @@ mod tests {
         );
         assert_eq!(ReactorMode::from_wire("observe"), None);
         assert_eq!(FailurePolicy::from_wire("fail_sometimes"), None);
+    }
+
+    /// The constants the five call sites pass must be registry names. A
+    /// constant that drifted out of the registry would make its hook dispatch
+    /// to nothing — a security control that silently stopped running.
+    #[test]
+    fn every_call_site_constant_names_a_registered_event() {
+        for name in [
+            events::TOKEN_PRE_ISSUE,
+            events::LOGIN_POST_AUTH,
+            events::USER_PRE_CREATE,
+            events::USER_PRE_UPDATE,
+            events::GRANT_PRE_ASSIGN,
+        ] {
+            assert!(
+                event_spec(name).is_some(),
+                "call-site constant '{name}' is not in EVENT_REGISTRY"
+            );
+        }
+        assert_eq!(
+            EVENT_REGISTRY.len(),
+            5,
+            "a sixth event needs a call-site constant and a wired hook, or it \
+             is a registration nothing will ever fire"
+        );
+    }
+
+    /// The erased gate is constructible and `Send + Sync` — the property that
+    /// lets every service hold one field instead of a type parameter. Its
+    /// *behavioural* equivalence to the concrete gate is asserted in
+    /// `axiam-amqp` (`reactor::gate` tests), which has an async runtime.
+    #[test]
+    fn the_erased_gate_is_a_shareable_object() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let erased: SharedReactorGate = noop_reactor_gate();
+        assert_send_sync(&erased);
+        let _cloned = erased.clone();
     }
 
     #[test]

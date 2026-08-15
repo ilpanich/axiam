@@ -17,6 +17,9 @@ gRPC (Protocol Buffers), and AMQP (AsyncAPI).
   - [`api/openapi.json`](./api/openapi.json) — REST OpenAPI spec (symlink to [`sdks/openapi.json`](../sdks/openapi.json), drift-gated in CI)
   - [`api/grpc.md`](./api/grpc.md) — gRPC usage guide, referencing [`proto/axiam/v1/`](../proto/axiam/v1/)
   - [`api/asyncapi.yml`](./api/asyncapi.yml) — AMQP AsyncAPI 2.6 spec
+  - [`api/scim-provisioning.md`](./api/scim-provisioning.md) — SCIM 2.0
+    (`/scim/v2`) user/group provisioning: endpoints, field mapping, PATCH
+    subset, tenant scoping, Okta + Entra walkthroughs
 
 ## Deployment & operations
 
@@ -41,6 +44,10 @@ Task-oriented guides for operators and integrators.
   WebAuthn attestation policy: policy fields and decision order, the passkey
   caveat, FIDO MDS3 refresh/air-gap operations, trust-anchor update
   procedure, and the compliance report
+- [`admin/reactors.md`](./admin/reactors.md) — Reactors (X1): what they are,
+  webhook vs. listener Reactor, failure-policy implications, the listener
+  idempotency note, and how to register one; the wire protocol itself is
+  normative in [`sdks/CONTRACT.md` §22](../sdks/CONTRACT.md)
 - [`pki/README.md`](./pki/README.md) — certificate lifecycle: CA issuance,
   leaf cert issuance, mTLS binding, revocation
 

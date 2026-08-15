@@ -910,8 +910,15 @@ pub struct SamlAcsRequest {
     /// Relay state returned by the IdP.
     pub relay_state: Option<String>,
     /// The real Assertion Consumer Service URL this response was posted to.
-    /// Required so the handler can validate `Response.Destination` against
-    /// it (SECFIX-04/SEC-005) instead of skipping the check.
+    ///
+    /// Required so the handler can validate `Response.Destination` against it
+    /// (SECFIX-04/SEC-005) instead of skipping the check, and — since R1.5 —
+    /// also the signed
+    /// `SubjectConfirmationData/@Recipient` inside the assertion. This field is
+    /// the single source of truth for both checks: `Destination` sits on the
+    /// unsigned `<samlp:Response>` root and is attacker-rewritable, so the
+    /// signed `@Recipient` is what actually proves the assertion was minted for
+    /// *this* SP rather than relayed from another one.
     pub acs_url: String,
 }
 
@@ -1012,9 +1019,19 @@ pub async fn saml_acs<C: Connection + Clone>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
-            None,               // no stored request ID on the authenticated ACS path
-            Some(&req.acs_url), // SECFIX-04: validate Destination against the real ACS URL
-            true,               // SECFIX-04: require InResponseTo presence (reject unsolicited)
+            None, // no stored request ID on the authenticated ACS path
+            // SECFIX-04 + R1.5/SEC-005: the ONE source of truth for "which ACS
+            // endpoint is this?". Checked against the unsigned
+            // `Response@Destination` AND against the signed
+            // `SubjectConfirmationData@Recipient` inside the assertion, so a
+            // relayed assertion minted for another SP is rejected even though
+            // the attacker can rewrite `Destination` freely.
+            Some(&req.acs_url),
+            // SECFIX-04: require InResponseTo presence (reject unsolicited).
+            // R1.5 note: this flag is also what makes the signed
+            // `SubjectConfirmationData@InResponseTo` mandatory on this path —
+            // AXIAM does not support IdP-initiated SSO.
+            true,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -1204,6 +1221,60 @@ fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
     }
 }
 
+/// Fire `login.post_auth` on a federated sign-in (SEC-095).
+///
+/// # Why this exists
+///
+/// The reactor gate was wired into `AuthService::login` and nowhere else, so
+/// the two public SSO handlers below — SAML ACS and the OIDC callback — issued
+/// a full session plus access/refresh tokens without the gate ever being
+/// consulted. Nothing in the event registry
+/// (`axiam_core::models::reactor::events`) or in `sdks/CONTRACT.md` §22.5
+/// scoped `login.post_auth` to password authentication; both describe it as
+/// "After credentials verify, before session issuance". An operator who
+/// registered the feature's own worked example — an embargoed-region login
+/// veto — got a control that "Sign in with Okta" walked straight past.
+///
+/// It was latent at the time it was found only because
+/// `UnavailableReactorTransport` meant no reactor reply could be produced at
+/// all; it becomes live the moment the lapin transport merges.
+///
+/// # What it is not
+///
+/// It is not a second implementation of the verdict logic. The payload and the
+/// `ReactorOutcome` match live once, in
+/// `AuthService::intercept_login_post_auth`, so all three sign-in paths get a
+/// byte-identical payload and a new outcome variant is a compile error at one
+/// site rather than a silent no-op at three. This function is only the
+/// call-site adapter: it pulls the client IP and user agent off the request —
+/// which the SSO handlers did not previously look at, and which a
+/// region-based veto needs — and delegates.
+///
+/// `require_mfa` is refused rather than dropped, because a federated sign-in
+/// has no step-up branch to route it into. See
+/// `AuthService::intercept_federated_login_post_auth`.
+async fn sso_login_post_auth<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    http_req: &actix_web::HttpRequest,
+    tenant_id: Uuid,
+    user: &axiam_core::models::user::User,
+) -> Result<(), AxiamApiError> {
+    use crate::extractors::client_info::{client_ip, user_agent};
+    state
+        .auth_service
+        .intercept_federated_login_post_auth(
+            tenant_id,
+            // Nil for the same reason `create_session_and_tokens` is called
+            // with a nil org below — see the T19.15 TODO at each call site.
+            Uuid::nil(),
+            user,
+            client_ip(http_req).as_deref(),
+            user_agent(http_req).as_deref(),
+        )
+        .await
+        .map_err(AxiamApiError)
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/v1/auth/federation/oidc/start  (public)
 // ---------------------------------------------------------------------------
@@ -1343,6 +1414,7 @@ pub async fn oidc_start_public<C: Connection + Clone>(
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn oidc_callback_public<C: Connection + Clone>(
+    http_req: actix_web::HttpRequest,
     state: web::Data<AppState<C>>,
     body: web::Json<OidcPublicCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1394,6 +1466,18 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
         .map_err(axiam_core::error::AxiamError::from)?;
 
     let user = callback_result.user;
+
+    // SEC-095: `login.post_auth` fires here too, not only on the password
+    // path. The IdP has just verified the credentials and no session exists
+    // yet, which is exactly the contract the event's registry entry states —
+    // "After credentials verify, before session issuance". Before this, a
+    // reactor registered to veto logins (the feature's own worked example is
+    // an embargoed-region veto) was bypassed by clicking "Sign in with Okta".
+    //
+    // `org_id` is `Uuid::nil()` for the same reason the token below carries a
+    // nil `org_id` — see the TODO. A reactor keying on `org_id` on this path
+    // therefore sees nil rather than a wrong value.
+    sso_login_post_auth(&state, &http_req, tenant_id, &user).await?;
 
     // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil().
     // SSO-provisioned access tokens currently carry an empty org_id claim.
@@ -1571,6 +1655,7 @@ pub async fn saml_login_public<C: Connection + Clone>(
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn saml_acs_public<C: Connection + Clone>(
+    http_req: actix_web::HttpRequest,
     state: web::Data<AppState<C>>,
     body: web::Json<SamlAcsPublicRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1609,8 +1694,16 @@ pub async fn saml_acs_public<C: Connection + Clone>(
             Some(&b.relay_state),
             // Pass stored request_id for InResponseTo check (SEC-005/REQ-14 AC-5).
             Some(login_state.request_id.as_str()),
-            // Destination check: pass empty string (ACS URL not available here;
-            // callers that know the ACS URL should pass it explicitly).
+            // Destination / SubjectConfirmationData@Recipient check: no ACS URL
+            // is available on this path — `saml_login_public` builds its
+            // AuthnRequest with an empty AssertionConsumerServiceURL and
+            // `FederationLoginState` has no column to store one. The bearer
+            // `<SubjectConfirmationData>` is still REQUIRED and its
+            // `@Recipient`/`@NotOnOrAfter`/`@InResponseTo` are still validated
+            // (the last against the stored `request_id` above); only the
+            // `@Recipient` *value* comparison is skipped. Closing that needs a
+            // schema addition — tracked as the SEC-005 residual, SAML-01 in
+            // claude_dev/security-audit.md §7.
             None,
             // require_in_response_to has no effect when expected_request_id is
             // Some (this path already enforces presence-and-equality above) —
@@ -1622,6 +1715,9 @@ pub async fn saml_acs_public<C: Connection + Clone>(
         .map_err(axiam_core::error::AxiamError::from)?;
 
     let user = callback_result.user;
+
+    // SEC-095 — see the identical call in `oidc_callback_public`.
+    sso_login_post_auth(&state, &http_req, tenant_id, &user).await?;
 
     // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil()
     // (see the SAML callback above) — SSO tokens carry an empty org_id claim. Phase 19.

@@ -29,7 +29,6 @@ interface EditGroupFormProps {
   description: string;
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
 }
 
 function EditGroupForm({
@@ -37,7 +36,6 @@ function EditGroupForm({
   description,
   onNameChange,
   onDescriptionChange,
-  error,
 }: EditGroupFormProps) {
   return (
     <>
@@ -59,7 +57,6 @@ function EditGroupForm({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -316,13 +313,14 @@ export function GroupDetailPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="group-detail-edit-error"
       >
         <EditGroupForm
           name={editName}
           description={editDescription}
           onNameChange={setEditName}
           onDescriptionChange={setEditDescription}
-          error={editError}
         />
       </FormDialog>
 

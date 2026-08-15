@@ -62,7 +62,6 @@ interface CreateUserFieldsProps {
   onEmailChange: (v: string) => void;
   onPasswordChange: (v: string) => void;
   onDisplayNameChange: (v: string) => void;
-  error?: string;
 }
 
 function CreateUserFields({
@@ -74,7 +73,6 @@ function CreateUserFields({
   onEmailChange,
   onPasswordChange,
   onDisplayNameChange,
-  error,
 }: CreateUserFieldsProps) {
   return (
     <>
@@ -128,7 +126,6 @@ function CreateUserFields({
           autoComplete="off"
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -142,7 +139,6 @@ interface EditUserFieldsProps {
   onEmailChange: (v: string) => void;
   onDisplayNameChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
-  error?: string;
 }
 
 function EditUserFields({
@@ -152,7 +148,6 @@ function EditUserFields({
   onEmailChange,
   onDisplayNameChange,
   onIsActiveChange,
-  error,
 }: EditUserFieldsProps) {
   return (
     <>
@@ -182,7 +177,6 @@ function EditUserFields({
         checked={isActive}
         onChange={onIsActiveChange}
       />
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -537,6 +531,8 @@ export function UsersPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="user-create-error"
       >
         <CreateUserFields
           username={createUsername}
@@ -547,7 +543,6 @@ export function UsersPage() {
           onEmailChange={setCreateEmail}
           onPasswordChange={setCreatePassword}
           onDisplayNameChange={setCreateDisplayName}
-          error={createError}
         />
       </FormDialog>
 
@@ -559,6 +554,8 @@ export function UsersPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="user-edit-error"
       >
         <EditUserFields
           email={editEmail}
@@ -567,7 +564,6 @@ export function UsersPage() {
           onEmailChange={setEditEmail}
           onDisplayNameChange={setEditDisplayName}
           onIsActiveChange={setEditIsActive}
-          error={editError}
         />
       </FormDialog>
 

@@ -33,7 +33,6 @@ interface PermissionFormFieldsProps {
   onActionChange: (v: string) => void;
   onCustomActionChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
   idPrefix: string;
 }
 
@@ -44,7 +43,6 @@ function PermissionFormFields({
   onActionChange,
   onCustomActionChange,
   onDescriptionChange,
-  error,
   idPrefix,
 }: PermissionFormFieldsProps) {
   return (
@@ -91,8 +89,6 @@ function PermissionFormFields({
           placeholder="Optional description…"
         />
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -314,6 +310,8 @@ export function PermissionsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="permission-create-error"
       >
         <PermissionFormFields
           action={createAction}
@@ -322,7 +320,6 @@ export function PermissionsPage() {
           onActionChange={setCreateAction}
           onCustomActionChange={setCreateCustomAction}
           onDescriptionChange={setCreateDescription}
-          error={createError}
           idPrefix="create-perm"
         />
       </FormDialog>
@@ -335,6 +332,8 @@ export function PermissionsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="permission-edit-error"
       >
         <PermissionFormFields
           action={editAction}
@@ -343,7 +342,6 @@ export function PermissionsPage() {
           onActionChange={setEditAction}
           onCustomActionChange={setEditCustomAction}
           onDescriptionChange={setEditDescription}
-          error={editError}
           idPrefix="edit-perm"
         />
       </FormDialog>

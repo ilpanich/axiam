@@ -24,6 +24,10 @@ pub struct CreateOAuth2ClientRequest {
     /// Human-readable name for the client.
     pub name: String,
     /// Allowed redirect URIs (must be HTTPS, except localhost for dev).
+    /// SEC-089: this list doubles as the token-exchange audience allow-list
+    /// — adding a URI here also authorises it as a token audience for this
+    /// client, so review additions on exchange-capable clients with that in
+    /// mind (see `docs/api/token-exchange.md#audience`).
     pub redirect_uris: Vec<String>,
     /// Grant types this client is authorized to use.
     pub grant_types: Vec<String>,
@@ -213,7 +217,33 @@ pub struct OAuth2ClientCreatedResponse {
 // Validation
 // ---------------------------------------------------------------------------
 
-const KNOWN_GRANT_TYPES: &[&str] = &["authorization_code", "client_credentials", "refresh_token"];
+/// Grant types a client may be registered for through this API.
+///
+/// This list MUST stay in step with what the token endpoint actually honours.
+/// Until 2026-08-15 it omitted the device-code and token-exchange grants, so
+/// `device_service::DEVICE_CODE_GRANT_TYPE` and
+/// `token_exchange::TOKEN_EXCHANGE_GRANT_TYPE` — both required by their
+/// respective flows, and both shipped — were rejected here as
+/// "unknown grant_type". That made B2 (device flow) and B3 (token exchange)
+/// unreachable through the admin API: their tests pass only because they build
+/// `OAuth2Client` values directly and never cross this validator.
+///
+/// `device_code` (the bare form) is accepted alongside the URN because
+/// `device_service` honours both.
+///
+/// Deliberately NOT included: `urn:axiam:params:oauth:grant-type:may-impersonate`.
+/// It is a capability marker, not a grant, and whether an admin-API caller may
+/// confer impersonation is a security decision that has not been taken. Leaving
+/// it out preserves the existing posture — impersonation stays settable only
+/// out-of-band.
+const KNOWN_GRANT_TYPES: &[&str] = &[
+    "authorization_code",
+    "client_credentials",
+    "refresh_token",
+    axiam_oauth2::device_service::DEVICE_CODE_GRANT_TYPE,
+    "device_code",
+    axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
+];
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     axiam_core::error::AxiamError::Validation {

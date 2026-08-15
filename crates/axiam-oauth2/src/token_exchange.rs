@@ -86,6 +86,17 @@ pub struct TokenExchangeRequest {
     pub actor_token_type: Option<String>,
     /// Space-separated. Absent means "the subject's own scopes".
     pub scope: Option<String>,
+    /// Target audience for the issued token. **The allow-list is the
+    /// client's `redirect_uris`** (SEC-089): a target is accepted if it
+    /// appears in the client's registered redirect URIs, or is one of
+    /// AXIAM's own built-in audiences. There is no separate audience field
+    /// in v1 — adding a redirect URI to a client also authorises it as a
+    /// token audience for that client. This allow-list is checked at two
+    /// call sites in this file (same-domain exchange, and the X4 external
+    /// exchange) — both are tagged `SEC-089` and must be touched together
+    /// (and together with this comment) if a future dedicated
+    /// `allowed_token_targets` field replaces this reuse. Full write-up in
+    /// `docs/api/token-exchange.md#audience`.
     pub audience: Option<String>,
     /// RFC 8707. Treated as a synonym of `audience`; if both are given they
     /// must agree, because silently preferring one would make the request
@@ -579,6 +590,15 @@ where
                 // addressed at systems it has no relationship with — the mesh
                 // equivalent of an open redirect. The client's registered URIs
                 // are its declared relationships.
+                //
+                // SEC-089: the allow-list *is* `client.redirect_uris` — there
+                // is no separate audience field in v1, so adding a redirect
+                // URI also authorises it as a token audience. Documented on
+                // `TokenExchangeRequest::audience` above and in
+                // `docs/api/token-exchange.md#audience`. The same check is
+                // repeated at the X4 external-exchange call site further
+                // down this file; a future `allowed_token_targets` field
+                // must replace both together.
                 if !is_builtin_audience(t) && !client.redirect_uris.iter().any(|u| u == t) {
                     return Err(OAuth2Error::InvalidTarget(format!(
                         "'{t}' is not a registered target for this client"
@@ -812,6 +832,14 @@ where
         };
         let audience = match target {
             Some(t) => {
+                // SEC-089: same allow-list reuse as the same-domain exchange
+                // path above in this file — `client.redirect_uris` doubles
+                // as the audience allow-list, so adding a redirect URI also
+                // authorises it as a token audience. Documented on
+                // `TokenExchangeRequest::audience` and in
+                // `docs/api/token-exchange.md#audience`. Keep this check and
+                // the same-domain one in sync; a future
+                // `allowed_token_targets` field must replace both together.
                 if !is_builtin_audience(t) && !client.redirect_uris.iter().any(|u| u == t) {
                     return Err(OAuth2Error::InvalidTarget(format!(
                         "'{t}' is not a registered target for this client"

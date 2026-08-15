@@ -12,6 +12,7 @@ members = [
     "crates/axiam-audit",
     "crates/axiam-pki",
     "crates/axiam-email",
+    "crates/axiam-scim",
     "crates/axiam-server",
     "crates/axiam-test-support",
 ]
@@ -150,6 +151,9 @@ rustls = "0.23"
 
 # Testing
 tokio-test = "0.4"
+# R5.3 (X2 test gap) — property test over the UMA RPT deny-override
+# invariant in axiam-oauth2/tests/uma_rpt_deny_property_test.rs.
+proptest = "1"
 
 # Internal crates
 axiam-core = { path = "crates/axiam-core" }
@@ -168,6 +172,8 @@ axiam-federation = { path = "crates/axiam-federation", default-features = false 
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }
+# R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2 by axiam-server.
+axiam-scim = { path = "crates/axiam-scim" }
 
 # Release build profile.
 #

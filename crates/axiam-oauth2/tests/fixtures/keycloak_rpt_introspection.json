@@ -1,0 +1,21 @@
+{
+  "_provenance": "HAND-CONSTRUCTED, not captured network traffic. This environment has no network access to a real Keycloak instance (no docker daemon, no egress). The shape below is transcribed from Keycloak's published Authorization Services Guide, section 'Obtaining Information about an RPT' (RPT introspection via POST /realms/{realm}/protocol/openid-connect/token/introspect with token_type_hint=requesting_party_token), and from the UMA 2.0 Federated Authorization spec section on RPT introspection that guide implements. Field names, nesting, and value shapes are transcribed as documented; the actual id/name/timestamp VALUES below are placeholders invented for this fixture, not real Keycloak output. See keycloak_rpt_introspection_compat_test.rs for how this fixture is used and why it is a hand transcription rather than a capture.",
+  "active": true,
+  "exp": 1465314139,
+  "iat": 1465313839,
+  "aud": "hello-world-authz-service",
+  "azp": "hello-world-authz-service",
+  "sub": "8f00c90d-fd94-4de3-b1b6-a1cb0b70cbba",
+  "permissions": [
+    {
+      "rsid": "6e57845d-ca1a-4c94-8858-9367a3d80480",
+      "rsname": "Hello World Resource",
+      "scopes": ["read"]
+    },
+    {
+      "rsid": "912fb1b8-3c9c-4b3f-9c6a-5e6a5e0b2f11",
+      "rsname": "Another Resource",
+      "scopes": ["view", "edit"]
+    }
+  ]
+}

@@ -72,6 +72,13 @@ Requesting Party Token. What maps onto what, the ticket lifecycle, the
 `WWW-Authenticate: UMA` challenge, and the single-use limitation are in
 [`uma.md`](uma.md).
 
+## SCIM 2.0 provisioning
+
+An IdP (Okta, Entra ID) creates, updates, and deactivates AXIAM users and
+groups directly via `/scim/v2`. Endpoint list, the filtering/PATCH subset,
+how tenant scoping is enforced, and Okta + Entra setup walkthroughs are in
+[`scim-provisioning.md`](scim-provisioning.md).
+
 ## Logout — RP-initiated and back-channel
 
 Ending a session at AXIAM and telling every relying party that shared it.

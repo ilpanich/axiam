@@ -240,12 +240,10 @@ export function LoginPage() {
       }
 
       if (data.user) {
-        // Re-fetch via /auth/me so the store is populated with the
-        // permissions array — the login response does not include it.
-        const hydrated = await fetchCurrentUser();
-        setUser(hydrated ?? { ...data.user, permissions: [] });
-        setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
-        navigate("/dashboard");
+        // CQ-F30: hydrate via the shared completeSignIn tail rather than
+        // degrading to `permissions: []` when /auth/me comes back null —
+        // that used to silently log the user in with no permissions.
+        await completeSignIn();
       } else {
         setError("Authentication error. Please sign in again.");
         navigate("/login");
@@ -285,12 +283,9 @@ export function LoginPage() {
 
       const data = response.data;
       if (data.user) {
-        // Re-fetch via /auth/me so the store is populated with the
-        // permissions array — the login response does not include it.
-        const hydrated = await fetchCurrentUser();
-        setUser(hydrated ?? { ...data.user, permissions: [] });
-        setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
-        navigate("/dashboard");
+        // CQ-F30: hydrate via the shared completeSignIn tail rather than
+        // degrading to `permissions: []` when /auth/me comes back null.
+        await completeSignIn();
       } else {
         setError("Authentication error. Please sign in again.");
         navigate("/login");
@@ -367,7 +362,7 @@ export function LoginPage() {
 
         {/* Step 1: Org + Tenant */}
         {step === "org-tenant" && (
-          <form onSubmit={handleOrgTenantSubmit} noValidate>
+          <form onSubmit={handleOrgTenantSubmit}>
             <fieldset>
               <legend className="text-lg font-semibold text-foreground mb-1">
                 Select your workspace
@@ -424,7 +419,7 @@ export function LoginPage() {
 
         {/* Step 2: Credentials */}
         {step === "credentials" && (
-          <form onSubmit={handleCredentialsSubmit} noValidate>
+          <form onSubmit={handleCredentialsSubmit}>
             <div className="mb-6">
               <h2 className="text-lg font-semibold text-foreground mb-1">
                 Sign in
@@ -554,7 +549,7 @@ export function LoginPage() {
 
         {/* Step 3: MFA */}
         {step === "mfa" && (
-          <form onSubmit={handleMfaSubmit} noValidate>
+          <form onSubmit={handleMfaSubmit}>
             <div className="flex flex-col items-center mb-6">
               <div className="h-12 w-12 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center mb-3 shadow-glow-cyan">
                 <KeyRound size={22} className="text-primary" />

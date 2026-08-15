@@ -1,0 +1,10 @@
+{
+  "_source": "hand-constructed from Okta's SCIM protocol reference / RFC 7644 §3.5.2.2 example 2 (single-member removal via filtered path) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+  "Operations": [
+    {
+      "op": "remove",
+      "path": "members[value eq \"__MEMBER_ID__\"]"
+    }
+  ]
+}

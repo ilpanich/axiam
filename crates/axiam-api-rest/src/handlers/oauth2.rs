@@ -359,7 +359,12 @@ pub async fn token<C: Connection + Clone>(
     // it is a confidential service, not a television, and an exchange is
     // precisely the operation that should be attributable.
     if grant_type == TOKEN_EXCHANGE_GRANT_TYPE {
-        return handle_token_exchange(tenant_id, form, &state).await;
+        // SEC-093: the transport context travels with the grant, so a client
+        // registered for `tls_client_auth` / `private_key_jwt` is
+        // authenticated by the credential its registration names rather than
+        // by the secret it was also, unavoidably, issued.
+        let ctx = token_request_context(&req).with_assertion_from(&form);
+        return handle_token_exchange(tenant_id, form, &state, &ctx).await;
     }
 
     // X2 / UMA 2.0 §3.3.1. Third grant dispatched here for the same structural
@@ -378,7 +383,9 @@ pub async fn token<C: Connection + Clone>(
                 "the uma-ticket grant requires an authorization checker".into(),
             ));
         };
-        return handle_uma_ticket(tenant_id, form, &state, &authz).await;
+        // SEC-093, as for the token-exchange grant above.
+        let ctx = token_request_context(&req).with_assertion_from(&form);
+        return handle_uma_ticket(tenant_id, form, &state, &authz, &ctx).await;
     }
 
     let ctx = token_request_context(&req).with_assertion_from(&form);
@@ -794,15 +801,21 @@ async fn append_client_auth_failure_audit<C: Connection + Clone>(
     ),
 )]
 pub async fn revoke<C: Connection + Clone>(
+    http_req: HttpRequest,
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<RevokeRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
+    // SEC-093: carry the connection's client certificate through, so a client
+    // registered for `tls_client_auth` can actually revoke. The assertion
+    // parameters are folded in by `revoke_token` from the form.
+    let ctx = token_request_context(&http_req);
+
     match state
         .token_service
-        .revoke_token(tenant_id, form.into_inner())
+        .revoke_token(tenant_id, form.into_inner(), &ctx)
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
@@ -831,15 +844,19 @@ pub async fn revoke<C: Connection + Clone>(
     ),
 )]
 pub async fn introspect<C: Connection + Clone>(
+    http_req: HttpRequest,
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<IntrospectRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
+    // SEC-093 — as for `revoke`.
+    let ctx = token_request_context(&http_req);
+
     match state
         .token_service
-        .introspect_token(tenant_id, form.into_inner())
+        .introspect_token(tenant_id, form.into_inner(), &ctx)
         .await
     {
         Ok(resp) => HttpResponse::Ok()
@@ -1183,10 +1200,14 @@ async fn handle_uma_ticket<C: Connection + Clone>(
     form: TokenRequest,
     state: &web::Data<AppState<C>>,
     authz: &crate::authz::AuthzData,
+    ctx: &TokenRequestContext,
 ) -> HttpResponse {
-    let (Some(client_id), Some(client_secret)) =
-        (form.client_id.as_deref(), form.client_secret.as_deref())
-    else {
+    // SEC-093: only `client_id` is required up front. Whether the credential
+    // that must accompany it is a secret, a certificate or a signed assertion
+    // is a property of the REGISTRATION, so it cannot be decided before the
+    // lookup — `authenticate_client` decides it, and answers the same
+    // `invalid_client` for "no credential" as for "wrong credential".
+    let Some(client_id) = form.client_id.as_deref() else {
         return build_oauth2_error_response(&OAuth2Error::InvalidClient(
             "the uma-ticket grant requires client authentication".into(),
         ));
@@ -1194,7 +1215,7 @@ async fn handle_uma_ticket<C: Connection + Clone>(
 
     let client = match state
         .token_service
-        .authenticate_client(tenant_id, client_id, client_secret)
+        .authenticate_client(tenant_id, client_id, form.client_secret.as_deref(), ctx)
         .await
     {
         Ok(client) => client,
@@ -1394,10 +1415,11 @@ async fn handle_token_exchange<C: Connection + Clone>(
     tenant_id: Uuid,
     form: TokenRequest,
     state: &web::Data<AppState<C>>,
+    ctx: &TokenRequestContext,
 ) -> HttpResponse {
-    let (Some(client_id), Some(client_secret)) =
-        (form.client_id.as_deref(), form.client_secret.as_deref())
-    else {
+    // SEC-093 — see `handle_uma_ticket` for why only `client_id` is required
+    // before the lookup.
+    let Some(client_id) = form.client_id.as_deref() else {
         return build_oauth2_error_response(&OAuth2Error::InvalidClient(
             "the token-exchange grant requires client authentication".into(),
         ));
@@ -1405,7 +1427,7 @@ async fn handle_token_exchange<C: Connection + Clone>(
 
     let client = match state
         .token_service
-        .authenticate_client(tenant_id, client_id, client_secret)
+        .authenticate_client(tenant_id, client_id, form.client_secret.as_deref(), ctx)
         .await
     {
         Ok(client) => client,
@@ -1640,7 +1662,13 @@ mod jwks_handler_tests {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PushedAuthorizationRequest {
     pub client_id: String,
-    pub client_secret: String,
+    /// Optional since SEC-093: a client registered for `tls_client_auth` or
+    /// `private_key_jwt` has no secret to present here, and presenting one no
+    /// longer authenticates it.
+    pub client_secret: Option<String>,
+    /// RFC 7521 §4.2 — `private_key_jwt` client authentication at PAR.
+    pub client_assertion: Option<String>,
+    pub client_assertion_type: Option<String>,
     pub response_type: String,
     pub redirect_uri: String,
     pub scope: Option<String>,
@@ -1690,6 +1718,7 @@ pub struct PushedAuthorizationResponse {
     ),
 )]
 pub async fn pushed_authorization_request<C: Connection + Clone>(
+    http_req: HttpRequest,
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<PushedAuthorizationRequest>,
     state: web::Data<AppState<C>>,
@@ -1697,11 +1726,25 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
     let tenant_id = tenant_query.into_inner().tenant_id;
     let req = form.into_inner();
 
-    // One secret-verification path in the codebase, shared with the token
-    // endpoint, rather than a second one to keep correct.
+    // One client-authentication path in the codebase, shared with the token
+    // endpoint, rather than a second one to keep correct — and since SEC-093
+    // that path honours the registered `token_endpoint_auth_method`. PAR is
+    // the sharpest instance of the old bug: FAPI 2.0 §5.3.1.1 requires strong
+    // client authentication AND requires PAR, so a FAPI deployment whose PAR
+    // endpoint accepted a shared secret was both an authentication downgrade
+    // and a conformance failure.
+    let ctx = token_request_context(&http_req).with_assertion(
+        req.client_assertion.as_deref(),
+        req.client_assertion_type.as_deref(),
+    );
     let client = match state
         .token_service
-        .authenticate_client(tenant_id, &req.client_id, &req.client_secret)
+        .authenticate_client(
+            tenant_id,
+            &req.client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
         .await
     {
         Ok(client) => client,
@@ -1953,12 +1996,21 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
         .map(|p| p.client_id.clone())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        if let Ok(c) = state
+        match state
             .oauth2_client_repo
             .get_by_client_id(tenant_id, &client_id)
             .await
         {
-            clients.push(c);
+            Ok(c) => clients.push(c),
+            // A participant whose registration cannot be loaded is dropped
+            // from the fan-out — correct (a deleted client keeps its
+            // participation rows), but silent until now. The RP that does not
+            // get told sees nothing, and neither did anyone reading the logs.
+            Err(e) => tracing::debug!(
+                %client_id,
+                error = %e,
+                "back-channel logout: session participant is not a loadable client, skipping"
+            ),
         }
     }
 
@@ -1966,17 +2018,49 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
     let auth_config = state.auth_config.clone();
     let participant_ids: Vec<String> = participants.into_iter().map(|p| p.client_id).collect();
 
-    let deliveries =
-        crate::backchannel_logout::select_targets(&participant_ids, &clients, |client_id| {
-            axiam_oauth2::logout::issue_logout_token(
+    let deliveries = crate::backchannel_logout::select_targets(
+        &participant_ids,
+        &clients,
+        |client_id| {
+            match axiam_oauth2::logout::issue_logout_token(
                 &issuer,
                 client_id,
                 session_id,
                 subject_id,
                 &auth_config,
-            )
-            .ok()
-        });
+            ) {
+                Ok(token) => Some(token),
+                // This used to be `.ok()`. A token that cannot be minted (a
+                // misconfigured issuer, an unusable signing key) silently
+                // removed the client from the fan-out, so a whole deployment
+                // could stop notifying anyone with no signal anywhere — on a
+                // session-termination path, where "nothing happened" is
+                // exactly the outcome an attacker wants. WARN, not DEBUG: this
+                // one is never routine.
+                Err(e) => {
+                    tracing::warn!(
+                        %client_id,
+                        error = %e,
+                        "back-channel logout: could not issue a logout token, client will NOT be notified"
+                    );
+                    None
+                }
+            }
+        },
+    );
+
+    // One line naming every stage of the funnel, so a delivery that never
+    // happens can be localised without a code read: how many clients joined
+    // the session, how many of those are still loadable registrations, and how
+    // many of those actually got a token and a URI to send it to. Each drop
+    // between those numbers has its own line above (or is the deliberate
+    // "client registered no backchannel_logout_uri" skip in `select_targets`).
+    tracing::debug!(
+        participants = participant_ids.len(),
+        clients = clients.len(),
+        deliveries = deliveries.len(),
+        "back-channel logout fan-out computed"
+    );
 
     // Participation records are dropped after the fan-out list is built, not
     // before — the list is what the fan-out iterates.

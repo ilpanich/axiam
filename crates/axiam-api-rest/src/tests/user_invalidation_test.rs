@@ -105,6 +105,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
             permissions: None,
             ext_exchange: None,
             cnf: None,
+            ext: None,
         }),
     }
 }

@@ -1,0 +1,13 @@
+{
+  "_source": "hand-constructed from Okta's SCIM protocol reference (group membership push, add-member shape) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+  "Operations": [
+    {
+      "op": "add",
+      "path": "members",
+      "value": [
+        { "value": "__MEMBER_ID__", "display": "jsmith@example.com" }
+      ]
+    }
+  ]
+}

@@ -30,5 +30,9 @@ describe("router", () => {
     expect(childPaths).toContain("users");
     expect(childPaths).toContain("organizations");
     expect(childPaths).toContain("audit-logs");
+    // R4.1/R4.2a — self-service routes, no ProtectedRoute permission gate
+    // (same class as dashboard/profile: authentication only).
+    expect(childPaths).toContain("device");
+    expect(childPaths).toContain("privacy");
   });
 });

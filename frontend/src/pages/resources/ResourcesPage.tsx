@@ -13,6 +13,8 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ResourceTree } from "@/components/ResourceTree";
+import { ScopesPanel } from "@/pages/resources/ScopesPanel";
+import { EffectiveAccessPanel } from "@/pages/resources/EffectiveAccessPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -45,7 +47,6 @@ interface ResourceFormFieldsProps {
   onCustomTypeChange: (v: string) => void;
   onParentIdChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
   idPrefix: string;
   allResources: Resource[];
   excludeId?: string;
@@ -62,7 +63,6 @@ function ResourceFormFields({
   onCustomTypeChange,
   onParentIdChange,
   onDescriptionChange,
-  error,
   idPrefix,
   allResources,
   excludeId,
@@ -164,8 +164,6 @@ function ResourceFormFields({
           placeholder="Optional description…"
         />
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -181,11 +179,23 @@ export function ResourcesPage() {
   const { toast } = useToast();
   const [viewMode, setViewMode] = useState<ViewMode>("tree");
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  // B1: resource ids the effective-access preview has flagged denied_by_rule
+  // for the currently-previewed subject/action — cleared whenever the
+  // selection changes, since a stale badge set from a different resource
+  // would misrepresent the new one.
+  const [denyResourceIds, setDenyResourceIds] = useState<Set<string>>(new Set());
 
   const { data: resources = [], isLoading } = useQuery({
     queryKey: ["resources"],
     queryFn: () => resourceService.list(),
   });
+
+  const selectedResource = resources.find((r) => r.id === selectedId);
+
+  function handleSelect(resource: Resource) {
+    setSelectedId(resource.id);
+    setDenyResourceIds(new Set());
+  }
 
   // Helper: resolve parent resource name
   function parentName(parentId?: string): string {
@@ -495,9 +505,10 @@ export function ResourcesPage() {
           ) : (
             <ResourceTree
               resources={resources}
-              onSelect={(r) => setSelectedId(r.id)}
+              onSelect={handleSelect}
               selectedId={selectedId}
               actions={treeActions}
+              denyResourceIds={denyResourceIds}
             />
           )}
         </div>
@@ -510,6 +521,24 @@ export function ResourcesPage() {
         />
       )}
 
+      {/* B1: effective-access preview + C4 scopes CRUD, both scoped to the
+          selected resource. Kept as separate components (ScopesPanel /
+          EffectiveAccessPanel) so the two surfaces stay independently
+          reviewable despite sharing this mount point. */}
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        <EffectiveAccessPanel
+          resources={resources}
+          selectedResource={selectedResource}
+          onDenyResourceIdsChange={setDenyResourceIds}
+        />
+        {selectedResource && (
+          <ScopesPanel
+            resourceId={selectedResource.id}
+            resourceName={selectedResource.name}
+          />
+        )}
+      </div>
+
       {/* Create dialog */}
       <FormDialog
         open={createOpen}
@@ -521,6 +550,8 @@ export function ResourcesPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="resource-create-error"
       >
         <ResourceFormFields
           name={createName}
@@ -533,7 +564,6 @@ export function ResourcesPage() {
           onCustomTypeChange={setCreateCustomType}
           onParentIdChange={setCreateParentId}
           onDescriptionChange={setCreateDescription}
-          error={createError}
           idPrefix="create-res"
           allResources={resources}
         />
@@ -547,6 +577,8 @@ export function ResourcesPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="resource-edit-error"
       >
         <ResourceFormFields
           name={editName}
@@ -559,7 +591,6 @@ export function ResourcesPage() {
           onCustomTypeChange={setEditCustomType}
           onParentIdChange={setEditParentId}
           onDescriptionChange={setEditDescription}
-          error={editError}
           idPrefix="edit-res"
           allResources={resources}
           excludeId={editResource?.id}

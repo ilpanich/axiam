@@ -1421,7 +1421,9 @@ fn revoke_req(token: &str) -> RevokeRequest {
         token: token.into(),
         token_type_hint: None,
         client_id: "client-1".into(),
-        client_secret: SECRET.into(),
+        client_secret: Some(SECRET.into()),
+        client_assertion: None,
+        client_assertion_type: None,
     }
 }
 
@@ -1434,7 +1436,7 @@ async fn revoke_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_err()
     );
@@ -1449,7 +1451,7 @@ async fn revoke_unknown_token_is_ok() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1465,7 +1467,7 @@ async fn revoke_owned_token_succeeds() {
         refresh,
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1481,7 +1483,7 @@ async fn revoke_other_client_token_is_noop_ok() {
         refresh,
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1496,7 +1498,9 @@ fn introspect_req(token: &str) -> IntrospectRequest {
         token: token.into(),
         token_type_hint: None,
         client_id: "client-1".into(),
-        client_secret: SECRET.into(),
+        client_secret: Some(SECRET.into()),
+        client_assertion: None,
+        client_assertion_type: None,
     }
 }
 
@@ -1509,7 +1513,7 @@ async fn introspect_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.introspect_token(client_tenant(), introspect_req("t"))
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
             .await
             .is_err()
     );
@@ -1540,7 +1544,7 @@ async fn introspect_valid_access_token_same_tenant_active() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .introspect_token(tenant_id, introspect_req(&token))
+        .introspect_token(tenant_id, introspect_req(&token), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1569,7 +1573,7 @@ async fn introspect_access_token_other_tenant_inactive() {
     );
     // Introspect under a *different* tenant.
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&token))
+        .introspect_token(client_tenant(), introspect_req(&token), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1591,7 +1595,7 @@ async fn introspect_refresh_token_active() {
     // Use a non-JWT token so JWT decode fails and refresh lookup runs.
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1614,7 +1618,7 @@ async fn introspect_refresh_token_other_client_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1630,7 +1634,7 @@ async fn introspect_unknown_token_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1793,7 +1797,7 @@ async fn introspect_refresh_token_empty_scope_yields_none() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1809,7 +1813,7 @@ async fn introspect_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     let err = svc
-        .introspect_token(client_tenant(), introspect_req("t"))
+        .introspect_token(client_tenant(), introspect_req("t"), &no_cert())
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), "server_error");
@@ -1824,8 +1828,11 @@ async fn revoke_wrong_secret_is_invalid_client() {
         MockRefreshRepo::new(),
     );
     let mut req = revoke_req("t");
-    req.client_secret = "wrong".into();
-    let err = svc.revoke_token(client_tenant(), req).await.unwrap_err();
+    req.client_secret = Some("wrong".into());
+    let err = svc
+        .revoke_token(client_tenant(), req, &no_cert())
+        .await
+        .unwrap_err();
     assert_eq!(err.error_code(), "invalid_client");
 }
 
@@ -2493,4 +2500,412 @@ async fn authorization_code_does_not_reveal_whether_a_client_exists() {
     // every arm say something that still names the cause.
     assert_eq!(unknown.error_code(), "invalid_client");
     assert_eq!(unknown.error_description(), "invalid client credentials");
+}
+
+// ---------------------------------------------------------------------------
+// X1 / R2.2 — the `token.pre_issue` call site
+//
+// A mock gate, not a real dispatcher: what is under test here is whether the
+// grant reads the outcome correctly, and the four outcomes are exactly the four
+// a chain can compose. The timeout row is the outcome the gate produces for a
+// timed-out reactor — `resolve_failure(policy, Timeout)`, which is `Allow`
+// under `fail_open` and a `Deny` naming the failure under `fail_closed` — so
+// this file does not have to link a broker to cover it. That resolution is
+// itself tested in `axiam_amqp::reactor::gate`.
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::reactor::{
+    DynReactorGate, ReactorOutcome, SharedReactorGate, noop_reactor_gate,
+};
+
+/// What a [`FixedGate`] recorded: one entry per interception, as
+/// `(tenant_id, event, payload)`.
+type SeenInterceptions = Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>;
+
+struct FixedGate {
+    outcome: ReactorOutcome,
+    seen: SeenInterceptions,
+}
+
+impl DynReactorGate for FixedGate {
+    fn intercept_dyn<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        event: &'static str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
+        self.seen.lock().unwrap().push((tenant_id, event, payload));
+        let outcome = self.outcome.clone();
+        Box::pin(std::future::ready(outcome))
+    }
+}
+
+type GateLog = Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>;
+
+fn gate(outcome: ReactorOutcome) -> (SharedReactorGate, GateLog) {
+    let seen: GateLog = Arc::new(Mutex::new(Vec::new()));
+    (
+        Arc::new(FixedGate {
+            outcome,
+            seen: seen.clone(),
+        }),
+        seen,
+    )
+}
+
+/// What the gate returns when a `fail_closed` reactor times out. Written as the
+/// literal the dispatcher's `resolve_failure` produces, so this test breaks if
+/// that mapping ever changes shape.
+fn timed_out_fail_closed() -> ReactorOutcome {
+    ReactorOutcome::Deny {
+        reason: "reactor unavailable (reactor timed out)".into(),
+    }
+}
+
+fn cc_svc_with_gate(gate: SharedReactorGate) -> Svc {
+    build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    )
+    .with_reactor_gate(gate)
+}
+
+#[tokio::test]
+async fn pre_issue_allow_mints_a_token_with_no_ext_claim() {
+    let (g, seen) = gate(ReactorOutcome::Allow);
+    let svc = cc_svc_with_gate(g);
+    let tenant = Uuid::new_v4();
+
+    let resp = svc
+        .exchange(tenant, base_req("client_credentials"), &no_cert())
+        .await
+        .expect("an allowing reactor does not change the grant");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert!(claims.ext.is_none(), "an allow adds no claims");
+
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the grant consults the gate exactly once");
+    assert_eq!(calls[0].0, tenant);
+    assert_eq!(calls[0].1, "token.pre_issue");
+    // §22.3: the event says what is being decided, never the means to act on
+    // it elsewhere.
+    let payload = calls[0].2.to_string();
+    assert!(payload.contains("client-1"));
+    assert!(
+        !payload.contains(SECRET),
+        "the client secret must never reach a reactor"
+    );
+}
+
+#[tokio::test]
+async fn pre_issue_deny_refuses_the_grant_as_invalid_grant() {
+    let (g, _) = gate(ReactorOutcome::Deny {
+        reason: "issuance frozen for this client".into(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let err = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a veto must refuse the grant");
+
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        !err.error_description().contains("frozen"),
+        "a reactor's own text must not be echoed to an OAuth2 client: {}",
+        err.error_description()
+    );
+}
+
+#[tokio::test]
+async fn pre_issue_mutate_writes_the_ext_claims_into_the_token() {
+    let (g, _) = gate(ReactorOutcome::Mutate {
+        patch: [
+            ("ext.department".to_string(), "engineering".to_string()),
+            ("ext.a.b.c".to_string(), "nested".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("an allow-listed mutation is applied");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("the enriched token still validates")
+        .0;
+    let ext = claims.ext.expect("ext claims present");
+    assert_eq!(ext["department"], "engineering");
+    assert_eq!(ext["a.b.c"], "nested");
+}
+
+/// The wiring-layer allow-list test the plan requires: a patch key outside
+/// `token.pre_issue`'s allow-list cannot reach a claim, even if it somehow got
+/// past the reply validator and the gate.
+#[tokio::test]
+async fn pre_issue_cannot_rewrite_a_standard_claim_even_from_inside_the_gate() {
+    let subject_before = Uuid::new_v4();
+    let (g, _) = gate(ReactorOutcome::Mutate {
+        patch: [
+            ("sub".to_string(), subject_before.to_string()),
+            ("scope".to_string(), "admin".to_string()),
+            ("exp".to_string(), "99999999999".to_string()),
+            ("aud".to_string(), "axiam:user".to_string()),
+            // One legitimate key alongside them, so the test distinguishes
+            // "dropped the forbidden ones" from "dropped everything".
+            ("ext.ok".to_string(), "yes".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("the grant proceeds");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert_eq!(
+        claims.sub, "client-1",
+        "a reactor must never be able to move `sub`"
+    );
+    assert_eq!(claims.scope.as_deref(), Some("api"));
+    assert_eq!(claims.aud.as_deref(), Some(axiam_auth::token::AUD_M2M));
+    let ext = claims.ext.expect("the allow-listed key still applies");
+    assert_eq!(ext.len(), 1);
+    assert_eq!(ext["ok"], "yes");
+}
+
+#[tokio::test]
+async fn pre_issue_timeout_denies_under_fail_closed_and_allows_under_fail_open() {
+    // fail_closed → the gate hands the site a Deny.
+    let (g, _) = gate(timed_out_fail_closed());
+    let err = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a fail_closed timeout must refuse issuance");
+    assert_eq!(err.error_code(), "invalid_grant");
+
+    // fail_open → the gate hands the site an Allow, and the token is the one
+    // an un-hooked deployment would have minted.
+    let (g, _) = gate(ReactorOutcome::Allow);
+    let resp = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("a fail_open timeout must not break issuance");
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert!(claims.ext.is_none());
+}
+
+/// `require_mfa` has no meaning at the token endpoint. The reply validator
+/// refuses it on any event but `login.post_auth`; if one ever reached here it
+/// must refuse the grant rather than be silently discarded.
+#[tokio::test]
+async fn pre_issue_refuses_a_step_up_demand_it_cannot_perform() {
+    let (g, _) = gate(ReactorOutcome::RequireMfa);
+    let err = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a demand the endpoint cannot satisfy must not be ignored");
+    assert_eq!(err.error_code(), "invalid_grant");
+}
+
+/// The default composition must be byte-for-byte the pre-X1 behaviour.
+#[tokio::test]
+async fn a_service_without_a_gate_behaves_exactly_as_before() {
+    let with_noop = cc_svc_with_gate(noop_reactor_gate());
+    let plain = build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    for svc in [&with_noop, &plain] {
+        let resp = svc
+            .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+            .await
+            .expect("issuance succeeds");
+        let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+            .expect("token validates")
+            .0;
+        assert!(claims.ext.is_none());
+    }
+}
+
+/// The refresh grant mints an access token, so it is hooked too — and a veto
+/// there must refuse the rotation.
+#[tokio::test]
+async fn the_refresh_grant_is_hooked_as_well() {
+    let raw = generate_refresh_token();
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["api"]);
+    stored.token_hash = hash_refresh_token(&raw);
+    let refresh_repo = MockRefreshRepo::new().with_get(stored);
+
+    let (g, seen) = gate(ReactorOutcome::Deny {
+        reason: "rotation frozen".into(),
+    });
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh_repo,
+    )
+    .with_reactor_gate(g);
+
+    let mut req = base_req("refresh_token");
+    req.refresh_token = Some(raw);
+    let err = svc
+        .exchange(Uuid::new_v4(), req, &no_cert())
+        .await
+        .expect_err("a veto must refuse the refresh");
+
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the refresh path consulted the gate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-093 — the registered `token_endpoint_auth_method` is enforced at
+// revoke and introspect, not just at the three grants
+// ---------------------------------------------------------------------------
+//
+// `TokenService::authenticate_client` used to call `verify_client_secret`
+// directly, so these two endpoints authenticated a client by shared secret
+// whatever its registration said. Every client is issued a secret
+// unconditionally at creation (`SurrealOAuth2ClientRepository::create`), so a
+// client registered for `tls_client_auth` or `private_key_jwt` held a live
+// password-equivalent credential here — the exact OR-over-two-credentials that
+// `authenticate_client_credential`'s own doc comment says must not exist.
+//
+// The three grants' equivalent assertions live in `mtls_client_auth.rs` /
+// `private_key_jwt` coverage; these are the two endpoints that were missed.
+
+/// Register `client-1` for a method that is NOT a shared secret, while leaving
+/// the (unavoidably present) secret hash in place — i.e. exactly the row shape
+/// the repository produces for a strong-auth client.
+fn strong_auth_client(
+    method: axiam_core::models::oauth2_client::ClientAuthMethod,
+) -> Box<OAuth2Client> {
+    let mut c = make_client(&["refresh_token"], &[]);
+    c.token_endpoint_auth_method = method;
+    // A `tls_client_auth` registration names an expected subject DN; without
+    // one the mTLS branch would refuse for a second, unrelated reason.
+    c.tls_client_auth_subject_dn = Some("CN=strong-client".into());
+    c
+}
+
+fn strong_methods() -> [axiam_core::models::oauth2_client::ClientAuthMethod; 3] {
+    use axiam_core::models::oauth2_client::ClientAuthMethod as M;
+    [
+        M::TlsClientAuth,
+        M::SelfSignedTlsClientAuth,
+        M::PrivateKeyJwt,
+    ]
+}
+
+#[tokio::test]
+async fn sec093_revoke_refuses_the_secret_of_a_strong_auth_client() {
+    for method in strong_methods() {
+        let svc = build(
+            ClientOutcome::Found(strong_auth_client(method)),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        // The CORRECT secret, over a connection carrying no certificate and a
+        // body carrying no assertion.
+        let err = svc
+            .revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .expect_err(&format!(
+                "{}: revoke must refuse a shared secret (SEC-093)",
+                method.as_str()
+            ));
+        assert_eq!(err.error_code(), "invalid_client", "{}", method.as_str());
+    }
+}
+
+#[tokio::test]
+async fn sec093_introspect_refuses_the_secret_of_a_strong_auth_client() {
+    for method in strong_methods() {
+        let svc = build(
+            ClientOutcome::Found(strong_auth_client(method)),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        let err = svc
+            .introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .expect_err(&format!(
+                "{}: introspect must refuse a shared secret (SEC-093)",
+                method.as_str()
+            ));
+        assert_eq!(err.error_code(), "invalid_client", "{}", method.as_str());
+    }
+}
+
+#[tokio::test]
+async fn sec093_client_secret_post_still_authenticates_at_revoke_and_introspect() {
+    // The other half of the fix: the ordinary path is untouched. If this ever
+    // fails, SEC-093's remedy has become an outage.
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    assert!(
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .is_ok(),
+        "client_secret_post must still authenticate at revoke"
+    );
+    assert!(
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .is_ok(),
+        "client_secret_post must still authenticate at introspect"
+    );
+}
+
+#[tokio::test]
+async fn sec093_private_key_jwt_client_is_refused_when_no_verifier_is_configured() {
+    // Not a duplicate of the test above: it pins WHICH branch refuses. A
+    // deployment with no assertion verifier must refuse the strong-auth client
+    // outright rather than fall back to the secret — the fallback is precisely
+    // the bug.
+    use axiam_core::models::oauth2_client::ClientAuthMethod as M;
+    let svc = build(
+        ClientOutcome::Found(strong_auth_client(M::PrivateKeyJwt)),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let mut req = revoke_req("t");
+    req.client_assertion = Some("eyJ.not.verified".into());
+    req.client_assertion_type =
+        Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into());
+    let err = svc
+        .revoke_token(client_tenant(), req, &no_cert())
+        .await
+        .expect_err("no verifier configured must refuse, not fall back to the secret");
+    assert_eq!(err.error_code(), "invalid_client");
 }

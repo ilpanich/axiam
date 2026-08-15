@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
+import { setToastDispatch } from "@/hooks/useToast";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
@@ -210,6 +211,24 @@ describe("TenantsPage", () => {
     await waitFor(() =>
       expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/organizations/o2/tenants/t2")
     );
+  });
+
+  it("surfaces a delete error via toast (CQ-F09)", async () => {
+    const toastFn = vi.fn();
+    setToastDispatch(toastFn);
+    mockDefaultGets();
+    apiMock.delete.mockRejectedValue(new Error("Tenant has active users"));
+    renderWithProviders(<TenantsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Delete Staging" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(toastFn).toHaveBeenCalledWith({
+        description: "Tenant has active users",
+        variant: "destructive",
+      })
+    );
+    setToastDispatch(null);
   });
 
   it("shows the empty state when there are no tenants", async () => {

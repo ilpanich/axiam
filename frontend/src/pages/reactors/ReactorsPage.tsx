@@ -98,6 +98,43 @@ function LivenessCell({ reactor }: { reactor: Reactor }) {
   );
 }
 
+/**
+ * R2.3 — recent timeouts and vetoes, read from the audit trail R2.2 started
+ * writing. A timeout is the reactor not answering; a veto is the reactor
+ * working as designed. They are shown separately for that reason — a
+ * frequently-vetoing reactor and a frequently-timing-out one need different
+ * operator attention.
+ */
+function HealthCell({ reactor }: { reactor: Reactor }) {
+  if (reactor.mode !== "intercept") {
+    return <span className="text-muted-foreground text-sm">—</span>;
+  }
+  const { recent_timeout_count: timeouts, recent_veto_count: vetoes } = reactor;
+  if (timeouts === 0 && vetoes === 0) {
+    return <span className="text-muted-foreground text-sm">Clean (24h)</span>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      {timeouts > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30"
+          title={`${timeouts} timeout${timeouts === 1 ? "" : "s"} in the last 24h`}
+        >
+          {timeouts} timeout{timeouts === 1 ? "" : "s"}
+        </span>
+      )}
+      {vetoes > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-500/15 text-cyan-400 border border-cyan-500/30"
+          title={`${vetoes} veto${vetoes === 1 ? "" : "s"} in the last 24h`}
+        >
+          {vetoes} veto{vetoes === 1 ? "" : "s"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // ─── Event selector ───────────────────────────────────────────────────────────
 
 interface EventSelectorProps {
@@ -210,7 +247,6 @@ interface ReactorFieldsProps {
   onTimeoutMsChange: (v: string) => void;
   onFailurePolicyChange: (v: FailurePolicy | "") => void;
   onEnabledChange: (v: boolean) => void;
-  error?: string;
 }
 
 function ReactorFields({
@@ -232,7 +268,6 @@ function ReactorFields({
   onTimeoutMsChange,
   onFailurePolicyChange,
   onEnabledChange,
-  error,
 }: ReactorFieldsProps) {
   const inheritedPolicy = strictestDefaultPolicy(events, registry);
 
@@ -366,8 +401,6 @@ function ReactorFields({
         checked={enabled}
         onChange={onEnabledChange}
       />
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -724,6 +757,11 @@ export function ReactorsPage() {
       render: (row) => <LivenessCell reactor={row} />,
     },
     {
+      key: "health",
+      header: "Health (24h)",
+      render: (row) => <HealthCell reactor={row} />,
+    },
+    {
       key: "enabled",
       header: "Status",
       render: (row) => (
@@ -797,6 +835,8 @@ export function ReactorsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="reactor-create-error"
       >
         <ReactorFields
           idPrefix="rc-create"
@@ -817,7 +857,6 @@ export function ReactorsPage() {
           onTimeoutMsChange={setCreateTimeout}
           onFailurePolicyChange={setCreatePolicy}
           onEnabledChange={setCreateEnabled}
-          error={createError}
         />
       </FormDialog>
 
@@ -829,6 +868,8 @@ export function ReactorsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="reactor-edit-error"
       >
         <ReactorFields
           idPrefix="rc-edit"
@@ -849,7 +890,6 @@ export function ReactorsPage() {
           onTimeoutMsChange={setEditTimeout}
           onFailurePolicyChange={setEditPolicy}
           onEnabledChange={setEditEnabled}
-          error={editError}
         />
       </FormDialog>
 

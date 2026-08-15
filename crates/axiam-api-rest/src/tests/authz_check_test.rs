@@ -73,6 +73,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
         permissions: None,
         ext_exchange: None,
         cnf: None,
+        ext: None,
     });
     AuthenticatedPrincipal {
         subject_id: user_id,
@@ -101,6 +102,7 @@ fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrinc
         permissions: None,
         ext_exchange: None,
         cnf: None,
+        ext: None,
     });
 
     AuthenticatedPrincipal {

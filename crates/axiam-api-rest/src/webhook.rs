@@ -453,6 +453,29 @@ mod tests {
         );
     }
 
+    /// SEC-094: the four blocked-v4 assertions above all passed while
+    /// `::ffff:10.0.0.1` sailed through — which is exactly why the bypass
+    /// survived review. A tenant admin's webhook host only has to publish an
+    /// `AAAA` record for the mapped form. These are the same four addresses,
+    /// in the encoding the old predicate missed.
+    #[test]
+    fn webhook_ssrf_ipv4_mapped_ipv6_blocked() {
+        for literal in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:172.16.0.1",
+            "::ffff:192.168.1.1",
+            "::ffff:169.254.169.254",
+            "::ffff:100.64.0.1",
+        ] {
+            let ip: IpAddr = literal.parse().expect("literal parses");
+            assert!(
+                ssrf::is_disallowed_ip(ip),
+                "{literal} must be blocked (SEC-094)"
+            );
+        }
+    }
+
     #[test]
     fn webhook_ssrf_public_ipv4_allowed() {
         let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)); // example.com

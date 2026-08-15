@@ -5,12 +5,15 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token_bound,
-    issue_client_credentials_token_bound, issue_id_token,
-    issue_service_account_client_credentials_token, validate_access_token,
+    generate_refresh_token, hash_refresh_token, issue_access_token_enriched,
+    issue_client_credentials_token_enriched, issue_id_token,
+    issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
+use axiam_core::models::reactor::{
+    ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
+};
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
 use axiam_core::models::uma::RptPermission;
 use axiam_core::models::user::UserStatus;
@@ -153,21 +156,34 @@ pub struct TokenResponse {
 }
 
 /// RFC 7009 token revocation request.
+///
+/// `client_secret` is optional and the two RFC 7521 assertion parameters are
+/// present because RFC 7009 §2.1 says this endpoint authenticates the client
+/// "the same way as the token endpoint" — and since SEC-093 it genuinely does.
+/// A client registered for `private_key_jwt` posts `client_assertion` here and
+/// no secret; one registered for `tls_client_auth` posts neither and is
+/// authenticated by the certificate on the connection.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
+    pub client_assertion: Option<String>,
+    pub client_assertion_type: Option<String>,
 }
 
 /// RFC 7662 token introspection request.
+///
+/// Same credential shape, and for the same reason, as [`RevokeRequest`].
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
+    pub client_assertion: Option<String>,
+    pub client_assertion_type: Option<String>,
 }
 
 /// RFC 7662 token introspection response.
@@ -276,9 +292,30 @@ impl TokenRequestContext {
     /// adding a third assertion parameter cannot be half-wired at one of the
     /// endpoints that build a context.
     #[must_use]
-    pub fn with_assertion_from(mut self, req: &TokenRequest) -> Self {
-        self.client_assertion = req.client_assertion.clone().filter(|a| !a.is_empty());
-        self.client_assertion_type = req.client_assertion_type.clone().filter(|t| !t.is_empty());
+    pub fn with_assertion_from(self, req: &TokenRequest) -> Self {
+        self.with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        )
+    }
+
+    /// Same as [`Self::with_assertion_from`], for the endpoints whose request
+    /// body is not a [`TokenRequest`] — revoke, introspect and PAR (SEC-093).
+    ///
+    /// One implementation, so the "empty string is not a credential" filter
+    /// cannot be present at one endpoint and missing at another.
+    #[must_use]
+    pub fn with_assertion(
+        mut self,
+        client_assertion: Option<&str>,
+        client_assertion_type: Option<&str>,
+    ) -> Self {
+        self.client_assertion = client_assertion
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned);
+        self.client_assertion_type = client_assertion_type
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
         self
     }
 
@@ -316,6 +353,13 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     user_repo: UR,
     auth_config: AuthConfig,
     refresh_token_lifetime_secs: i64,
+    /// X1 — the `token.pre_issue` interceptor chain.
+    ///
+    /// A field rather than a seventh type parameter, and never an `Option`;
+    /// see `axiam_auth::service::AuthService::reactor_gate` for why. A
+    /// deployment without reactors holds the no-op gate, so every grant runs
+    /// the same code.
+    reactor_gate: SharedReactorGate,
 }
 
 impl<OC, AC, TR, RT, UR, SA> TokenService<OC, AC, TR, RT, UR, SA>
@@ -348,6 +392,92 @@ where
             user_repo,
             auth_config,
             refresh_token_lifetime_secs,
+            reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+        }
+    }
+
+    /// Attach the reactor gate (X1).
+    ///
+    /// Builder-style for the same reason [`Self::with_assertion_verifier`] is:
+    /// every existing construction site keeps compiling and keeps its current
+    /// behaviour.
+    #[must_use]
+    pub fn with_reactor_gate(mut self, gate: SharedReactorGate) -> Self {
+        self.reactor_gate = gate;
+        self
+    }
+
+    /// Run `token.pre_issue` and return the `ext` claims to mint with.
+    ///
+    /// Every grant that mints an access token goes through here, which is the
+    /// point: three call sites (authorization code, refresh, client
+    /// credentials) share one hook, so a fourth grant added later cannot
+    /// quietly skip it by forgetting to copy the block.
+    ///
+    /// A veto surfaces as `invalid_grant` — the plan's pinned mapping, and the
+    /// right one: RFC 6749 §5.2 `invalid_grant` is "the grant is not valid for
+    /// this request", which is exactly what a reactor is saying. The reactor's
+    /// reason is **not** echoed to the client (it is third-party text on an
+    /// endpoint reachable with a client credential); the gate has already
+    /// written it to the audit trail with the reactor's id.
+    async fn pre_issue_ext_claims(
+        &self,
+        tenant_id: Uuid,
+        subject: &str,
+        subject_kind: &'static str,
+        client_id: &str,
+        scopes: &[String],
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, OAuth2Error> {
+        match self
+            .reactor_gate
+            .intercept(
+                tenant_id,
+                reactor_events::TOKEN_PRE_ISSUE,
+                serde_json::json!({
+                    // No token, no credential, no signing key (§22.3) — the
+                    // reactor is told what is about to be minted, not handed
+                    // the means to mint it.
+                    "sub": subject,
+                    "sub_kind": subject_kind,
+                    "client_id": client_id,
+                    "tenant_id": tenant_id,
+                    "scopes": scopes,
+                }),
+            )
+            .await
+        {
+            ReactorOutcome::Allow => Ok(None),
+            ReactorOutcome::Mutate { patch } => {
+                Ok(axiam_auth::token::ext_claims_from_patch(&patch))
+            }
+            ReactorOutcome::Deny { reason } => {
+                tracing::info!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    client_id,
+                    "token issuance vetoed by a reactor on token.pre_issue"
+                );
+                debug_assert!(!reason.is_empty());
+                Err(OAuth2Error::InvalidGrant(
+                    "token issuance was refused by policy".into(),
+                ))
+            }
+            // `require_mfa` is a `login.post_auth` answer. The reply validator
+            // refuses it on any other event, so this arm is unreachable through
+            // the wire path — and if it were reachable, the token endpoint has
+            // no step-up to perform, so proceeding "as if allowed" would be
+            // silently discarding a security demand.
+            ReactorOutcome::RequireMfa => {
+                tracing::error!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    "a reactor demanded step-up on token.pre_issue, which has no \
+                     step-up to perform — refusing the grant"
+                );
+                Err(OAuth2Error::InvalidGrant(
+                    "token issuance was refused by policy".into(),
+                ))
+            }
         }
     }
 
@@ -690,12 +820,23 @@ where
         let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
         let t_token_mint = std::time::Instant::now();
-        let access_token = issue_service_account_client_credentials_token(
+        // X1 — the fourth issuance path, hooked like the other three.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &sa.id.to_string(),
+                "service_account",
+                &sa.client_id,
+                &[],
+            )
+            .await?;
+        let access_token = issue_service_account_client_credentials_token_enriched(
             sa.id,
             tenant_id,
             tenant.organization_id,
             &[],
             &self.auth_config,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -937,7 +1078,20 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
-        let access_token = issue_access_token_bound(
+        // X1 — the code has already been consumed at this point, so a veto
+        // costs the caller the code. That is the correct order: the code is
+        // single-use and PKCE-verified, and leaving it spendable while an
+        // external process decides would hand an attacker a retry window.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &auth_code.user_id.to_string(),
+                "user",
+                client_id,
+                &auth_code.scopes,
+            )
+            .await?;
+        let access_token = issue_access_token_enriched(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
@@ -946,6 +1100,7 @@ where
             uuid::Uuid::new_v4().to_string(),
             axiam_auth::token::AUD_USER,
             cnf,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1204,13 +1359,21 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
-        let access_token = issue_client_credentials_token_bound(
+        // X1. Deliberately measured INSIDE `token_mint_us` rather than as its
+        // own stage: this is the number the R2.4 bench cell compares against an
+        // unhooked run, and splitting it out would let the hooked and unhooked
+        // figures be read from different clocks.
+        let ext = self
+            .pre_issue_ext_claims(tenant_id, client_id, "oauth2_client", client_id, &scopes)
+            .await?;
+        let access_token = issue_client_credentials_token_enriched(
             client_id,
             tenant_id,
             tenant.organization_id,
             &scopes,
             &self.auth_config,
             cnf,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -1353,8 +1516,29 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
+        // X1 — a refresh mints a new access token, so it is an issuance and it
+        // is hooked. Enrichment is re-derived here rather than copied from the
+        // token being refreshed, for the same reason `cnf` is: a claim a
+        // reactor added fifteen minutes ago is not evidence that it would add
+        // it now, and carrying it forward would let a revoked enrichment
+        // survive every rotation.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &stored
+                    .user_id
+                    .map_or_else(|| client_id.to_string(), |u| u.to_string()),
+                if stored.user_id.is_some() {
+                    "user"
+                } else {
+                    "oauth2_client"
+                },
+                client_id,
+                &stored.scopes,
+            )
+            .await?;
         let access_token = if let Some(user_id) = stored.user_id {
-            issue_access_token_bound(
+            issue_access_token_enriched(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
@@ -1363,18 +1547,20 @@ where
                 uuid::Uuid::new_v4().to_string(),
                 axiam_auth::token::AUD_USER,
                 cnf,
+                ext,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
             // Client-credentials-originated refresh (shouldn't normally
             // happen, but handle gracefully)
-            issue_client_credentials_token_bound(
+            issue_client_credentials_token_enriched(
                 client_id,
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
                 &self.auth_config,
                 cnf,
+                ext,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
@@ -1488,10 +1674,22 @@ where
         &self,
         tenant_id: Uuid,
         req: RevokeRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<(), OAuth2Error> {
-        // Authenticate the client making the revocation request
-        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
-            .await?;
+        // Authenticate the client making the revocation request, by whichever
+        // credential its REGISTRATION names (SEC-093) — not by whichever one
+        // the request happened to carry.
+        let ctx = ctx.clone().with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        );
+        self.authenticate_client(
+            tenant_id,
+            &req.client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
+        .await?;
 
         // Try revoking as a refresh token (hash-based lookup).
         // For access tokens (short-lived JWTs), revocation is a no-op —
@@ -1521,10 +1719,21 @@ where
         &self,
         tenant_id: Uuid,
         req: IntrospectRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<IntrospectionResponse, OAuth2Error> {
-        // Authenticate the client making the introspection request
-        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
-            .await?;
+        // Authenticate the client making the introspection request, by
+        // whichever credential its REGISTRATION names (SEC-093).
+        let ctx = ctx.clone().with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        );
+        self.authenticate_client(
+            tenant_id,
+            &req.client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
+        .await?;
 
         // First try: decode as JWT access token
         if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {
@@ -1613,21 +1822,39 @@ where
 
     /// Verify client credentials and return the authenticated registration.
     ///
-    /// Shared by revoke, introspect, and — since B3 — the token-exchange
-    /// grant. The first two discard the returned row; the exchange needs it,
-    /// because the client's registered scopes bound what an exchange may
-    /// grant and its registered URIs bound which audiences it may address.
+    /// Shared by every client-authenticating endpoint that is not one of the
+    /// three grants dispatched inside [`Self::exchange`]: revoke, introspect,
+    /// PAR, the token-exchange grant and the uma-ticket grant. The first two
+    /// discard the returned row; the others need it, because the client's
+    /// registered scopes bound what an exchange may grant and its registered
+    /// URIs bound which audiences it may address.
     ///
-    /// Returning the row rather than `()` is what keeps ONE
-    /// secret-verification path in this crate. The alternative — a second
-    /// method for the one caller that needs the row — would mean two places
-    /// to keep the OBS-1 transparent-hash-upgrade behaviour correct, and the
-    /// one that drifted would be the one nobody was looking at.
+    /// # SEC-093 — the registration decides here too
+    ///
+    /// This used to call [`Self::verify_client_secret`] directly, so those
+    /// five endpoints authenticated by shared secret **whatever
+    /// `token_endpoint_auth_method` the client registered**. Because
+    /// `SurrealOAuth2ClientRepository::create` mints a secret for every client
+    /// unconditionally, a FAPI client registered for `tls_client_auth` — whose
+    /// registration validation explicitly *forbids* shared-secret
+    /// authentication — nonetheless held a live password-equivalent credential
+    /// that worked at PAR, revoke, introspect, token-exchange and uma-ticket.
+    /// The operator's model was "this client authenticates with a
+    /// certificate"; the reality was an OR over two credentials, one of which
+    /// they were told to discard at creation time.
+    ///
+    /// It now delegates to [`Self::authenticate_client_credential`], the same
+    /// method the authorization_code / client_credentials / refresh_token
+    /// grants use — deliberately *reused* rather than reimplemented, because a
+    /// second copy of this rule is how the two drifted apart in the first
+    /// place. `client_secret` is `Option` because a client registered for a
+    /// strong method has none to present.
     pub async fn authenticate_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
-        client_secret: &str,
+        client_secret: Option<&str>,
+        ctx: &TokenRequestContext,
     ) -> Result<OAuth2Client, OAuth2Error> {
         let client = self
             .client_repo
@@ -1656,7 +1883,7 @@ where
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 
-        self.verify_client_secret(tenant_id, &client, client_secret)
+        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
 
         Ok(client)

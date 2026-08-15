@@ -104,4 +104,25 @@ describe("ResourceTree", () => {
     // The sync effect adds the new node to expandedIds; its child becomes visible.
     expect(screen.getByText("Fresh Child")).toBeInTheDocument();
   });
+
+  // B1 — effective-access preview panel's inheritance badge.
+  it("renders a DENY badge only on resources in denyResourceIds", () => {
+    render(
+      <ResourceTree
+        resources={tree}
+        denyResourceIds={new Set(["root", "grandchild"])}
+      />
+    );
+    const rootRow = screen.getByText("Root API").closest("[role='treeitem']")!;
+    const grandchildRow = screen.getByText("Grandchild").closest("[role='treeitem']")!;
+    const child1Row = screen.getByText("Child One").closest("[role='treeitem']")!;
+    expect(rootRow.querySelector("span[title*='deny rule']")).toBeInTheDocument();
+    expect(grandchildRow.querySelector("span[title*='deny rule']")).toBeInTheDocument();
+    expect(child1Row.querySelector("span[title*='deny rule']")).not.toBeInTheDocument();
+  });
+
+  it("renders no DENY badges when denyResourceIds is omitted or empty", () => {
+    render(<ResourceTree resources={tree} />);
+    expect(screen.queryByText("Deny")).not.toBeInTheDocument();
+  });
 });

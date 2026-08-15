@@ -23,6 +23,8 @@ import {
   Globe,
   BellRing,
   Zap,
+  MonitorSmartphone,
+  ShieldCheck,
 } from "lucide-react";
 
 interface NavItem {
@@ -163,6 +165,14 @@ const navSections: NavSection[] = [
         icon: <BellRing size={18} />,
         requiredPermission: "notification_rules:list",
       },
+      {
+        // B2/R4.1: self-service (any authenticated user can approve a device
+        // they're holding), so no permission gate -- matches Dashboard/Profile.
+        to: "/device",
+        label: "Connect a Device",
+        icon: <MonitorSmartphone size={18} />,
+        requiredPermission: null,
+      },
     ],
   },
   {
@@ -172,6 +182,14 @@ const navSections: NavSection[] = [
         to: "/profile",
         label: "Profile",
         icon: <UserCircle size={18} />,
+        requiredPermission: null,
+      },
+      {
+        // GDPR Art. 15/17 self-service console -- every authenticated user
+        // manages their own export/erasure requests here.
+        to: "/privacy",
+        label: "Privacy & Data",
+        icon: <ShieldCheck size={18} />,
         requiredPermission: null,
       },
       {

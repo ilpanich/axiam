@@ -1,6 +1,13 @@
 # SDK OIDC / SSO Relying-Party Helpers — Implementation Plan
 
-> **Status: PLAN — not yet implemented.**
+> **Status: SHIPPED.** The helpers below are specified as CONTRACT §12
+> ("OIDC/SSO Relying-Party Helpers") in [`sdks/CONTRACT.md`](../sdks/CONTRACT.md)
+> and are implemented across the SDK fleet. Cross-SDK conformance was reviewed
+> in [`sdk-oidc-sso-conformance-review.md`](sdk-oidc-sso-conformance-review.md)
+> (18 of 19 follow-up findings are still open and untracked — see
+> `remediation-plan-2026-08-15.md` R5.7). The plan below is kept as the
+> original design record; it is not being rewritten to past tense.
+>
 > Scope: the eight **backend-capable** client SDKs (`axiam-rust-sdk`, `axiam-typescript-sdk`,
 > `axiam-python-sdk`, `axiam-java-sdk`, `axiam-kotlin-sdk`, `axiam-csharp-sdk`,
 > `axiam-php-sdk`, `axiam-go-sdk`) plus a contract amendment in this repository

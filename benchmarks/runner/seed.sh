@@ -263,8 +263,15 @@ seed_axiam() {
 
   echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh)"
   local CLIENT_RESP
+  # R5.2: 'uma_protection' alongside 'openid' so uma2_perm.js / uma_ticket_grant.js
+  # can mint a Protection API Token (X2's ProtectionApiToken extractor requires
+  # the scope on the token, not just on the client — see those scenarios'
+  # mintPat()). Scopes have no server-side allow-list (unlike grant_types,
+  # which does — see token_exchange.js's header comment for the gap that
+  # leaves open), so widening this list is safe and does not need a matching
+  # KNOWN_SCOPES change.
   CLIENT_RESP=$(api POST /api/v1/oauth2-clients \
-    '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid"]}')
+    '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid","uma_protection"]}')
   CLIENT_ID=$(echo "$CLIENT_RESP" | jq -r '.client_id // empty')
   CLIENT_SECRET=$(echo "$CLIENT_RESP" | jq -r '.client_secret // empty')
   if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then

@@ -298,6 +298,8 @@ function AssignGroupDialog({
       onSubmit={handleAssign}
       isLoading={assigning}
       submitLabel="Assign"
+      error={error}
+      errorId="assign-group-error"
     >
       <div className="space-y-2">
         <Label htmlFor="assign-group-select">Group</Label>
@@ -327,7 +329,6 @@ function AssignGroupDialog({
           </select>
         )}
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </FormDialog>
   );
 }
@@ -341,7 +342,6 @@ interface EditRoleFormProps {
   onNameChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   onIsGlobalChange: (v: boolean) => void;
-  error?: string;
 }
 
 function EditRoleForm({
@@ -351,7 +351,6 @@ function EditRoleForm({
   onNameChange,
   onDescriptionChange,
   onIsGlobalChange,
-  error,
 }: EditRoleFormProps) {
   return (
     <>
@@ -385,7 +384,6 @@ function EditRoleForm({
           Global role
         </Label>
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -773,6 +771,8 @@ export function RoleDetailPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="role-detail-edit-error"
       >
         <EditRoleForm
           name={editName}
@@ -781,7 +781,6 @@ export function RoleDetailPage() {
           onNameChange={setEditName}
           onDescriptionChange={setEditDescription}
           onIsGlobalChange={setEditIsGlobal}
-          error={editError}
         />
       </FormDialog>
 

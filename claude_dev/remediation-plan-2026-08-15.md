@@ -392,3 +392,207 @@ R8 (certification/operator)     — R8.1 whenever docker is available; R8.2/R8.3
 
 Cheapest-adequate model totals: **Opus 5** only for R1.5, R2.1, R2.2, R5.6 (decision),
 R5.7 (F-01/F-06), R6, R7 (D2 diagnosis), R8.5 — everything else Sonnet 5 or operator.
+
+---
+
+## Execution log — 2026-08-15 (Claude Code Cloud container)
+
+Recorded per the execution brief: where an acceptance criterion could not be met in this
+environment, the precise residual is stated here rather than silently skipped.
+
+### Environment constraints (fixed, not failures of the tasks)
+- **No docker daemon and no bench hardware.** Every R7 measurement cell, R8.1's FAPI
+  conformance run, R5.4's live Keycloak exchange and the examples' compose smoke-runs are
+  therefore authoring-only. No measured number was written anywhere in this pass.
+- **SAGE MCP not connected** — no `sage_*` tools exposed. Noted once; not blocking.
+- **Quota-limited volume (~38 GB).** A full `axiam` workspace build (~17 GB peak) and a full
+  `axiam-rust-sdk` build (~14 GB peak, incl. a 3.2 GB `llvm-cov-target`) cannot coexist. They
+  were serialised and all builds moved to `CARGO_INCREMENTAL=0`. One mid-build incremental-cache
+  deletion by the orchestrator did destroy two in-flight builds before this was understood.
+- **`libxml2-dev` + `xmlsec1` were installed**, so R1.5 was built and tested with the real
+  `saml` feature rather than `--no-default-features`.
+
+### Correction to §0 — the R5.7 premise was stale
+`sdk-oidc-sso-conformance-review.md` assessed each SDK at its 2026-07-27 commit. Several repos
+have moved far past that: `axiam-rust-sdk` `main` is **64 commits** beyond the reviewed
+`b2d7930`, and **all seven** of its assigned findings (F-01, F-04, F-05, F-07, F-09, F-10,
+F-19) were closed on 2026-07-27 in `2ea4308`, with a follow-up in `04780fd`. F-02 (java),
+F-03 (kotlin) and F-08 (python) were likewise already fixed. The plan's "18 of 19 open" is
+therefore wrong; genuinely open and now fixed were F-11, F-12, F-13, F-14, F-15, F-17, F-18.
+
+**Do not re-apply F-01's literal six-step spec.** Step 4 prescribes `broadcast::Sender`;
+`04780fd` deliberately migrated `broadcast` → `watch` because `broadcast` is not value-retaining,
+forcing retire-before-send and reopening the window where a second leader replays a consumed
+refresh token. CONTRACT §9 rule 6(a) ("publish-before-vacate") now names this, citing that repo
+as the reference implementation. Implementing the spec verbatim would reintroduce a fixed
+security defect.
+
+### New findings raised during execution (not in the plan)
+- **`KNOWN_GRANT_TYPES` omits two shipped grants.**
+  `crates/axiam-api-rest/src/handlers/oauth2_clients.rs:220` allows only `authorization_code`,
+  `client_credentials`, `refresh_token`. But `device_service.rs:145` requires
+  `urn:ietf:params:oauth:grant-type:device_code` and `token_exchange.rs:331/411` requires
+  `urn:ietf:params:oauth:grant-type:token-exchange`. **B2 (device flow) and B3 (token exchange)
+  are therefore unreachable through the admin REST API** — their tests pass only because they
+  construct clients directly, bypassing the validator. Fix pending.
+  `urn:axiam:params:oauth:grant-type:may-impersonate` is deliberately NOT being added: whether an
+  admin-API caller may grant impersonation is a security decision this plan does not answer.
+  **Routed to R6 for adjudication.**
+- **Go SDK: a real data race** in `TestUmaExchangeTicketIsNotRetriedOnATransportFailure`,
+  pre-existing on `main`, skipped under `-race`. Out of R5.7's scope; needs its own follow-up.
+- **Python SDK: coverage floor is not gating.** Local `fail_under` is 97.0 and the tree measures
+  96.93 (pre-existing on `main`), yet the CI coverage job passes. The local gate and the CI gate
+  disagree; one of them is wrong.
+- **C# SDK: `dotnet format --verify-no-changes` is not actually configured in CI**, contrary to
+  the assumption in the task brief.
+- **Kotlin/C# do not speak AMQP today** (§8 lists six SDKs; Kotlin defers §8), yet R2.5 assigns
+  them a `reactor_serve` runtime. Recorded in CONTRACT §22.10 as a prerequisite.
+
+### Divergences between the plan's prose and the implementation (R2.1)
+CONTRACT §22 was drafted from the code, so eight plan statements were written as the code
+actually behaves, not as the plan described. The load-bearing ones: reactor replies rely on
+freshness + single-use `correlation_id`, **not** the durable nonce dedup the audit/authz
+consumers do; the budget is a wall-clock ceiling with `min(timeout, remaining)` per reactor
+rather than `min(sum, 5000)`, and an unreached `fail_closed` reactor still denies; failure policy
+is per-registration with strictest-wins composition, not per-reply; `patch` values are strings,
+not arbitrary JSON; and reactor bodies serialize `"hmac_signature":null` where §8's two message
+types omit the field — previously undocumented anywhere, and now pinned by the new fixture.
+
+### Residuals carried
+- **R1.5**: the public first-time-SSO ACS path cannot compare `@Recipient` *by value* —
+  `saml_login_public` builds its AuthnRequest with an empty ACS URL and `FederationLoginState`
+  has no column for one. Presence is required and `@NotOnOrAfter`/`@InResponseTo` are fully
+  enforced there. Closing the value check needs a schema addition. Recorded as SAML-01.
+- **R5.2**: the SCIM flood scenario is written against the documented `/scim/v2` contract and
+  parked in a `PENDING_ENDPOINTS`/`PENDING_SCENARIOS` lane; it must be re-verified against the
+  real DTOs once `axiam-scim` lands, and folded into `ENDPOINTS` then.
+- **R7**: every measurement cell remains unrun. The two previously-missing scenarios
+  (`device-flow-poll`, `token-exchange`) now exist and are registered.
+
+### Execution log — update 2 (end of the 2026-08-15 pass)
+
+**Wave status.** R1 complete. R2.1–R2.4 and R2.6 complete; R2.5 (the 8-runtime SDK fan-out) not started —
+it is gated on the main-repo PR merging so the SDKs receive one stable artifact set. R3 complete. R4
+complete except R4.2b. R5: R5.1, R5.2, R5.3, R5.4, R5.6, R5.7, R5.10, R5.11 complete; R5.8 not started
+(same merge gate); R5.9 half done; R5.5 deliberately not implemented. R6 complete, and its three HIGH
+findings are fixed. R7 authoring half complete; no cell executed. R8 untouched, as scoped.
+
+**The contract is at 1.19, not 1.18.** R2.1 took it to 1.18 (§22 Reactors); R5.6's SDK-Q10 erratum took it
+to 1.19. R5.8's re-vendor must therefore ship `CONTRACT.md` **and** `proto/` together — the proto changed
+in the same step, so shipping the contract alone would leave every SDK describing a wire it does not have.
+
+**R5.5 — not implemented, deliberately.** Two independent blockers, either sufficient: there is no
+per-client or per-profile lifetime mechanism to extend (every other row in `fapi.rs`'s table gates on a
+field already on `OAuth2Client`; lifetimes are global `AuthConfig` values), and FAPI 2.0 core does not pin
+numeric bounds for code/refresh lifetimes the way it pins PAR, PKCE and sender-constraining. Choosing 60 s
+or 300 s would be inventing a requirement and citing it as FAPI. Needs a decision on the actual bound and
+its citation, plus whether it is a per-client override (schema change) or a global fapi2 knob.
+
+**R5.9 — half done.** Frontend measured at 94.41% lines (808 tests, 67 files) and gated at 92.4 in
+`vitest.config.ts`, which had never had a threshold. The Rust half did NOT complete: the instrumented
+workspace build consumed ~10 GB in six minutes and was stopped at 1.5 GB free rather than risk ENOSPC. No
+TOTAL was obtained and none was invented; `coverage.yml` remains at `--fail-under-lines 80`. Finishing it
+needs ~6 GB of headroom and a re-run of the three commands `coverage.yml` uses. Worth knowing: the docker
+daemon is absent but `dockerd` IS installed, and native RabbitMQ + SurrealDB were installed successfully as
+substitutes for the CI service containers — so service-dependent work is not as blocked here as assumed.
+Frontend outlier for follow-up: `FederationTrustEditor.tsx` at 28.57% lines.
+
+**R6 findings and disposition.** 15 findings, SEC-093..SEC-107. The three HIGHs are fixed in this branch:
+SEC-093 (five OAuth2 endpoints authenticated by shared secret regardless of the registered
+`token_endpoint_auth_method`), SEC-094 (SSRF guard did not canonicalise IPv4-mapped IPv6, so
+`::ffff:169.254.169.254` passed and was then pinned), SEC-095 (`login.post_auth` never fired on SAML ACS or
+OIDC callback). The twelve medium/low findings are NOT fixed and are the natural next queue — SEC-096
+(token exchange strips sender-constraining), SEC-097 (`dpop_require_nonce` persisted and never read, with an
+adjacent comment asserting the opposite), SEC-098 (SCIM can set any tenant user's password and revokes no
+sessions), SEC-099/SEC-100 (reactor cap and unreadable-registry paths), SEC-101 (nothing but a boot warning
+stops an admin self-inflicting a login outage), through SEC-107.
+
+**SEC-093 forced a wire change.** `RevokeRequest`, `IntrospectRequest` and the PAR body all marked
+`client_secret` required and carried no `client_assertion`, so refusing the secret alone would have locked
+strong-auth clients out of those endpoints entirely. `client_secret` is now optional and RFC 7521
+assertions are accepted — additive, so `client_secret_post` clients are unchanged — with `openapi.json`
+regenerated and CONTRACT §12.1 rule 4 amended because it stated the now-false invariant.
+
+**Further findings raised during execution, none of them in the plan.**
+- `KNOWN_GRANT_TYPES` omitted the device-code and token-exchange grants, so B2 and B3 were unreachable
+  through the admin REST API despite both shipping. Fixed, with a regression test.
+  `may-impersonate` is deliberately still excluded and a test pins that; R6 agreed, noting the design
+  comment conflated where a capability is stored with who may write it.
+- OIDC discovery returned 500 for the entire e2e stack: `AXIAM__AUTH__OAUTH2_ISSUER_URL` was set nowhere,
+  so `effective_issuer()` fell back to `jwt_issuer`, a bare name that fails `url::Url::parse`. Nothing
+  exercised discovery until the B5 example did. Fixed in `docker-compose.e2e.yml`.
+- `/oauth2/end_session` requires a `tenant_id` query parameter that OIDC RP-Initiated Logout 1.0 does not
+  define, so a generic RP library fails deserialization before the handler runs. Same for
+  `/oauth2/device_authorization`. Documented in the examples; worth considering whether the extension
+  should be advertised in discovery.
+- SSO sessions record no IP or user agent — both federated handlers pass `None, None` to
+  `create_session_and_tokens` while every password login records them. An audit/forensics gap, distinct
+  from SEC-095. Not fixed.
+- `org_id` is `Uuid::nil()` on both federated paths (pre-existing `TODO(T19.15)`).
+- `GroupRepository::delete` returns Ok without checking affected rows, so a cross-tenant delete silently
+  "succeeds". Fixed in the SCIM handler; the native `/api/v1/groups` handler still has it. R6 rates it Low
+  (no data crosses tenants, uniform 204 so no oracle) and says the fix belongs in `axiam-db`.
+- `RoleRepository::assign_to_user` hard-scopes the `has_role` edge to the `user` table, so a
+  `service_account` subject can hold no RBAC permission at all. The SCIM bearer principal must therefore be
+  a tenant user, not a service account.
+- The examples are separate Cargo workspaces, so `cargo clippy --workspace` does not cover them; the b3
+  example broke its own CI job during R5.6 and only its dedicated smoke job would have caught it.
+
+**Process notes worth carrying forward.**
+- Verify with CI's own command (`cargo clippy --workspace --all-targets -- -D warnings`), not scoped
+  per-crate equivalents. Scoped checks let findings through to CI twice in this pass.
+- Test fixtures should generate credentials rather than carry literals; four separate secret-scanner
+  findings in this branch were all fixture literals, one of which had been suppressed with an inline
+  scanner directive rather than removed.
+- The examples' runtime smoke job earned its keep: it found five real defects (two wrong status codes, a
+  missing query parameter, a wrong JSON path, and the server-side OIDC issuer gap) that shellcheck, `bash
+  -n` and review had all passed.
+
+### Execution log — update 3 (b5 back-channel logout, R5.1 follow-up)
+
+**The sixth defect the runtime smoke job found, and the first one no amount of review could have.**
+`examples-smoke.yml`'s b5 step got through login and RP-Initiated Logout and then failed step 3:
+`no verified back-channel logout token arrived within 10s`. Reproduced locally against a natively-run
+server (SurrealDB + RabbitMQ native, no docker daemon needed — see update 2's process note) by
+registering a `backchannel_logout_uri` AXIAM could not dial, which reproduces the CI symptom exactly,
+including the RP app's log containing nothing but its two startup lines.
+
+**Root cause — an example/CI-harness defect, not a server defect.** `smoke-test.sh` registered
+`http://localhost:9999/backchannel-logout`. That is the ONE url in the whole flow that AXIAM dials
+itself; every other one is dialled by curl standing in for a browser. In CI, AXIAM runs inside the
+`axiam-e2e-server` container while the script and the RP app run on the runner, so `localhost` named
+the container, nothing listened on 9999 there, and all three delivery attempts were refused. The
+server behaved correctly throughout and logged three
+`WARN back-channel logout delivery failed … error=error sending request for url (…)` lines — which
+nobody saw, because the workflow deliberately does not print server logs.
+
+Fixed by an `RP_BACKCHANNEL_URL` seam in `smoke-test.sh` (default = `RP_URL`, so a non-containerised
+local run is unaffected), `examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml` mapping
+`host.docker.internal:host-gateway` into the server container, and the workflow setting the seam to
+that name — the same mechanism `conformance/docker-compose.yml` already uses for the same reason.
+The full smoke script now passes end to end against a live server; delivery is measured at **16 ms**
+from fan-out to 2xx, so the 10 s poll was never the problem and was not touched.
+
+**Two observability defects fixed alongside it, because the diagnosis cost a CI round-trip.**
+- *Server (`handlers/oauth2.rs`).* `issue_logout_token(...).ok()` discarded a token-issuance error and
+  silently dropped that client from the fan-out. On a session-termination path, "nothing happened" is
+  the outcome an attacker wants, and there was no signal anywhere. Now a `WARN`. A participant whose
+  client registration fails to load is likewise now a `DEBUG` line, and one
+  `back-channel logout fan-out computed` line names the whole funnel
+  (participants → loadable clients → deliveries) so the next failure is localised without a code read.
+  It is what empirically eliminated causes 1–3 in this investigation.
+- *Example (`src/server.ts`).* The receiver logged nothing on arrival, so "AXIAM never reached us" and
+  "AXIAM reached us and we rejected the token" were indistinguishable from the RP side — the
+  `verified_jti_count` debug endpoint reads 0 for both. It now logs arrival before validating anything,
+  logs the previously-silent `missing logout_token` 400, and logs the outcome (identified-by /
+  duplicate / sessions-ended, no identifiers).
+
+`docs/api/logout.md` gains "The URI is resolved from AXIAM's network position", which states the
+container/pod trap for operators and names the two WARN lines to look for. Its delivery contract
+("up to 3 attempts, 500 ms then 2 s backoff") was checked against measurement and is accurate:
+attempts landed at +0 ms, +502 ms, +2003 ms.
+
+**Carry forward.** A failure-only, grep-filtered `docker logs axiam-e2e-server | grep back-channel`
+step is now in the workflow. Back-channel delivery runs in a detached task, so a delivery fault
+produces nothing at all in the example's own output — three lines of server log is the only place the
+fault is visible, and that is a narrow enough exception to the job's no-log-dump rule to be worth it.

@@ -269,6 +269,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   who logs out keeps passing gRPC authorization until their access token
   expires (up to 15 minutes). This was always true; it is now written down,
   and `AXIAM__GRPC__STRICT_REVOCATION=true` changes it.
+- **gRPC `CheckAccessRequest.subject_id` is now optional**, the way the REST
+  check body's has always been: an **empty** value means "the subject in the
+  verified token" instead of being refused as a malformed UUID. A non-empty
+  value must still equal the token's subject — gRPC has no `authz:check_as`
+  cross-subject form. Empty carries the meaning rather than the field becoming
+  proto3 `optional`, because that is a cardinality change `buf breaking`
+  refuses. Purely a widening: every request that worked before still works.
+
+### Deprecated
+
+- **gRPC `CheckAccessResponse.deny_reason` — superseded by `reason`, removed at
+  2.0.** The REST decision body has always called the human-readable reason
+  `reason`; the gRPC one called the identical string `deny_reason`, so every SDK
+  speaking both transports reconciled the two names itself, and not all of them
+  reconciled them the same way (SDK-Q10). `CheckAccessResponse` now carries
+  **`reason` (field 4)** with explicit presence — absent on an allow, present on
+  every refusal, exactly the REST shape — and `deny_reason` is marked
+  `[deprecated = true]` while continuing to carry the identical string.
+
+  Nothing breaks today: both fields ship until **AXIAM 2.0**, where
+  `deny_reason` is removed. Renaming it now would have broken every deployed
+  gRPC client on the wire for no behavioural gain. Clients should read `reason`
+  and fall back to `deny_reason` only when `reason` is absent *on a refusal*,
+  which means the server predates this change. The rule, and the SDK-side
+  obligations that go with it, are in `sdks/CONTRACT.md` §11.2 rule 9
+  ("Amended 2026-08 (SDK-Q10)", contract 1.19).
 
 ### Security
 
@@ -333,6 +359,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `surrealdb`, `surrealdb-core` or `surrealkv`, and fails on any double-winner
   round. Results are recorded, version-pinned, in
   `tools/surreal-race-probe/RESULTS.md`.
+
+- **SEC-088 (fix): token exchange no longer mints a `sub_kind`/`sub` mismatch.**
+  Exchanging to the machine audience rewrote `sub_kind` to `OAuth2Client` while
+  leaving `sub` as the subject user's UUID — the one combination the
+  `sub_kind`-tells-you-how-to-read-`sub` contract says cannot occur.
+  `sub_kind` now always carries through unchanged from the subject token; the
+  audience alone conveys "this token reached the M2M audience by exchange." A
+  regression test exchanges a user token to `aud=axiam:m2m` and asserts
+  `sub_kind == User` and `sub` unchanged.
+- **SEC-089 (decision): the token-exchange audience allow-list stays
+  `redirect_uris`, documented loudly instead of split into a dedicated field.**
+  Adding a redirect URI to a client also authorises it as a token-exchange
+  audience for that client; there is no separate audience allow-list in v1.
+  This is now stated on `TokenExchangeRequest::audience`, at both allow-list
+  check sites in `token_exchange.rs`, on the `redirect_uris` field docs in the
+  client-management handler, in `docs/api/token-exchange.md#audience`, and in
+  the generated OpenAPI schema. A dedicated `allowed_token_targets` field
+  remains the intended eventual fix.
+- **SEC-090 (decision): an impersonation exchange intentionally resets the
+  actor-chain depth bound.** Impersonation produces a token indistinguishable
+  from one the subject obtained directly, so it starts a new, unlinked chain
+  rather than extending the delegation one it grew out of. No code change:
+  impersonation already requires the dedicated `may-impersonate` grant, and
+  the per-hop lifetime cap still bounds every chain regardless of depth.
+  Recorded so the reset is not rediscovered as a surprise.
+- **SEC-091 (doc): token exchange's revocation posture is now stated where an
+  operator will find it.** Exchange does not consult session revocation — the
+  same standing posture as non-strict access-token validation elsewhere in
+  AXIAM — bounded by two properties already enforced in code: the exchanged
+  token's lifetime can never exceed the subject token's remaining lifetime,
+  and its granted privilege is always a subset of the subject's and the
+  client's scopes. Documented in `docs/security-profiles.md` (Session-revocation
+  posture) and cross-referenced from `docs/api/token-exchange.md#sec-091`.
+- **SEC-092 (fix): an unrecognised permission-grant `effect` no longer reads
+  back as `allow`.** `PermissionGrantRow::try_into_grant` used to default an
+  unparseable `effect` to `Allow`; under deny-override that silently defeated
+  every deny for the affected role during a rolling upgrade that wrote a newer
+  effect value an older node could not parse. The row is now dropped instead
+  — it contributes neither an allow nor a deny, decisions fall through to the
+  remaining grants and ultimately to default-deny — and logged at `error`
+  rather than `warn`, since reaching that branch means the datastore was
+  written outside both the API validator and the schema `ASSERT`.
 
 ## [1.0.0-alpha24] - 2026-08-04
 

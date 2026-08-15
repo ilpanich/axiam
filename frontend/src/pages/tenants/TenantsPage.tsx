@@ -22,6 +22,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import { formatDate } from "@/lib/utils";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Enriched tenant type (includes org name for display) ─────────────────────
 
@@ -41,7 +43,6 @@ interface CreateTenantFieldsProps {
   onSlugChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   onOrgIdChange: (v: string) => void;
-  error?: string;
 }
 
 function CreateTenantFields({
@@ -54,7 +55,6 @@ function CreateTenantFields({
   onSlugChange,
   onDescriptionChange,
   onOrgIdChange,
-  error,
 }: CreateTenantFieldsProps) {
   return (
     <>
@@ -113,7 +113,6 @@ function CreateTenantFields({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -129,7 +128,6 @@ interface EditTenantFieldsProps {
   onSlugChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
-  error?: string;
 }
 
 function EditTenantFields({
@@ -141,7 +139,6 @@ function EditTenantFields({
   onSlugChange,
   onDescriptionChange,
   onIsActiveChange,
-  error,
 }: EditTenantFieldsProps) {
   return (
     <>
@@ -181,7 +178,6 @@ function EditTenantFields({
         checked={isActive}
         onChange={onIsActiveChange}
       />
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -191,6 +187,7 @@ function EditTenantFields({
 export function TenantsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // ─── Search state ──────────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -363,6 +360,16 @@ export function TenantsPage() {
       void queryClient.invalidateQueries({ queryKey: ["tenants"] });
       setDeleteTenant(null);
     },
+    // CQ-F09: previously silent on failure — mirrors the create/edit
+    // mutations' onError (which surface the message near the field), using
+    // the app-wide toast convention (useCrudMutations, CQ-F15) since
+    // ConfirmDialog has no inline error slot.
+    onError: (err: unknown) => {
+      toast({
+        description: getApiErrorMessage(err),
+        variant: "destructive",
+      });
+    },
   });
 
   // ─── Table columns ────────────────────────────────────────────────────────
@@ -493,6 +500,8 @@ export function TenantsPage() {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="tenant-create-error"
       >
         <CreateTenantFields
           name={createName}
@@ -504,7 +513,6 @@ export function TenantsPage() {
           onSlugChange={setCreateSlug}
           onDescriptionChange={setCreateDescription}
           onOrgIdChange={setCreateOrgId}
-          error={createError}
         />
       </FormDialog>
 
@@ -516,6 +524,8 @@ export function TenantsPage() {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="tenant-edit-error"
       >
         <EditTenantFields
           name={editName}
@@ -526,7 +536,6 @@ export function TenantsPage() {
           onSlugChange={setEditSlug}
           onDescriptionChange={setEditDescription}
           onIsActiveChange={setEditIsActive}
-          error={editError}
         />
       </FormDialog>
 

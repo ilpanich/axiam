@@ -195,6 +195,8 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
         onSubmit={handleSubmit}
         isLoading={encryptMutation.isPending}
         submitLabel="Encrypt"
+        error={error}
+        errorId="pgp-encrypt-error"
       >
         <div className="space-y-2">
           <Label htmlFor="encrypt-data">Data to Encrypt *</Label>
@@ -208,7 +210,6 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
             className="resize-y font-mono"
           />
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
       </FormDialog>
 
       <SecretRevealModal
@@ -236,7 +237,6 @@ interface GenerateFieldsProps {
   onEmailChange: (v: string) => void;
   onPurposeChange: (v: PgpKeyPurpose) => void;
   onAlgorithmChange: (v: PgpKeyAlgorithm) => void;
-  error?: string;
 }
 
 function GenerateFields({
@@ -248,7 +248,6 @@ function GenerateFields({
   onEmailChange,
   onPurposeChange,
   onAlgorithmChange,
-  error,
 }: GenerateFieldsProps) {
   return (
     <>
@@ -314,8 +313,6 @@ function GenerateFields({
             : "Ed25519 supports signing and signature verification only."}
         </p>
       </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -540,6 +537,8 @@ export function PgpKeysPage() {
         onSubmit={handleGenerateSubmit}
         isLoading={generateMutation.isPending}
         submitLabel="Generate"
+        error={generateError}
+        errorId="pgp-generate-error"
       >
         <GenerateFields
           name={name}
@@ -550,7 +549,6 @@ export function PgpKeysPage() {
           onEmailChange={setEmail}
           onPurposeChange={setPurpose}
           onAlgorithmChange={setAlgorithm}
-          error={generateError}
         />
       </FormDialog>
 

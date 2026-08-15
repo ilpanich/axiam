@@ -1,0 +1,14 @@
+{
+  "_source": "hand-constructed from Microsoft's Entra ID SCIM provisioning reference (default attribute-mapping create shape) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "userName": "AdeleV@example.com",
+  "name": {
+    "givenName": "Adele",
+    "familyName": "Vance"
+  },
+  "emails": [
+    { "value": "AdeleV@example.com", "type": "work", "primary": true }
+  ],
+  "active": true,
+  "externalId": "a1b2c3d4-e5f6-4a1b-9c2d-3e4f5a6b7c8d"
+}

@@ -682,6 +682,29 @@ where
                 continue;
             }
 
+            // WIDENING fallback: a miss here silently yields "no ancestors",
+            // which can only ever *shrink* `applicable_role_ids` below —
+            // dropping an ancestor-scoped grant. If that dropped grant was a
+            // DENY, this would silently widen access (an ancestor-scoped deny
+            // would fail to apply). It is unreachable today only because this
+            // lookup key, `(req.tenant_id, req.resource_id)`, is populated by
+            // the round-trip-2 loop above under the exact same gate that
+            // guards this call site: the round-trip-2 loop runs over
+            // `requests.iter().filter(|r| has_roles(r))` (the `has_roles`
+            // closure defined above, keyed off `assignments_by_subject`), and
+            // this call site is reached only when the `assignments.is_empty()`
+            // check just above did NOT `continue` — i.e. only when
+            // `assignments_by_subject.get(&(req.tenant_id, req.subject_id))`
+            // is non-empty for this same `req`, which is exactly `has_roles`'s
+            // condition. So every `req` that reaches this line already had its
+            // `(tenant_id, resource_id)` key inserted into `ancestors_by_resource`
+            // by round-trip 2, and `.unwrap_or(&empty_ancestors)` never actually
+            // fires. If that population gate (`has_roles`) and this consumption
+            // gate (`assignments.is_empty()`) are ever allowed to diverge —
+            // e.g. by filtering round-trip 2 on something other than
+            // `has_roles`, or by reordering this block above the
+            // `assignments.is_empty()` check — a missed lookup here would
+            // silently drop an ancestor-scoped DENY instead of failing loudly.
             let empty_ancestors = HashSet::new();
             let ancestor_ids = ancestors_by_resource
                 .get(&(req.tenant_id, req.resource_id))
@@ -729,7 +752,22 @@ where
 
         // --- Coalesce round-trip 4: fetch grants for every applicable role in
         //     the batch, one batched query per tenant.
-        let mut grants_by_role: HashMap<Uuid, Vec<PermissionGrant>> = HashMap::new();
+        //
+        // Keyed per-tenant (outer map keyed by `tenant_id`, inner by
+        // `role_id`) rather than by bare `role_id` across the whole batch —
+        // isomorphic to keying the flat map by `(tenant_id, role_id)`, and
+        // mirrors the `(Uuid, Uuid)` key `grant_role_seen` already uses a few
+        // lines above. `get_role_permission_grants_for_roles` returns a
+        // `role_id`-keyed map for a *single* tenant per call (it is invoked
+        // once per `tenant_id` in `grant_role_ids`), so a bare
+        // `grants_by_role.extend(map)` here would merge those per-tenant maps
+        // into one flat `role_id`-keyed map, and a `role_id` collision across
+        // two tenants in the same batch would silently overwrite one tenant's
+        // grants with another's. Nesting under `tenant_id` removes that
+        // reliance on UUIDv4 role-id uniqueness for cross-tenant batch
+        // isolation — a same-named `role_id` in two tenants' `Vec<Uuid>` below
+        // simply lands in two different inner maps and can never collide.
+        let mut grants_by_role: HashMap<Uuid, HashMap<Uuid, Vec<PermissionGrant>>> = HashMap::new();
         for (tenant_id, role_ids) in &grant_role_ids {
             let map = self
                 .permission_repo
@@ -740,8 +778,9 @@ where
                     role_count = role_ids.len()
                 ))
                 .await?;
-            grants_by_role.extend(map);
+            grants_by_role.entry(*tenant_id).or_default().extend(map);
         }
+        let empty_role_grants: HashMap<Uuid, Vec<PermissionGrant>> = HashMap::new();
 
         // --- Final pass: evaluate each item against the shared grants map,
         //     preserving input order.
@@ -755,11 +794,17 @@ where
                 } => {
                     // Same two helpers the single-check path uses, so the
                     // batch path's deny-override semantics and reason codes
-                    // cannot diverge from it.
+                    // cannot diverge from it. Scoped to this item's tenant
+                    // before handing off, so `evaluate_grants` (shared with
+                    // the single-check path, which is inherently
+                    // single-tenant) never sees another tenant's role ids.
+                    let tenant_grants = grants_by_role
+                        .get(&req.tenant_id)
+                        .unwrap_or(&empty_role_grants);
                     decisions.push(decision_for(
                         evaluate_grants(
                             &unique_role_ids,
-                            &grants_by_role,
+                            tenant_grants,
                             &req.action,
                             requested_scope_id,
                         ),

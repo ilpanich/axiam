@@ -192,6 +192,60 @@ describe("FormDialog", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("renders no error slot when error is unset", () => {
+    render(
+      <FormDialog open onClose={() => {}} onSubmit={() => {}} title="T">
+        <input aria-label="F" />
+      </FormDialog>
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("renders the error slot wired via aria-describedby, mirroring Input/Textarea", () => {
+    render(
+      <FormDialog
+        open
+        onClose={() => {}}
+        onSubmit={() => {}}
+        title="T"
+        error="Failed to save tenant."
+      >
+        <input aria-label="F" />
+      </FormDialog>
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Failed to save tenant.");
+    expect(alert).toHaveAttribute("id", "form-dialog-error");
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "aria-describedby",
+      "form-dialog-error"
+    );
+  });
+
+  it("honors a custom errorId for the error slot", () => {
+    render(
+      <FormDialog
+        open
+        onClose={() => {}}
+        onSubmit={() => {}}
+        title="T"
+        error="Boom"
+        errorId="tenant-create-error"
+      >
+        <input aria-label="F" />
+      </FormDialog>
+    );
+    expect(screen.getByRole("alert")).toHaveAttribute(
+      "id",
+      "tenant-create-error"
+    );
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "aria-describedby",
+      "tenant-create-error"
+    );
+  });
+
   it("Tab wraps from last to first focusable and Shift+Tab wraps back", () => {
     render(
       <FormDialog open onClose={() => {}} onSubmit={(e) => e.preventDefault()} title="T" submitLabel="Save">

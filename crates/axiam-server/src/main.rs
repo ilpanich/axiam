@@ -582,6 +582,67 @@ async fn main() -> std::io::Result<()> {
     );
     let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(crypto_hash_permits));
 
+    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
+    // debug build this falls back to a documented dev-only default when
+    // unset; in a release build (the production container image) an unset
+    // key fails closed at startup — there is no unsigned code path (D-05c).
+    //
+    // Resolved here because THREE things need it and this is the earliest of
+    // them: the X1 reactor gate below (which signs reactor events and verifies
+    // reactor replies with the same §8 v2 scheme), §4.2's cross-replica
+    // cache-invalidation publisher, and the AMQP consumers.
+    let amqp_signing_key: Vec<u8> = config
+        .amqp
+        .resolve_signing_key()
+        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
+    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
+
+    // -------------------------------------------------------------------
+    // X1 — the reactor gate (R2.2)
+    // -------------------------------------------------------------------
+    //
+    // ONE gate, shared by all five hook sites: `login.post_auth` in
+    // `AuthService`, `token.pre_issue` in `TokenService`, and
+    // `user.pre_create` / `user.pre_update` / `grant.pre_assign` in the REST
+    // handlers via `AppState`. One gate means one routing table, one
+    // per-tenant concurrency bound and one audit sink — five gates would mean
+    // five caps that each admit 64 in-flight interceptions per tenant.
+    //
+    // The routing table is TTL-cached, so a tenant with no registered reactor
+    // costs one hash-map lookup per hooked operation and never touches the
+    // database or the broker.
+    let reactor_routing = Arc::new(axiam_amqp::ReactorRoutingTable::new(
+        axiam_amqp::RepositoryReactorSource(SurrealReactorRepository::new(pool.handle_for_repo())),
+        axiam_amqp::reactor::DEFAULT_ROUTING_TTL,
+    ));
+    let reactor_gate: axiam_core::models::reactor::SharedReactorGate =
+        Arc::new(axiam_amqp::DispatchingReactorGate::new(
+            Arc::clone(&reactor_routing),
+            // §22.1's scope note: the lapin RPC transport is not merged yet.
+            // Every dispatch therefore resolves through the registration's
+            // failure policy, which is audited and counted. A deployment with
+            // no registered reactor is unaffected; see the warning below.
+            axiam_amqp::UnavailableReactorTransport,
+            axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(pool.handle_for_repo())),
+            amqp_signing_key.clone(),
+            axiam_amqp::ReactorGateConfig::default(),
+        ));
+    let reactor_routing_invalidator: Arc<dyn Fn(uuid::Uuid) + Send + Sync> = {
+        let routing = Arc::clone(&reactor_routing);
+        Arc::new(move |tenant_id| routing.invalidate_tenant(tenant_id))
+    };
+    tracing::warn!(
+        "X1 reactors: the dispatch gate is wired into all five interceptor \
+         events, but the AMQP reactor transport is not implemented in this \
+         build. A tenant with NO registered reactor is unaffected. A REGISTERED \
+         reactor cannot be reached, so its failure_policy applies to every \
+         dispatch — a fail_closed registration (the default for login.post_auth, \
+         user.pre_create, user.pre_update and grant.pre_assign) will DENY those \
+         operations, and every one of those denials is audited as \
+         'reactor.dispatch_failed'. Do not register interceptors until the \
+         transport ships."
+    );
+
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
@@ -589,7 +650,8 @@ async fn main() -> std::io::Result<()> {
         auth_refresh_token_repo,
         config.auth.clone(),
         Arc::clone(&crypto_semaphore),
-    );
+    )
+    .with_reactor_gate(Arc::clone(&reactor_gate));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -762,7 +824,10 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
-    );
+    )
+    // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
+    // `login.post_auth` share one routing table and one per-tenant cap.
+    .with_reactor_gate(Arc::clone(&reactor_gate));
 
     // B2 — device authorization grant (RFC 8628).
     //
@@ -1036,19 +1101,11 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
-    // debug build this falls back to a documented dev-only default when
-    // unset; in a release build (the production container image) an unset
-    // key fails closed at startup — there is no unsigned code path (D-05c).
+    // `amqp_signing_key` (SEC-022/SECHRD-08) is resolved further up, next to
+    // the X1 reactor gate — the gate signs reactor events with the same master
+    // key, and it is constructed before `AuthService`. §4.2's cross-replica
+    // cache-invalidation publisher, below, signs with that same value.
     //
-    // Resolved here (before the engines are built) because §4.2's
-    // cross-replica cache-invalidation publisher signs with the same key and
-    // has to be attached to every engine.
-    let amqp_signing_key: Vec<u8> = config
-        .amqp
-        .resolve_signing_key()
-        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
-    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
     // NEW-4: freshness skew window shared by both consumers.
     let amqp_replay_skew = config.amqp.replay_skew();
 
@@ -1521,6 +1578,39 @@ async fn main() -> std::io::Result<()> {
             None => engine,
         }
     };
+    // X1 / R2.3 — `ReactorAdminServiceImpl`'s own `AuthorizationEngine`.
+    // `AuthorizationEngine` does not implement `Clone`, so it cannot share
+    // `grpc_engine`'s instance; built identically (same repositories, same
+    // decision cache, same invalidation broadcaster) so the two stay
+    // coherent — see `start_grpc_server`'s `reactor_engine` doc comment.
+    let grpc_reactor_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
+        );
+        let engine = match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
+            None => engine,
+        }
+    };
+    let grpc_reactor_repo = reactor_repo.clone();
+    // `pool` is moved into `health_checker` before this point (see the
+    // comment near `session_client_repo` above), so this reuses the
+    // `audit_repo` instance built earlier from `pool.handle_for_repo()`
+    // rather than calling `pool` again.
+    let grpc_reactor_audit_repo = audit_repo.clone();
+    let grpc_reactor_routing_invalidator = Arc::clone(&reactor_routing_invalidator);
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
@@ -1563,6 +1653,10 @@ async fn main() -> std::io::Result<()> {
             grpc_db,
             grpc_batch_max_concurrency,
             grpc_strict_revocation,
+            grpc_reactor_engine,
+            grpc_reactor_repo,
+            grpc_reactor_audit_repo,
+            grpc_reactor_routing_invalidator,
         )
         .await
         {
@@ -1689,6 +1783,10 @@ async fn main() -> std::io::Result<()> {
         device_auth_service: device_auth_service.clone(),
         pgp_service: pgp_service.clone(),
         reactor_repo: reactor_repo.clone(),
+        // X1 — the REST-side hooks (`user.pre_create`, `user.pre_update`,
+        // `grant.pre_assign`) call the same gate the two services hold.
+        reactor_gate: Arc::clone(&reactor_gate),
+        reactor_routing_invalidator: Some(Arc::clone(&reactor_routing_invalidator)),
         webhook_repo: webhook_repo.clone(),
         webhook_delivery: webhook_delivery.clone(),
         // CQ-B22: hand the delivery publisher to AppState so handlers can
@@ -1784,6 +1882,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(app_state.clone()))
             .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
+            // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
+            .configure(axiam_scim::scim_routes::<axiam_db::DbClient>)
             .configure(openapi_routes)
     })
     // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS

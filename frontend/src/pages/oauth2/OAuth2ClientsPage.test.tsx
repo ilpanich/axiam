@@ -104,6 +104,8 @@ describe("OAuth2ClientsPage", () => {
         redirect_uris: ["https://x/cb", "https://x/cb2"],
         grant_types: ["authorization_code"],
         scopes: ["openid", "profile"],
+        post_logout_redirect_uris: [],
+        backchannel_logout_uri: undefined,
       })
     );
     const secret = await screen.findByRole("alertdialog");
@@ -143,6 +145,8 @@ describe("OAuth2ClientsPage", () => {
         redirect_uris: [],
         grant_types: ["authorization_code"],
         scopes: undefined,
+        post_logout_redirect_uris: [],
+        backchannel_logout_uri: undefined,
       })
     );
   });
@@ -182,6 +186,8 @@ describe("OAuth2ClientsPage", () => {
         redirect_uris: ["https://app.example.com/callback"],
         grant_types: ["authorization_code", "refresh_token"],
         scopes: ["openid", "profile"],
+        post_logout_redirect_uris: [],
+        backchannel_logout_uri: "",
       })
     );
   });
@@ -222,6 +228,50 @@ describe("OAuth2ClientsPage", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
     expect(await screen.findByText("Update failed")).toBeInTheDocument();
+  });
+
+  it("sends post_logout_redirect_uris and backchannel_logout_uri when creating (B5)", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockResolvedValue(
+      res({
+        id: "c5",
+        client_id: "client-logout",
+        client_secret: "s3cr3t",
+        name: "Logout App",
+        redirect_uris: ["https://x/cb"],
+        grant_types: ["authorization_code"],
+        scopes: [],
+        created_at: "t",
+      })
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Logout App");
+    fireEvent.change(within(dialog).getByLabelText("Redirect URIs (one per line)"), {
+      target: { value: "https://x/cb" },
+    });
+    fireEvent.change(
+      within(dialog).getByLabelText("Post-Logout Redirect URIs (one per line)"),
+      { target: { value: "https://x/logged-out" } }
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText("Back-Channel Logout URI"),
+      "https://x/backchannel-logout"
+    );
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "openid" }));
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "profile" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/oauth2-clients", {
+        name: "Logout App",
+        redirect_uris: ["https://x/cb"],
+        grant_types: ["authorization_code"],
+        scopes: undefined,
+        post_logout_redirect_uris: ["https://x/logged-out"],
+        backchannel_logout_uri: "https://x/backchannel-logout",
+      })
+    );
   });
 
   it("deletes a client after confirmation", async () => {

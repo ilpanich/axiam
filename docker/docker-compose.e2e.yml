@@ -37,6 +37,58 @@ services:
       timeout: 5s
       retries: 5
 
+  # R5.4 (X4 cross-vendor proof): a real Keycloak instance so
+  # `keycloak_cross_vendor_token_exchange_test.rs` can exchange a token
+  # actually minted (and signed) by Keycloak, not a hand-rolled JWT shaped
+  # like one — `external_token_exchange_test.rs:19-27` names exactly this
+  # gap and says it belongs to the compose suite, not a unit-test harness.
+  #
+  # Image, healthcheck technique and the bootstrap-admin env vars are the
+  # same as `benchmarks/targets/keycloak/docker-compose.yml` (26.7.0; a bare
+  # TCP probe on the management port, because the image ships no curl and an
+  # https profile serves the management port over TLS too). Deliberately
+  # NOT that target's postgres-backed `start` + build-then-serve sequence,
+  # and no TLS profile: the bench target needs production-representative
+  # persistence and a matrix of security profiles to measure; this service
+  # exists for one CI job's worth of realm/client/user that is discarded
+  # with the stack, so `start-dev` (in-memory H2, auto-http-enabled) is
+  # simpler and boots faster for no loss of what this test actually proves.
+  # Plaintext HTTP is fine here: the test reaches this service over loopback
+  # (the published port below) through the SAME `allow_private`/
+  # `JwksCache::new_allow_private_networks()` seam every other
+  # loopback-mock-IdP integration test uses — `axiam_pki::ssrf::guarded_fetch`
+  # tolerates a non-HTTPS first hop only behind that seam, so this container
+  # is never reachable in a posture the production SSRF guard would accept
+  # (see the test file's module docs for why that is a real, intentional
+  # limit — a *production* AXIAM instance still cannot federate with an
+  # internal-network IdP over plain HTTP, or at all without an explicit
+  # allowlist that does not exist today).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.0
+    container_name: axiam-e2e-keycloak
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${E2E_KEYCLOAK_ADMIN:-admin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${E2E_KEYCLOAK_ADMIN_PASSWORD:-admin}"
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      # Published on the host so the Rust test process (running directly on
+      # the CI runner, not in a container — see the test file's module docs
+      # for why) reaches it at http://localhost:8180, which is loopback from
+      # the test's point of view and therefore within the documented test
+      # seam above.
+      - "8180:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      # Generous: first-ever `start-dev` on a cold image pull is slower than
+      # a warm re-run.
+      start_period: 60s
+    restart: "no"
+
   rabbitmq:
     image: rabbitmq:4-management-alpine
     container_name: axiam-e2e-rabbitmq
@@ -121,6 +173,17 @@ services:
       # committed. A fresh pepper per run is correct here: E2E starts from an
       # empty database, so there are no v2 hashes to carry across runs.
       AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:-}"
+      # OIDC discovery (/.well-known/openid-configuration) returns 500
+      # "OIDC issuer is not configured as a valid URL" unless this is a real
+      # URL: effective_issuer() falls back to jwt_issuer, which is a bare name
+      # and fails url::Url::parse in the discovery handler's guard. Nothing in
+      # the e2e suite exercised discovery until the B5 relying-party example
+      # did, which is why this was never noticed.
+      # It must equal the URL clients actually reach the server on — the
+      # discovery `issuer` has to string-match the `iss` in issued tokens
+      # (OIDC Core §2) — and the stack publishes the server on localhost:8090,
+      # which is also what the examples use as AXIAM_URL.
+      AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-http://localhost:8090}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s

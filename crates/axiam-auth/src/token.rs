@@ -142,6 +142,68 @@ pub struct AccessTokenClaims {
     /// refuse the token, not ignore the claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// X1 — custom claims contributed by a `token.pre_issue` reactor.
+    ///
+    /// # Why a nested object rather than flattened top-level claims
+    ///
+    /// The reactor patch keys are `ext.department`, `ext.cost_center`, … and
+    /// the obvious rendering is one top-level claim per key. That would need
+    /// `#[serde(flatten)]`, and `flatten` forces serde to buffer the **whole
+    /// struct** through an intermediate map on *every* deserialization — which
+    /// is to say on every access-token validation, the hottest path in the
+    /// product. Reactors are not allowed to cost the un-hooked path anything
+    /// (X1.6: "hot-path cells must show zero delta"), so the claim is a nested
+    /// object whose absence costs one `Option` check.
+    ///
+    /// Keys are stored with the `ext.` prefix **stripped**: the namespace is
+    /// the claim name, so `ext.department` reads back as `ext: {"department":
+    /// …}`. Nothing outside the namespace can appear here — the allow-list is
+    /// enforced by the reply validator, again by the gate, and the prefix is
+    /// removed by the one function that builds this map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// The `ext.` namespace prefix a `token.pre_issue` patch key carries, and the
+/// only prefix [`ext_claims_from_patch`] will accept.
+pub const EXT_CLAIM_PREFIX: &str = "ext.";
+
+/// Turn a validated `token.pre_issue` patch into the `ext` claim object.
+///
+/// Returns `None` for an empty patch so an unhooked token is byte-identical to
+/// one issued before X1 existed.
+///
+/// # This is a renderer, not a second allow-list
+///
+/// A key that is not in the `ext.` namespace has already been refused twice
+/// (the reply validator, then the gate). If one arrives here anyway it is
+/// **dropped and logged at ERROR** rather than written under some fallback
+/// name: this function's contract is that everything it emits is inside the
+/// namespace, and the only way to keep that true when handed something outside
+/// it is not to emit it. Dropping is safe *here specifically* — unlike in the
+/// reply path, where §22.4 rule 1 forbids partial application — because by this
+/// point the operation has already been authorized to proceed and no reactor
+/// author is being told their field was applied.
+pub fn ext_claims_from_patch(
+    patch: &std::collections::BTreeMap<String, String>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut claims = std::collections::BTreeMap::new();
+    for (key, value) in patch {
+        match key.strip_prefix(EXT_CLAIM_PREFIX) {
+            Some(name) if !name.is_empty() => {
+                claims.insert(name.to_string(), value.clone());
+            }
+            _ => {
+                tracing::error!(
+                    target: "axiam::reactor",
+                    claim = %key,
+                    "a token.pre_issue patch key outside the `ext.` namespace reached \
+                     claim rendering — two allow-list checks were bypassed; dropping it"
+                );
+            }
+        }
+    }
+    (!claims.is_empty()).then_some(claims)
 }
 
 /// RFC 7800 confirmation claim, carrying either or both of the two
@@ -321,6 +383,34 @@ pub fn issue_access_token_bound(
     aud: &str,
     cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
+    issue_access_token_enriched(
+        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, None,
+    )
+}
+
+/// [`issue_access_token_bound`], carrying the `ext` claims a `token.pre_issue`
+/// reactor contributed (X1).
+///
+/// Passing `None` produces a byte-identical token to
+/// [`issue_access_token_bound`], which is why that function is a one-line
+/// delegation rather than a copy — the same relationship, and for the same
+/// reason, that X5.1's `cnf` parameter has to [`issue_access_token`].
+///
+/// `ext` is the **rendered** claim map from [`ext_claims_from_patch`], not a
+/// raw reactor patch: this function does not know about the allow-list and
+/// must not be the place anyone thinks it is enforced.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_access_token_enriched(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    jti: String,
+    aud: &str,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
         None
@@ -343,6 +433,7 @@ pub fn issue_access_token_bound(
         permissions: None,
         ext_exchange: None,
         cnf,
+        ext,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -459,6 +550,7 @@ pub fn issue_exchanged_token(
         // verified. Sender-constrained exchange is a distinct piece of work,
         // deliberately not smuggled in here.
         cnf: None,
+        ext: None,
     };
 
     let owned;
@@ -508,6 +600,25 @@ pub fn issue_client_credentials_token_bound(
     config: &AuthConfig,
     cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
+    issue_client_credentials_token_enriched(client_id, tenant_id, org_id, scopes, config, cnf, None)
+}
+
+/// [`issue_client_credentials_token_bound`], carrying the `ext` claims a
+/// `token.pre_issue` reactor contributed (X1).
+///
+/// The machine-to-machine grant is hooked for the same reason the user grants
+/// are: `token.pre_issue` is about the *token*, and a client-credentials token
+/// is the one most likely to be handed to a partner system whose claims someone
+/// wants to enrich. Passing `None` reproduces the pre-X1 token exactly.
+pub fn issue_client_credentials_token_enriched(
+    client_id: &str,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
         None
@@ -532,6 +643,7 @@ pub fn issue_client_credentials_token_bound(
         permissions: None,
         ext_exchange: None,
         cnf,
+        ext,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -599,6 +711,7 @@ pub fn issue_rpt(
         // here would attribute this decision to a provenance it does not have.
         ext_exchange: None,
         cnf: None,
+        ext: None,
     };
 
     let owned;
@@ -668,6 +781,7 @@ pub fn issue_service_account_token(
         permissions: None,
         ext_exchange: None,
         cnf: None,
+        ext: None,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -718,6 +832,31 @@ pub fn issue_service_account_client_credentials_token(
     scopes: &[String],
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
+    issue_service_account_client_credentials_token_enriched(
+        service_account_id,
+        tenant_id,
+        org_id,
+        scopes,
+        config,
+        None,
+    )
+}
+
+/// [`issue_service_account_client_credentials_token`], carrying the `ext`
+/// claims a `token.pre_issue` reactor contributed (X1).
+///
+/// The service-account grant is hooked for the same reason every other grant
+/// is, and for one more: it is the grant a caller would reach for if they
+/// wanted to mint a token without a reactor watching. A hook that covers three
+/// of the four issuance paths is not a hook, it is a detour sign.
+pub fn issue_service_account_client_credentials_token_enriched(
+    service_account_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
         None
@@ -740,6 +879,7 @@ pub fn issue_service_account_client_credentials_token(
         permissions: None,
         ext_exchange: None,
         cnf: None,
+        ext,
     };
 
     let owned;
@@ -1716,6 +1856,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             permissions: None,
             ext_exchange: None,
             cnf,
+            ext: None,
         }
     }
 

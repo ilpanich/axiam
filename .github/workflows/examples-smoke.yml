@@ -1,0 +1,259 @@
+name: Examples Smoke
+
+# R5.1 (F3) — keeps examples/** honest. Two tiers:
+#
+#   1. Fast, docker-free static verification (shellcheck / cargo build+clippy
+#      / tsc+npm build / YAML validation) — runs on every PR touching this
+#      tree, gives quick signal, no live server needed.
+#   2. `runtime-smoke` — brings up the real e2e compose stack and runs every
+#      example against it for real. Gated on the static jobs passing first,
+#      so a live-server run is never wasted chasing a compile error.
+#
+# Every example in examples/** is referenced by exactly one step below —
+# that is what "cannot rot" means operationally: a change that breaks an
+# example's compile, typecheck, lint, or runtime behavior fails a named,
+# always-on check.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/**'
+      - '.github/workflows/examples-smoke.yml'
+      - 'docker/docker-compose.e2e.yml'
+      - 'docker/Dockerfile.server'
+      - 'crates/**'
+      - 'proto/**'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/**'
+      - '.github/workflows/examples-smoke.yml'
+      - 'docker/docker-compose.e2e.yml'
+      - 'docker/Dockerfile.server'
+      - 'crates/**'
+      - 'proto/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Tier 1 — static verification, no live server.
+  # ---------------------------------------------------------------------
+
+  shellcheck-bash-examples:
+    name: Lint — b1-deny-override / b2-iot-device-quickstart / b5 smoke script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: bash -n (syntax)
+        run: |
+          bash -n examples/b1-deny-override/walkthrough.sh
+          bash -n examples/b2-iot-device-quickstart/device-quickstart.sh
+          bash -n examples/b5-rp-logout-app/smoke-test.sh
+      - name: shellcheck
+        run: |
+          shellcheck examples/b1-deny-override/walkthrough.sh
+          shellcheck examples/b2-iot-device-quickstart/device-quickstart.sh
+          shellcheck examples/b5-rp-logout-app/smoke-test.sh
+
+  build-b3-mesh-delegation-grpc:
+    name: Build — b3-mesh-delegation-grpc (own Cargo workspace)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/b3-mesh-delegation-grpc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: examples/b3-mesh-delegation-grpc
+      # tonic-prost-build's build.rs shells out to a system `protoc` (prost-build
+      # does not vendor one) — same requirement as crates/axiam-api-grpc's own
+      # build.rs, and the same package ci.yml installs for that crate.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo fmt -- --check
+      - run: cargo build --locked
+      - run: cargo clippy --all-targets -- -D warnings
+
+  typecheck-b5-rp-logout-app:
+    name: Typecheck — b5-rp-logout-app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/b5-rp-logout-app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: examples/b5-rp-logout-app/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  validate-workflow-and-compose-yaml:
+    name: Validate — this workflow + the b3/b5 compose overrides
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: pip install --quiet pyyaml
+      - run: |
+          python3 -c "import yaml; yaml.safe_load(open('.github/workflows/examples-smoke.yml')); print('examples-smoke.yml OK')"
+          python3 -c "import yaml; yaml.safe_load(open('examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml')); print('docker-compose.grpc-port.override.yml OK')"
+          python3 -c "import yaml; yaml.safe_load(open('examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml')); print('docker-compose.host-gateway.override.yml OK')"
+
+  # ---------------------------------------------------------------------
+  # Tier 2 — the real thing: every example run against the actual e2e
+  # compose stack. Gated on tier 1 so a live run is never spent chasing a
+  # compile error tier 1 would have caught in seconds.
+  # ---------------------------------------------------------------------
+
+  runtime-smoke:
+    name: Runtime smoke — every example against docker-compose.e2e.yml
+    runs-on: ubuntu-latest
+    needs:
+      - shellcheck-bash-examples
+      - build-b3-mesh-delegation-grpc
+      - typecheck-b5-rp-logout-app
+      - validate-workflow-and-compose-yaml
+    env:
+      AXIAM_URL: http://localhost:8090
+      AXIAM_GRPC_URL: http://127.0.0.1:50051
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: examples/b3-mesh-delegation-grpc
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: examples/b5-rp-logout-app/package-lock.json
+      # jq for the bash examples' JSON parsing; protobuf-compiler for b3's
+      # `cargo run` (tonic-prost-build shells out to a system `protoc`).
+      - run: sudo apt-get update && sudo apt-get install -y jq protobuf-compiler
+
+      # Two example-scoped overrides, each explained in its own header comment:
+      #
+      #   b3's docker-compose.grpc-port.override.yml publishes the gRPC port
+      #   and widens its bind address (the base e2e stack does neither by
+      #   default — a deliberate security posture, not an oversight).
+      #
+      #   b5's docker-compose.host-gateway.override.yml maps
+      #   host.docker.internal into the axiam-server container. Back-channel
+      #   logout is the only leg of any example that AXIAM dials OUTWARD, so
+      #   it is the only one for which "localhost" means the container rather
+      #   than this runner; without the alias every delivery is refused and
+      #   b5 step 3 fails.
+      - name: Bring up the e2e stack (+ b3 gRPC port and b5 host-gateway overrides)
+        run: |
+          # Three secrets are mandatory in a release build; each one unset makes
+          # the server fail closed and panic on startup with exit 101, long
+          # before any example runs. These mirror ci.yml's E2E job exactly —
+          # omitting them is why this job's first runs never got past step 1.
+          #   - the Ed25519 JWT signing keypair (load_config asserts non-empty)
+          #   - AXIAM__AMQP__SIGNING_KEY (SEC-022/SECHRD-08/D-05c)
+          #   - AXIAM__AUTH__PEPPER (OBS-1; client secrets are a keyed HMAC with
+          #     no unkeyed fallback)
+          # A fresh set per run is correct: the stack starts from an empty
+          # database, so nothing outlives the run.
+          AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(openssl genpkey -algorithm ed25519)"
+          AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(printf '%s' "$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" | openssl pkey -pubout)"
+          export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM AXIAM__AUTH__JWT_PUBLIC_KEY_PEM
+          AXIAM__AMQP__SIGNING_KEY="$(openssl rand -hex 32)"
+          export AXIAM__AMQP__SIGNING_KEY
+          AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
+          export AXIAM__AUTH__PEPPER
+          # --build for the same reason ci.yml gives (W8): a pre-built registry
+          # image would not contain this PR's source and would produce
+          # false-green example runs.
+          docker compose \
+            -f docker/docker-compose.e2e.yml \
+            -f examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml \
+            -f examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml \
+            up -d --build --wait --wait-timeout 300
+
+      - name: Seed org/tenant/admin
+        run: ./scripts/e2e-bootstrap.sh
+
+      - name: b1-deny-override
+        run: ./examples/b1-deny-override/walkthrough.sh
+
+      - name: b2-iot-device-quickstart
+        run: ./examples/b2-iot-device-quickstart/device-quickstart.sh
+
+      - name: b3-mesh-delegation-grpc
+        working-directory: examples/b3-mesh-delegation-grpc
+        # E2E_ADMIN_PASSWORD is required and has no in-source default — the
+        # example refuses to carry a credential literal. This is the same
+        # value scripts/e2e-bootstrap.sh seeds the stack with.
+        env:
+          E2E_ADMIN_PASSWORD: Test@Admin123!
+        run: cargo run --locked
+
+      - name: b5-rp-logout-app (build)
+        working-directory: examples/b5-rp-logout-app
+        run: |
+          npm ci
+          npm run build
+
+      - name: b5-rp-logout-app (runtime smoke — login, RP-initiated logout, back-channel logout)
+        working-directory: examples/b5-rp-logout-app
+        env:
+          # AXIAM dials this one itself, from inside the container — see the
+          # RP_BACKCHANNEL_URL comment in smoke-test.sh and the header of
+          # docker-compose.host-gateway.override.yml, which is what makes the
+          # name resolve. Everything else the script touches stays on
+          # localhost, because everything else is dialled from this runner.
+          RP_BACKCHANNEL_URL: http://host.docker.internal:9999
+        run: ./smoke-test.sh
+
+      # No general server-log dump on purpose. Each example prints its own
+      # `[name] FAIL: <method> <path> -> <status> (wanted <status>): <body>`
+      # line, which has been the actual diagnostic every time this job has gone
+      # red. Dumping container logs on top of it — even a short tail — pushed
+      # that line out of a readable tail and cost a round-trip per failure.
+      #
+      # The one grep below is the exception, and it is narrow for that reason:
+      # back-channel logout is delivered by a DETACHED task, so a delivery that
+      # fails produces nothing at all in the example's own output — the fault
+      # is only ever visible in the server's log. Three warning lines is not a
+      # dump. (Without them, localising a refused delivery cost exactly the
+      # round trip this comment block was written to prevent.)
+      - name: Back-channel logout delivery log (only if something failed)
+        if: failure()
+        run: |
+          # `|| true` on the grep, not on the pipeline: the pipeline's status is
+          # tail's, which is 0 whether or not grep matched, so a plain `|| echo`
+          # fallback would never fire and a no-match would print nothing at all.
+          lines="$(docker logs axiam-e2e-server 2>&1 | { grep -i 'back-channel logout' || true; } | tail -20)"
+          if [ -n "${lines}" ]; then
+            printf '%s\n' "${lines}"
+          else
+            echo "(no back-channel logout lines — AXIAM never got as far as dispatching one)"
+          fi
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+            -f docker/docker-compose.e2e.yml \
+            -f examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml \
+            -f examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml \
+            down -v

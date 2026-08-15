@@ -78,6 +78,13 @@ TOLERANCE = 0.10
 # The scenario=None path is kept (not deleted) so that adding a ninth family
 # without a scenario degrades to an honest "not checked" row rather than
 # silently vanishing from the table.
+#
+# R5.2 (A1 §5 / J1c follow-on) added the five rows below: the device family
+# (B2's own buckets, `device_authorization_per_min`/`device_verify_per_min`),
+# `token_exchange_per_min` (B3, RFC 8693) and the two UMA 2.0 buckets (X2,
+# `uma_perm_per_min`/`uma_ticket_per_min`) all shipped with a configured
+# limit and no scenario driving it — the same hole J1c closed for
+# revoke/grpc_admin/grpc_infra in run 5.
 ENDPOINTS = {
     "login_per_min": ("oauth2_password_login.js", "POST /api/v1/auth/login"),
     "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
@@ -89,7 +96,32 @@ ENDPOINTS = {
     "grpc_identity_per_min": ("userinfo_grpc.js", "gRPC UserInfoService/GetUserInfo (grpc_identity family)"),
     "grpc_admin_per_min": ("grpc_admin_validate.js", "gRPC UserService/ValidateCredentials (grpc_admin family, SEC-079 absolute)"),
     "grpc_infra_per_min": ("grpc_infra.js", "gRPC reflection + health (grpc_infra family, fixed ceiling)"),
+    "device_authorization_per_min": (
+        "device_authorization.js",
+        "POST /oauth2/device_authorization (RFC 8628 device flow)",
+    ),
+    "device_verify_per_min": (
+        "device_verify.js",
+        "GET /api/v1/device/verify (device flow, user-code lookup; shares device_verify_per_min with /device/decide)",
+    ),
+    "token_exchange_per_min": ("token_exchange.js", "POST /oauth2/token (token-exchange grant, RFC 8693)"),
+    "uma_perm_per_min": ("uma2_perm.js", "POST /uma2/perm (UMA 2.0 permission ticket)"),
+    "uma_ticket_per_min": ("uma_ticket_grant.js", "POST /oauth2/token (uma-ticket grant)"),
 }
+
+# B4 SCIM (R3.1) is not yet a checkable family: `axiam-scim` has not landed,
+# so there is no `scim_*_per_min` field in `RateLimitConfig` for
+# `read_configured_defaults()` to extract yet — adding one to `ENDPOINTS`
+# above would make EVERY run of this script raise (it extracts every field
+# unconditionally), breaking the seven families that already work. This list
+# is deliberately separate and carries no numeric "configured" value; it only
+# renders as an honest, explicit "pending" row so the crate landing isn't
+# read as "silently forgotten" the way an absent row would be. Once R3.1
+# lands a `scim_*_per_min` field, fold its family into `ENDPOINTS` above
+# (with `scenarios/scim_provisioning.js`, already written) and delete this.
+PENDING_ENDPOINTS = [
+    ("POST/PATCH /scim/v2/Users, /scim/v2/Groups (SCIM 2.0 provisioning, B4)", "pending R3.1 — axiam-scim crate not yet merged"),
+]
 
 
 def _extract_int(text, pattern, label, path):
@@ -126,7 +158,10 @@ def read_configured_defaults():
     rest_defaults = {}
     for field in ("login_per_min", "register_per_min", "password_reset_per_min",
                   "mfa_per_min", "token_per_min", "introspect_per_min",
-                  "revoke_per_min", "authz_check_per_min"):
+                  "revoke_per_min", "authz_check_per_min",
+                  # R5.2: B2/B3/X2 buckets — same extraction, no special-casing.
+                  "device_authorization_per_min", "device_verify_per_min",
+                  "token_exchange_per_min", "uma_perm_per_min", "uma_ticket_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 
@@ -211,6 +246,13 @@ def check(results, target, profile, configured_overrides):
         if verdict == "FAIL":
             any_fail = True
         rows.append((label, configured_limit, admitted, verdict))
+
+    # Pending families never affect any_fail — "not yet buildable" is not a
+    # regression, and must never be conflated with one (see PENDING_ENDPOINTS
+    # above for why SCIM can't just become a tenth ENDPOINTS row today).
+    for label, note in PENDING_ENDPOINTS:
+        rows.append((label, None, None, note))
+
     return rows, any_fail
 
 
@@ -228,8 +270,9 @@ def write_summary(results, profile, rows):
         "|---|---|---|---|",
     ]
     for label, configured_limit, admitted, verdict in rows:
+        configured_str = configured_limit if configured_limit is not None else "—"
         admitted_str = f"{admitted:.0f}" if admitted is not None else "—"
-        lines.append(f"| {label} | {configured_limit} | {admitted_str} | {verdict} |")
+        lines.append(f"| {label} | {configured_str} | {admitted_str} | {verdict} |")
     lines += ["", "A `FAIL` here is exactly the shape of bug I1 was — a units/scoping "
               "mismatch between the configured limit and what the server actually "
               "admits — caught by this script instead of a by-hand k6-summary read."]
@@ -255,9 +298,9 @@ def main():
 
     print(f"wrote {out_path}")
     for label, configured_limit, admitted, verdict in rows:
-        admitted_str = f"{admitted:.0f}" if admitted is not None else "—"
-        print(f"  [{verdict:>4}] {label}: configured={configured_limit}/min "
-              f"admitted={admitted_str}/min")
+        configured_str = f"{configured_limit}/min" if configured_limit is not None else "—"
+        admitted_str = f"{admitted:.0f}/min" if admitted is not None else "—"
+        print(f"  [{verdict:>4}] {label}: configured={configured_str} admitted={admitted_str}")
 
     if any_fail:
         print("[rl-prod-check] FAIL: at least one endpoint's admission rate is outside "

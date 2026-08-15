@@ -158,13 +158,20 @@ pub async fn create<C: Connection + Clone>(
         }));
     }
 
-    let input = CreateUser {
+    let mut input = CreateUser {
         tenant_id: user.tenant_id,
         username: req.username,
         email: req.email,
         password: req.password,
         metadata: req.metadata,
     };
+
+    // X1 `user.pre_create` — after the caller's permission and the format
+    // checks, before the write. Placed after validation so a reactor is never
+    // asked about an email that is not an email; placed before the transaction
+    // so a veto costs nothing to roll back and a normalization is what gets
+    // stored rather than a second write.
+    crate::reactor_hooks::user_pre_create(&state.reactor_gate, user.tenant_id, &mut input).await?;
 
     // Capture IP and User-Agent for the Art. 7 proof-of-consent record.
     let ip_address = client_ip(&http_req);
@@ -299,7 +306,7 @@ pub async fn update<C: Connection + Clone>(
         false
     };
 
-    let input = UpdateUser {
+    let mut input = UpdateUser {
         username: req.username,
         email: req.email,
         status: effective_status,
@@ -313,6 +320,20 @@ pub async fn update<C: Connection + Clone>(
         },
         ..Default::default()
     };
+
+    // X1 `user.pre_update` — after the SEC-050 self-update guards, so a
+    // reactor cannot re-open what they closed. In particular it runs after
+    // `effective_status` has already stripped a self-service status change, and
+    // `status` is not in the event's allow-list, so neither the caller nor the
+    // reactor can set it here.
+    crate::reactor_hooks::user_pre_update(
+        &state.reactor_gate,
+        user.tenant_id,
+        target_id,
+        &mut input,
+    )
+    .await?;
+
     let updated = state
         .user_repo
         .update(user.tenant_id, target_id, input)

@@ -11,6 +11,18 @@ export interface OAuth2Client {
   grant_types: string[];
   scopes: string[];
   created_at: string;
+  /**
+   * B5 — RP-initiated logout allow-list and back-channel logout delivery
+   * URI. KNOWN BACKEND GAP (R4.2d residual): `OAuth2ClientResponse` in
+   * `crates/axiam-api-rest/src/handlers/oauth2_clients.rs` does not
+   * serialize these two fields today, even though `Create`/`UpdateOAuth2ClientRequest`
+   * both accept and persist them — so a PUT that sets them succeeds, but
+   * GET/list responses come back without them and this page cannot show the
+   * currently-saved value until that response DTO is fixed server-side.
+   * Optional here (rather than required) so that gap doesn't crash the page.
+   */
+  post_logout_redirect_uris?: string[];
+  backchannel_logout_uri?: string | null;
 }
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
@@ -20,6 +32,8 @@ export interface CreateOAuth2ClientPayload {
   redirect_uris: string[];
   grant_types: string[];
   scopes?: string[];
+  post_logout_redirect_uris?: string[];
+  backchannel_logout_uri?: string;
 }
 
 export interface UpdateOAuth2ClientPayload {
@@ -27,6 +41,9 @@ export interface UpdateOAuth2ClientPayload {
   redirect_uris?: string[];
   grant_types?: string[];
   scopes?: string[];
+  post_logout_redirect_uris?: string[];
+  /** Pass "" to clear a previously registered URI (mirrors the backend). */
+  backchannel_logout_uri?: string;
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────

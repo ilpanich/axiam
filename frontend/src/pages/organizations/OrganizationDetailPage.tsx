@@ -79,7 +79,6 @@ interface TenantFormFieldsProps {
   onNameChange: (v: string) => void;
   onSlugChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
-  error?: string;
 }
 
 function TenantFormFields({
@@ -89,7 +88,6 @@ function TenantFormFields({
   onNameChange,
   onSlugChange,
   onDescriptionChange,
-  error,
 }: TenantFormFieldsProps) {
   return (
     <>
@@ -123,7 +121,6 @@ function TenantFormFields({
           rows={3}
         />
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
 }
@@ -340,6 +337,8 @@ function TenantsTab({ orgId }: { orgId: string }) {
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
+        error={createError}
+        errorId="org-tenant-create-error"
       >
         <TenantFormFields
           name={createName}
@@ -351,7 +350,6 @@ function TenantsTab({ orgId }: { orgId: string }) {
           }}
           onSlugChange={setCreateSlug}
           onDescriptionChange={setCreateDescription}
-          error={createError}
         />
       </FormDialog>
 
@@ -362,6 +360,8 @@ function TenantsTab({ orgId }: { orgId: string }) {
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
+        error={editError}
+        errorId="org-tenant-edit-error"
       >
         <TenantFormFields
           name={editName}
@@ -373,7 +373,6 @@ function TenantsTab({ orgId }: { orgId: string }) {
           }}
           onSlugChange={setEditSlug}
           onDescriptionChange={setEditDescription}
-          error={editError}
         />
       </FormDialog>
 
@@ -584,6 +583,8 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         onSubmit={handleGenerateSubmit}
         isLoading={generateMutation.isPending}
         submitLabel="Generate"
+        error={generateError}
+        errorId="org-ca-generate-error"
       >
         <div className="space-y-2">
           <Label htmlFor="cert-subject">Subject *</Label>
@@ -624,9 +625,6 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             onChange={(e) => setValidityDays(Number(e.target.value))}
           />
         </div>
-        {generateError && (
-          <p className="text-sm text-destructive">{generateError}</p>
-        )}
       </FormDialog>
 
       <ConfirmDialog

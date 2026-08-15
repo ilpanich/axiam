@@ -81,6 +81,67 @@ pub trait ReactorTransport: Send + Sync {
     ) -> impl std::future::Future<Output = Result<(), DispatchFailure>> + Send;
 }
 
+/// The transport a deployment has until the lapin one is merged.
+///
+/// # Why this exists rather than a `None`
+///
+/// R2.2 wires the gate; the lapin RPC transport is the piece
+/// `sdks/CONTRACT.md` §22.1's scope note records as not yet merged. Composing
+/// the gate with *no* transport would mean composing no gate, and a deployment
+/// whose registered `fail_closed` fraud check silently does nothing is the
+/// exact failure mode reactors exist to avoid — an operator who registered one
+/// believes their logins are protected.
+///
+/// So every round trip fails as `Transport`, which §22.8 puts in the same
+/// closed "no usable reply" set as a timeout, and **each registration's own
+/// failure policy decides what that costs**. Concretely, until the transport
+/// lands:
+///
+/// * a tenant with **no** registered reactor is completely unaffected — the
+///   routing table returns an empty list and the gate never reaches a
+///   transport;
+/// * a registered `fail_open` reactor (the `token.pre_issue` default) allows,
+///   and every dispatch is audited and counted;
+/// * a registered `fail_closed` reactor (the `login.post_auth`,
+///   `user.pre_*` and `grant.pre_assign` defaults) **denies** the operation.
+///
+/// The third bullet is a loud, audited, per-tenant, opt-in consequence of
+/// registering a reactor that cannot be reached, and it is the safe direction.
+/// `axiam-server` warns about it at startup.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableReactorTransport;
+
+/// The failure text a dispatch through [`UnavailableReactorTransport`] carries
+/// into the audit record. Named so an operator can grep for it.
+pub const REACTOR_TRANSPORT_UNAVAILABLE: &str =
+    "the AMQP reactor transport is not implemented in this build (X1 R2.4)";
+
+impl ReactorTransport for UnavailableReactorTransport {
+    async fn round_trip(
+        &self,
+        _reactor: &Reactor,
+        _event: &'static str,
+        _correlation_id: Uuid,
+        _payload: serde_json::Value,
+        _timeout_ms: u32,
+    ) -> Result<ReactorReply, DispatchFailure> {
+        Err(DispatchFailure::Transport(
+            REACTOR_TRANSPORT_UNAVAILABLE.to_string(),
+        ))
+    }
+
+    async fn publish_listen(
+        &self,
+        _reactor: &Reactor,
+        _event: &'static str,
+        _payload: serde_json::Value,
+    ) -> Result<(), DispatchFailure> {
+        Err(DispatchFailure::Transport(
+            REACTOR_TRANSPORT_UNAVAILABLE.to_string(),
+        ))
+    }
+}
+
 /// What one event's chain produced, plus what to audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainResult {
@@ -90,10 +151,33 @@ pub struct ChainResult {
     /// not be invisible in the audit trail — that is the whole difference
     /// between "no reactor was configured" and "the reactor never answered".
     pub failures: Vec<(Uuid, DispatchFailure)>,
+    /// The reactor whose *reply* produced a terminal `Deny`, when the outcome
+    /// is `Deny` for that reason (§22.6 rule 1: deny short-circuits, so at
+    /// most one reactor's reply is ever the cause).
+    ///
+    /// `None` for every other outcome, and also `None` when the deny came
+    /// from resolving a *failure* through `failure_policy` (a timeout, a
+    /// rejected reply, a budget exhaustion) rather than from a genuine
+    /// `decision: "deny"` reply — that reactor is already attributed via
+    /// [`Self::failures`], which is where a health panel should count it.
+    /// Conflating the two would double-count one denial as both a veto and a
+    /// failure.
+    ///
+    /// R2.3: this is what lets the admin health surface attribute a "recent
+    /// veto" to the specific reactor that issued it, rather than only to the
+    /// chain as a whole.
+    pub denied_by: Option<Uuid>,
 }
 
 /// Resolve one reactor's failure through its policy.
-fn apply_policy(policy: FailurePolicy, failure: &DispatchFailure) -> ReactorOutcome {
+///
+/// Public because the gate resolves two failures the chain never sees — the
+/// per-tenant cap breach and an unreadable registry — and both must land on
+/// exactly this function rather than on a second copy of the same `match`.
+/// "No usable reply" is one closed set with one resolution; a second
+/// implementation of it is a second place for `fail_closed` to quietly become
+/// `fail_open`.
+pub fn resolve_failure(policy: FailurePolicy, failure: &DispatchFailure) -> ReactorOutcome {
     match policy {
         FailurePolicy::FailOpen => ReactorOutcome::Allow,
         FailurePolicy::FailClosed => ReactorOutcome::Deny {
@@ -144,6 +228,7 @@ pub async fn run_chain<T: ReactorTransport>(
         return ChainResult {
             outcome: ReactorOutcome::Allow,
             failures,
+            denied_by: None,
         };
     };
 
@@ -152,12 +237,16 @@ pub async fn run_chain<T: ReactorTransport>(
         let remaining = MAX_CHAIN_BUDGET_MS.saturating_sub(spent);
         if remaining == 0 {
             let failure = DispatchFailure::BudgetExhausted;
-            let outcome = apply_policy(reactor.failure_policy, &failure);
+            let outcome = resolve_failure(reactor.failure_policy, &failure);
             failures.push((reactor.id, failure));
             if let ReactorOutcome::Deny { reason } = outcome {
+                // A budget-exhaustion deny is a *failure* resolved through
+                // policy, not a reply — already attributed via `failures`
+                // above, so `denied_by` stays `None` (see its doc comment).
                 return ChainResult {
                     outcome: ReactorOutcome::Deny { reason },
                     failures,
+                    denied_by: None,
                 };
             }
             continue;
@@ -204,9 +293,12 @@ pub async fn run_chain<T: ReactorTransport>(
 
         match step {
             Ok(ReactorOutcome::Deny { reason }) => {
+                // A genuine `decision: "deny"` reply — the only case
+                // `denied_by` is populated for.
                 return ChainResult {
                     outcome: ReactorOutcome::Deny { reason },
                     failures,
+                    denied_by: Some(reactor.id),
                 };
             }
             Ok(ReactorOutcome::Mutate { patch: p }) => {
@@ -217,12 +309,15 @@ pub async fn run_chain<T: ReactorTransport>(
             }
             Ok(ReactorOutcome::Allow) => {}
             Err(failure) => {
-                let outcome = apply_policy(reactor.failure_policy, &failure);
+                let outcome = resolve_failure(reactor.failure_policy, &failure);
                 failures.push((reactor.id, failure));
                 if let ReactorOutcome::Deny { reason } = outcome {
+                    // Failure-resolved, not reply-resolved — already
+                    // attributed via `failures`.
                     return ChainResult {
                         outcome: ReactorOutcome::Deny { reason },
                         failures,
+                        denied_by: None,
                     };
                 }
             }
@@ -237,28 +332,22 @@ pub async fn run_chain<T: ReactorTransport>(
         ReactorOutcome::Mutate { patch }
     };
 
-    ChainResult { outcome, failures }
+    ChainResult {
+        outcome,
+        failures,
+        denied_by: None,
+    }
 }
 
 /// A gate that runs no reactors, used when the feature is off.
 ///
-/// Exists so `axiam-auth` and `axiam-oauth2` have exactly one code path
-/// whether or not reactors are configured. A call site that branches on
-/// `Option<Gate>` is a call site where the disabled build and the enabled
-/// build can drift.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoopReactorGate;
-
-impl axiam_core::models::reactor::ReactorGate for NoopReactorGate {
-    async fn intercept(
-        &self,
-        _tenant_id: Uuid,
-        _event: &'static str,
-        _payload: serde_json::Value,
-    ) -> ReactorOutcome {
-        ReactorOutcome::Allow
-    }
-}
+/// Re-exported from `axiam-core` rather than defined here. It used to live in
+/// this file, which meant the crates that must not know a broker exists could
+/// not name the gate they are built with — the type that represents *"no
+/// broker"* cannot itself live in the broker crate. It is now
+/// [`axiam_core::models::reactor::NoopReactorGate`] and this alias exists so
+/// `axiam_amqp::NoopReactorGate` keeps resolving.
+pub use axiam_core::models::reactor::NoopReactorGate;
 
 /// Bounds concurrent interceptions per tenant.
 #[derive(Debug, Clone)]
@@ -282,6 +371,18 @@ impl InFlightLimiter {
     pub fn try_enter(&self) -> Result<tokio::sync::SemaphorePermit<'_>, DispatchFailure> {
         self.permits
             .try_acquire()
+            .map_err(|_| DispatchFailure::Overloaded)
+    }
+
+    /// [`Self::try_enter`], with a permit that does not borrow the limiter.
+    ///
+    /// The gate looks its limiter up in a per-tenant map and cannot hold a
+    /// borrow into that map across the `await` that runs the chain. Same
+    /// non-blocking acquire, same immediate `Overloaded`; only the permit's
+    /// lifetime differs.
+    pub fn try_enter_owned(&self) -> Result<tokio::sync::OwnedSemaphorePermit, DispatchFailure> {
+        Arc::clone(&self.permits)
+            .try_acquire_owned()
             .map_err(|_| DispatchFailure::Overloaded)
     }
 }
@@ -469,6 +570,7 @@ mod tests {
     #[tokio::test]
     async fn a_deny_short_circuits_the_rest_of_the_chain() {
         let first = reactor("first", 1, FailurePolicy::FailOpen, 500);
+        let first_id = first.id;
         let second = reactor("second", 2, FailurePolicy::FailOpen, 500);
         let t = Scripted::new(vec![("first", deny()), ("second", allow())]);
 
@@ -479,6 +581,47 @@ mod tests {
             vec!["first"],
             "nothing later can overturn a deny, so nothing later should be asked"
         );
+        // R2.3: a reply-driven deny is attributed to the reactor that issued
+        // it, so a health panel can count "recent vetoes" per reactor.
+        assert_eq!(result.denied_by, Some(first_id));
+    }
+
+    /// A deny resolved through `failure_policy` (a timeout, a rejected reply,
+    /// a budget exhaustion) is a *failure*, not a veto — it must not be
+    /// attributed via `denied_by`, or a health panel would double-count it as
+    /// both a failure and a veto.
+    #[tokio::test]
+    async fn a_failure_resolved_deny_is_not_attributed_as_denied_by() {
+        let r = reactor("fraud-check", 1, FailurePolicy::FailClosed, 500);
+        let t = Scripted::new(vec![("fraud-check", Step::Fail(DispatchFailure::Timeout))]);
+
+        let result = run(&t, &[r]).await;
+        assert!(!result.outcome.permits());
+        assert_eq!(
+            result.denied_by, None,
+            "a timeout resolved to a deny is a failure, already attributed via `failures`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_budget_exhausted_deny_is_not_attributed_as_denied_by() {
+        let lenient = reactor("lenient", 1, FailurePolicy::FailOpen, 500);
+        let veto = reactor("veto", 2, FailurePolicy::FailClosed, 500);
+        let t = Scripted::new(vec![("lenient", allow()), ("veto", allow())]);
+
+        let result = run_chain(
+            &t,
+            MASTER,
+            &[lenient, veto],
+            "token.pre_issue",
+            serde_json::json!({}),
+            Utc::now,
+            || MAX_CHAIN_BUDGET_MS,
+        )
+        .await;
+
+        assert!(!result.outcome.permits());
+        assert_eq!(result.denied_by, None);
     }
 
     /// A `fail_open` timeout must be invisible in the outcome and visible in
@@ -647,6 +790,21 @@ mod tests {
     }
 
     #[test]
+    fn the_owned_permit_bounds_the_same_way_as_the_borrowed_one() {
+        let limiter = InFlightLimiter::new(1);
+        let held = limiter.try_enter_owned().expect("first permit");
+        assert_eq!(
+            limiter.try_enter_owned().unwrap_err(),
+            DispatchFailure::Overloaded
+        );
+        drop(held);
+        assert!(
+            limiter.try_enter_owned().is_ok(),
+            "the permit must be returned when the dispatch finishes"
+        );
+    }
+
+    #[test]
     fn failure_policy_maps_every_failure_the_same_way() {
         for failure in [
             DispatchFailure::Timeout,
@@ -656,10 +814,10 @@ mod tests {
             DispatchFailure::Rejected(ReplyRejection::BadSignature),
         ] {
             assert_eq!(
-                apply_policy(FailurePolicy::FailOpen, &failure),
+                resolve_failure(FailurePolicy::FailOpen, &failure),
                 ReactorOutcome::Allow
             );
-            assert!(!apply_policy(FailurePolicy::FailClosed, &failure).permits());
+            assert!(!resolve_failure(FailurePolicy::FailClosed, &failure).permits());
         }
     }
 }

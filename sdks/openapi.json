@@ -9515,7 +9515,7 @@
           },
           "dpop_require_nonce": {
             "type": "boolean",
-            "description": "RFC 9449 §8 — require this client's DPoP proofs to carry a\nserver-issued nonce. Costs a round trip on the first request of each\nnonce window; `false` (the default) is the pre-v39 behaviour."
+            "description": "RFC 9449 §8 — require this client's DPoP proofs to carry a\nserver-issued nonce.\n\n**Not implemented in this build (SEC-097).** `true` is refused with\n`400`; only `false` (the default) is accepted. Nothing reads the stored\nvalue, so accepting `true` would persist and echo back a security\nswitch that does nothing. DPoP proofs are made single-use at the token\nendpoint by `jti` replay detection instead — see\n`docs/security-profiles.md`."
           },
           "grant_types": {
             "type": "array",

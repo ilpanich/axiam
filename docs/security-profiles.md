@@ -290,3 +290,92 @@ is always a subset of the intersection of the subject's and the client's
 scopes. See
 [Revocation is not consulted at exchange time](api/token-exchange.md#revocation-is-not-consulted-at-exchange-time-sec-091)
 for the full write-up.
+
+## DPoP nonces are NOT implemented (SEC-097)
+
+`OAuth2Client.dpop_require_nonce` exists on the model, in the SurrealDB schema,
+in the admin create/update DTOs and in `sdks/openapi.json`. **Nothing reads
+it.** The token endpoint passes `require_nonce: false` unconditionally, and the
+comment that used to sit beside it claimed the opposite.
+
+`axiam_oauth2::dpop::verify_dpop_proof` implements RFC 9449 §8 completely — the
+mechanism exists and is simply never engaged. The reason it is not engaged is
+that this deployment stores no per-client nonce to compare an echoed one
+against: a challenge without server-side state (or a keyed, time-bounded MAC in
+its place) would prove that the client is live and nothing else. Shipping that
+as though it were a control is worse than shipping no control.
+
+**What the API does now.** `POST`/`PUT /api/v1/oauth2-clients` refuse
+`dpop_require_nonce: true` with `400`, naming the reason. `false` — the default,
+and the value every stored row holds — is accepted unchanged, so the wire shape
+is stable for the seven SDKs and no existing client is affected. The refusal is
+the check a future nonce implementation deletes.
+
+**What actually makes a DPoP proof unreplayable here**, and it is the stronger
+of the two controls, is the single-use `jti`: every proof presented at
+`/oauth2/token` is recorded through the same `UNIQUE`-index guard the
+`private_key_jwt` client assertion uses, and a proof whose `jti` cannot be
+recorded is refused rather than accepted. That is not optional and not
+per-client. FAPI 2.0 does not mandate DPoP nonces.
+
+**Known residual**, unchanged by this: the resource-server path in
+`axiam-api-rest`'s extractor is synchronous and does not record `jti`, so
+within the 60-second freshness window a proof for that exact method, URI and
+access token could be presented twice there. Documented in the extractor and in
+contract §21.7.2.
+
+## Outbound SSRF guard — the operator override (SEC-107)
+
+Every outbound fetch to an admin- or IdP-supplied URL (webhook delivery,
+`jwks_uri`, OIDC discovery, the IdP token endpoint, SAML metadata, the FIDO MDS3
+BLOB) goes through `axiam_pki::ssrf`, which resolves the host fresh, refuses the
+fetch if **any** resolved address is non-globally-routable, and pins the exact
+validated address into the connection so the socket that opens is the one that
+was validated.
+
+That rule is a *network-topology* control being used as a *trust* control, and
+the two diverge in real deployments: a Kubernetes-internal Keycloak or Entra
+proxy at `10.x` is a perfectly legitimate IdP, as is an internal webhook
+consumer, an internal MDS mirror, or an air-gapped deployment where everything
+is RFC1918. With no exception at all, the operator's only recourse is to run
+AXIAM outside the guard's assumptions or to patch the binary — and a guard that
+gets patched around protects nobody.
+
+**`AXIAM__PKI__SSRF_ALLOWED_HOSTS`** is that exception: a comma-separated list
+of host names (or literal IPs), matched **exactly**.
+
+```
+AXIAM__PKI__SSRF_ALLOWED_HOSTS=keycloak.internal,idp.corp.example
+```
+
+Five properties make it an exception rather than a hole, and none of them is
+optional:
+
+1. **Default-empty.** Unset — which is what every deployment gets unless
+   somebody decides otherwise — means the address rule admits no exceptions at
+   all. Startup logs which it is, either way.
+2. **Set once, at startup.** It is installed in `main` from the environment and
+   cannot be re-armed at runtime.
+3. **Exact match only.** ASCII-lowercased equality. No wildcards, no suffix
+   matching, no CIDRs. A CIDR exception can be widened by a DNS answer — allow
+   `10.0.0.0/8` and *any* hostname an admin can set reaches everything in it. A
+   host exception cannot: the operator names the exact destination.
+4. **First hop only.** Redirect targets are always validated strictly. A
+   `Location` header is attacker-influenced response data, not the URL the
+   operator chose to trust.
+5. **Cloud metadata endpoints stay unreachable**, even for an allowlisted host:
+   `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`,
+   `192.0.0.192`, and the deprecated `::/96` encoding of any of them. An
+   operator asking for their `10.x` IdP is not asking for `169.254.169.254`,
+   and an allowlisted name whose DNS has been poisoned onto a metadata endpoint
+   is exactly the attack this would otherwise re-open. The IPv4-mapped IPv6
+   spelling (SEC-094) is canonicalised before this check, not after.
+
+Every use of the exception is logged at `WARN` with the host and the address it
+resolved to; an allowlisted host that resolves to a metadata endpoint is logged
+at `ERROR` and refused.
+
+**There is deliberately no `AXIAM__PKI__SSRF_ALLOW_PRIVATE=true`.** That is the
+`verify_peer: false` of this module: it appears in a dev compose file, works,
+and travels unchanged into production. `axiam-amqp`'s TLS config already carries
+the long-form argument for why such a switch should not exist.

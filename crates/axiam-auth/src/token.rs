@@ -493,9 +493,26 @@ pub fn unverified_issuer_of(token: &str) -> Option<String> {
 /// * **`ext_exchange` may be set** (X4), naming the foreign issuer whose token
 ///   bought this one. Both exchange paths refuse a subject token that carries
 ///   it, which is what makes the exchange non-transitive.
+/// * **`cnf` may be set** (SEC-096), binding the *result* to the credential the
+///   exchanging client proved at the token endpoint. See the note on the
+///   parameter below for why this is not the subject token's `cnf`.
 ///
 /// Everything else — issuer, algorithm, key handling — is identical, so an
 /// exchanged token validates through exactly the same path as any other.
+///
+/// # `cnf` and who it names
+///
+/// An exchange does **not** inherit the subject token's sender constraint. RFC
+/// 8705 §3 binds a token to the certificate presented *at the token endpoint by
+/// the party the token is for*; the exchanging client is a different party from
+/// the subject, so copying the subject's `cnf` would bind the new token to a
+/// certificate its holder does not have.
+///
+/// What the caller passes here is derived from what **this** request proved —
+/// the exchanging client's own verified client certificate or DPoP proof,
+/// through the same `certificate_binding_for` that the three ordinary grants
+/// use. Passing `None` reproduces the pre-SEC-096 bytes exactly, which is what
+/// every client that asked for no binding still gets.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_exchanged_token(
     subject: &str,
@@ -509,6 +526,7 @@ pub fn issue_exchanged_token(
     expires_at: i64,
     act: Option<ActClaim>,
     ext_exchange: Option<ExtExchangeClaim>,
+    cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     if expires_at <= now {
@@ -540,16 +558,9 @@ pub fn issue_exchanged_token(
         // authorised it.
         permissions: None,
         ext_exchange,
-        // An exchange does not inherit the subject token's sender constraint,
-        // and must not invent one. RFC 8705 §3 binds a token to the
-        // certificate presented *at the token endpoint by the party the token
-        // is for*; the exchanging client is a different party from the subject,
-        // so copying the subject's `cnf` would bind the new token to a
-        // certificate its holder does not have — breaking every request — and
-        // minting a fresh one would assert a constraint the exchange never
-        // verified. Sender-constrained exchange is a distinct piece of work,
-        // deliberately not smuggled in here.
-        cnf: None,
+        // SEC-096: the exchanging client's OWN constraint, never the subject
+        // token's — see the function's doc comment.
+        cnf,
         ext: None,
     };
 
@@ -684,6 +695,7 @@ pub fn issue_rpt(
     permissions: Vec<RptPermission>,
     lifetime_secs: i64,
     config: &AuthConfig,
+    cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
 
@@ -710,7 +722,11 @@ pub fn issue_rpt(
         // fact belongs to *that* token and its audit record; re-stamping it
         // here would attribute this decision to a provenance it does not have.
         ext_exchange: None,
-        cnf: None,
+        // SEC-096: the RPT carries the constraint the *redeeming client*
+        // proved at the token endpoint, on the same terms as every other
+        // grant. `None` for a client that registered no binding, which
+        // reproduces the pre-SEC-096 bytes.
+        cnf,
         ext: None,
     };
 
@@ -1761,6 +1777,107 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     }
 
     // -----------------------------------------------------------------
+    // SEC-096 — an exchange no longer strips sender-constraining
+    // -----------------------------------------------------------------
+
+    /// Before SEC-096 `issue_exchanged_token` had no `cnf` parameter at all,
+    /// so **every** exchanged token was a plain bearer token — a client
+    /// holding a `cnf.jkt`-bound token that is useless to a thief could
+    /// exchange it and get back an unconstrained one with the same subject.
+    #[test]
+    fn an_exchanged_token_carries_the_confirmation_claim_it_was_given() {
+        let config = test_config();
+        let token = issue_exchanged_token(
+            &Uuid::new_v4().to_string(),
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &["read".to_string()],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Utc::now().timestamp() + 60,
+            None,
+            None,
+            Some(CnfClaim::from_dpop_thumbprint(JKT)),
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(
+            claims.cnf.as_ref().and_then(CnfClaim::dpop_thumbprint),
+            Some(JKT),
+            "the exchanging client's own proof must bind the token it receives"
+        );
+    }
+
+    /// The other half of the same property: `None` reproduces the pre-SEC-096
+    /// bytes exactly, so every client that registered no binding is unaffected.
+    #[test]
+    fn an_unbound_exchange_still_produces_a_token_with_no_cnf() {
+        let config = test_config();
+        let token = issue_exchanged_token(
+            &Uuid::new_v4().to_string(),
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &["read".to_string()],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Utc::now().timestamp() + 60,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(decode_access_token(&token, &config).unwrap().cnf.is_none());
+    }
+
+    /// SEC-096, the UMA half: an RPT is an access token and takes the
+    /// redeeming client's constraint on the same terms.
+    #[test]
+    fn an_rpt_carries_the_confirmation_claim_it_was_given() {
+        let config = test_config();
+        let bound = issue_rpt(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            vec![],
+            60,
+            &config,
+            Some(CnfClaim::from_dpop_thumbprint(JKT)),
+        )
+        .unwrap();
+        assert_eq!(
+            decode_access_token(&bound, &config)
+                .unwrap()
+                .cnf
+                .as_ref()
+                .and_then(CnfClaim::dpop_thumbprint),
+            Some(JKT)
+        );
+
+        let unbound = issue_rpt(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            vec![],
+            60,
+            &config,
+            None,
+        )
+        .unwrap();
+        assert!(
+            decode_access_token(&unbound, &config)
+                .unwrap()
+                .cnf
+                .is_none()
+        );
+    }
+
+    // -----------------------------------------------------------------
     // X4 — the ext_exchange provenance claim
     // -----------------------------------------------------------------
 
@@ -1777,6 +1894,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Uuid::new_v4().to_string(),
             AUD_USER,
             Utc::now().timestamp() + 60,
+            None,
             None,
             None,
         )
@@ -1817,6 +1935,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Some(ExtExchangeClaim {
                 iss: "https://partner.example/".into(),
             }),
+            None,
         )
         .unwrap();
 

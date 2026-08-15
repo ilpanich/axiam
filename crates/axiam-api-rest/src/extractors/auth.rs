@@ -282,7 +282,20 @@ fn verified_dpop_thumbprint(req: &HttpRequest, token: &str) -> Option<String> {
         return None;
     }
 
-    let htu = req.full_url().to_string();
+    // SEC-102: the authority comes from the configured issuer, never from the
+    // request's `Forwarded` / `X-Forwarded-Host` / `Host` headers, which
+    // `HttpRequest::full_url()` would prefer in that order and none of which a
+    // trusted-proxy layer normalises here. Same reasoning as
+    // `handlers::oauth2::dpop_htu`, at the resource-server end of the same
+    // comparison: with a request-derived authority the caller chooses both
+    // sides of RFC 9449 §4.3 step 9.
+    //
+    // A deployment with no `AuthConfig` in scope cannot compute the server's
+    // own view of its URI, so no proof verifies — the fail-closed direction: a
+    // `jkt`-bound token is then refused by `verify_token_binding` rather than
+    // accepted against an attacker-chosen `htu`.
+    let config = req.app_data::<web::Data<AuthConfig>>()?;
+    let htu = format!("{}{}", config.effective_issuer(), req.path());
     let expect = DpopExpectation::at_resource_server(
         req.method().as_str(),
         &htu,

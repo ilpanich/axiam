@@ -2,6 +2,9 @@
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::password_history::CreatePasswordHistoryEntry;
+use axiam_core::models::reactor::{
+    ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
+};
 use axiam_core::models::session::CreateSession;
 use axiam_core::models::settings::{MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, UserStatus};
@@ -163,6 +166,16 @@ pub struct AuthService<
     /// Bounding semaphore (CQ-B02): limits concurrent Argon2 operations to prevent
     /// CPU-bound crypto from starving the Tokio async runtime under login bursts.
     crypto_semaphore: Arc<Semaphore>,
+    /// X1 — the `login.post_auth` interceptor chain.
+    ///
+    /// A field rather than a type parameter, and never an `Option`. `AuthService`
+    /// is already generic over four repositories and is named explicitly in
+    /// `AppState<C>`; a fifth parameter would push the broker choice into the
+    /// signature of a crate whose whole design is not to know a broker exists.
+    /// A deployment without reactors holds
+    /// [`axiam_core::models::reactor::NoopReactorGate`] here, so there is one
+    /// login path in every build rather than two that can drift.
+    reactor_gate: SharedReactorGate,
 }
 
 impl<
@@ -187,7 +200,21 @@ impl<
             refresh_token_repo,
             config,
             crypto_semaphore,
+            reactor_gate: noop_reactor_gate(),
         }
+    }
+
+    /// Attach the reactor gate (X1).
+    ///
+    /// Builder-style rather than a seventh `new` parameter, for the same reason
+    /// `TokenService::with_assertion_verifier` is: every existing construction
+    /// site — including every test harness — keeps compiling and keeps its
+    /// current behaviour, and the feature is invisible to a deployment that
+    /// does not ask for it.
+    #[must_use]
+    pub fn with_reactor_gate(mut self, gate: SharedReactorGate) -> Self {
+        self.reactor_gate = gate;
+        self
     }
 
     /// Authenticate a user with username/email + password.
@@ -298,17 +325,90 @@ impl<
             self.config.email_verification_grace_period_hours,
         )?;
 
+        // 5c. X1 `login.post_auth` — after the credentials verify, before any
+        //     session or challenge is issued.
+        //
+        //     This is the placement the event name promises and the only one
+        //     that is safe. Earlier, and a reactor would be consulted about
+        //     credentials that have not been checked, which turns the hook into
+        //     a credential-probing oracle for whoever wrote the extension.
+        //     Later — after `create_session_and_tokens` — and a veto would be
+        //     refusing a session that already exists.
+        let mut reactor_requires_mfa = false;
+        match self
+            .reactor_gate
+            .intercept(
+                input.tenant_id,
+                reactor_events::LOGIN_POST_AUTH,
+                serde_json::json!({
+                    // What is being decided, never the means to act on it
+                    // elsewhere (§22.3): no password, no token, no session id
+                    // — the session does not exist yet.
+                    "user_id": user.id,
+                    "username": user.username,
+                    "tenant_id": input.tenant_id,
+                    "org_id": input.org_id,
+                    "ip_address": input.ip_address,
+                    "user_agent": input.user_agent,
+                    "mfa_enabled": user.mfa_enabled,
+                }),
+            )
+            .await
+        {
+            ReactorOutcome::Allow => {}
+            ReactorOutcome::Deny { reason } => {
+                // The gate has already audited this with the reactor's id; the
+                // reason travels in the typed error for the caller's own audit
+                // record and never reaches the HTTP response body.
+                tracing::info!(
+                    target: "axiam::reactor",
+                    tenant_id = %input.tenant_id,
+                    user_id = %user.id,
+                    "login vetoed by a reactor on login.post_auth"
+                );
+                return Err(AuthError::ReactorDenied { reason }.into());
+            }
+            ReactorOutcome::RequireMfa => reactor_requires_mfa = true,
+            // `login.post_auth` is veto-only: the registry marks it
+            // `mutable: false`, the reply validator refuses a `mutate` on it,
+            // and the gate re-checks. Reaching this arm would mean all three
+            // failed, so it is treated as a refusal rather than ignored.
+            ReactorOutcome::Mutate { .. } => {
+                tracing::error!(
+                    target: "axiam::reactor",
+                    tenant_id = %input.tenant_id,
+                    "a mutation reached the login.post_auth call site, which is a \
+                     veto-only event — refusing the login"
+                );
+                return Err(AuthError::ReactorDenied {
+                    reason: "reactor attempted to mutate a veto-only event".into(),
+                }
+                .into());
+            }
+        }
+
         // 5b. MFA enforcement — if policy requires MFA but user hasn't set it up,
         //     return a setup token (unless the user is federated).
-        if let Some(ref policy) = input.mfa_policy
-            && policy.mfa_enforced
-            && !user.mfa_enabled
-        {
+        //
+        //     A reactor's `require_mfa` composes with the tenant policy by
+        //     joining it, never by replacing it: it can only *add* a step-up
+        //     demand, which is why it is OR-ed in below rather than consulted
+        //     as an alternative.
+        let policy_enforces_mfa = input
+            .mfa_policy
+            .as_ref()
+            .is_some_and(|policy| policy.mfa_enforced);
+        if (policy_enforces_mfa || reactor_requires_mfa) && !user.mfa_enabled {
             let links = self
                 .federation_repo
                 .get_by_user_id(input.tenant_id, user.id)
                 .await?;
-            if links.is_empty() {
+            // A reactor's demand is not waived for a federated user the way the
+            // tenant policy's is. The federated carve-out exists because the
+            // upstream IdP already performed the second factor; a reactor that
+            // asked for step-up *after* seeing this login has, by definition,
+            // seen that and asked anyway.
+            if links.is_empty() || reactor_requires_mfa {
                 let setup_token =
                     self.issue_mfa_setup_token(user.id, input.tenant_id, input.org_id)?;
                 return Ok(LoginResult::MfaSetupRequired(MfaSetupOutput {

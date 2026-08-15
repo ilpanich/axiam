@@ -208,6 +208,12 @@ pub async fn create<C: Connection + Clone>(
         })
         .await?;
 
+    // X1 — the routing table this replica dispatches from is a TTL cache, so a
+    // new registration would otherwise not fire for up to the TTL. Invalidate
+    // the tenant's entries here so it is live at once; the TTL remains the
+    // guarantee for every OTHER replica, which did not serve this request.
+    state.invalidate_reactor_routing(user.tenant_id);
+
     Ok(HttpResponse::Created().json(ReactorResponse::from(reactor)))
 }
 
@@ -342,6 +348,8 @@ pub async fn update<C: Connection + Clone>(
         )
         .await?;
 
+    state.invalidate_reactor_routing(user.tenant_id);
+
     Ok(HttpResponse::Ok().json(ReactorResponse::from(reactor)))
 }
 
@@ -367,5 +375,12 @@ pub async fn delete<C: Connection + Clone>(
         .reactor_repo
         .delete(user.tenant_id, path.into_inner())
         .await?;
+
+    // Deleting matters most of the three: an interceptor that no longer exists
+    // must stop being dispatched to, and a `fail_closed` one that is still in
+    // the routing table would deny every login it was registered for until the
+    // TTL expired.
+    state.invalidate_reactor_routing(user.tenant_id);
+
     Ok(HttpResponse::NoContent().finish())
 }

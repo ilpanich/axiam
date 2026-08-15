@@ -96,6 +96,19 @@ pub enum AuthError {
     #[error("this security key model is not permitted by your organization")]
     WebauthnAttestationDenied { reason: AttestationDenyReason },
 
+    /// X1: a registered reactor refused this login on `login.post_auth`, or a
+    /// `fail_closed` reactor could not be reached.
+    ///
+    /// `reason` is the reactor's own text (or the failure that stood in for
+    /// it), carried for the audit record; the `Display` text is deliberately
+    /// the fixed, non-specific message the end user is shown — the same D11
+    /// split [`AuthError::WebauthnAttestationDenied`] makes. A reactor is
+    /// third-party code, and echoing its string to an unauthenticated caller
+    /// would let an extension author turn the login endpoint into an oracle
+    /// (or an XSS sink) without touching AXIAM.
+    #[error("login refused by policy")]
+    ReactorDenied { reason: String },
+
     /// W2-D3: the tenant's policy requires attestation (`mode != none`) but
     /// no attestation CA list could be built — MDS has never been ingested,
     /// or no allowed AAGUID has a known root. Distinct from
@@ -160,6 +173,11 @@ impl From<AuthError> for AxiamError {
             AuthError::WebauthnAttestationUnavailable => {
                 AxiamError::ServiceUnavailable(err.to_string())
             }
+            // The user sees the fixed `Display` text; the reactor's own reason
+            // was already written to the audit trail by the gate.
+            AuthError::ReactorDenied { .. } => AxiamError::AuthenticationFailed {
+                reason: err.to_string(),
+            },
         }
     }
 }

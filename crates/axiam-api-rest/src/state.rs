@@ -327,6 +327,25 @@ pub struct AppState<C: Connection + Clone> {
     pub device_auth_service: DeviceAuthServiceT<C>,
     pub pgp_service: PgpServiceT<C>,
     pub reactor_repo: SurrealReactorRepository<C>,
+    /// X1 — the interceptor chain the `user.pre_create`, `user.pre_update` and
+    /// `grant.pre_assign` handlers call.
+    ///
+    /// `axiam-auth` and `axiam-oauth2` hold their own clone of the same gate
+    /// (they own the `login.post_auth` and `token.pre_issue` sites), so all
+    /// five hooks share one routing table, one per-tenant concurrency bound and
+    /// one audit sink. A deployment without AMQP holds
+    /// [`axiam_core::models::reactor::NoopReactorGate`] here — never `None`,
+    /// because a call site that branches on the feature is a call site where
+    /// the two builds can drift.
+    pub reactor_gate: axiam_core::models::reactor::SharedReactorGate,
+    /// X1 — invalidates the gate's routing table when a reactor registration
+    /// changes, so the change is live on this replica immediately rather than
+    /// at the end of the TTL.
+    ///
+    /// A closure rather than the routing table itself because the table is
+    /// generic over its source, and `AppState<C>` is already generic over one
+    /// parameter too many. `None` when no gate is composed.
+    pub reactor_routing_invalidator: Option<Arc<dyn Fn(uuid::Uuid) + Send + Sync>>,
     pub webhook_repo: SurrealWebhookRepository<C>,
     pub webhook_delivery: WebhookDeliveryServiceT<C>,
     /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
@@ -488,6 +507,23 @@ impl<C: Connection + Clone> AppState<C> {
             crate::uma::ResourceScopeCatalog::new(self.scope_repo.clone()),
             self.rpt_max_lifetime_secs,
         )
+    }
+
+    /// X1 — tell the reactor gate that this tenant's registrations changed.
+    ///
+    /// A no-op when no gate is composed (AMQP off, or a test harness), which is
+    /// the same shape [`Self::emit_webhook`] uses and for the same reason: a
+    /// side effect of an administrative write must not fail the write, and a
+    /// handler must not have to know whether the subsystem is configured.
+    ///
+    /// This is an **optimisation on top of the TTL, not a replacement for it**.
+    /// It only reaches the replica that served the mutation; every other
+    /// replica picks the change up when its own routing entry expires, which is
+    /// the bound the acceptance test asserts.
+    pub fn invalidate_reactor_routing(&self, tenant_id: uuid::Uuid) {
+        if let Some(invalidate) = &self.reactor_routing_invalidator {
+            invalidate(tenant_id);
+        }
     }
 
     /// Dispatch a domain event to any webhooks subscribed to `event_type` in
@@ -693,6 +729,13 @@ impl<C: Connection + Clone> AppState<C> {
             device_auth_service,
             pgp_service,
             reactor_repo,
+            // A test harness gets the no-op gate, which is also what a
+            // production deployment without AMQP gets — so a handler test
+            // exercises exactly the composition an un-hooked deployment runs.
+            // A test that needs a live gate overrides this field (the same
+            // pattern `email_encryption_key` documents above).
+            reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+            reactor_routing_invalidator: None,
             webhook_repo,
             webhook_delivery,
             webhook_publisher: None,

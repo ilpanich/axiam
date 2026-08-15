@@ -26,7 +26,9 @@ pub use mail_publisher::MailOutboundPublisher;
 pub use messages::{MailType, OutboundMailMessage, WebhookMessage};
 pub use notification_publisher::NotificationPublisher;
 pub use reactor::{
-    ChainResult, DispatchFailure, InFlightLimiter, NoopReactorGate, ReactorEventMessage,
-    ReactorReply, ReactorTransport, ReplyDecision, ReplyRejection, run_chain,
+    ChainResult, DispatchFailure, DispatchingReactorGate, InFlightLimiter, NoopReactorGate,
+    ReactorAuditSink, ReactorEventMessage, ReactorGateConfig, ReactorReply, ReactorRoutingTable,
+    ReactorSource, ReactorTransport, ReplyDecision, ReplyRejection, RepositoryAuditSink,
+    RepositoryReactorSource, UnavailableReactorTransport, run_chain,
 };
 pub use webhook_publisher::WebhookPublisher;

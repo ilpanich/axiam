@@ -5,11 +5,14 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token_bound,
-    issue_client_credentials_token_bound, issue_id_token,
-    issue_service_account_client_credentials_token, validate_access_token,
+    generate_refresh_token, hash_refresh_token, issue_access_token_enriched,
+    issue_client_credentials_token_enriched, issue_id_token,
+    issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
 use axiam_core::error::AxiamError;
+use axiam_core::models::reactor::{
+    ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
+};
 use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
 use axiam_core::models::uma::RptPermission;
@@ -316,6 +319,13 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     user_repo: UR,
     auth_config: AuthConfig,
     refresh_token_lifetime_secs: i64,
+    /// X1 — the `token.pre_issue` interceptor chain.
+    ///
+    /// A field rather than a seventh type parameter, and never an `Option`;
+    /// see `axiam_auth::service::AuthService::reactor_gate` for why. A
+    /// deployment without reactors holds the no-op gate, so every grant runs
+    /// the same code.
+    reactor_gate: SharedReactorGate,
 }
 
 impl<OC, AC, TR, RT, UR, SA> TokenService<OC, AC, TR, RT, UR, SA>
@@ -348,6 +358,90 @@ where
             user_repo,
             auth_config,
             refresh_token_lifetime_secs,
+            reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+        }
+    }
+
+    /// Attach the reactor gate (X1).
+    ///
+    /// Builder-style for the same reason [`Self::with_assertion_verifier`] is:
+    /// every existing construction site keeps compiling and keeps its current
+    /// behaviour.
+    #[must_use]
+    pub fn with_reactor_gate(mut self, gate: SharedReactorGate) -> Self {
+        self.reactor_gate = gate;
+        self
+    }
+
+    /// Run `token.pre_issue` and return the `ext` claims to mint with.
+    ///
+    /// Every grant that mints an access token goes through here, which is the
+    /// point: three call sites (authorization code, refresh, client
+    /// credentials) share one hook, so a fourth grant added later cannot
+    /// quietly skip it by forgetting to copy the block.
+    ///
+    /// A veto surfaces as `invalid_grant` — the plan's pinned mapping, and the
+    /// right one: RFC 6749 §5.2 `invalid_grant` is "the grant is not valid for
+    /// this request", which is exactly what a reactor is saying. The reactor's
+    /// reason is **not** echoed to the client (it is third-party text on an
+    /// endpoint reachable with a client credential); the gate has already
+    /// written it to the audit trail with the reactor's id.
+    async fn pre_issue_ext_claims(
+        &self,
+        tenant_id: Uuid,
+        subject: &str,
+        subject_kind: &'static str,
+        client_id: &str,
+        scopes: &[String],
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, OAuth2Error> {
+        match self
+            .reactor_gate
+            .intercept(
+                tenant_id,
+                reactor_events::TOKEN_PRE_ISSUE,
+                serde_json::json!({
+                    // No token, no credential, no signing key (§22.3) — the
+                    // reactor is told what is about to be minted, not handed
+                    // the means to mint it.
+                    "sub": subject,
+                    "sub_kind": subject_kind,
+                    "client_id": client_id,
+                    "tenant_id": tenant_id,
+                    "scopes": scopes,
+                }),
+            )
+            .await
+        {
+            ReactorOutcome::Allow => Ok(None),
+            ReactorOutcome::Mutate { patch } => Ok(axiam_auth::token::ext_claims_from_patch(&patch)),
+            ReactorOutcome::Deny { reason } => {
+                tracing::info!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    client_id,
+                    "token issuance vetoed by a reactor on token.pre_issue"
+                );
+                debug_assert!(!reason.is_empty());
+                Err(OAuth2Error::InvalidGrant(
+                    "token issuance was refused by policy".into(),
+                ))
+            }
+            // `require_mfa` is a `login.post_auth` answer. The reply validator
+            // refuses it on any other event, so this arm is unreachable through
+            // the wire path — and if it were reachable, the token endpoint has
+            // no step-up to perform, so proceeding "as if allowed" would be
+            // silently discarding a security demand.
+            ReactorOutcome::RequireMfa => {
+                tracing::error!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    "a reactor demanded step-up on token.pre_issue, which has no \
+                     step-up to perform — refusing the grant"
+                );
+                Err(OAuth2Error::InvalidGrant(
+                    "token issuance was refused by policy".into(),
+                ))
+            }
         }
     }
 
@@ -690,12 +784,23 @@ where
         let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
         let t_token_mint = std::time::Instant::now();
-        let access_token = issue_service_account_client_credentials_token(
+        // X1 — the fourth issuance path, hooked like the other three.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &sa.id.to_string(),
+                "service_account",
+                &sa.client_id,
+                &[],
+            )
+            .await?;
+        let access_token = issue_service_account_client_credentials_token_enriched(
             sa.id,
             tenant_id,
             tenant.organization_id,
             &[],
             &self.auth_config,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -937,7 +1042,20 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
-        let access_token = issue_access_token_bound(
+        // X1 — the code has already been consumed at this point, so a veto
+        // costs the caller the code. That is the correct order: the code is
+        // single-use and PKCE-verified, and leaving it spendable while an
+        // external process decides would hand an attacker a retry window.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &auth_code.user_id.to_string(),
+                "user",
+                client_id,
+                &auth_code.scopes,
+            )
+            .await?;
+        let access_token = issue_access_token_enriched(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
@@ -946,6 +1064,7 @@ where
             uuid::Uuid::new_v4().to_string(),
             axiam_auth::token::AUD_USER,
             cnf,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1204,13 +1323,21 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
-        let access_token = issue_client_credentials_token_bound(
+        // X1. Deliberately measured INSIDE `token_mint_us` rather than as its
+        // own stage: this is the number the R2.4 bench cell compares against an
+        // unhooked run, and splitting it out would let the hooked and unhooked
+        // figures be read from different clocks.
+        let ext = self
+            .pre_issue_ext_claims(tenant_id, client_id, "oauth2_client", client_id, &scopes)
+            .await?;
+        let access_token = issue_client_credentials_token_enriched(
             client_id,
             tenant_id,
             tenant.organization_id,
             &scopes,
             &self.auth_config,
             cnf,
+            ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -1353,8 +1480,29 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = Self::token_type_for(cnf.as_ref());
+        // X1 — a refresh mints a new access token, so it is an issuance and it
+        // is hooked. Enrichment is re-derived here rather than copied from the
+        // token being refreshed, for the same reason `cnf` is: a claim a
+        // reactor added fifteen minutes ago is not evidence that it would add
+        // it now, and carrying it forward would let a revoked enrichment
+        // survive every rotation.
+        let ext = self
+            .pre_issue_ext_claims(
+                tenant_id,
+                &stored
+                    .user_id
+                    .map_or_else(|| client_id.to_string(), |u| u.to_string()),
+                if stored.user_id.is_some() {
+                    "user"
+                } else {
+                    "oauth2_client"
+                },
+                client_id,
+                &stored.scopes,
+            )
+            .await?;
         let access_token = if let Some(user_id) = stored.user_id {
-            issue_access_token_bound(
+            issue_access_token_enriched(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
@@ -1363,18 +1511,20 @@ where
                 uuid::Uuid::new_v4().to_string(),
                 axiam_auth::token::AUD_USER,
                 cnf,
+                ext,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
             // Client-credentials-originated refresh (shouldn't normally
             // happen, but handle gracefully)
-            issue_client_credentials_token_bound(
+            issue_client_credentials_token_enriched(
                 client_id,
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
                 &self.auth_config,
                 cnf,
+                ext,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };

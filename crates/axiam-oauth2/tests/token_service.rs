@@ -2494,3 +2494,274 @@ async fn authorization_code_does_not_reveal_whether_a_client_exists() {
     assert_eq!(unknown.error_code(), "invalid_client");
     assert_eq!(unknown.error_description(), "invalid client credentials");
 }
+
+// ---------------------------------------------------------------------------
+// X1 / R2.2 — the `token.pre_issue` call site
+//
+// A mock gate, not a real dispatcher: what is under test here is whether the
+// grant reads the outcome correctly, and the four outcomes are exactly the four
+// a chain can compose. The timeout row is the outcome the gate produces for a
+// timed-out reactor — `resolve_failure(policy, Timeout)`, which is `Allow`
+// under `fail_open` and a `Deny` naming the failure under `fail_closed` — so
+// this file does not have to link a broker to cover it. That resolution is
+// itself tested in `axiam_amqp::reactor::gate`.
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::reactor::{
+    DynReactorGate, ReactorOutcome, SharedReactorGate, noop_reactor_gate,
+};
+
+struct FixedGate {
+    outcome: ReactorOutcome,
+    seen: Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>,
+}
+
+impl DynReactorGate for FixedGate {
+    fn intercept_dyn<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        event: &'static str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
+        self.seen.lock().unwrap().push((tenant_id, event, payload));
+        let outcome = self.outcome.clone();
+        Box::pin(std::future::ready(outcome))
+    }
+}
+
+type GateLog = Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>;
+
+fn gate(outcome: ReactorOutcome) -> (SharedReactorGate, GateLog) {
+    let seen: GateLog = Arc::new(Mutex::new(Vec::new()));
+    (
+        Arc::new(FixedGate {
+            outcome,
+            seen: seen.clone(),
+        }),
+        seen,
+    )
+}
+
+/// What the gate returns when a `fail_closed` reactor times out. Written as the
+/// literal the dispatcher's `resolve_failure` produces, so this test breaks if
+/// that mapping ever changes shape.
+fn timed_out_fail_closed() -> ReactorOutcome {
+    ReactorOutcome::Deny {
+        reason: "reactor unavailable (reactor timed out)".into(),
+    }
+}
+
+fn cc_svc_with_gate(gate: SharedReactorGate) -> Svc {
+    build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    )
+    .with_reactor_gate(gate)
+}
+
+#[tokio::test]
+async fn pre_issue_allow_mints_a_token_with_no_ext_claim() {
+    let (g, seen) = gate(ReactorOutcome::Allow);
+    let svc = cc_svc_with_gate(g);
+    let tenant = Uuid::new_v4();
+
+    let resp = svc
+        .exchange(tenant, base_req("client_credentials"), &no_cert())
+        .await
+        .expect("an allowing reactor does not change the grant");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert!(claims.ext.is_none(), "an allow adds no claims");
+
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the grant consults the gate exactly once");
+    assert_eq!(calls[0].0, tenant);
+    assert_eq!(calls[0].1, "token.pre_issue");
+    // §22.3: the event says what is being decided, never the means to act on
+    // it elsewhere.
+    let payload = calls[0].2.to_string();
+    assert!(payload.contains("client-1"));
+    assert!(
+        !payload.contains(SECRET),
+        "the client secret must never reach a reactor"
+    );
+}
+
+#[tokio::test]
+async fn pre_issue_deny_refuses_the_grant_as_invalid_grant() {
+    let (g, _) = gate(ReactorOutcome::Deny {
+        reason: "issuance frozen for this client".into(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let err = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a veto must refuse the grant");
+
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        !err.error_description().contains("frozen"),
+        "a reactor's own text must not be echoed to an OAuth2 client: {}",
+        err.error_description()
+    );
+}
+
+#[tokio::test]
+async fn pre_issue_mutate_writes_the_ext_claims_into_the_token() {
+    let (g, _) = gate(ReactorOutcome::Mutate {
+        patch: [
+            ("ext.department".to_string(), "engineering".to_string()),
+            ("ext.a.b.c".to_string(), "nested".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("an allow-listed mutation is applied");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("the enriched token still validates")
+        .0;
+    let ext = claims.ext.expect("ext claims present");
+    assert_eq!(ext["department"], "engineering");
+    assert_eq!(ext["a.b.c"], "nested");
+}
+
+/// The wiring-layer allow-list test the plan requires: a patch key outside
+/// `token.pre_issue`'s allow-list cannot reach a claim, even if it somehow got
+/// past the reply validator and the gate.
+#[tokio::test]
+async fn pre_issue_cannot_rewrite_a_standard_claim_even_from_inside_the_gate() {
+    let subject_before = Uuid::new_v4();
+    let (g, _) = gate(ReactorOutcome::Mutate {
+        patch: [
+            ("sub".to_string(), subject_before.to_string()),
+            ("scope".to_string(), "admin".to_string()),
+            ("exp".to_string(), "99999999999".to_string()),
+            ("aud".to_string(), "axiam:user".to_string()),
+            // One legitimate key alongside them, so the test distinguishes
+            // "dropped the forbidden ones" from "dropped everything".
+            ("ext.ok".to_string(), "yes".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let svc = cc_svc_with_gate(g);
+
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("the grant proceeds");
+
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert_eq!(
+        claims.sub, "client-1",
+        "a reactor must never be able to move `sub`"
+    );
+    assert_eq!(claims.scope.as_deref(), Some("api"));
+    assert_eq!(claims.aud.as_deref(), Some(axiam_auth::token::AUD_M2M));
+    let ext = claims.ext.expect("the allow-listed key still applies");
+    assert_eq!(ext.len(), 1);
+    assert_eq!(ext["ok"], "yes");
+}
+
+#[tokio::test]
+async fn pre_issue_timeout_denies_under_fail_closed_and_allows_under_fail_open() {
+    // fail_closed → the gate hands the site a Deny.
+    let (g, _) = gate(timed_out_fail_closed());
+    let err = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a fail_closed timeout must refuse issuance");
+    assert_eq!(err.error_code(), "invalid_grant");
+
+    // fail_open → the gate hands the site an Allow, and the token is the one
+    // an un-hooked deployment would have minted.
+    let (g, _) = gate(ReactorOutcome::Allow);
+    let resp = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect("a fail_open timeout must not break issuance");
+    let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+        .expect("token validates")
+        .0;
+    assert!(claims.ext.is_none());
+}
+
+/// `require_mfa` has no meaning at the token endpoint. The reply validator
+/// refuses it on any event but `login.post_auth`; if one ever reached here it
+/// must refuse the grant rather than be silently discarded.
+#[tokio::test]
+async fn pre_issue_refuses_a_step_up_demand_it_cannot_perform() {
+    let (g, _) = gate(ReactorOutcome::RequireMfa);
+    let err = cc_svc_with_gate(g)
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .expect_err("a demand the endpoint cannot satisfy must not be ignored");
+    assert_eq!(err.error_code(), "invalid_grant");
+}
+
+/// The default composition must be byte-for-byte the pre-X1 behaviour.
+#[tokio::test]
+async fn a_service_without_a_gate_behaves_exactly_as_before() {
+    let with_noop = cc_svc_with_gate(noop_reactor_gate());
+    let plain = build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    for svc in [&with_noop, &plain] {
+        let resp = svc
+            .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+            .await
+            .expect("issuance succeeds");
+        let claims = axiam_auth::token::validate_access_token(&resp.access_token, &test_config())
+            .expect("token validates")
+            .0;
+        assert!(claims.ext.is_none());
+    }
+}
+
+/// The refresh grant mints an access token, so it is hooked too — and a veto
+/// there must refuse the rotation.
+#[tokio::test]
+async fn the_refresh_grant_is_hooked_as_well() {
+    let raw = generate_refresh_token();
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["api"]);
+    stored.token_hash = hash_refresh_token(&raw);
+    let refresh_repo = MockRefreshRepo::new().with_get(stored);
+
+    let (g, seen) = gate(ReactorOutcome::Deny {
+        reason: "rotation frozen".into(),
+    });
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh_repo,
+    )
+    .with_reactor_gate(g);
+
+    let mut req = base_req("refresh_token");
+    req.refresh_token = Some(raw);
+    let err = svc
+        .exchange(Uuid::new_v4(), req, &no_cert())
+        .await
+        .expect_err("a veto must refuse the refresh");
+
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(seen.lock().unwrap().len(), 1, "the refresh path consulted the gate");
+}

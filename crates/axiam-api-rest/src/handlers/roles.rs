@@ -255,14 +255,29 @@ pub async fn assign_to_user<C: Connection + Clone>(
         .await?;
     let req = body.into_inner();
     let target_user = req.user_id;
+    let role_id = path.into_inner();
+
+    // X1 `grant.pre_assign` — the four-eyes hook, veto-only. Before the write:
+    // an approval workflow that ran after the grant existed would be reviewing
+    // access the subject already has.
+    crate::reactor_hooks::grant_pre_assign(
+        &state.reactor_gate,
+        user.tenant_id,
+        serde_json::json!({
+            "grantee_kind": "user",
+            "user_id": target_user,
+            "role_id": role_id,
+            "resource_id": req.resource_id,
+            "tenant_id": user.tenant_id,
+            // Who is asking — the half a four-eyes rule is actually about.
+            "actor_id": user.user_id,
+        }),
+    )
+    .await?;
+
     state
         .role_repo
-        .assign_to_user(
-            user.tenant_id,
-            req.user_id,
-            path.into_inner(),
-            req.resource_id,
-        )
+        .assign_to_user(user.tenant_id, req.user_id, role_id, req.resource_id)
         .await?;
     // D7: only this subject's effective permissions change — targeted flush.
     // (Assignment widens access, the safe direction, but we invalidate anyway
@@ -349,14 +364,28 @@ pub async fn assign_to_group<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    let role_id = path.into_inner();
+
+    // X1 `grant.pre_assign` — the group half. A role assigned to a group is
+    // inherited by every member, so it is the *wider* of the two assignment
+    // paths and the one a four-eyes rule most needs to see.
+    crate::reactor_hooks::grant_pre_assign(
+        &state.reactor_gate,
+        user.tenant_id,
+        serde_json::json!({
+            "grantee_kind": "group",
+            "group_id": req.group_id,
+            "role_id": role_id,
+            "resource_id": req.resource_id,
+            "tenant_id": user.tenant_id,
+            "actor_id": user.user_id,
+        }),
+    )
+    .await?;
+
     state
         .role_repo
-        .assign_to_group(
-            user.tenant_id,
-            req.group_id,
-            path.into_inner(),
-            req.resource_id,
-        )
+        .assign_to_group(user.tenant_id, req.group_id, role_id, req.resource_id)
         .await?;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.

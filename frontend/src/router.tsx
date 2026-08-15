@@ -34,6 +34,8 @@ import { ForgotPasswordPage } from "@/pages/auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "@/pages/auth/ResetPasswordPage";
 import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
 import { MfaSetupPage } from "@/pages/auth/MfaSetupPage";
+import { DevicePage } from "@/pages/device/DevicePage";
+import { PrivacyPage } from "@/pages/privacy/PrivacyPage";
 
 export const router = createBrowserRouter([
   // Public routes (no AppLayout, no auth required)
@@ -297,6 +299,25 @@ export const router = createBrowserRouter([
         path: "profile/mfa",
         element: <MfaManagementPage />,
         handle: { crumb: "MFA Methods" },
+      },
+      {
+        // B2/R4.1: no permission gate -- approving one's own device grant
+        // needs only an authenticated session, the same "requiredPermission:
+        // null" class as /profile (see Sidebar.tsx). AppLayout's own guard
+        // above still redirects unauthenticated visitors to /login.
+        path: "device",
+        element: <DevicePage />,
+        handle: { crumb: "Connect a Device" },
+      },
+      {
+        // GDPR Art. 15/17 self-service export & erasure -- every
+        // authenticated user manages their own data here; the optional
+        // "act on behalf of" fields are gated inline on gdpr:export /
+        // users:erase (see PrivacyPage.tsx), matching the null-permission
+        // self-service class rather than a route-level ProtectedRoute.
+        path: "privacy",
+        element: <PrivacyPage />,
+        handle: { crumb: "Privacy & Data" },
       },
     ],
   },

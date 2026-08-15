@@ -101,7 +101,9 @@ CLIENT_SECRET=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_secret')
 log "creating a test end user"
 TEST_USERNAME="rp-demo-user-${RUN_ID}"
 TEST_EMAIL="rp-demo-user-${RUN_ID}@example.invalid"
-TEST_PASSWORD="RpDemo@User123!"
+# Generated per run rather than a literal: a username/password pair in source
+# is a secret-scanner finding wherever an example gets copied to.
+TEST_PASSWORD="Rp$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')@1aA"
 api_expect POST "${ADMIN_CSRF}" /api/v1/users \
   "{\"username\":\"${TEST_USERNAME}\",\"email\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\"}" \
   201 >/dev/null

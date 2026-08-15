@@ -158,9 +158,9 @@ TECH_USER_ID=$(api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" /api/v1/users \
   "{\"username\":\"${TECH_USERNAME}\",\"email\":\"${TECH_EMAIL}\",\"password\":\"${TECH_PASSWORD}\"}" 201 | jq -r '.id')
 
 api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/roles/${ALLOW_ROLE_ID}/users" \
-  "{\"user_id\":\"${TECH_USER_ID}\",\"resource_id\":\"${FLEET_ID}\"}" 201 >/dev/null
+  "{\"user_id\":\"${TECH_USER_ID}\",\"resource_id\":\"${FLEET_ID}\"}" 204 >/dev/null
 api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/roles/${DENY_ROLE_ID}/users" \
-  "{\"user_id\":\"${TECH_USER_ID}\",\"resource_id\":\"${DECOMMISSIONED_ID}\"}" 201 >/dev/null
+  "{\"user_id\":\"${TECH_USER_ID}\",\"resource_id\":\"${DECOMMISSIONED_ID}\"}" 204 >/dev/null
 
 # ---------------------------------------------------------------------------
 # 5. Log in as fleet-tech and run the three checks that prove deny-override.

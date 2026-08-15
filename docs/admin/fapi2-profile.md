@@ -396,6 +396,42 @@ micro-benchmarks of the mint in isolation, not a fraction of a request.
 
 ---
 
+## Sender-constrained tokens on the gRPC surface
+
+AXIAM's gRPC surface is the low-latency check plane for a service mesh, and it
+is a resource server for AXIAM's own tokens — so it owes the same obligation the
+REST surface does.
+
+**Introspection carries the confirmation.** `TokenService.IntrospectToken` and
+`ValidateToken` return `cnf` (with `x5t_s256` / `jkt`) and `token_type`, and
+introspection additionally returns `scope`, `client_id`, `permissions` (a UMA
+RPT's) and `ext_exchange_iss` (X4 cross-domain provenance). Until this landed,
+gRPC introspection answered `active: true` for a bound token with **no way to
+tell it was bound** — so a mesh resource server had no choice but to treat it as
+a bearer token.
+
+`valid: true` means the signature, expiry and tenant check out. It does **not**
+mean the token may be used by whoever presented it: when `cnf` is present the
+caller must prove possession against **its own** connection. AXIAM cannot do
+that for them, because the proof is against the caller's connection and not the
+one carrying the introspection call.
+
+**AXIAM's own gRPC API enforces binding on inbound calls.** A certificate-bound
+token is checked against the peer chain rustls verified for that connection.
+
+**A DPoP-bound token is refused on gRPC, deliberately.** RFC 9449 binds a proof
+to an HTTP method and URI (`htm`/`htu`), and a tonic interceptor runs before the
+RPC path is bound to a request — it sees neither. Verifying a proof without them
+would accept one captured from any other endpoint, which is worse than not
+verifying at all, so the answer is the one rule 9 prescribes: **reject when you
+cannot verify.**
+
+The practical consequence for an operator: if you issue DPoP-bound tokens and
+your services authorize through the mesh, terminate those tokens at the REST
+surface, which has the method and URI. Certificate-bound tokens work on both.
+
+---
+
 ## RFC 9207 `iss` — on by default, for everybody
 
 Every authorization response now carries an `iss` parameter naming the issuer,

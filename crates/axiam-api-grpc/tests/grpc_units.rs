@@ -49,6 +49,28 @@ fn claims_for(tenant_id: Uuid) -> ValidatedClaims {
     axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap()
 }
 
+/// A **sender-constrained** token for `tenant_id` (X5.1).
+///
+/// `cnf` is whatever the caller passes, so one helper covers the certificate
+/// half, the DPoP half and the both-at-once case.
+fn bound_token_for(tenant_id: Uuid, cnf: axiam_auth::token::CnfClaim) -> String {
+    axiam_auth::token::issue_access_token_bound(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        &[],
+        &auth_config(),
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(cnf),
+    )
+    .unwrap()
+}
+
+/// A thumbprint of the right shape (43 base64url chars).
+const TP: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+
 // ---------------------------------------------------------------------------
 // GrpcConfig
 // ---------------------------------------------------------------------------
@@ -114,6 +136,102 @@ fn interceptor_rejects_invalid_token() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
+// ---------------------------------------------------------------------------
+// AuthInterceptor — X5.1 sender-constrained tokens
+// ---------------------------------------------------------------------------
+
+/// **The positive regression test.** A token with no `cnf` — every token AXIAM
+/// issued before X5.1 — must pass the interceptor with no certificate and no
+/// proof, exactly as it always did.
+///
+/// This is the one the whole design turns on: the likeliest way to break gRPC
+/// binding enforcement is to start demanding evidence from every caller, which
+/// would break every existing mesh deployment at once.
+#[test]
+fn an_unbound_token_is_accepted_with_no_evidence() {
+    let tenant = Uuid::new_v4();
+    let mut interceptor = AuthInterceptor::new(auth_config());
+    let mut req = Request::new(());
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", token_for(tenant)).parse().unwrap(),
+    );
+    let out = interceptor
+        .call(req)
+        .expect("an unbound token must still pass");
+    assert!(out.extensions().get::<ValidatedClaims>().is_some());
+}
+
+/// A certificate-bound token presented over a connection with no peer
+/// certificate — which is what an in-process `Request::new(())` has — must be
+/// **refused**, not accepted as a bearer token. Before X5.1's gRPC half it was
+/// accepted, which made the binding decorative for the whole mesh.
+#[test]
+fn a_certificate_bound_token_without_a_peer_certificate_is_refused() {
+    let tenant = Uuid::new_v4();
+    let mut interceptor = AuthInterceptor::new(auth_config());
+    let mut req = Request::new(());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
+    );
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let err = interceptor.call(req).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+/// A DPoP-bound token is refused on this transport **by design**, and the
+/// reason is worth pinning: a tonic interceptor runs on `Request<()>` and sees
+/// neither the HTTP method nor the URI, so it cannot check a proof's
+/// `htm`/`htu`. Verifying a proof without them would accept one captured from
+/// any other endpoint — worse than not verifying at all.
+///
+/// Rule 9's rule is "reject when you cannot verify", and this is what that
+/// looks like on a transport that genuinely cannot.
+#[test]
+fn a_dpop_bound_token_is_refused_because_this_transport_cannot_check_a_proof() {
+    let tenant = Uuid::new_v4();
+    let mut interceptor = AuthInterceptor::new(auth_config());
+    let mut req = Request::new(());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_dpop_thumbprint(JKT),
+    );
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let err = interceptor.call(req).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+/// Every refusal reports the same message as an ordinary bad token, so a caller
+/// cannot learn from the wire whether the token they hold is bound — which is
+/// a fact about a credential they have not proved they may use.
+#[test]
+fn a_binding_refusal_is_indistinguishable_from_an_invalid_token() {
+    let tenant = Uuid::new_v4();
+    let mut interceptor = AuthInterceptor::new(auth_config());
+
+    let mut bound = Request::new(());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
+    );
+    bound
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    let mut garbage = Request::new(());
+    garbage
+        .metadata_mut()
+        .insert("authorization", "Bearer not-a-token".parse().unwrap());
+
+    assert_eq!(
+        interceptor.call(bound).unwrap_err().message(),
+        interceptor.call(garbage).unwrap_err().message()
+    );
+}
+
 #[test]
 fn interceptor_rejects_header_without_bearer_prefix() {
     let mut interceptor = AuthInterceptor::new(auth_config());
@@ -152,6 +270,129 @@ async fn validate_token_missing_claims_is_unauthenticated() {
     });
     let err = svc.validate_token(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+// ---------------------------------------------------------------------------
+// TokenService — X5.1 / X2 / X4 response parity with REST introspection
+// ---------------------------------------------------------------------------
+
+/// The defect this whole gRPC pass exists to close: introspecting a bound token
+/// over gRPC used to answer `active: true` with **no way to tell it was bound**.
+/// A mesh resource server had no choice but to treat it as a bearer token —
+/// which is exactly what contract §10.1 rule 9 forbids, and rule 9 detail 4
+/// says local-verifying and introspecting SDKs must not disagree.
+#[tokio::test]
+async fn introspection_surfaces_the_confirmation_claim() {
+    let tenant = Uuid::new_v4();
+    let svc = TokenServiceImpl::new(auth_config());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
+    );
+    let mut req = Request::new(IntrospectTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+
+    let resp = svc.introspect_token(req).await.unwrap().into_inner();
+    assert!(resp.active);
+    let cnf = resp
+        .cnf
+        .expect("a bound token must report its confirmation");
+    assert_eq!(cnf.x5t_s256, TP);
+    assert!(cnf.jkt.is_empty());
+    // RFC 8705 leaves a certificate-bound token a bearer token at the HTTP
+    // layer; only DPoP changes the scheme.
+    assert_eq!(resp.token_type, "Bearer");
+}
+
+/// A DPoP-bound token additionally changes `token_type`, which is the signal a
+/// consumer that never looks at `cnf` will still trip over.
+#[tokio::test]
+async fn a_dpop_bound_token_reports_its_key_and_token_type() {
+    let tenant = Uuid::new_v4();
+    let svc = TokenServiceImpl::new(auth_config());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_dpop_thumbprint(JKT),
+    );
+    let mut req = Request::new(IntrospectTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+
+    let resp = svc.introspect_token(req).await.unwrap().into_inner();
+    assert!(resp.active);
+    assert_eq!(resp.cnf.unwrap().jkt, JKT);
+    assert_eq!(resp.token_type, "DPoP");
+}
+
+/// `ValidateToken` carries it too. It is the coarser call, so it is the one a
+/// caller is most likely to use and least likely to inspect — which is why the
+/// confirmation is on it rather than only on introspection.
+#[tokio::test]
+async fn validate_token_reports_the_confirmation_too() {
+    let tenant = Uuid::new_v4();
+    let svc = TokenServiceImpl::new(auth_config());
+    let token = bound_token_for(
+        tenant,
+        axiam_auth::token::CnfClaim::from_dpop_thumbprint(JKT),
+    );
+    let mut req = Request::new(ValidateTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+
+    let resp = svc.validate_token(req).await.unwrap().into_inner();
+    assert!(resp.valid, "the signature and expiry are genuinely fine");
+    assert_eq!(resp.cnf.unwrap().jkt, JKT);
+    assert_eq!(resp.token_type, "DPoP");
+}
+
+/// An **unbound** token must carry no confirmation at all, and must report
+/// `Bearer` — byte-compatible with what a pre-X5.1 consumer expects.
+#[tokio::test]
+async fn an_unbound_token_reports_no_confirmation() {
+    let tenant = Uuid::new_v4();
+    let svc = TokenServiceImpl::new(auth_config());
+    let mut req = Request::new(IntrospectTokenRequest {
+        access_token: token_for(tenant),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+
+    let resp = svc.introspect_token(req).await.unwrap().into_inner();
+    assert!(resp.active);
+    assert!(resp.cnf.is_none(), "an unbound token names no confirmation");
+    assert_eq!(resp.token_type, "Bearer");
+    assert!(resp.permissions.is_empty());
+    assert!(resp.ext_exchange_iss.is_empty());
+}
+
+/// An inactive response discloses nothing — including whether the token that
+/// failed was bound. Otherwise the SEC-068 cross-tenant guard would leak
+/// through the new fields it does not know about.
+#[tokio::test]
+async fn an_inactive_response_discloses_no_new_fields() {
+    let caller_tenant = Uuid::new_v4();
+    let other_tenant = Uuid::new_v4();
+    let svc = TokenServiceImpl::new(auth_config());
+    let token = bound_token_for(
+        other_tenant,
+        axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
+    );
+    let mut req = Request::new(IntrospectTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(caller_tenant));
+
+    let resp = svc.introspect_token(req).await.unwrap().into_inner();
+    assert!(!resp.active);
+    assert!(resp.cnf.is_none());
+    assert!(resp.token_type.is_empty());
+    assert!(resp.scope.is_empty());
+    assert!(resp.client_id.is_empty());
+    assert!(resp.permissions.is_empty());
+    assert!(resp.ext_exchange_iss.is_empty());
 }
 
 #[tokio::test]

@@ -27,6 +27,12 @@ http = { workspace = true }
 bytes = { workspace = true }
 secrecy = { workspace = true }
 axiam-db = { workspace = true }
+# X5.1 — the interceptor computes an `x5t#S256` thumbprint over the peer
+# certificate to enforce RFC 8705 §3.2 token binding. One SHA-256 plus a
+# base64url encode; deliberately NOT a dependency on axiam-oauth2, which would
+# drag the whole authorization server in for one digest.
+base64 = { workspace = true }
+sha2 = { workspace = true }
 surrealdb = { workspace = true }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 

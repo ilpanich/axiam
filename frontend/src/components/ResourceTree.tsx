@@ -50,6 +50,21 @@ function ResourceTypeBadge({ type }: { type: string }) {
   );
 }
 
+// B1: deliberately NOT styled as "a red allow" -- this is the badge for a
+// resource the effective-access preview found `denied_by_rule` on, whether
+// the deny grant sits directly on this resource or cascades down from an
+// ancestor (deny-override reaches at any depth).
+function DenyBadge() {
+  return (
+    <span
+      title="A deny rule reaches this resource for the previewed subject/action"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-destructive/20 text-destructive border border-destructive/40"
+    >
+      Deny
+    </span>
+  );
+}
+
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 export interface ResourceTreeProps {
@@ -57,6 +72,15 @@ export interface ResourceTreeProps {
   onSelect?: (resource: Resource) => void;
   selectedId?: string;
   actions?: (resource: Resource) => ReactNode;
+  /**
+   * B1 — resource ids the effective-access preview panel has determined
+   * would be `denied_by_rule` for the currently-previewed (subject, action)
+   * pair, INCLUDING the deny cascading down from an ancestor. Rendered as a
+   * red DENY badge so an admin composing deny-override rules can see the
+   * inheritance reach without saving anything (see `ResourcesPage.tsx`'s
+   * `EffectiveAccessPanel`). `undefined`/empty renders the tree unchanged.
+   */
+  denyResourceIds?: Set<string>;
 }
 
 // ─── Single tree node renderer (recursive) ───────────────────────────────────
@@ -75,6 +99,7 @@ interface TreeNodeRowProps {
   isFirstRoot: boolean;
   expandedIds: Set<string>;
   onToggleExpand: (id: string) => void;
+  denyResourceIds?: Set<string>;
 }
 
 function focusNodeById(id: string) {
@@ -94,8 +119,10 @@ function TreeNodeRow({
   isFirstRoot,
   expandedIds,
   onToggleExpand,
+  denyResourceIds,
 }: TreeNodeRowProps) {
   const hasChildren = node.children.length > 0;
+  const isDenied = denyResourceIds?.has(node.resource.id) ?? false;
   const expanded = expandedIds.has(node.resource.id);
   const isSelected = selectedId === node.resource.id;
   // Clamp indentation at MAX_DEPTH to avoid runaway layouts
@@ -205,6 +232,9 @@ function TreeNodeRow({
         {/* Type badge */}
         <ResourceTypeBadge type={node.resource.resource_type} />
 
+        {/* B1: red DENY badge -- see denyResourceIds doc on ResourceTreeProps */}
+        {isDenied && <DenyBadge />}
+
         {/* Action buttons (revealed on hover / always visible) */}
         {actions && (
           <span
@@ -239,6 +269,7 @@ function TreeNodeRow({
               isFirstRoot={false}
               expandedIds={expandedIds}
               onToggleExpand={onToggleExpand}
+              denyResourceIds={denyResourceIds}
             />
           ))}
         </div>
@@ -285,6 +316,7 @@ export function ResourceTree({
   onSelect,
   selectedId,
   actions,
+  denyResourceIds,
 }: ResourceTreeProps) {
   const roots = useMemo(() => buildTree(resources), [resources]);
 
@@ -359,6 +391,7 @@ export function ResourceTree({
           isFirstRoot={index === 0}
           expandedIds={expandedIds}
           onToggleExpand={handleToggleExpand}
+          denyResourceIds={denyResourceIds}
         />
       ))}
     </div>

@@ -193,7 +193,8 @@ async fn start_test_server(
         std::sync::Arc::new(|_tenant_id| {});
 
     let reactor_svc = ReactorAdminServiceServer::with_interceptor(
-        ReactorAdminServiceImpl::new(reactor_repo, engine, audit_repo, routing_invalidator),
+        // SEC-101: this harness stands in for a working transport.
+        ReactorAdminServiceImpl::new(reactor_repo, engine, audit_repo, routing_invalidator, true),
         AuthInterceptor::new(auth_config),
     );
 

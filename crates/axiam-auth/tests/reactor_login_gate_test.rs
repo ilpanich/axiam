@@ -79,6 +79,12 @@ impl DynReactorGate for FixedGate {
         let outcome = self.outcome.clone();
         Box::pin(std::future::ready(outcome))
     }
+
+    // SEC-101: a scripted test double stands in for a working
+    // transport, so registrations are acceptable under it.
+    fn can_dispatch_dyn(&self) -> bool {
+        true
+    }
 }
 
 type GateLog = Arc<Mutex<Vec<(&'static str, serde_json::Value)>>>;

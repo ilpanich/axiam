@@ -703,6 +703,36 @@ async fn main() -> std::io::Result<()> {
         mds_leaf_dns: std::env::var("AXIAM__PKI__MDS_LEAF_DNS")
             .unwrap_or_else(|_| axiam_pki::config::DEFAULT_MDS_LEAF_DNS.to_string()),
     };
+    // SEC-107: install the operator's SSRF host exception list, once, here in
+    // the composition root so it is visible in one place and logged at
+    // startup. Unset — the default and what every deployment gets unless
+    // somebody decides otherwise — installs nothing and the address rule
+    // admits no exceptions at all. See `axiam_pki::ssrf::set_allowed_hosts`
+    // for why this is a host list rather than a boolean or a CIDR range.
+    match std::env::var(axiam_pki::ssrf::ALLOWED_HOSTS_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let hosts = axiam_pki::ssrf::parse_allowed_hosts(&raw);
+            let installed = axiam_pki::ssrf::set_allowed_hosts(hosts.clone());
+            tracing::warn!(
+                count = installed,
+                hosts = %hosts.join(","),
+                "SSRF host exceptions installed ({}): these hosts may resolve to \
+                 private/loopback addresses. Every use is logged. Cloud metadata \
+                 endpoints remain blocked for them, and redirect targets are still \
+                 validated strictly.",
+                axiam_pki::ssrf::ALLOWED_HOSTS_ENV
+            );
+        }
+        _ => {
+            tracing::info!(
+                "SSRF guard: no host exceptions configured ({} unset) — every outbound \
+                 fetch to an admin-supplied URL must resolve to a globally routable \
+                 address",
+                axiam_pki::ssrf::ALLOWED_HOSTS_ENV
+            );
+        }
+    }
+
     tracing::info!(
         mds_enabled = pki_config.mds_enabled,
         mds_refresh_interval_secs = pki_config.mds_refresh_interval_secs,
@@ -1611,6 +1641,14 @@ async fn main() -> std::io::Result<()> {
     // rather than calling `pool` again.
     let grpc_reactor_audit_repo = audit_repo.clone();
     let grpc_reactor_routing_invalidator = Arc::clone(&reactor_routing_invalidator);
+    // SEC-101: read off the SAME gate the REST layer holds, so the gRPC and
+    // REST reactor-admin surfaces cannot disagree about whether a registration
+    // is acceptable. Refusing on one and accepting on the other would leave
+    // the outage one `grpcurl` away.
+    let grpc_reactor_dispatch_available = {
+        use axiam_core::models::reactor::ReactorGate;
+        reactor_gate.can_dispatch()
+    };
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
@@ -1657,6 +1695,7 @@ async fn main() -> std::io::Result<()> {
             grpc_reactor_repo,
             grpc_reactor_audit_repo,
             grpc_reactor_routing_invalidator,
+            grpc_reactor_dispatch_available,
         )
         .await
         {

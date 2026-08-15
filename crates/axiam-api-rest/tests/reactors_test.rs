@@ -444,3 +444,182 @@ async fn a_reactor_is_invisible_to_another_tenant() {
     let req = authed!(get, &format!("/api/v1/reactors/{id}"), owner).to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// SEC-101 — registration is refused while the transport cannot dispatch
+// ---------------------------------------------------------------------------
+
+/// A gate whose transport cannot deliver — what `axiam-server` composes today
+/// (`UnavailableReactorTransport`), reduced to the one property the handler
+/// reads.
+struct UndispatchableGate;
+
+impl axiam_core::models::reactor::DynReactorGate for UndispatchableGate {
+    fn intercept_dyn<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _event: &'static str,
+        _payload: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = axiam_core::models::reactor::ReactorOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(std::future::ready(
+            axiam_core::models::reactor::ReactorOutcome::Allow,
+        ))
+    }
+
+    fn can_dispatch_dyn(&self) -> bool {
+        false
+    }
+}
+
+macro_rules! undispatchable_app {
+    ($db:expr, $auth:expr) => {{
+        let mut state = AppState::for_test($db.clone(), $auth.clone());
+        state.reactor_gate = Arc::new(UndispatchableGate);
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    }};
+}
+
+/// Registering a reactor while nothing can reach it is a **self-service,
+/// tenant-wide, complete login outage**: the transport fails every dispatch,
+/// `login.post_auth` defaults to `fail_closed`, and the only warning is a
+/// `tracing::warn!` emitted once at boot for every deployment — including the
+/// majority that will never register a reactor, which is how a warning becomes
+/// a filtered line. The action that causes the outage happens weeks later, in
+/// a UI that gave no indication anything was wrong.
+///
+/// Before the fix this asserts 201.
+#[actix_web::test]
+async fn creating_a_reactor_is_refused_while_the_transport_cannot_dispatch() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = undispatchable_app!(db, auth);
+
+    let req = authed!(post, "/api/v1/reactors", token)
+        .set_json(json!({
+            "name": "fraud-veto",
+            "events": ["login.post_auth"],
+            "mode": "intercept",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        503,
+        "the dependency this registration needs is absent from this build"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body.to_string().contains("fail_closed"),
+        "the refusal must say what would have happened: {body}"
+    );
+}
+
+/// `listen` is refused too. `ReactorTransport::publish_listen` has no caller
+/// anywhere in the tree — `run_chain` filters listeners out and `intercept`
+/// returns early when the interceptor list is empty — so a listen registration
+/// receives nothing, which is the inverse of its contract (SEC-099).
+#[actix_web::test]
+async fn a_listen_registration_is_refused_too_while_the_transport_cannot_dispatch() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = undispatchable_app!(db, auth);
+
+    let req = authed!(post, "/api/v1/reactors", token)
+        .set_json(json!({
+            "name": "observer",
+            "events": ["token.pre_issue"],
+            "mode": "listen",
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 503);
+}
+
+/// The operator must keep a way out. A registration created while the
+/// transport worked has to remain *disable*-able and *delete*-able when it
+/// stops — otherwise the refusal becomes the outage it exists to prevent.
+#[actix_web::test]
+async fn a_disabled_registration_and_a_delete_are_always_permitted() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // Created through the ordinary (dispatchable) app …
+    let created: Value = {
+        let app = test_app!(db, auth);
+        let req = authed!(post, "/api/v1/reactors", token)
+            .set_json(valid_body())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+        test::read_body_json(resp).await
+    };
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // … and then the transport goes away.
+    let app = undispatchable_app!(db, auth);
+
+    let disable = authed!(put, &format!("/api/v1/reactors/{id}"), token)
+        .set_json(json!({ "enabled": false }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, disable).await.status().as_u16(),
+        200,
+        "disabling must always be available — it is the way out"
+    );
+
+    // Re-enabling is what stays refused.
+    let reenable = authed!(put, &format!("/api/v1/reactors/{id}"), token)
+        .set_json(json!({ "enabled": true }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, reenable).await.status().as_u16(),
+        503
+    );
+
+    let delete = authed!(delete, &format!("/api/v1/reactors/{id}"), token).to_request();
+    assert_eq!(
+        test::call_service(&app, delete).await.status().as_u16(),
+        204
+    );
+}
+
+/// A disabled registration may be created even when nothing can reach it: it
+/// dispatches to nothing, so it causes no outage, and refusing it would block
+/// a legitimate "stage the configuration now, enable it when the transport
+/// ships" workflow.
+#[actix_web::test]
+async fn creating_a_disabled_registration_is_permitted() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = undispatchable_app!(db, auth);
+
+    let req = authed!(post, "/api/v1/reactors", token)
+        .set_json(json!({
+            "name": "staged",
+            "events": ["login.post_auth"],
+            "mode": "intercept",
+            "enabled": false,
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 201);
+}

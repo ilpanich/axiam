@@ -62,6 +62,16 @@ where
     /// than only after the routing table's TTL expires, exactly as R2.2
     /// requires for the REST path.
     routing_invalidator: Arc<dyn Fn(Uuid) + Send + Sync>,
+    /// SEC-101 — whether the composed reactor transport can deliver at all.
+    ///
+    /// A plain `bool` rather than the gate itself: this service needs the
+    /// answer, not the ability to dispatch, and `axiam-api-grpc` has no other
+    /// reason to know a gate exists. `axiam-server` reads it off the same
+    /// gate the REST layer holds, so the two admin surfaces cannot disagree
+    /// — which is the whole point. Without this, refusing the registration in
+    /// `axiam-api-rest` alone would leave a second, unguarded door onto the
+    /// same outage.
+    dispatch_available: bool,
 }
 
 impl<Rr, Rl, P, Res, S, G, A> ReactorAdminServiceImpl<Rr, Rl, P, Res, S, G, A>
@@ -79,13 +89,39 @@ where
         engine: AuthorizationEngine<Rl, P, Res, S, G>,
         audit_repo: A,
         routing_invalidator: Arc<dyn Fn(Uuid) + Send + Sync>,
+        dispatch_available: bool,
     ) -> Self {
         Self {
             reactor_repo,
             engine,
             audit_repo,
             routing_invalidator,
+            dispatch_available,
         }
+    }
+
+    /// SEC-101 — refuse to leave an ENABLED registration in place while the
+    /// transport cannot deliver to it.
+    ///
+    /// Mirrors `axiam_api_rest::handlers::reactors::require_dispatchable_transport`
+    /// exactly, including the "only when it would be enabled" rule that keeps
+    /// disable and delete available as the operator's way out. See that
+    /// function for the full reasoning.
+    ///
+    /// `UNAVAILABLE` is the gRPC status for "the dependency this call needs is
+    /// not present", and is what `AxiamError::ServiceUnavailable` maps to on
+    /// the REST side (503).
+    fn require_dispatchable_transport(&self, would_be_enabled: bool) -> Result<(), Status> {
+        if !would_be_enabled || self.dispatch_available {
+            return Ok(());
+        }
+        Err(Status::unavailable(
+            "the AMQP reactor transport is not implemented in this build, so a registered \
+             reactor could never be reached. Registering one would apply its failure_policy \
+             to every dispatch instead — and login.post_auth, user.pre_create, \
+             user.pre_update and grant.pre_assign all default to fail_closed, so the \
+             registration would deny those operations for this tenant.",
+        ))
     }
 
     async fn require_permission(
@@ -253,6 +289,10 @@ where
             .map(parse_failure_policy)
             .transpose()?;
         let timeout_ms = req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let enabled = req.enabled.unwrap_or(true);
+
+        // SEC-101 — the same refusal the REST create path makes.
+        self.require_dispatchable_transport(enabled)?;
 
         validate_registration(&req.name, &req.events, mode, timeout_ms)
             .map_err(validation_status)?;
@@ -268,7 +308,7 @@ where
                 priority: req.priority,
                 timeout_ms: Some(timeout_ms),
                 failure_policy,
-                enabled: req.enabled.unwrap_or(true),
+                enabled,
             })
             .await
             .map_err(axiam_err_to_status)?;
@@ -369,6 +409,10 @@ where
             current.events.clone()
         };
         let merged_timeout = req.timeout_ms.unwrap_or(current.timeout_ms);
+        let merged_enabled = req.enabled.unwrap_or(current.enabled);
+
+        // SEC-101, on the merged result — disabling is always allowed.
+        self.require_dispatchable_transport(merged_enabled)?;
 
         validate_registration(&merged_name, &merged_events, mode, merged_timeout)
             .map_err(validation_status)?;

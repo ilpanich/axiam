@@ -131,6 +131,10 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     reactor_repo: Rr,
     reactor_audit_repo: A,
     reactor_routing_invalidator: Arc<dyn Fn(Uuid) + Send + Sync>,
+    // SEC-101 — whether the composed reactor transport can deliver at all.
+    // MUST be read from the same gate `axiam-api-rest` holds, so the two
+    // admin surfaces refuse (or accept) the same registrations.
+    reactor_dispatch_available: bool,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -220,6 +224,7 @@ where
             reactor_engine,
             reactor_audit_repo,
             reactor_routing_invalidator,
+            reactor_dispatch_available,
         ),
         AuthInterceptor::new(auth_config),
     );

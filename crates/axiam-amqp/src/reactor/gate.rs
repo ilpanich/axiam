@@ -66,6 +66,18 @@ use super::metrics;
 /// mutation.
 pub const DEFAULT_ROUTING_TTL: Duration = Duration::from_secs(5);
 
+/// How long "this tenant has (no) reactor registrations" stays believed
+/// (SEC-100).
+///
+/// Deliberately much longer than [`DEFAULT_ROUTING_TTL`]: it is consulted only
+/// when the per-event registry read has already failed, and it decides only
+/// whether a tenant with provably zero registrations is exempt from the
+/// resulting deny. An administrative change calls
+/// [`ReactorRoutingTable::invalidate_tenant`], which clears it on the replica
+/// that served the change, so this is the ceiling for the replicas that did
+/// not.
+pub const REGISTRATION_PRESENCE_TTL: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // Where registrations come from
 // ---------------------------------------------------------------------------
@@ -86,6 +98,40 @@ pub trait ReactorSource: Send + Sync {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Vec<Reactor>, String>> + Send + 'a>,
     >;
+
+    /// Whether this tenant has **any** reactor registration at all, enabled or
+    /// not (SEC-100).
+    ///
+    /// Consulted only when [`Self::enabled_for_event`] has failed and there is
+    /// no cached list to fall back on. The unreadable-registry rule — *a
+    /// registry that cannot be read is not evidence that no veto was
+    /// registered* — is right, and must stay: if an unreadable registry meant
+    /// "no reactors", anyone who can degrade the reactor table's availability
+    /// could disable every `fail_closed` fraud check in the deployment. But
+    /// the rule was being applied to the population it does not protect. The
+    /// overwhelming majority of tenants have never registered a reactor, and
+    /// for them the correct answer is provably "there is nothing to consult",
+    /// not "deny every login". On a cold replica — before any successful
+    /// resolve has cached the empty list — the old code denied `login.post_auth`
+    /// for all of them.
+    ///
+    /// This is a *different, broader query* than the per-event one, which is
+    /// why it is worth asking: a per-table timeout, a bad plan on the event
+    /// index or a partial failure can take out one and not the other. When it
+    /// also fails, the deny stands — that is the honest answer when there is
+    /// genuinely no evidence.
+    ///
+    /// The default is `Ok(true)`: "assume this tenant has registrations",
+    /// which preserves the deny. An implementation that can answer cheaply
+    /// should override it; one that cannot must not guess `false`.
+    fn tenant_has_registrations<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
+    {
+        let _ = tenant_id;
+        Box::pin(std::future::ready(Ok(true)))
+    }
 }
 
 /// Adapter from the real `ReactorRepository` to [`ReactorSource`].
@@ -107,6 +153,31 @@ impl<R: axiam_core::repository::ReactorRepository> ReactorSource for RepositoryR
                 .map_err(|e| e.to_string())
         })
     }
+
+    fn tenant_has_registrations<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // One row is enough to answer the question, so ask for one. This
+            // runs only on the failure path, and its result is cached by
+            // `ReactorRoutingTable` for `REGISTRATION_PRESENCE_TTL`, so a
+            // sustained registry outage costs one such query per tenant per
+            // minute rather than one per login.
+            self.0
+                .list(
+                    tenant_id,
+                    axiam_core::repository::Pagination {
+                        offset: 0,
+                        limit: 1,
+                    },
+                )
+                .await
+                .map(|page| page.total > 0)
+                .map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// A source with no registrations — the routing table a deployment gets when
@@ -123,6 +194,14 @@ impl ReactorSource for EmptyReactorSource {
         Box<dyn std::future::Future<Output = Result<Vec<Reactor>, String>> + Send + 'a>,
     > {
         Box::pin(std::future::ready(Ok(Vec::new())))
+    }
+
+    fn tenant_has_registrations<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
+    {
+        Box::pin(std::future::ready(Ok(false)))
     }
 }
 
@@ -144,6 +223,23 @@ pub struct ReactorRoutingTable<S> {
     source: S,
     ttl: Duration,
     entries: Mutex<HashMap<(Uuid, &'static str), RoutingEntry>>,
+    /// SEC-100: "does this tenant have any registration at all", cached
+    /// separately and for much longer than the routing entries.
+    ///
+    /// A different TTL because it answers a different question. The routing
+    /// entries must be fresh — five seconds is the bound the "registry update
+    /// visible ≤ TTL" acceptance test asserts — because they decide *which*
+    /// reactor runs. This one only ever decides whether a tenant with
+    /// provably zero reactors is exempt from the unreadable-registry deny, and
+    /// it is consulted only when the registry is already unreadable, so a
+    /// minute-old answer is exactly as useful as a fresh one and costs one
+    /// query per tenant per minute instead of one per login.
+    ///
+    /// Cleared by [`Self::invalidate_tenant`] along with everything else, so a
+    /// tenant that registers its first reactor stops being exempt at once on
+    /// the replica that served the registration, and within
+    /// [`REGISTRATION_PRESENCE_TTL`] everywhere else.
+    presence: Mutex<HashMap<Uuid, (bool, Instant)>>,
 }
 
 impl<S: ReactorSource> ReactorRoutingTable<S> {
@@ -152,6 +248,7 @@ impl<S: ReactorSource> ReactorRoutingTable<S> {
             source,
             ttl,
             entries: Mutex::new(HashMap::new()),
+            presence: Mutex::new(HashMap::new()),
         }
     }
 
@@ -165,6 +262,9 @@ impl<S: ReactorSource> ReactorRoutingTable<S> {
         if let Ok(mut entries) = self.entries.lock() {
             entries.retain(|(t, _), _| *t != tenant_id);
         }
+        if let Ok(mut presence) = self.presence.lock() {
+            presence.remove(&tenant_id);
+        }
     }
 
     /// Drop everything. Used when a change's tenant is not known.
@@ -172,6 +272,30 @@ impl<S: ReactorSource> ReactorRoutingTable<S> {
         if let Ok(mut entries) = self.entries.lock() {
             entries.clear();
         }
+        if let Ok(mut presence) = self.presence.lock() {
+            presence.clear();
+        }
+    }
+
+    /// SEC-100 — whether `tenant_id` has any reactor registration at all.
+    ///
+    /// `Ok(false)` is the only answer that exempts a tenant from the
+    /// unreadable-registry deny, and it is only ever produced by an actual
+    /// successful query that found nothing. An error here is **not** folded
+    /// into `false`: that would rebuild the very bypass the rule exists to
+    /// prevent, one layer down.
+    async fn tenant_has_registrations(&self, tenant_id: Uuid) -> Result<bool, String> {
+        if let Ok(presence) = self.presence.lock()
+            && let Some((known, at)) = presence.get(&tenant_id)
+            && at.elapsed() < REGISTRATION_PRESENCE_TTL
+        {
+            return Ok(*known);
+        }
+        let answer = self.source.tenant_has_registrations(tenant_id).await?;
+        if let Ok(mut presence) = self.presence.lock() {
+            presence.insert(tenant_id, (answer, Instant::now()));
+        }
+        Ok(answer)
     }
 
     /// Number of live cache entries — for tests and a health panel.
@@ -520,13 +644,23 @@ where
             .clone()
     }
 
-    /// Resolve one failure that applies to *every* reactor in the chain (the
-    /// cap breach, and the unreadable-registry case), and audit each.
+    /// Resolve one failure that applies to every **interceptor** in the chain
+    /// (the cap breach), and audit each.
+    ///
+    /// SEC-099: takes the already-filtered interceptor list, not the whole
+    /// registration list. `run_chain` filters to `ReactorMode::Intercept`
+    /// before it dispatches anything, and this out-of-chain path must agree
+    /// with it — passing the unfiltered slice meant a `listen`-mode
+    /// registration's `failure_policy` was resolved, and since
+    /// `default_failure_policy_for` gives a `login.post_auth` registration
+    /// `fail_closed` whatever its mode, a listener **denied the login** when
+    /// the per-tenant in-flight cap was breached. `ReactorMode::Listen`'s own
+    /// contract is the opposite: "a listener cannot affect any outcome".
     async fn fail_whole_chain(
         &self,
         tenant_id: Uuid,
         event: &'static str,
-        reactors: &[Reactor],
+        reactors: &[&Reactor],
         failure: DispatchFailure,
     ) -> ReactorOutcome {
         let mut outcome = ReactorOutcome::Allow;
@@ -723,11 +857,57 @@ where
         let reactors = match self.routing.resolve(tenant_id, event).await {
             Ok(list) => list,
             Err(e) => {
-                // The registry is unreadable and there is no stale entry, so
-                // we cannot know whether a veto was registered. Falling back
-                // to the event's own default is the only honest answer: an
+                // SEC-100: before applying the unreadable-registry rule, ask
+                // the one question that can exempt a tenant from it —
+                // "does this tenant have any registration at all?" — through
+                // a broader query with its own cache. A tenant that has never
+                // registered a reactor is not a tenant whose veto we might be
+                // skipping; there is provably nothing to consult, and denying
+                // its logins protects nobody. This is the population the old
+                // code hurt: on a cold replica during a partial registry
+                // failure, EVERY tenant took the deny.
+                //
+                // An error from the probe is not folded into "no
+                // registrations" — that would rebuild the availability-shaped
+                // off switch the rule exists to remove.
+                match self.routing.tenant_has_registrations(tenant_id).await {
+                    Ok(false) => {
+                        tracing::warn!(
+                            target: "axiam::reactor",
+                            tenant_id = %tenant_id,
+                            event,
+                            error = %e,
+                            "reactor registry unreadable, but this tenant has no reactor \
+                             registrations at all; allowing"
+                        );
+                        return ReactorOutcome::Allow;
+                    }
+                    Ok(true) => {}
+                    Err(probe_error) => {
+                        tracing::error!(
+                            target: "axiam::reactor",
+                            tenant_id = %tenant_id,
+                            event,
+                            error = %probe_error,
+                            "could not establish whether this tenant has any reactor \
+                             registration; falling through to the unreadable-registry rule"
+                        );
+                    }
+                }
+
+                // The registry is unreadable, there is no stale entry, and
+                // this tenant is not known to be reactor-free, so we cannot
+                // know whether a veto was registered. Falling back to the
+                // event's own default is the only honest answer left: an
                 // unreadable database must not become a way to skip
                 // `login.post_auth`.
+                //
+                // Note what this deliberately does NOT do: resolve the
+                // registrations' own failure policies. It cannot — the whole
+                // premise of this arm is that the registration list is
+                // unknown. When a *stale* list exists, `resolve` serves it and
+                // the per-registration policies are applied one screen below,
+                // which is the case that matters in a warm process.
                 tracing::error!(
                     target: "axiam::reactor",
                     tenant_id = %tenant_id,
@@ -772,8 +952,10 @@ where
                     "per-tenant reactor in-flight cap reached; applying each \
                      registration's failure policy without waiting"
                 );
+                // SEC-099: `&interceptors`, never `&reactors` — a listener
+                // must not be able to deny.
                 return self
-                    .fail_whole_chain(tenant_id, event, &reactors, failure)
+                    .fail_whole_chain(tenant_id, event, &interceptors, failure)
                     .await;
             }
         };
@@ -799,6 +981,13 @@ where
 
         Self::enforce_allow_list(event, result.outcome)
     }
+
+    /// SEC-101: forwarded verbatim from the composed transport. The gate has
+    /// no opinion of its own here — the question is entirely "can the thing
+    /// that would carry the message carry it".
+    fn can_dispatch(&self) -> bool {
+        self.transport.can_dispatch()
+    }
 }
 
 #[cfg(test)]
@@ -819,6 +1008,11 @@ mod tests {
         reactors: Mutex<Vec<Reactor>>,
         loads: AtomicUsize,
         fail: Mutex<Option<String>>,
+        /// SEC-100: the presence probe is a *different, broader* query, so it
+        /// is broken separately. `break_store` models the partial failure the
+        /// review names (a per-table timeout, a bad plan on the event index);
+        /// `break_presence` models a total one.
+        fail_presence: Mutex<Option<String>>,
     }
 
     impl VecSource {
@@ -833,6 +1027,10 @@ mod tests {
         }
         fn break_store(&self, why: &str) {
             *self.fail.lock().unwrap() = Some(why.to_string());
+        }
+        #[allow(dead_code)]
+        fn break_presence(&self, why: &str) {
+            *self.fail_presence.lock().unwrap() = Some(why.to_string());
         }
         fn loads(&self) -> usize {
             self.loads.load(Ordering::Relaxed)
@@ -860,6 +1058,19 @@ mod tests {
                     .filter(|r| r.enabled && r.events.iter().any(|e| e == event))
                     .cloned()
                     .collect())
+            })
+        }
+
+        fn tenant_has_registrations<'a>(
+            &'a self,
+            _tenant_id: Uuid,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if let Some(why) = self.fail_presence.lock().unwrap().clone() {
+                    return Err(why);
+                }
+                Ok(!self.reactors.lock().unwrap().is_empty())
             })
         }
     }
@@ -1525,10 +1736,23 @@ mod tests {
 
     /// An unreadable registry must not become a way to skip a `fail_closed`
     /// hook — and must not break a `fail_open` one either.
+    ///
+    /// SEC-100 narrowed the population this applies to: the tenant must be
+    /// *known to have* at least one registration, because a tenant with none
+    /// has provably nothing to consult. The registration below is what makes
+    /// the presence probe answer `true`; with an empty source this now
+    /// correctly allows, which
+    /// `an_unreadable_registry_allows_a_tenant_with_no_registrations` asserts.
+    /// The per-event read still fails, so the event-default rule is what is
+    /// under test here, exactly as before.
     #[tokio::test]
     async fn an_unreadable_registry_falls_back_to_the_events_default_policy() {
         let tenant = Uuid::new_v4();
-        let source = VecSource::with(vec![]);
+        let source = VecSource::with(vec![reactor(
+            tenant,
+            "login.post_auth",
+            FailurePolicy::FailClosed,
+        )]);
         source.break_store("connection refused");
         let audit = CollectingAudit::default();
         let g = gate(
@@ -1772,6 +1996,205 @@ mod tests {
                 .intercept_dyn(tenant, "login.post_auth", serde_json::json!({}))
                 .await,
             ReactorOutcome::Allow
+        );
+    }
+
+    // -- SEC-099 / SEC-100 / SEC-101 regressions --------------------------
+
+    fn listener(tenant: Uuid, event: &str, policy: FailurePolicy) -> Reactor {
+        Reactor {
+            mode: ReactorMode::Listen,
+            ..reactor(tenant, event, policy)
+        }
+    }
+
+    /// SEC-099. A `listen`-mode registration cannot deny, and the in-flight
+    /// cap is the path where it used to.
+    ///
+    /// `default_failure_policy_for` gives any `login.post_auth` registration
+    /// `fail_closed` regardless of mode, and `fail_whole_chain` was handed the
+    /// **unfiltered** registration list — so a listener denied the login the
+    /// moment the per-tenant cap was breached, which is the exact inverse of
+    /// `ReactorMode::Listen`'s contract ("a listener cannot affect any
+    /// outcome"). Before the fix this asserts `Deny`.
+    #[tokio::test]
+    async fn a_listen_registration_cannot_deny_when_the_in_flight_cap_is_breached() {
+        let tenant = Uuid::new_v4();
+        let source = VecSource::with(vec![
+            // One interceptor, so the chain is entered at all …
+            reactor(tenant, "login.post_auth", FailurePolicy::FailOpen),
+            // … and one listener whose fail_closed policy must not be read.
+            listener(tenant, "login.post_auth", FailurePolicy::FailClosed),
+        ]);
+        let config = ReactorGateConfig {
+            max_in_flight_per_tenant: 1,
+            ..Default::default()
+        };
+        let g = Arc::new(gate(
+            source,
+            Scripted::holding(Answer::Allow, Duration::from_millis(200)),
+            CollectingAudit::default(),
+            config,
+        ));
+
+        let first = {
+            let g = Arc::clone(&g);
+            tokio::spawn(async move {
+                g.intercept(tenant, "login.post_auth", serde_json::json!({}))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        assert_eq!(
+            g.intercept(tenant, "login.post_auth", serde_json::json!({}))
+                .await,
+            ReactorOutcome::Allow,
+            "only the fail_open INTERCEPTOR's policy may be resolved under the cap; \
+             the fail_closed listener must not be able to deny a login"
+        );
+        first.await.unwrap();
+    }
+
+    /// SEC-100. An unreadable registry must not deny a tenant that provably
+    /// has no reactors at all.
+    ///
+    /// Before the fix the `Err` arm returned the event's default failure
+    /// policy — `fail_closed` for `login.post_auth` — before ever reaching the
+    /// "nobody is listening" check, so on a cold replica during a partial
+    /// registry failure EVERY tenant's logins were denied, including the
+    /// overwhelming majority that had never registered a reactor.
+    #[tokio::test]
+    async fn an_unreadable_registry_allows_a_tenant_with_no_registrations() {
+        let tenant = Uuid::new_v4();
+        let source = VecSource::with(vec![]);
+        // Nothing cached: the failure happens on the very first resolve, which
+        // is the cold-replica case.
+        source.break_store("permission denied on table reactor");
+        let g = gate(
+            Arc::clone(&source),
+            Scripted::new(Answer::Deny("unreachable")),
+            CollectingAudit::default(),
+            ReactorGateConfig::default(),
+        );
+
+        assert_eq!(
+            g.intercept(tenant, "login.post_auth", serde_json::json!({}))
+                .await,
+            ReactorOutcome::Allow,
+            "a tenant with zero registrations has nothing to consult; denying its \
+             logins because the registry is unreadable protects nobody"
+        );
+    }
+
+    /// SEC-100, the other half: the rule itself must survive. A tenant that
+    /// DOES have registrations still takes the deny when the registry cannot
+    /// be read and nothing is cached — otherwise anyone who can degrade the
+    /// reactor table's availability could disable every `fail_closed` check in
+    /// the deployment.
+    #[tokio::test]
+    async fn an_unreadable_registry_still_denies_a_tenant_that_has_registrations() {
+        let tenant = Uuid::new_v4();
+        let source = VecSource::with(vec![reactor(
+            tenant,
+            "login.post_auth",
+            FailurePolicy::FailClosed,
+        )]);
+        source.break_store("per-table timeout");
+        let g = gate(
+            Arc::clone(&source),
+            Scripted::new(Answer::Allow),
+            CollectingAudit::default(),
+            ReactorGateConfig::default(),
+        );
+
+        assert!(
+            !g.intercept(tenant, "login.post_auth", serde_json::json!({}))
+                .await
+                .permits(),
+            "an unreadable registry is not evidence that no veto was registered"
+        );
+    }
+
+    /// SEC-100: an errored presence probe is NOT folded into "no
+    /// registrations". Folding it would rebuild the availability-shaped off
+    /// switch one layer down.
+    #[tokio::test]
+    async fn a_failing_presence_probe_does_not_exempt_a_tenant() {
+        struct AllBroken;
+        impl ReactorSource for AllBroken {
+            fn enabled_for_event<'a>(
+                &'a self,
+                _tenant_id: Uuid,
+                _event: &'a str,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Vec<Reactor>, String>> + Send + 'a>,
+            > {
+                Box::pin(std::future::ready(Err("registry down".to_string())))
+            }
+            fn tenant_has_registrations<'a>(
+                &'a self,
+                _tenant_id: Uuid,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>,
+            > {
+                Box::pin(std::future::ready(Err("registry down".to_string())))
+            }
+        }
+
+        let g = DispatchingReactorGate::new(
+            Arc::new(ReactorRoutingTable::new(AllBroken, DEFAULT_ROUTING_TTL)),
+            Scripted::new(Answer::Allow),
+            CollectingAudit::default(),
+            MASTER.to_vec(),
+            ReactorGateConfig::default(),
+        );
+
+        assert!(
+            !g.intercept(Uuid::new_v4(), "login.post_auth", serde_json::json!({}))
+                .await
+                .permits()
+        );
+    }
+
+    /// SEC-101. The gate reports its transport's dispatch capability, and
+    /// `UnavailableReactorTransport` — the one composed in production today —
+    /// answers `false`. The REST and gRPC reactor-admin handlers refuse an
+    /// enabled registration on that answer.
+    #[test]
+    fn the_gate_reports_whether_its_transport_can_dispatch() {
+        use crate::reactor::dispatcher::UnavailableReactorTransport;
+
+        let unavailable = DispatchingReactorGate::new(
+            Arc::new(ReactorRoutingTable::new(
+                EmptyReactorSource,
+                DEFAULT_ROUTING_TTL,
+            )),
+            UnavailableReactorTransport,
+            CollectingAudit::default(),
+            MASTER.to_vec(),
+            ReactorGateConfig::default(),
+        );
+        assert!(
+            !unavailable.can_dispatch(),
+            "registering an interceptor against this transport is a login outage"
+        );
+
+        let working = gate(
+            VecSource::with(vec![]),
+            Scripted::new(Answer::Allow),
+            CollectingAudit::default(),
+            ReactorGateConfig::default(),
+        );
+        assert!(working.can_dispatch());
+
+        // And it survives type erasure, which is how the REST layer sees it.
+        let erased: SharedReactorGate = Arc::new(unavailable);
+        assert!(!erased.can_dispatch_dyn());
+        assert!(
+            noop_reactor_gate().can_dispatch_dyn(),
+            "the no-op gate runs no reactors at all, so a registration under it is \
+             inert rather than dangerous"
         );
     }
 }

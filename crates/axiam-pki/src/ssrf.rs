@@ -15,9 +15,12 @@
 //!
 //! 1. Resolves the host (A + AAAA) fresh — no cross-request DNS caching
 //!    (D-01c).
-//! 2. Rejects the fetch if ANY resolved address is
-//!    loopback/private/link-local/ULA/unspecified (D-01a) — unless the
-//!    caller opted into the `allow_private` test seam (see below).
+//! 2. Rejects the fetch if ANY resolved address is non-globally-routable
+//!    (D-01a) — unless the caller opted into the `allow_private` test seam
+//!    (see below). [`is_disallowed_ip`] enumerates the families and, since
+//!    SEC-094, canonicalises the IPv4-in-IPv6 encodings first: an `AAAA`
+//!    record carrying `::ffff:169.254.169.254` used to pass this step and
+//!    then be *pinned* by step 3.
 //! 3. Pins the exact validated `IpAddr` into a fresh, single-use
 //!    `reqwest::Client` via `ClientBuilder::resolve()`, so the socket that
 //!    is actually opened is the one that was validated — not a second,
@@ -39,7 +42,7 @@
 //! redirect-bypass defense this module exists to provide (D-01b: "re-run
 //! the full SSRF guard against the redirect target").
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 /// Maximum number of redirect hops [`guarded_fetch`] will follow before
@@ -74,30 +77,149 @@ pub enum SsrfError {
 /// federation fetch types.
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
+/// Returns `true` for IPv4 addresses that must never be contacted from a
+/// server-side outbound fetch (SEC-094).
+///
+/// | Range | RFC | Why |
+/// |---|---|---|
+/// | `0.0.0.0/8` | RFC 1122 | "this network"; `0.0.0.0` reaches localhost on Linux |
+/// | `10/8`, `172.16/12`, `192.168/16` | RFC 1918 | private |
+/// | `100.64.0.0/10` | RFC 6598 | CGNAT shared address space — carrier-internal |
+/// | `127.0.0.0/8` | RFC 1122 | loopback (the whole /8, not just `127.0.0.1`) |
+/// | `169.254.0.0/16` | RFC 3927 | link-local — **the cloud metadata service** |
+/// | `192.0.0.0/24` | RFC 6890 | IETF protocol assignments (incl. `192.0.0.8` etc.) |
+/// | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | RFC 5737 | documentation |
+/// | `192.88.99.0/24` | RFC 7526 | deprecated 6to4 relay anycast |
+/// | `198.18.0.0/15` | RFC 2544 | benchmarking |
+/// | `224.0.0.0/4` | RFC 5771 | multicast |
+/// | `240.0.0.0/4` | RFC 1112 | reserved, incl. `255.255.255.255` broadcast |
+///
+/// `Ipv4Addr::is_shared`, `is_documentation`, `is_benchmarking` and
+/// `is_reserved` are all still unstable (`#![feature(ip)]`), hence the
+/// hand-rolled octet arithmetic.
+fn is_disallowed_ipv4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || o[0] == 0 // 0.0.0.0/8 — not merely `is_unspecified()`
+        || (o[0] == 100 && (o[1] & 0xc0) == 0x40) // 100.64.0.0/10 CGNAT
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2) // 192.0.2.0/24
+        || (o[0] == 192 && o[1] == 88 && o[2] == 99) // 192.88.99.0/24
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100) // 198.51.100.0/24
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113) // 203.0.113.0/24
+        || o[0] >= 240 // 240.0.0.0/4 reserved + broadcast
+}
+
+/// Returns `true` for IPv6 addresses that must never be contacted.
+///
+/// Callers reach this only via [`is_disallowed_ip`], which has already dealt
+/// with the two `::`-prefixed IPv4-in-IPv6 forms — `::ffff:a.b.c.d` is
+/// canonicalised to [`is_disallowed_ipv4`], `::a.b.c.d` is rejected outright.
+/// What is left here is either genuinely-v6 or a *transition* encoding, and the
+/// transition encodings are handled explicitly below because each one can name
+/// an internal v4 host.
+fn is_disallowed_ipv6(v6: Ipv6Addr) -> bool {
+    let s = v6.segments();
+
+    // 6to4, 2002::/16 (RFC 3056): bits 16..48 are the IPv4 address of the
+    // 6to4 site. `2002:7f00:0001::1` is 127.0.0.1; `2002:a9fe:a9fe::1` is the
+    // metadata service. The prefix as a whole cannot be blocked (it maps the
+    // ENTIRE public IPv4 space), so classify the address it embeds.
+    if s[0] == 0x2002 {
+        let embedded = Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            (s[1] & 0xff) as u8,
+            (s[2] >> 8) as u8,
+            (s[2] & 0xff) as u8,
+        );
+        if is_disallowed_ipv4(embedded) {
+            return true;
+        }
+    }
+
+    // NAT64 well-known prefix, 64:ff9b::/96 (RFC 6052): low 32 bits are the
+    // IPv4 destination. Same reasoning as 6to4 — classify what it embeds.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        let embedded = Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        );
+        if is_disallowed_ipv4(embedded) {
+            return true;
+        }
+    }
+
+    v6.is_loopback()                            // ::1
+        || v6.is_unspecified()                  // ::
+        || v6.is_multicast()                    // ff00::/8
+        || (s[0] & 0xffc0) == 0xfe80            // fe80::/10 link-local
+        || (s[0] & 0xffc0) == 0xfec0            // fec0::/10 site-local (deprecated, RFC3879)
+        || (s[0] & 0xfe00) == 0xfc00            // fc00::/7 unique-local
+        || (s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0) // 100::/64 discard-only
+        || (s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001)    // 64:ff9b:1::/48 local NAT64
+        // 2001::/23 IETF protocol assignments (RFC 2928): Teredo 2001::/32,
+        // benchmarking 2001:2::/48, ORCHIDv2 2001:20::/28. Teredo in
+        // particular embeds BOTH a server and an (obfuscated) client IPv4
+        // address; the whole /23 is non-global-unicast, so block it outright.
+        || (s[0] == 0x2001 && (s[1] & 0xfe00) == 0x0000)
+        || (s[0] == 0x2001 && s[1] == 0x0db8)   // 2001:db8::/32 documentation
+        || (s[0] == 0x3fff && (s[1] & 0xf000) == 0) // 3fff::/20 documentation (RFC 9637)
+}
+
 /// Returns `true` for IP addresses that must never be contacted from a
 /// server-side outbound fetch to an admin/IdP-supplied URL.
 ///
-/// Covers: RFC1918 private ranges, loopback (127/8 and ::1), link-local
-/// (169.254/16 and fe80::/10), broadcast (255.255.255.255), and unspecified
-/// (0.0.0.0 / ::). Lifted byte-identical from the two pre-existing
-/// duplicate copies (`jwks_cache::is_private_jwks_ip`,
-/// `webhook::is_private_ip`) — this is the D-01a dedup target.
+/// # SEC-094 — canonicalisation happens FIRST
+///
+/// The predicate this replaced matched on the `IpAddr` variant as it arrived
+/// from `getaddrinfo`. An `AAAA` record may legally contain an IPv4-mapped
+/// address (`::ffff:169.254.169.254`), whose `segments()[0]` is `0x0000`: it
+/// matched none of the v6 arms, and the v4 arms were never consulted because
+/// the value was an `IpAddr::V6`. The address then went straight into
+/// `ClientBuilder::resolve()`, so the pinning that closes the DNS-rebind
+/// window (D-01c) *guaranteed* the attacker's address was the one dialled —
+/// and on a dual-stack host `connect()` to `::ffff:a.b.c.d` reaches the IPv4
+/// destination.
+///
+/// Both IPv4-in-IPv6 embeddings are folded before classification:
+///
+/// * `::ffff:0:0/96` — IPv4-mapped. Legitimate: `getaddrinfo` with
+///   `AI_V4MAPPED` returns it for real v4 hosts, so it is *canonicalised*
+///   (checked as the v4 address it denotes) rather than rejected outright.
+/// * `::/96` — IPv4-compatible, deprecated by RFC 4291 §2.5.5.1. Rejected
+///   outright; nothing legitimate resolves to it. Note that
+///   `IpAddr::to_canonical` does **not** fold this form (it delegates to
+///   `to_ipv4_mapped`, not `to_ipv4`), which is why it is handled here by
+///   hand.
 pub fn is_disallowed_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xffc0 == 0xfe80) // link-local fe80::/10
-                || (v6.segments()[0] & 0xfe00 == 0xfc00) // unique-local fc00::/7
-        }
+        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            // ::ffff:a.b.c.d — classify as the v4 address it denotes.
+            Some(v4) => is_disallowed_ipv4(v4),
+            None => {
+                // ::/96 (IPv4-compatible, deprecated) — always rejected. `::`
+                // and `::1` fall in this range too and are disallowed anyway.
+                if is_ipv4_compatible_v6(v6) {
+                    return true;
+                }
+                is_disallowed_ipv6(v6)
+            }
+        },
     }
+}
+
+/// `::/96` — the deprecated IPv4-compatible form, plus `::` and `::1`.
+fn is_ipv4_compatible_v6(v6: Ipv6Addr) -> bool {
+    let s = v6.segments();
+    s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0
 }
 
 /// Resolve `host:port` (A + AAAA), reject if ANY resolved address is
@@ -279,6 +401,195 @@ pub async fn read_capped_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SEC-094 — the regression the review reproduced: an `AAAA` record
+    /// carrying an IPv4-mapped internal address passed the guard and was then
+    /// *pinned* into the connection. Every literal named in the write-up.
+    #[test]
+    fn sec094_ipv4_mapped_ipv6_is_blocked() {
+        for literal in [
+            "::ffff:127.0.0.1",       // loopback
+            "::ffff:169.254.169.254", // IMDS
+            "::ffff:10.0.0.1",        // RFC1918
+            "::ffff:192.168.1.1",     // RFC1918
+            "::ffff:172.16.0.1",      // RFC1918
+            "::ffff:0.0.0.0",         // unspecified
+            "::ffff:255.255.255.255", // broadcast
+            "::ffff:100.64.0.1",      // CGNAT
+        ] {
+            let ip: IpAddr = literal.parse().expect("literal parses");
+            assert!(
+                is_disallowed_ip(ip),
+                "{literal}: IPv4-mapped IPv6 must be canonicalised and blocked (SEC-094)"
+            );
+        }
+    }
+
+    /// SEC-094 — table-driven classification over every family the guard is
+    /// responsible for. `expect_blocked` is the assertion; the comment on each
+    /// row is why.
+    #[test]
+    fn sec094_is_disallowed_ip_table() {
+        // (literal, expect_blocked, why)
+        let cases: &[(&str, bool, &str)] = &[
+            // ---- IPv4: must be blocked -------------------------------------
+            ("0.0.0.0", true, "unspecified"),
+            ("0.1.2.3", true, "0.0.0.0/8 'this network'"),
+            ("10.0.0.1", true, "RFC1918 10/8"),
+            ("172.16.0.1", true, "RFC1918 172.16/12"),
+            ("172.31.255.254", true, "RFC1918 172.16/12 upper edge"),
+            ("192.168.1.1", true, "RFC1918 192.168/16"),
+            ("100.64.0.1", true, "RFC6598 CGNAT lower edge"),
+            ("100.127.255.254", true, "RFC6598 CGNAT upper edge"),
+            ("127.0.0.1", true, "loopback"),
+            ("127.1.2.3", true, "loopback — the whole /8"),
+            ("169.254.169.254", true, "link-local / cloud metadata"),
+            ("192.0.0.1", true, "RFC6890 IETF protocol assignments"),
+            ("192.0.2.1", true, "RFC5737 TEST-NET-1"),
+            ("192.88.99.1", true, "deprecated 6to4 relay anycast"),
+            ("198.18.0.1", true, "RFC2544 benchmarking"),
+            ("198.19.255.254", true, "RFC2544 benchmarking upper edge"),
+            ("198.51.100.1", true, "RFC5737 TEST-NET-2"),
+            ("203.0.113.1", true, "RFC5737 TEST-NET-3"),
+            ("224.0.0.1", true, "multicast"),
+            ("239.255.255.255", true, "multicast upper edge"),
+            ("240.0.0.1", true, "RFC1112 reserved"),
+            ("255.255.255.255", true, "broadcast"),
+            // ---- IPv4: must be allowed (routable public) -------------------
+            ("1.1.1.1", false, "public"),
+            ("8.8.8.8", false, "public"),
+            (
+                "93.184.216.34",
+                false,
+                "public — the pre-existing webhook case",
+            ),
+            ("100.63.255.255", false, "just BELOW the CGNAT block"),
+            ("100.128.0.1", false, "just ABOVE the CGNAT block"),
+            ("172.15.255.255", false, "just below RFC1918 172.16/12"),
+            ("172.32.0.1", false, "just above RFC1918 172.16/12"),
+            ("198.17.255.255", false, "just below the benchmarking /15"),
+            ("198.20.0.1", false, "just above the benchmarking /15"),
+            ("223.255.255.255", false, "just below multicast"),
+            // ---- IPv4-mapped IPv6 (SEC-094): classified as their v4 --------
+            ("::ffff:127.0.0.1", true, "mapped loopback"),
+            ("::ffff:169.254.169.254", true, "mapped IMDS"),
+            ("::ffff:10.0.0.1", true, "mapped RFC1918"),
+            ("::ffff:192.168.1.1", true, "mapped RFC1918"),
+            ("::ffff:100.64.0.1", true, "mapped CGNAT"),
+            (
+                "::ffff:93.184.216.34",
+                false,
+                "mapped PUBLIC address stays reachable — AI_V4MAPPED is legitimate",
+            ),
+            // ---- IPv4-compatible ::/96 (deprecated, always blocked) --------
+            ("::", true, "unspecified"),
+            ("::1", true, "loopback"),
+            ("::127.0.0.1", true, "IPv4-compatible loopback"),
+            ("::169.254.169.254", true, "IPv4-compatible IMDS"),
+            (
+                "::93.184.216.34",
+                true,
+                "IPv4-compatible form is deprecated (RFC4291) — blocked wholesale",
+            ),
+            // ---- IPv6: must be blocked -------------------------------------
+            ("fe80::1", true, "link-local fe80::/10"),
+            ("febf:ffff::1", true, "link-local upper edge"),
+            ("fec0::1", true, "deprecated site-local fec0::/10 (RFC3879)"),
+            ("fc00::1", true, "unique-local fc00::/7"),
+            ("fd00::1", true, "unique-local"),
+            ("fdff:ffff::1", true, "unique-local upper edge"),
+            ("ff02::1", true, "multicast — all-nodes"),
+            ("ff05::1:3", true, "multicast — site-local DHCP servers"),
+            ("100::1", true, "100::/64 discard-only (RFC6666)"),
+            ("2001:db8::1", true, "documentation (RFC3849)"),
+            ("3fff::1", true, "documentation (RFC9637)"),
+            ("3fff:0fff::1", true, "documentation upper edge"),
+            ("2001::1", true, "Teredo, inside 2001::/23"),
+            ("2001:2::1", true, "IPv6 benchmarking, inside 2001::/23"),
+            ("2001:20::1", true, "ORCHIDv2, inside 2001::/23"),
+            ("64:ff9b::7f00:1", true, "NAT64 embedding 127.0.0.1"),
+            (
+                "64:ff9b::a9fe:a9fe",
+                true,
+                "NAT64 embedding 169.254.169.254",
+            ),
+            ("64:ff9b::a00:1", true, "NAT64 embedding 10.0.0.1"),
+            ("64:ff9b:1::1", true, "RFC8215 local-use NAT64 prefix"),
+            ("2002:7f00:1::1", true, "6to4 embedding 127.0.0.1"),
+            ("2002:a9fe:a9fe::1", true, "6to4 embedding 169.254.169.254"),
+            ("2002:a00:1::1", true, "6to4 embedding 10.0.0.1"),
+            ("2002:c0a8:101::1", true, "6to4 embedding 192.168.1.1"),
+            ("2002:6440:1::1", true, "6to4 embedding CGNAT 100.64.0.1"),
+            // ---- IPv6: must be allowed -------------------------------------
+            (
+                "2606:4700:4700::1111",
+                false,
+                "public — Cloudflare resolver",
+            ),
+            (
+                "2001:4860:4860::8888",
+                false,
+                "public — Google resolver, 2001:4860 is outside /23",
+            ),
+            ("2400::1", false, "public GUA"),
+            (
+                "64:ff9b::5db8:d822",
+                false,
+                "NAT64 embedding a PUBLIC v4 (93.184.216.34)",
+            ),
+            (
+                "2002:5db8:d822::1",
+                false,
+                "6to4 embedding a PUBLIC v4 (93.184.216.34)",
+            ),
+            (
+                "3ffe::1",
+                false,
+                "just below the 3fff::/20 documentation block",
+            ),
+            (
+                "4000::1",
+                false,
+                "just above the 3fff::/20 documentation block",
+            ),
+            ("fbff:ffff::1", false, "just below fc00::/7"),
+            ("fe00::1", false, "just below fe80::/10"),
+        ];
+
+        let mut failures = Vec::new();
+        for (literal, expect_blocked, why) in cases {
+            let ip: IpAddr = literal.parse().unwrap_or_else(|e| {
+                panic!("test table literal {literal:?} does not parse: {e}");
+            });
+            let actual = is_disallowed_ip(ip);
+            if actual != *expect_blocked {
+                failures.push(format!(
+                    "  {literal:<26} expected blocked={expect_blocked:<5} got={actual:<5} ({why})"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "is_disallowed_ip misclassified {} address(es):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// SEC-094 — end-to-end: the mapped form must be rejected by
+    /// `resolve_and_pick`, i.e. before `pinned_client` can pin it. Uses a
+    /// literal host (no DNS) so the test is hermetic; a hostile `AAAA` record
+    /// reaches the identical code path.
+    #[tokio::test]
+    async fn sec094_mapped_literal_host_is_blocked_before_pinning() {
+        for host in ["::ffff:169.254.169.254", "::ffff:127.0.0.1"] {
+            let result = resolve_and_pick(host, 443, false).await;
+            assert!(
+                matches!(result, Err(SsrfError::Blocked)),
+                "{host} must be Blocked, not pinned; got: {result:?}"
+            );
+        }
+    }
 
     /// SECHRD-02 negative test (SC #1): an OIDC discovery document whose
     /// `token_endpoint` resolves to a loopback address must be rejected

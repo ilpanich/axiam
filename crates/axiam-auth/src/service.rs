@@ -7,7 +7,7 @@ use axiam_core::models::reactor::{
 };
 use axiam_core::models::session::CreateSession;
 use axiam_core::models::settings::{MfaPolicy, PasswordPolicy};
-use axiam_core::models::user::{UpdateUser, UserStatus};
+use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
     UserRepository,
@@ -334,58 +334,15 @@ impl<
         //     a credential-probing oracle for whoever wrote the extension.
         //     Later — after `create_session_and_tokens` — and a veto would be
         //     refusing a session that already exists.
-        let mut reactor_requires_mfa = false;
-        match self
-            .reactor_gate
-            .intercept(
+        let reactor_requires_mfa = self
+            .intercept_login_post_auth(
                 input.tenant_id,
-                reactor_events::LOGIN_POST_AUTH,
-                serde_json::json!({
-                    // What is being decided, never the means to act on it
-                    // elsewhere (§22.3): no password, no token, no session id
-                    // — the session does not exist yet.
-                    "user_id": user.id,
-                    "username": user.username,
-                    "tenant_id": input.tenant_id,
-                    "org_id": input.org_id,
-                    "ip_address": input.ip_address,
-                    "user_agent": input.user_agent,
-                    "mfa_enabled": user.mfa_enabled,
-                }),
+                input.org_id,
+                &user,
+                input.ip_address.as_deref(),
+                input.user_agent.as_deref(),
             )
-            .await
-        {
-            ReactorOutcome::Allow => {}
-            ReactorOutcome::Deny { reason } => {
-                // The gate has already audited this with the reactor's id; the
-                // reason travels in the typed error for the caller's own audit
-                // record and never reaches the HTTP response body.
-                tracing::info!(
-                    target: "axiam::reactor",
-                    tenant_id = %input.tenant_id,
-                    user_id = %user.id,
-                    "login vetoed by a reactor on login.post_auth"
-                );
-                return Err(AuthError::ReactorDenied { reason }.into());
-            }
-            ReactorOutcome::RequireMfa => reactor_requires_mfa = true,
-            // `login.post_auth` is veto-only: the registry marks it
-            // `mutable: false`, the reply validator refuses a `mutate` on it,
-            // and the gate re-checks. Reaching this arm would mean all three
-            // failed, so it is treated as a refusal rather than ignored.
-            ReactorOutcome::Mutate { .. } => {
-                tracing::error!(
-                    target: "axiam::reactor",
-                    tenant_id = %input.tenant_id,
-                    "a mutation reached the login.post_auth call site, which is a \
-                     veto-only event — refusing the login"
-                );
-                return Err(AuthError::ReactorDenied {
-                    reason: "reactor attempted to mutate a veto-only event".into(),
-                }
-                .into());
-            }
-        }
+            .await?;
 
         // 5b. MFA enforcement — if policy requires MFA but user hasn't set it up,
         //     return a setup token (unless the user is federated).
@@ -440,6 +397,139 @@ impl<
             .await?;
 
         Ok(LoginResult::Success(output))
+    }
+
+    /// Fire `login.post_auth` for a principal whose authentication has just
+    /// succeeded, and apply the verdict (X1 / R2.2, SEC-095).
+    ///
+    /// Returns `Ok(true)` when a reactor demanded step-up MFA, which the
+    /// caller must honour; `Err(ReactorDenied)` when the login is vetoed.
+    ///
+    /// # Why this is a method rather than an inline block in [`Self::login`]
+    ///
+    /// It used to be inline, and that is exactly how SEC-095 happened: the
+    /// event fired on the password path and nowhere else, so a federated
+    /// sign-in — SAML ACS, OIDC callback — created a full session plus
+    /// access/refresh tokens without the gate ever being consulted. Nothing
+    /// scoped the event to passwords; the registry says "After credentials
+    /// verify, before session issuance: veto or require step-up MFA", and
+    /// `sdks/CONTRACT.md` §22.5 repeats that with no carve-out. An operator
+    /// who registered the feature's own worked example — an embargoed-region
+    /// login veto — got a control that was bypassed by clicking "Sign in with
+    /// Okta".
+    ///
+    /// Having ONE payload builder and ONE verdict `match` is the property that
+    /// keeps the federated paths honest: a third sign-in path cannot get a
+    /// subtly different payload, and a new [`ReactorOutcome`] variant is a
+    /// compile error at one site instead of a silent no-op at three.
+    ///
+    /// Placement at every call site is the same and is load-bearing: **after**
+    /// the credentials verify — earlier turns the hook into a
+    /// credential-probing oracle for whoever wrote the extension — and
+    /// **before** any session or challenge is issued, because a veto that
+    /// arrives after `create_session_and_tokens` is refusing a session that
+    /// already exists.
+    pub async fn intercept_login_post_auth(
+        &self,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        user: &User,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> AxiamResult<bool> {
+        match self
+            .reactor_gate
+            .intercept(
+                tenant_id,
+                reactor_events::LOGIN_POST_AUTH,
+                serde_json::json!({
+                    // What is being decided, never the means to act on it
+                    // elsewhere (§22.3): no password, no token, no session id
+                    // — the session does not exist yet.
+                    "user_id": user.id,
+                    "username": user.username,
+                    "tenant_id": tenant_id,
+                    "org_id": org_id,
+                    "ip_address": ip_address,
+                    "user_agent": user_agent,
+                    "mfa_enabled": user.mfa_enabled,
+                }),
+            )
+            .await
+        {
+            ReactorOutcome::Allow => Ok(false),
+            ReactorOutcome::Deny { reason } => {
+                // The gate has already audited this with the reactor's id; the
+                // reason travels in the typed error for the caller's own audit
+                // record and never reaches the HTTP response body.
+                tracing::info!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    user_id = %user.id,
+                    "login vetoed by a reactor on login.post_auth"
+                );
+                Err(AuthError::ReactorDenied { reason }.into())
+            }
+            ReactorOutcome::RequireMfa => Ok(true),
+            // `login.post_auth` is veto-only: the registry marks it
+            // `mutable: false`, the reply validator refuses a `mutate` on it,
+            // and the gate re-checks. Reaching this arm would mean all three
+            // failed, so it is treated as a refusal rather than ignored.
+            ReactorOutcome::Mutate { .. } => {
+                tracing::error!(
+                    target: "axiam::reactor",
+                    tenant_id = %tenant_id,
+                    "a mutation reached the login.post_auth call site, which is a \
+                     veto-only event — refusing the login"
+                );
+                Err(AuthError::ReactorDenied {
+                    reason: "reactor attempted to mutate a veto-only event".into(),
+                }
+                .into())
+            }
+        }
+    }
+
+    /// [`Self::intercept_login_post_auth`] for a sign-in path that has **no**
+    /// step-up branch to route a `require_mfa` into — the SAML ACS and OIDC
+    /// callback handlers (SEC-095).
+    ///
+    /// A federated sign-in completes in one round trip: there is no
+    /// `MfaRequired` / `MfaSetupRequired` result for the caller to act on, so
+    /// a reactor's step-up demand cannot be honoured. It is **refused**, not
+    /// dropped — the same rule `reactor_hooks::impossible` applies on the REST
+    /// side. Silently ignoring it would mean a reactor that asked for a second
+    /// factor got a session with one, which is worse than an outage for the
+    /// operator who configured it: they would never learn their control did
+    /// nothing.
+    pub async fn intercept_federated_login_post_auth(
+        &self,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        user: &User,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> AxiamResult<()> {
+        let requires_mfa = self
+            .intercept_login_post_auth(tenant_id, org_id, user, ip_address, user_agent)
+            .await?;
+        if requires_mfa {
+            tracing::error!(
+                target: "axiam::reactor",
+                tenant_id = %tenant_id,
+                user_id = %user.id,
+                "a reactor demanded step-up MFA on a federated login.post_auth, which \
+                 this sign-in path cannot honour — refusing the login rather than \
+                 issuing a session the reactor did not authorise"
+            );
+            return Err(AuthError::ReactorDenied {
+                reason: "reactor required step-up MFA on a sign-in path that cannot \
+                         perform it"
+                    .into(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Complete MFA verification after a login challenge.

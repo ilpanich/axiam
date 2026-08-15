@@ -156,21 +156,34 @@ pub struct TokenResponse {
 }
 
 /// RFC 7009 token revocation request.
+///
+/// `client_secret` is optional and the two RFC 7521 assertion parameters are
+/// present because RFC 7009 §2.1 says this endpoint authenticates the client
+/// "the same way as the token endpoint" — and since SEC-093 it genuinely does.
+/// A client registered for `private_key_jwt` posts `client_assertion` here and
+/// no secret; one registered for `tls_client_auth` posts neither and is
+/// authenticated by the certificate on the connection.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
+    pub client_assertion: Option<String>,
+    pub client_assertion_type: Option<String>,
 }
 
 /// RFC 7662 token introspection request.
+///
+/// Same credential shape, and for the same reason, as [`RevokeRequest`].
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
+    pub client_assertion: Option<String>,
+    pub client_assertion_type: Option<String>,
 }
 
 /// RFC 7662 token introspection response.
@@ -279,9 +292,30 @@ impl TokenRequestContext {
     /// adding a third assertion parameter cannot be half-wired at one of the
     /// endpoints that build a context.
     #[must_use]
-    pub fn with_assertion_from(mut self, req: &TokenRequest) -> Self {
-        self.client_assertion = req.client_assertion.clone().filter(|a| !a.is_empty());
-        self.client_assertion_type = req.client_assertion_type.clone().filter(|t| !t.is_empty());
+    pub fn with_assertion_from(self, req: &TokenRequest) -> Self {
+        self.with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        )
+    }
+
+    /// Same as [`Self::with_assertion_from`], for the endpoints whose request
+    /// body is not a [`TokenRequest`] — revoke, introspect and PAR (SEC-093).
+    ///
+    /// One implementation, so the "empty string is not a credential" filter
+    /// cannot be present at one endpoint and missing at another.
+    #[must_use]
+    pub fn with_assertion(
+        mut self,
+        client_assertion: Option<&str>,
+        client_assertion_type: Option<&str>,
+    ) -> Self {
+        self.client_assertion = client_assertion
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned);
+        self.client_assertion_type = client_assertion_type
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
         self
     }
 
@@ -1640,10 +1674,22 @@ where
         &self,
         tenant_id: Uuid,
         req: RevokeRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<(), OAuth2Error> {
-        // Authenticate the client making the revocation request
-        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
-            .await?;
+        // Authenticate the client making the revocation request, by whichever
+        // credential its REGISTRATION names (SEC-093) — not by whichever one
+        // the request happened to carry.
+        let ctx = ctx.clone().with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        );
+        self.authenticate_client(
+            tenant_id,
+            &req.client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
+        .await?;
 
         // Try revoking as a refresh token (hash-based lookup).
         // For access tokens (short-lived JWTs), revocation is a no-op —
@@ -1673,10 +1719,21 @@ where
         &self,
         tenant_id: Uuid,
         req: IntrospectRequest,
+        ctx: &TokenRequestContext,
     ) -> Result<IntrospectionResponse, OAuth2Error> {
-        // Authenticate the client making the introspection request
-        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
-            .await?;
+        // Authenticate the client making the introspection request, by
+        // whichever credential its REGISTRATION names (SEC-093).
+        let ctx = ctx.clone().with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        );
+        self.authenticate_client(
+            tenant_id,
+            &req.client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
+        .await?;
 
         // First try: decode as JWT access token
         if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {
@@ -1765,21 +1822,39 @@ where
 
     /// Verify client credentials and return the authenticated registration.
     ///
-    /// Shared by revoke, introspect, and — since B3 — the token-exchange
-    /// grant. The first two discard the returned row; the exchange needs it,
-    /// because the client's registered scopes bound what an exchange may
-    /// grant and its registered URIs bound which audiences it may address.
+    /// Shared by every client-authenticating endpoint that is not one of the
+    /// three grants dispatched inside [`Self::exchange`]: revoke, introspect,
+    /// PAR, the token-exchange grant and the uma-ticket grant. The first two
+    /// discard the returned row; the others need it, because the client's
+    /// registered scopes bound what an exchange may grant and its registered
+    /// URIs bound which audiences it may address.
     ///
-    /// Returning the row rather than `()` is what keeps ONE
-    /// secret-verification path in this crate. The alternative — a second
-    /// method for the one caller that needs the row — would mean two places
-    /// to keep the OBS-1 transparent-hash-upgrade behaviour correct, and the
-    /// one that drifted would be the one nobody was looking at.
+    /// # SEC-093 — the registration decides here too
+    ///
+    /// This used to call [`Self::verify_client_secret`] directly, so those
+    /// five endpoints authenticated by shared secret **whatever
+    /// `token_endpoint_auth_method` the client registered**. Because
+    /// `SurrealOAuth2ClientRepository::create` mints a secret for every client
+    /// unconditionally, a FAPI client registered for `tls_client_auth` — whose
+    /// registration validation explicitly *forbids* shared-secret
+    /// authentication — nonetheless held a live password-equivalent credential
+    /// that worked at PAR, revoke, introspect, token-exchange and uma-ticket.
+    /// The operator's model was "this client authenticates with a
+    /// certificate"; the reality was an OR over two credentials, one of which
+    /// they were told to discard at creation time.
+    ///
+    /// It now delegates to [`Self::authenticate_client_credential`], the same
+    /// method the authorization_code / client_credentials / refresh_token
+    /// grants use — deliberately *reused* rather than reimplemented, because a
+    /// second copy of this rule is how the two drifted apart in the first
+    /// place. `client_secret` is `Option` because a client registered for a
+    /// strong method has none to present.
     pub async fn authenticate_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
-        client_secret: &str,
+        client_secret: Option<&str>,
+        ctx: &TokenRequestContext,
     ) -> Result<OAuth2Client, OAuth2Error> {
         let client = self
             .client_repo
@@ -1808,7 +1883,7 @@ where
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 
-        self.verify_client_secret(tenant_id, &client, client_secret)
+        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
 
         Ok(client)

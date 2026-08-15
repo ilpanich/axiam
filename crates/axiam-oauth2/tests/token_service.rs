@@ -1421,7 +1421,9 @@ fn revoke_req(token: &str) -> RevokeRequest {
         token: token.into(),
         token_type_hint: None,
         client_id: "client-1".into(),
-        client_secret: SECRET.into(),
+        client_secret: Some(SECRET.into()),
+        client_assertion: None,
+        client_assertion_type: None,
     }
 }
 
@@ -1434,7 +1436,7 @@ async fn revoke_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_err()
     );
@@ -1449,7 +1451,7 @@ async fn revoke_unknown_token_is_ok() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1465,7 +1467,7 @@ async fn revoke_owned_token_succeeds() {
         refresh,
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1481,7 +1483,7 @@ async fn revoke_other_client_token_is_noop_ok() {
         refresh,
     );
     assert!(
-        svc.revoke_token(client_tenant(), revoke_req("t"))
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
             .await
             .is_ok()
     );
@@ -1496,7 +1498,9 @@ fn introspect_req(token: &str) -> IntrospectRequest {
         token: token.into(),
         token_type_hint: None,
         client_id: "client-1".into(),
-        client_secret: SECRET.into(),
+        client_secret: Some(SECRET.into()),
+        client_assertion: None,
+        client_assertion_type: None,
     }
 }
 
@@ -1509,7 +1513,7 @@ async fn introspect_client_auth_fails() {
         MockRefreshRepo::new(),
     );
     assert!(
-        svc.introspect_token(client_tenant(), introspect_req("t"))
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
             .await
             .is_err()
     );
@@ -1540,7 +1544,7 @@ async fn introspect_valid_access_token_same_tenant_active() {
         MockRefreshRepo::new(),
     );
     let resp = svc
-        .introspect_token(tenant_id, introspect_req(&token))
+        .introspect_token(tenant_id, introspect_req(&token), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1569,7 +1573,7 @@ async fn introspect_access_token_other_tenant_inactive() {
     );
     // Introspect under a *different* tenant.
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&token))
+        .introspect_token(client_tenant(), introspect_req(&token), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1591,7 +1595,7 @@ async fn introspect_refresh_token_active() {
     // Use a non-JWT token so JWT decode fails and refresh lookup runs.
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1614,7 +1618,7 @@ async fn introspect_refresh_token_other_client_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1630,7 +1634,7 @@ async fn introspect_unknown_token_inactive() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(!resp.active);
@@ -1793,7 +1797,7 @@ async fn introspect_refresh_token_empty_scope_yields_none() {
     );
     let raw = generate_refresh_token();
     let resp = svc
-        .introspect_token(client_tenant(), introspect_req(&raw))
+        .introspect_token(client_tenant(), introspect_req(&raw), &no_cert())
         .await
         .unwrap();
     assert!(resp.active);
@@ -1809,7 +1813,7 @@ async fn introspect_client_db_outage_is_server_error() {
         MockRefreshRepo::new(),
     );
     let err = svc
-        .introspect_token(client_tenant(), introspect_req("t"))
+        .introspect_token(client_tenant(), introspect_req("t"), &no_cert())
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), "server_error");
@@ -1824,8 +1828,11 @@ async fn revoke_wrong_secret_is_invalid_client() {
         MockRefreshRepo::new(),
     );
     let mut req = revoke_req("t");
-    req.client_secret = "wrong".into();
-    let err = svc.revoke_token(client_tenant(), req).await.unwrap_err();
+    req.client_secret = Some("wrong".into());
+    let err = svc
+        .revoke_token(client_tenant(), req, &no_cert())
+        .await
+        .unwrap_err();
     assert_eq!(err.error_code(), "invalid_client");
 }
 
@@ -2772,4 +2779,133 @@ async fn the_refresh_grant_is_hooked_as_well() {
         1,
         "the refresh path consulted the gate"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-093 — the registered `token_endpoint_auth_method` is enforced at
+// revoke and introspect, not just at the three grants
+// ---------------------------------------------------------------------------
+//
+// `TokenService::authenticate_client` used to call `verify_client_secret`
+// directly, so these two endpoints authenticated a client by shared secret
+// whatever its registration said. Every client is issued a secret
+// unconditionally at creation (`SurrealOAuth2ClientRepository::create`), so a
+// client registered for `tls_client_auth` or `private_key_jwt` held a live
+// password-equivalent credential here — the exact OR-over-two-credentials that
+// `authenticate_client_credential`'s own doc comment says must not exist.
+//
+// The three grants' equivalent assertions live in `mtls_client_auth.rs` /
+// `private_key_jwt` coverage; these are the two endpoints that were missed.
+
+/// Register `client-1` for a method that is NOT a shared secret, while leaving
+/// the (unavoidably present) secret hash in place — i.e. exactly the row shape
+/// the repository produces for a strong-auth client.
+fn strong_auth_client(
+    method: axiam_core::models::oauth2_client::ClientAuthMethod,
+) -> Box<OAuth2Client> {
+    let mut c = make_client(&["refresh_token"], &[]);
+    c.token_endpoint_auth_method = method;
+    // A `tls_client_auth` registration names an expected subject DN; without
+    // one the mTLS branch would refuse for a second, unrelated reason.
+    c.tls_client_auth_subject_dn = Some("CN=strong-client".into());
+    c
+}
+
+fn strong_methods() -> [axiam_core::models::oauth2_client::ClientAuthMethod; 3] {
+    use axiam_core::models::oauth2_client::ClientAuthMethod as M;
+    [
+        M::TlsClientAuth,
+        M::SelfSignedTlsClientAuth,
+        M::PrivateKeyJwt,
+    ]
+}
+
+#[tokio::test]
+async fn sec093_revoke_refuses_the_secret_of_a_strong_auth_client() {
+    for method in strong_methods() {
+        let svc = build(
+            ClientOutcome::Found(strong_auth_client(method)),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        // The CORRECT secret, over a connection carrying no certificate and a
+        // body carrying no assertion.
+        let err = svc
+            .revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .expect_err(&format!(
+                "{}: revoke must refuse a shared secret (SEC-093)",
+                method.as_str()
+            ));
+        assert_eq!(err.error_code(), "invalid_client", "{}", method.as_str());
+    }
+}
+
+#[tokio::test]
+async fn sec093_introspect_refuses_the_secret_of_a_strong_auth_client() {
+    for method in strong_methods() {
+        let svc = build(
+            ClientOutcome::Found(strong_auth_client(method)),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        let err = svc
+            .introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .expect_err(&format!(
+                "{}: introspect must refuse a shared secret (SEC-093)",
+                method.as_str()
+            ));
+        assert_eq!(err.error_code(), "invalid_client", "{}", method.as_str());
+    }
+}
+
+#[tokio::test]
+async fn sec093_client_secret_post_still_authenticates_at_revoke_and_introspect() {
+    // The other half of the fix: the ordinary path is untouched. If this ever
+    // fails, SEC-093's remedy has become an outage.
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    assert!(
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .is_ok(),
+        "client_secret_post must still authenticate at revoke"
+    );
+    assert!(
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .is_ok(),
+        "client_secret_post must still authenticate at introspect"
+    );
+}
+
+#[tokio::test]
+async fn sec093_private_key_jwt_client_is_refused_when_no_verifier_is_configured() {
+    // Not a duplicate of the test above: it pins WHICH branch refuses. A
+    // deployment with no assertion verifier must refuse the strong-auth client
+    // outright rather than fall back to the secret — the fallback is precisely
+    // the bug.
+    use axiam_core::models::oauth2_client::ClientAuthMethod as M;
+    let svc = build(
+        ClientOutcome::Found(strong_auth_client(M::PrivateKeyJwt)),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let mut req = revoke_req("t");
+    req.client_assertion = Some("eyJ.not.verified".into());
+    req.client_assertion_type =
+        Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into());
+    let err = svc
+        .revoke_token(client_tenant(), req, &no_cert())
+        .await
+        .expect_err("no verifier configured must refuse, not fall back to the secret");
+    assert_eq!(err.error_code(), "invalid_client");
 }

@@ -10666,18 +10666,32 @@
       },
       "IntrospectRequest": {
         "type": "object",
-        "description": "RFC 7662 token introspection request.",
+        "description": "RFC 7662 token introspection request.\n\nSame credential shape, and for the same reason, as [`RevokeRequest`].",
         "required": [
           "token",
-          "client_id",
-          "client_secret"
+          "client_id"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "token": {
             "type": "string"
@@ -12302,16 +12316,32 @@
         "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` is deliberately\nabsent: RFC 9126 §2.1 forbids pushing one, because a chained push would let\nthe second request inherit the first's authentication.",
         "required": [
           "client_id",
-          "client_secret",
           "response_type",
           "redirect_uri"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7521 §4.2 — `private_key_jwt` client authentication at PAR."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional since SEC-093: a client registered for `tls_client_auth` or\n`private_key_jwt` has no secret to present here, and presenting one no\nlonger authenticates it."
           },
           "code_challenge": {
             "type": [
@@ -12729,18 +12759,32 @@
       },
       "RevokeRequest": {
         "type": "object",
-        "description": "RFC 7009 token revocation request.",
+        "description": "RFC 7009 token revocation request.\n\n`client_secret` is optional and the two RFC 7521 assertion parameters are\npresent because RFC 7009 §2.1 says this endpoint authenticates the client\n\"the same way as the token endpoint\" — and since SEC-093 it genuinely does.\nA client registered for `private_key_jwt` posts `client_assertion` here and\nno secret; one registered for `tls_client_auth` posts neither and is\nauthenticated by the certificate on the connection.",
         "required": [
           "token",
-          "client_id",
-          "client_secret"
+          "client_id"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "token": {
             "type": "string"

@@ -1282,8 +1282,30 @@ verifier, at the `jwks_uri` the discovery document advertises.
    form body. The server documents no HTTP Basic (`client_secret_basic`) alternative, so SDKs
    MUST NOT send an `Authorization: Basic` header to `/oauth2/*`.
 4. **`introspect` and `revoke` require confidential-client credentials.** `IntrospectRequest`
-   and `RevokeRequest` both mark `token`, `client_id`, and `client_secret` as required
-   (non-nullable); `token_type_hint` is optional. A public client cannot call them.
+   and `RevokeRequest` both mark `token` and `client_id` as required (non-nullable);
+   `token_type_hint` is optional. A public client cannot call them.
+
+   **Amended 2026-08 (SEC-093).** `client_secret` was required (non-nullable) on both
+   requests, and both endpoints authenticated by shared secret **regardless of the
+   client's registered `token_endpoint_auth_method`** — so a client registered for
+   `tls_client_auth` or `private_key_jwt` (see §21.2's `token_endpoint_auth_method`
+   row) kept a working password-equivalent credential here, which is the opposite of
+   what registering the stronger method is for. The server now honours the
+   registration at `revoke`, `introspect`, `/oauth2/par`, and the `token-exchange`
+   and `uma-ticket` grants, exactly as it already did at the `authorization_code`,
+   `client_credentials` and `refresh_token` grants.
+
+   Consequences for an SDK:
+
+   - `client_secret` is now **optional** (nullable) on `IntrospectRequest`,
+     `RevokeRequest` and the PAR request body, and both requests additionally accept
+     the RFC 7521 pair `client_assertion` / `client_assertion_type`. This is a
+     widening, not a break: an SDK that keeps sending `client_secret` for a
+     `client_secret_post` client is unchanged and stays conformant.
+   - An SDK that supports the strong methods MUST NOT send `client_secret` for a
+     client registered for one of them — it is refused with `invalid_client`, not
+     ignored. Send `client_assertion` for `private_key_jwt`, or nothing at all for
+     the two mTLS methods, whose credential is the TLS connection.
 5. **`revoke` returns no body.** Per RFC 7009 the server answers `200` for unknown, expired,
    or already-revoked tokens. `revoke` therefore returns void/`Unit`/`nil` and MUST treat a
    `200` as success — including for a token it has never issued (idempotence is the point of
@@ -3209,7 +3231,7 @@ Issuing is the easy half.
 | Field | Type | Meaning |
 |---|---|---|
 | `profile` | `"standard"` \| `"fapi2"` | The security posture. Default `"standard"` — what every client registered before this contract version already is. |
-| `token_endpoint_auth_method` | `"client_secret_post"` \| `"tls_client_auth"` \| `"self_signed_tls_client_auth"` | Default `"client_secret_post"`. |
+| `token_endpoint_auth_method` | `"client_secret_post"` \| `"tls_client_auth"` \| `"self_signed_tls_client_auth"` \| `"private_key_jwt"` | Default `"client_secret_post"`. `private_key_jwt` arrived with §21.8 in contract 1.16 and was missing from this row. |
 | `tls_client_auth_subject_dn` | string | RFC 8705 §2.1.2. Exactly one of the three `tls_client_auth_*` parameters may be set. |
 | `tls_client_auth_san_dns` | string | RFC 8705 §2.1.2. |
 | `tls_client_auth_san_uri` | string | RFC 8705 §2.1.2. |
@@ -3654,6 +3676,22 @@ requires a network call to be understood is not a contract.
 | `user.pre_create` | yes | `username`, `email`, `metadata.` namespace | `fail_closed` |
 | `user.pre_update` | yes | `username`, `email`, `metadata.` namespace | `fail_closed` |
 | `grant.pre_assign` | no | — (veto only) | `fail_closed` |
+
+**`login.post_auth` covers every interactive sign-in, not only password login
+(clarified 2026-08, SEC-095).** The event fires on password authentication, on
+SAML ACS (`POST /api/v1/auth/federation/saml/acs`) and on the OIDC callback
+(`POST /api/v1/auth/federation/oidc/callback`) — in every case after the
+credentials verify and before any session or token is issued, which is what the
+row above has always said. MFA completion and the WebAuthn
+`authenticate/finish` ceremony are **not** separate firings: both continue a
+login that was already gated at its first step.
+
+One difference is worth stating because it is not discoverable from the table.
+The federated paths have no step-up branch — a SAML or OIDC sign-in completes in
+one round trip, with no `MfaRequired` result for the caller to act on — so a
+`require_mfa` answer on those paths is **refused** (the sign-in fails) rather
+than silently dropped. A reactor that needs step-up on federated logins must
+answer `deny` and drive enrolment out of band.
 
 **The namespace-prefix rule.** An allow-list entry ending in `.` is a namespace
 prefix, and it matches a field that starts with the entry **and has at least one

@@ -215,11 +215,11 @@ jobs:
       - name: Dump server logs on failure
         if: failure()
         run: |
-          echo "::group::axiam server (last 120 lines)"
+          echo "::group::axiam server (last 40 lines)"
           docker compose \
             -f docker/docker-compose.e2e.yml \
             -f examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml \
-            logs --no-color --tail 120 axiam-server || true
+            logs --no-color --tail 40 axiam-server || true
           echo "::endgroup::"
 
       - name: Tear down

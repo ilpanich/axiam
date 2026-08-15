@@ -1,30 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="_response-id-replay-victim-1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="_response-id-scd-expired-1" Version="2.0" InResponseTo="_axiam-req-1" Destination="https://sp.example.com/api/v1/federation/saml/acs" IssueInstant="2099-01-01T00:00:00Z">
   <saml:Issuer>https://idp.example.com</saml:Issuer>
   <samlp:Status>
     <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
   </samlp:Status>
-  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="replay-victim-1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="scd-expired-1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
     <saml:Issuer>https://idp.example.com</saml:Issuer>
     <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
       <ds:SignedInfo>
         <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
         <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
-        <ds:Reference URI="#replay-victim-1">
+        <ds:Reference URI="#scd-expired-1">
           <ds:Transforms>
             <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
             <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
           </ds:Transforms>
           <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
-          <ds:DigestValue>gYF9DQrtpbaSiQe0nEMYEktxnAz/iVzTr5PDkJsM0uM=</ds:DigestValue>
+          <ds:DigestValue>GKw/mclRnCMNpO3vwexFrXUmHFbgIFczgQXGS4LrQk0=</ds:DigestValue>
         </ds:Reference>
       </ds:SignedInfo>
-      <ds:SignatureValue>t624NUhYwO837uF62uL0qYVR0buBC8AouRK4t/eqFhMYxyMCHYDuWLlqj1X24u04
-AvgcQD28a1FDIzmbiB1zvEgvDwBbhlIM2jO4ZEdFRQAWucXb6QZFPid0gQGcowOu
-zERsjwiaFvE3BSQRjI3Nqo9ulEmxeAcmoU7nP8cWtrNPjJCbDiJdvBM3V1dZVSKy
-FM33JgLnJ8bFNAX9sFEfSSNY8OWQ8bzwUBQwQc/ctngpCqzqFqWfu0o179gHKGD0
-cmO0yH2PgM/9M0F5v0UjlBw9SvKEZ2wWbv5MhssieAa9KqhaGPxIUhcm/nAdlKuq
-QuHEYR02dPZiH3FINnIRkQ==</ds:SignatureValue>
+      <ds:SignatureValue>WUZDe5qJCv4WhPEqB1Wn4i9KvosIFqrhuCTq6B3KE7HH7R1AqsrPDM2O0Cve6h+I
+0EQDjz6pwZfZZhUeWwKhjdevXDcR0uKPYJpfjT3CQ4LZP1MygGM9LOsCypG4CFEw
+g7dDItPpqYH3ka5uSuWsE2L3KBr6NVUcET8JsSfLv2hYUwHWx8DQVuM+d5m4pZh3
+7W6isebv6hICuHXdMT1l+qXFGdA88PVEKbAziVNqnnGMMLGmyFF4fUcOJyY1ckgP
+JJNzgmLSTIdNgiqP6ugDxZZ+uTGF3lFA2Srp3K2svqSeUHYSjAJJhnizSFhV6o0S
+VvSS+BCY/A5OfML3Dw8fDw==</ds:SignatureValue>
       <ds:KeyInfo>
         <ds:X509Data>
           <ds:X509Certificate>MIIDVzCCAj+gAwIBAgIUZq//L62A01RpQ8nHiA9klI0F4hswDQYJKoZIhvcNAQEL
@@ -52,7 +52,7 @@ XOIMzfStVFWJI1cnS7oCU5gXGp4pvSFjA2uMdU89xrb+Kb5yGr29Oc2ZdUwUuWxl
     <saml:Subject>
       <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">user@example.com</saml:NameID>
       <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
-        <saml:SubjectConfirmationData NotOnOrAfter="2099-01-01T01:00:00Z" Recipient="https://sp.example.com/api/v1/federation/saml/acs"/>
+        <saml:SubjectConfirmationData NotOnOrAfter="2020-01-01T00:00:00Z" Recipient="https://sp.example.com/api/v1/federation/saml/acs" InResponseTo="_axiam-req-1"/>
       </saml:SubjectConfirmation>
     </saml:Subject>
     <saml:Conditions NotBefore="2026-01-01T00:00:00Z" NotOnOrAfter="2099-01-01T01:00:00Z">

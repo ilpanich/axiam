@@ -910,8 +910,15 @@ pub struct SamlAcsRequest {
     /// Relay state returned by the IdP.
     pub relay_state: Option<String>,
     /// The real Assertion Consumer Service URL this response was posted to.
-    /// Required so the handler can validate `Response.Destination` against
-    /// it (SECFIX-04/SEC-005) instead of skipping the check.
+    ///
+    /// Required so the handler can validate `Response.Destination` against it
+    /// (SECFIX-04/SEC-005) instead of skipping the check, and — since R1.5 —
+    /// also the signed
+    /// `SubjectConfirmationData/@Recipient` inside the assertion. This field is
+    /// the single source of truth for both checks: `Destination` sits on the
+    /// unsigned `<samlp:Response>` root and is attacker-rewritable, so the
+    /// signed `@Recipient` is what actually proves the assertion was minted for
+    /// *this* SP rather than relayed from another one.
     pub acs_url: String,
 }
 
@@ -1012,9 +1019,19 @@ pub async fn saml_acs<C: Connection + Clone>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
-            None,               // no stored request ID on the authenticated ACS path
-            Some(&req.acs_url), // SECFIX-04: validate Destination against the real ACS URL
-            true,               // SECFIX-04: require InResponseTo presence (reject unsolicited)
+            None, // no stored request ID on the authenticated ACS path
+            // SECFIX-04 + R1.5/SEC-005: the ONE source of truth for "which ACS
+            // endpoint is this?". Checked against the unsigned
+            // `Response@Destination` AND against the signed
+            // `SubjectConfirmationData@Recipient` inside the assertion, so a
+            // relayed assertion minted for another SP is rejected even though
+            // the attacker can rewrite `Destination` freely.
+            Some(&req.acs_url),
+            // SECFIX-04: require InResponseTo presence (reject unsolicited).
+            // R1.5 note: this flag is also what makes the signed
+            // `SubjectConfirmationData@InResponseTo` mandatory on this path —
+            // AXIAM does not support IdP-initiated SSO.
+            true,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -1609,8 +1626,16 @@ pub async fn saml_acs_public<C: Connection + Clone>(
             Some(&b.relay_state),
             // Pass stored request_id for InResponseTo check (SEC-005/REQ-14 AC-5).
             Some(login_state.request_id.as_str()),
-            // Destination check: pass empty string (ACS URL not available here;
-            // callers that know the ACS URL should pass it explicitly).
+            // Destination / SubjectConfirmationData@Recipient check: no ACS URL
+            // is available on this path — `saml_login_public` builds its
+            // AuthnRequest with an empty AssertionConsumerServiceURL and
+            // `FederationLoginState` has no column to store one. The bearer
+            // `<SubjectConfirmationData>` is still REQUIRED and its
+            // `@Recipient`/`@NotOnOrAfter`/`@InResponseTo` are still validated
+            // (the last against the stored `request_id` above); only the
+            // `@Recipient` *value* comparison is skipped. Closing that needs a
+            // schema addition — tracked as the SEC-005 residual, SAML-01 in
+            // claude_dev/security-audit.md §7.
             None,
             // require_in_response_to has no effect when expected_request_id is
             // Some (this path already enforces presence-and-equality above) —

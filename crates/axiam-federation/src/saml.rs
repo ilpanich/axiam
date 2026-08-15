@@ -35,6 +35,14 @@ const SAML_STATUS_SUCCESS: &str = "urn:oasis:names:tc:SAML:2.0:status:Success";
 /// Persistent NameID format URI.
 const NAMEID_FORMAT_PERSISTENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent";
 
+/// SAML 2.0 "bearer" subject-confirmation method URI.
+///
+/// The Web-Browser-SSO profile (§4.1.4.2) REQUIRES the assertion to carry at
+/// least one `<SubjectConfirmation>` with exactly this `Method`; everything the
+/// SP is entitled to trust about *who* the assertion was minted for hangs off
+/// that confirmation's `<SubjectConfirmationData>`.
+const SUBJECT_CONFIRMATION_METHOD_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -339,8 +347,12 @@ where
     /// `expected_request_id` — if `Some`, checked against `Response.InResponseTo`
     /// (SEC-005/REQ-14 AC-5).  Pass the ID stored in `FederationLoginState.request_id`.
     ///
-    /// `expected_destination` — if `Some` and non-empty, checked against
-    /// `Response.Destination` (SEC-005/REQ-14 AC-5).
+    /// `expected_destination` — the SP's real ACS URL. If `Some` and non-empty
+    /// it is checked against **both** `Response.Destination` (SEC-005/REQ-14
+    /// AC-5) and the signed
+    /// `Subject/SubjectConfirmation[@Method=…cm:bearer]/SubjectConfirmationData/@Recipient`
+    /// (R1.5). One argument, one source of truth — the two checks can never
+    /// drift onto separate config paths.
     ///
     /// `require_in_response_to` — if `true` and `expected_request_id` is `None`,
     /// reject a response with no `InResponseTo` at all (unsolicited-response
@@ -348,6 +360,11 @@ where
     /// stored request ID to compare against but still must not accept an
     /// out-of-band response). Has no effect when `expected_request_id` is
     /// `Some` — that already enforces presence-and-equality (SECFIX-04/SEC-005).
+    ///
+    /// Independently of these arguments, the assertion MUST carry a bearer
+    /// `<SubjectConfirmation>` with usable `<SubjectConfirmationData>`; see
+    /// `validate_bearer_subject_confirmation` for the fail-closed rules and for
+    /// AXIAM's IdP-initiated-SSO posture (R1.5/SEC-005).
     pub async fn handle_saml_response(
         &self,
         tenant_id: Uuid,
@@ -485,8 +502,13 @@ where
             )
         })?;
 
+        // One wall-clock reading, shared by the `<Conditions>` window below and
+        // the `<SubjectConfirmationData>` window in Step 2b, so both apply the
+        // identical strict "no leeway" policy (R1.5/SEC-005) and can never
+        // disagree about *when* "now" was.
+        let now = Utc::now();
+
         {
-            let now = Utc::now();
             if let Some(not_before) = conditions.not_before
                 && now < not_before
             {
@@ -516,6 +538,27 @@ where
                 }
             }
         }
+
+        // Step 2b — Bearer <SubjectConfirmationData> validation
+        // (R1.5, closing the SEC-005 residual; Web-Browser-SSO profile §4.1.4.3).
+        //
+        // Runs AFTER signature verification and the XSW binding check (so the
+        // confirmation we read is provably the signed one) and BEFORE the replay
+        // insert, so a profile-invalid assertion never burns a replay row.
+        //
+        // `expected_destination` is deliberately reused as the expected
+        // `@Recipient`: it IS the SP's real ACS URL, supplied by
+        // `SamlAcsRequest.acs_url` at the one authenticated ACS call site. Using
+        // the same argument for both checks keeps "which endpoint are we?" on a
+        // single source of truth.
+        validate_bearer_subject_confirmation(
+            assertion,
+            now,
+            response.in_response_to.as_deref(),
+            expected_request_id,
+            expected_destination,
+            require_in_response_to,
+        )?;
 
         // Step 3 — Assertion replay protection (D-09).
         // Record the assertion ID in saml_assertion_replay. Returns
@@ -859,6 +902,203 @@ fn bind_signature_to_assertion(
              (XML Signature Wrapping rejected)"
                 .into(),
         ));
+    }
+
+    Ok(())
+}
+
+/// Validate the assertion's bearer `<SubjectConfirmation>` /
+/// `<SubjectConfirmationData>` (R1.5, closing the SEC-005 residual).
+///
+/// SAML 2.0 Web-Browser-SSO profile §4.1.4.2-3 requires the SP to reject an
+/// assertion unless it carries **at least one** bearer `<SubjectConfirmation>`
+/// whose `<SubjectConfirmationData>`
+///   * has a `@Recipient` matching the ACS URL the response was delivered to,
+///   * has a `@NotOnOrAfter` that has not passed, and
+///   * has an `@InResponseTo` matching the SP's outstanding `AuthnRequest`.
+///
+/// **Why this is not redundant with the checks already done in
+/// `handle_saml_response`.** `Response@Destination` and `Response@InResponseTo`
+/// live on the `<samlp:Response>` root, which is *outside* the enveloped
+/// signature — the IdP signs the `<Assertion>` (see `bind_signature_to_assertion`).
+/// An attacker relaying an assertion that the same IdP legitimately minted for a
+/// **different** SP can rewrite both attributes for free and pass those checks.
+/// `<SubjectConfirmationData>` sits *inside* the signed assertion, so it is the
+/// only tamper-proof statement of who the assertion was for and which request it
+/// answers. Without this function the cross-SP relay of §4.1.4.3 succeeds.
+///
+/// **Fail closed.** A missing `<Subject>`, no bearer `<SubjectConfirmation>`, a
+/// bearer confirmation with no `<SubjectConfirmationData>`, or confirmation data
+/// missing `@Recipient`/`@NotOnOrAfter` are all rejections — never a pass.
+/// Bearer confirmation is REQUIRED by the profile, so "the IdP did not send one"
+/// describes an unusable assertion, not a permissive default.
+///
+/// **IdP-initiated (unsolicited) SSO posture.** §4.1.4.2 says `@InResponseTo`
+/// MUST be absent for an unsolicited response. AXIAM's posture is that it
+/// **does not accept unsolicited/IdP-initiated SSO at all**, on either ACS path,
+/// so that branch is unreachable by construction and this function mirrors the
+/// posture rather than duplicating it:
+///   * the public first-time-SSO path passes the `FederationLoginState.request_id`
+///     it stored when it built the `AuthnRequest` (`expected_request_id`), and
+///   * the authenticated ACS path, which has no state row, passes
+///     `require_in_response_to = true`, which already rejects a `<Response>`
+///     without `InResponseTo` before we are reached.
+///
+/// So `@InResponseTo` is REQUIRED here and must equal the outstanding request id
+/// — the caller's stored id when it has one, otherwise the `Response@InResponseTo`
+/// the caller insisted on (which cross-binds the unsigned root attribute to the
+/// signed assertion). No constraint is imposed only when the caller opted out of
+/// both, a configuration no production ACS call site uses. Should AXIAM ever
+/// support IdP-initiated SSO, the change belongs here *and* at the caller flags
+/// together: accept the absence of `@InResponseTo` and reject its presence.
+fn validate_bearer_subject_confirmation(
+    assertion: &samael::schema::Assertion,
+    now: chrono::DateTime<Utc>,
+    response_in_response_to: Option<&str>,
+    expected_request_id: Option<&str>,
+    expected_recipient: Option<&str>,
+    require_in_response_to: bool,
+) -> Result<(), FederationError> {
+    let subject = assertion.subject.as_ref().ok_or_else(|| {
+        FederationError::SamlResponseFailed(
+            "Assertion missing required Subject (no bearer SubjectConfirmation possible)".into(),
+        )
+    })?;
+
+    let bearer: Vec<&samael::schema::SubjectConfirmation> = subject
+        .subject_confirmations
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|c| c.method.as_deref() == Some(SUBJECT_CONFIRMATION_METHOD_BEARER))
+        .collect();
+
+    if bearer.is_empty() {
+        return Err(FederationError::SamlResponseFailed(format!(
+            "Assertion carries no bearer SubjectConfirmation \
+             (Method=\"{SUBJECT_CONFIRMATION_METHOD_BEARER}\" is REQUIRED by the \
+             SAML 2.0 Web-Browser-SSO profile)"
+        )));
+    }
+
+    // Which AuthnRequest must this confirmation answer? Prefer the caller's
+    // stored request id; otherwise fall back to the `Response@InResponseTo` the
+    // caller already required to be present. See the posture note above.
+    let required_in_response_to: Option<&str> = match expected_request_id {
+        Some(id) if !id.is_empty() => Some(id),
+        _ if require_in_response_to => response_in_response_to,
+        _ => None,
+    };
+
+    let expected_recipient = expected_recipient.filter(|r| !r.is_empty());
+
+    // The profile requires only that ONE bearer confirmation satisfy every
+    // constraint. Try each, keeping the last failure so the rejection names a
+    // concrete violation rather than a generic "nothing matched".
+    let mut last_error: Option<FederationError> = None;
+    for confirmation in bearer {
+        match check_bearer_confirmation_data(
+            confirmation,
+            now,
+            required_in_response_to,
+            expected_recipient,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        FederationError::SamlResponseFailed(
+            "no bearer SubjectConfirmationData satisfied the Web-Browser-SSO profile".into(),
+        )
+    }))
+}
+
+/// Check one bearer `<SubjectConfirmation>`'s `<SubjectConfirmationData>`.
+///
+/// Every branch is a rejection; `validate_bearer_subject_confirmation` accepts
+/// the assertion on the first `Ok`.
+fn check_bearer_confirmation_data(
+    confirmation: &samael::schema::SubjectConfirmation,
+    now: chrono::DateTime<Utc>,
+    required_in_response_to: Option<&str>,
+    expected_recipient: Option<&str>,
+) -> Result<(), FederationError> {
+    let data = confirmation
+        .subject_confirmation_data
+        .as_ref()
+        .ok_or_else(|| {
+            FederationError::SamlResponseFailed(
+                "bearer SubjectConfirmation missing required SubjectConfirmationData".into(),
+            )
+        })?;
+
+    // --- @Recipient — this assertion must have been minted for THIS SP. ------
+    // Presence is REQUIRED unconditionally (§4.1.4.2). The value is compared
+    // whenever the caller knows its own ACS URL; the only caller that does not
+    // is the public first-time-SSO path, whose AuthnRequest carries no
+    // AssertionConsumerServiceURL and whose login-state row has no column for
+    // one — closing that needs a schema addition, tracked as the SEC-005
+    // residual in claude_dev/security-audit.md §7 (SAML-01).
+    let recipient = data
+        .recipient
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| {
+            FederationError::SamlResponseFailed(
+                "SubjectConfirmationData missing required Recipient".into(),
+            )
+        })?;
+    if let Some(expected) = expected_recipient
+        && recipient != expected
+    {
+        return Err(FederationError::SamlResponseFailed(format!(
+            "SubjectConfirmationData Recipient mismatch: expected {expected}, got {recipient} \
+             (assertion was issued for a different service provider)"
+        )));
+    }
+
+    // --- @NotOnOrAfter — strict, no leeway; identical to <Conditions>. -------
+    let not_on_or_after = data.not_on_or_after.ok_or_else(|| {
+        FederationError::SamlResponseFailed(
+            "SubjectConfirmationData missing required NotOnOrAfter".into(),
+        )
+    })?;
+    if now >= not_on_or_after {
+        return Err(FederationError::SamlResponseFailed(format!(
+            "SubjectConfirmationData expired (NotOnOrAfter: {not_on_or_after})"
+        )));
+    }
+    // §4.1.4.2 says @NotBefore MUST NOT be present. We do not reject its mere
+    // presence (real IdPs emit it and rejecting would break interop for no
+    // security gain), but we do honour it: a confirmation that is not yet valid
+    // is not a confirmation.
+    if let Some(not_before) = data.not_before
+        && now < not_before
+    {
+        return Err(FederationError::SamlResponseFailed(format!(
+            "SubjectConfirmationData not yet valid (NotBefore: {not_before})"
+        )));
+    }
+
+    // --- @InResponseTo — must answer OUR outstanding AuthnRequest. -----------
+    if let Some(expected) = required_in_response_to {
+        match data.in_response_to.as_deref() {
+            None => {
+                return Err(FederationError::SamlResponseFailed(format!(
+                    "SubjectConfirmationData missing InResponseTo (expected {expected}; \
+                     AXIAM does not accept unsolicited/IdP-initiated responses)"
+                )));
+            }
+            Some(actual) if actual != expected => {
+                return Err(FederationError::SamlResponseFailed(format!(
+                    "SubjectConfirmationData InResponseTo mismatch: expected {expected}, \
+                     got {actual}"
+                )));
+            }
+            _ => {}
+        }
     }
 
     Ok(())
@@ -1857,6 +2097,246 @@ mod tests {
         assert!(
             matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Audience")),
             "expected SamlResponseFailed(Audience), got: {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R1.5 / SEC-005 residual — bearer <SubjectConfirmationData> validation
+    // (Web-Browser-SSO profile §4.1.4.3)
+    //
+    // Every test below drives `handle_saml_response` with the EXACT parameter
+    // shape the authenticated ACS handler uses
+    // (`crates/axiam-api-rest/src/handlers/federation.rs`, `saml_acs`):
+    //
+    //     expected_request_id     = None          (no stored login-state row)
+    //     expected_destination    = Some(acs_url) (the SP's real ACS URL)
+    //     require_in_response_to  = true          (unsolicited SSO refused)
+    //
+    // The `scd_*` fixtures are built so that EVERY pre-existing control
+    // (signature, XSW binding, Response/@Destination, Response/@InResponseTo,
+    // <Conditions> validity, <AudienceRestriction>) passes. `Destination` and
+    // `Response/@InResponseTo` sit on the UNSIGNED <samlp:Response> root, so a
+    // relaying attacker rewrites them for free; only the signed
+    // <SubjectConfirmationData> can catch the three negatives below. Before
+    // this fix all three assertions were accepted.
+    // -----------------------------------------------------------------------
+
+    /// The SP's real ACS URL — the single source of truth shared by the
+    /// `Destination` check and the new `Recipient` check (both read the
+    /// `expected_destination` argument, which `saml_acs` fills from
+    /// `SamlAcsRequest.acs_url`).
+    const TEST_ACS_URL: &str = "https://sp.example.com/api/v1/federation/saml/acs";
+
+    fn scd_fixture_b64(name: &str) -> String {
+        STANDARD.encode(load_fixture(name))
+    }
+
+    /// Positive vector: a fully profile-conformant bearer confirmation —
+    /// `@Recipient` = our ACS URL, `@NotOnOrAfter` in the future,
+    /// `@InResponseTo` = the outstanding request — is accepted.
+    #[tokio::test]
+    async fn handle_saml_response_accepts_valid_subject_confirmation() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let result = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &scd_fixture_b64("scd_valid_response.xml"),
+                None,
+                None,
+                Some(TEST_ACS_URL),
+                true,
+            )
+            .await
+            .expect("a conformant bearer SubjectConfirmationData must be accepted");
+
+        assert!(result.newly_provisioned);
+        assert_eq!(result.user.email, "user@example.com");
+    }
+
+    /// Positive vector, SP-initiated shape: when the caller DOES have a stored
+    /// request id (the public ACS path), the same fixture still validates —
+    /// `SubjectConfirmationData/@InResponseTo` equals it.
+    #[tokio::test]
+    async fn handle_saml_response_accepts_valid_scd_with_stored_request_id() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        svc.handle_saml_response(
+            tenant,
+            cfg_id,
+            &scd_fixture_b64("scd_valid_response.xml"),
+            None,
+            Some("_axiam-req-1"),
+            Some(TEST_ACS_URL),
+            false,
+        )
+        .await
+        .expect("matching stored request id must validate against the SCD InResponseTo");
+    }
+
+    /// NEGATIVE 1 — the assertion was minted by the same IdP for a DIFFERENT
+    /// SP: the signed `@Recipient` names `https://other-sp.example.com/...`
+    /// while the (unsigned, attacker-rewritable) `Destination` still says us.
+    /// Web-Browser-SSO profile §4.1.4.3 requires the SP to reject this.
+    #[tokio::test]
+    async fn handle_saml_response_rejects_subject_confirmation_recipient_mismatch() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &scd_fixture_b64("scd_wrong_recipient_response.xml"),
+                None,
+                None,
+                Some(TEST_ACS_URL),
+                true,
+            )
+            .await
+            .expect_err(
+                "an assertion whose SubjectConfirmationData/@Recipient names another SP \
+                 must be rejected (SEC-005, profile §4.1.4.3)",
+            );
+
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Recipient")),
+            "expected SamlResponseFailed naming Recipient, got: {err:?}"
+        );
+    }
+
+    /// NEGATIVE 2 — the bearer confirmation window has closed
+    /// (`SubjectConfirmationData/@NotOnOrAfter` = 2020) even though
+    /// `<Conditions>` is still valid until 2099. The Conditions check cannot
+    /// see this; the SCD clock check must.
+    #[tokio::test]
+    async fn handle_saml_response_rejects_expired_subject_confirmation_data() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &scd_fixture_b64("scd_expired_response.xml"),
+                None,
+                None,
+                Some(TEST_ACS_URL),
+                true,
+            )
+            .await
+            .expect_err("an expired bearer SubjectConfirmationData must be rejected");
+
+        assert!(
+            matches!(
+                err,
+                FederationError::SamlResponseFailed(ref m)
+                    if m.contains("SubjectConfirmationData") && m.contains("NotOnOrAfter")
+            ),
+            "expected SamlResponseFailed naming the SCD expiry, got: {err:?}"
+        );
+    }
+
+    /// NEGATIVE 3 — the signed `@InResponseTo` answers a FOREIGN AuthnRequest
+    /// (`_attacker-req-9`) while the unsigned `Response/@InResponseTo` has been
+    /// rewritten to our own `_axiam-req-1`. Only the signed value proves the
+    /// IdP actually issued this assertion for our request.
+    #[tokio::test]
+    async fn handle_saml_response_rejects_foreign_subject_confirmation_in_response_to() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &scd_fixture_b64("scd_foreign_in_response_to_response.xml"),
+                None,
+                None,
+                Some(TEST_ACS_URL),
+                true,
+            )
+            .await
+            .expect_err(
+                "a SubjectConfirmationData answering a foreign AuthnRequest must be rejected",
+            );
+
+        assert!(
+            matches!(
+                err,
+                FederationError::SamlResponseFailed(ref m)
+                    if m.contains("SubjectConfirmationData") && m.contains("InResponseTo")
+            ),
+            "expected SamlResponseFailed naming the SCD InResponseTo, got: {err:?}"
+        );
+    }
+
+    /// FAIL-CLOSED — bearer confirmation is REQUIRED. An authentic, correctly
+    /// signed assertion carrying no `<SubjectConfirmation>` at all is a
+    /// rejection, never a pass.
+    #[tokio::test]
+    async fn handle_saml_response_rejects_missing_bearer_subject_confirmation() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &scd_fixture_b64("scd_missing_confirmation_response.xml"),
+                None,
+                None,
+                Some(TEST_ACS_URL),
+                true,
+            )
+            .await
+            .expect_err("a missing bearer SubjectConfirmation must fail closed");
+
+        assert!(
+            matches!(
+                err,
+                FederationError::SamlResponseFailed(ref m) if m.contains("SubjectConfirmation")
+            ),
+            "expected SamlResponseFailed naming SubjectConfirmation, got: {err:?}"
         );
     }
 

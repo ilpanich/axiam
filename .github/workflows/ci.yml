@@ -452,6 +452,28 @@ jobs:
         if: failure()
         run: docker compose -f docker/docker-compose.e2e.yml logs axiam-server
 
+      # R5.4 (X4 cross-vendor proof): `keycloak_cross_vendor_token_exchange_test.rs`
+      # exchanges a token minted by the REAL Keycloak service the compose
+      # stack just brought up (`--wait` above already gates on its
+      # healthcheck) — see that file's module docs for exactly why it talks
+      # to Keycloak over `localhost` from this runner rather than through the
+      # containerized `axiam-server`. `--ignored` is required: the test is
+      # marked `#[ignore]` so `cargo test` elsewhere in CI (the `test` job,
+      # which has no Keycloak) never tries to run it.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: ". -> target"
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+      - name: X4 cross-vendor token exchange against real Keycloak
+        run: |
+          cargo test -p axiam-api-rest --test keycloak_cross_vendor_token_exchange_test \
+            -- --ignored --test-threads=1
+        env:
+          KEYCLOAK_URL: "http://localhost:8180"
+
       - name: Bootstrap E2E fixture (org + tenant + admin)
         run: bash scripts/e2e-bootstrap.sh
         env:

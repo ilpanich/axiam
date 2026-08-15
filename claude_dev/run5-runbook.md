@@ -1033,9 +1033,9 @@ Fields: `client_lookup_us`, `secret_verify_us`, `tenant_lookup_us`,
 
 ```bash
 for VUS in 1 2 5 10 20 50 100; do
+  export BENCH_RESULTS_DIR="$PWD/results/section-12_4-vusweep_vus-$(printf '%03d' "$VUS")"
   for PROF in p0-plaintext p2-tls13; do
-    just target=axiam profile="$PROF" bench-up
-    just target=axiam bench-seed
+    just target=axiam profile="$PROF" bench-up bench-seed
     BENCH_VUS=$VUS just target=axiam profile="$PROF" \
       scenario=oauth2_client_credentials.js bench-run
     just target=axiam bench-down
@@ -1072,8 +1072,9 @@ for DEC in false true; do
   for SESS in 0 5; do
     export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$DEC
     export AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=$SESS
+    export BENCH_RESULTS_DIR=$PWD/results/section-12_5-$DEC_$(printf '%03d' "$SESS")
 
-    just target=axiam profile=p0-plaintext bench-up
+    just target=axiam profile=p0-plaintext bench-up bench-seed
 
     # Verify the knobs actually took effect BEFORE spending a cell on it.
     # (docker inspect, not `docker exec ... env` — the released image is
@@ -1084,7 +1085,6 @@ for DEC in false true; do
     # With SESS=5 you MUST see a startup WARN naming the TTL.
     # No WARN => the cache is off => the cell is worthless. Stop and fix.
 
-    just target=axiam bench-seed
     just target=axiam profile=p0-plaintext scenario=authz_check_rest.js bench-run
     just target=axiam profile=p0-plaintext scenario=authz_check_grpc.js bench-run
     just target=axiam bench-down

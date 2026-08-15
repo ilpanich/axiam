@@ -1,14 +1,21 @@
-// Scenario: SCIM 2.0 provisioning (B4 / R3.1) — PENDING the `axiam-scim`
-// crate landing. Written now, against the documented contract, so R3.1 only
-// has to make it pass rather than also write it from scratch.
+// Scenario: SCIM 2.0 provisioning (B4 / R3.1). Floods the `/scim/v2` limiter
+// bucket so `runner/rl_prod_check.py` can compare admitted-per-minute against
+// the configured `scim_per_min`.
 //
 // ============================================================================
-// STATUS: PENDING — crates/axiam-scim does not exist yet (R3.1, wave R3 of
-// claude_dev/remediation-plan-2026-08-15.md). This file is EXCLUDED from
-// `scenario=all` auto-discovery by `runner/run-benchmark.sh`'s
-// `PENDING_SCENARIOS` list — it will not run, and will not break the matrix
-// — until R3.1 lands AND `BENCH_ENABLE_PENDING_SCENARIOS=1` (or an explicit
-// `scenario=scim_provisioning.js`) opts it back in. See that file's header
+// STATUS: STILL SKIPPED, BUT NOT FOR THE ORIGINAL REASON.
+//
+// `crates/axiam-scim` HAS landed (R3.1) and `/scim/v2` answers; the R5.2 tail
+// gave it a real rate-limit bucket (`AXIAM__RATE_LIMIT__SCIM_PER_MIN`,
+// shipped 600/min per IP) and folded the family into rl_prod_check.py's
+// ENDPOINTS. What is still missing is on the HARNESS side: `runner/seed.sh`
+// registers the bench client with scopes ["openid","uma_protection"] and
+// seeds no `scim:provision` grant, so `mintScimToken()` below still fails.
+// This file therefore stays in `runner/run-benchmark.sh`'s
+// `PENDING_SCENARIOS` list — it will not run, and will not break the matrix,
+// until seed.sh provisions a `scim:provision` principal (see
+// docs/api/scim-provisioning.md's setup steps) or
+// `BENCH_ENABLE_PENDING_SCENARIOS=1` opts it back in. See that file's header
 // comment for the exact mechanism.
 // ============================================================================
 //
@@ -16,10 +23,10 @@
 // (mirrored into R3.1): a new crate mounted under `/scim/v2`, tenant-scoped
 // bearer with a dedicated `scim:provision` permission; `Users` + `Groups`
 // CRUD + PATCH per RFC 7644 §3.5.2. Field names, exact paths, and the mount
-// point are taken from RFC 7643/7644 directly (no AXIAM source exists yet to
-// verify against) — re-check every literal below against the real DTOs the
-// first time this scenario is run for real, and delete this whole paragraph
-// once it has been.
+// point below were taken from RFC 7643/7644 directly, BEFORE the crate
+// existed — they have not yet been re-checked against the real DTOs, because
+// this scenario has still never executed against a live server. Do that on
+// its first real run, and delete this paragraph once it has happened.
 //
 // # Flood shape
 //
@@ -54,11 +61,12 @@ const SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User';
 const SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
 
 // Bearer with the `scim:provision` permission (R3.1). The bench client is
-// NOT registered for this scope today — that registration is R3.1's own
-// follow-on (per the plan, "F4 tenant-isolation review" and the SCIM token
-// management page land after this), not something this benchmarks-only
-// change can grant ahead of the crate it authorizes against. Until then this
-// mint fails loudly, same shape as token_exchange.js's documented blocker.
+// still NOT registered for this scope: `runner/seed.sh` creates it with
+// scopes ["openid","uma_protection"] and seeds no `scim:provision` grant.
+// That is a seed.sh change (a tenant user + a role holding the permission,
+// per docs/api/scim-provisioning.md's setup steps) and is the ONLY thing
+// still blocking this scenario. Until then this mint fails loudly, same
+// shape as token_exchange.js's documented blocker.
 function mintScimToken() {
   const res = http.post(
     `${baseUrl()}/oauth2/token?tenant_id=${cfg.tenantId}`,

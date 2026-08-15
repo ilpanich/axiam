@@ -23,7 +23,18 @@ use crate::openapi::api_doc;
 ///
 /// Each call creates an independent in-memory store — never share configs
 /// between endpoints with different limits (that would merge their counters).
-fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+///
+/// **Public for cross-crate route modules only** (R5.2): `axiam-scim` mounts
+/// `/scim/v2` from its own crate but must be limited by the SAME two layers
+/// as every family wired here — this per-replica governor plus
+/// [`crate::middleware::rate_limit_shared::RateLimitShared`] as the outer
+/// wrap. Exporting the constructor is what lets it reuse the wiring instead
+/// of inventing a parallel one. It stays IP-keyed; use
+/// `build_client_aware_governor` only for the three OAuth2 endpoints that
+/// carry a form-encoded `client_id`.
+pub fn build_governor(
+    requests_per_min: u32,
+) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
     // SEC-048: trusted_hops=0 default; override via AXIAM__RATE_LIMIT__TRUSTED_HOPS
     // when running behind a single ingress/nginx layer (set to 1).
     let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")

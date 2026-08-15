@@ -135,6 +135,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
+| `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | 600 | 600 | 600 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |
 | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10 | 10 | 10 |
@@ -157,6 +158,18 @@ a CPU guard on an online-guessing surface rather than a throughput number —
 raising the authz ceiling for service-mesh capacity must not silently widen
 password spraying (SEC-079). Set the env var explicitly if you need more;
 explicit configuration still wins.
+
+`SCIM_PER_MIN` is flat across the posture columns for the same reason, and
+carries the same number on purpose. One bucket covers the whole `/scim/v2`
+surface (Users + Groups, reads and writes, plus the discovery endpoints), and
+600/min per IP is the REST twin of `GRPC_ADMIN_PER_SEC`: a fully-privileged
+`scim:provision` M2M client whose real cost is Argon2id (creating a SCIM user
+hashes an initial password; a `password` PATCH re-hashes one). A posture
+preset that widens machine capacity must not widen the provisioning surface,
+so no preset touches it — pin `AXIAM__RATE_LIMIT__SCIM_PER_MIN` if a very
+large directory's reconciliation sweep needs more. For scale: at a typical
+IdP page size of 200, a 100 000-user full import is ~500 `GET /scim/v2/Users`
+calls, which fits inside one minute's budget.
 
 ### 3.1 gRPC buckets are per method family
 

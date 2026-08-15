@@ -408,6 +408,11 @@ jobs:
           cargo test -p axiam-api-rest --test rate_limit_client_identity_test
           cargo test -p axiam-api-rest --test rate_limit_keying_test
           cargo test -p axiam-api-rest --test users_rate_limit_split_test
+      # R5.2 tail: SCIM shipped (R3.1) with no limiter at all. This proves the
+      # `scim_per_min` bucket is ENFORCED on the real `/scim/v2` wiring, not
+      # merely configured — the whole point of adding it.
+      - name: axiam-scim rate-limit enforcement tests
+        run: cargo test -p axiam-scim --test scim_rate_limit_test
       - name: axiam-api-grpc rate-limit unit + integration tests
         run: |
           cargo test -p axiam-api-grpc --lib middleware::rate_limit

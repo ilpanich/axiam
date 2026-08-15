@@ -1883,7 +1883,12 @@ async fn main() -> std::io::Result<()> {
             .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
-            .configure(axiam_scim::scim_routes::<axiam_db::DbClient>)
+            // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
+            // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
+            // posture log line) actually govern the provisioning surface.
+            .configure(|cfg| {
+                axiam_scim::scim_routes_with_rate_limits::<axiam_db::DbClient>(cfg, &rl)
+            })
             .configure(openapi_routes)
     })
     // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS

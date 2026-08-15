@@ -27,4 +27,4 @@ pub mod schema;
 pub mod scim_metadata;
 pub mod users;
 
-pub use routes::scim_routes;
+pub use routes::{scim_routes, scim_routes_with_rate_limits};

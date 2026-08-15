@@ -301,6 +301,20 @@ fn bearer(token: &str) -> (&'static str, String) {
     ("Authorization", format!("Bearer {token}"))
 }
 
+/// Every request in this file carries a peer address (R5.2).
+///
+/// `/scim/v2` is now wrapped in the same IP-keyed rate limiters every other
+/// AXIAM family uses, and `XForwardedForKeyExtractor` rejects a request it
+/// cannot key — a real connection always has a peer address, so a
+/// `TestRequest` without one is the unrealistic case, not the limiter. The
+/// shipped 600/min ceiling is far above anything this file drives, and each
+/// test builds its own app (hence its own governor store and its own shared
+/// counter), so the limiter never influences a contract assertion.
+/// Enforcement itself is proven in `tests/scim_rate_limit_test.rs`.
+fn bench_peer() -> std::net::SocketAddr {
+    "203.0.113.7:5000".parse().expect("valid test peer address")
+}
+
 // ---------------------------------------------------------------------------
 // Okta contract fixtures
 // ---------------------------------------------------------------------------
@@ -317,6 +331,7 @@ async fn okta_create_user_fixture_provisions_a_user() {
 
     let body = fixture("okta/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&body)
@@ -343,6 +358,7 @@ async fn okta_create_user_fixture_provisions_a_user() {
     // Round-trips via GET.
     let id = created["id"].as_str().unwrap();
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{id}"))
         .insert_header(bearer(&token))
         .to_request();
@@ -362,6 +378,7 @@ async fn okta_patch_deactivate_user_fixture() {
 
     let create_body = fixture("okta/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&create_body)
@@ -372,6 +389,7 @@ async fn okta_patch_deactivate_user_fixture() {
 
     let patch_body = fixture("okta/patch_deactivate_user.json");
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{id}"))
         .insert_header(bearer(&token))
         .set_json(&patch_body)
@@ -410,6 +428,7 @@ async fn okta_group_add_then_remove_member_fixture() {
     // A member to add/remove.
     let member_body = fixture("okta/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&member_body)
@@ -419,6 +438,7 @@ async fn okta_group_add_then_remove_member_fixture() {
 
     let group_body = fixture("okta/create_group.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Groups")
         .insert_header(bearer(&token))
         .set_json(&group_body)
@@ -429,6 +449,7 @@ async fn okta_group_add_then_remove_member_fixture() {
 
     let add_body = substitute_member_id(fixture("okta/patch_group_add_member.json"), member_id);
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Groups/{group_id}"))
         .insert_header(bearer(&token))
         .set_json(&add_body)
@@ -443,6 +464,7 @@ async fn okta_group_add_then_remove_member_fixture() {
     let remove_body =
         substitute_member_id(fixture("okta/patch_group_remove_member.json"), member_id);
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Groups/{group_id}"))
         .insert_header(bearer(&token))
         .set_json(&remove_body)
@@ -478,6 +500,7 @@ async fn entra_create_user_fixture_provisions_a_user() {
 
     let body = fixture("entra/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&body)
@@ -509,6 +532,7 @@ async fn entra_patch_deactivate_user_pathless_fixture() {
 
     let create_body = fixture("entra/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&create_body)
@@ -519,6 +543,7 @@ async fn entra_patch_deactivate_user_pathless_fixture() {
     // Entra's path-less shape: {"op":"replace","value":{"active":false}}.
     let patch_body = fixture("entra/patch_deactivate_user.json");
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{id}"))
         .insert_header(bearer(&token))
         .set_json(&patch_body)
@@ -545,6 +570,7 @@ async fn entra_patch_update_name_fixture() {
 
     let create_body = fixture("entra/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&create_body)
@@ -554,6 +580,7 @@ async fn entra_patch_update_name_fixture() {
 
     let patch_body = fixture("entra/patch_update_name.json");
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{id}"))
         .insert_header(bearer(&token))
         .set_json(&patch_body)
@@ -578,6 +605,7 @@ async fn entra_group_add_member_fixture() {
 
     let member_body = fixture("entra/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .set_json(&member_body)
@@ -587,6 +615,7 @@ async fn entra_group_add_member_fixture() {
 
     let group_body = fixture("entra/create_group.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Groups")
         .insert_header(bearer(&token))
         .set_json(&group_body)
@@ -596,6 +625,7 @@ async fn entra_group_add_member_fixture() {
 
     let add_body = substitute_member_id(fixture("entra/patch_group_add_member.json"), member_id);
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Groups/{group_id}"))
         .insert_header(bearer(&token))
         .set_json(&add_body)
@@ -620,6 +650,7 @@ async fn discovery_endpoints_require_a_credential_but_not_a_permission() {
     // No Authorization header at all -> 401 (AuthzMiddleware, same as every
     // other /scim/v2 route).
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/ServiceProviderConfig")
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -636,6 +667,7 @@ async fn discovery_endpoints_require_a_credential_but_not_a_permission() {
         "/scim/v2/Schemas",
     ] {
         let req = test::TestRequest::get()
+            .peer_addr(bench_peer())
             .uri(path)
             .insert_header(bearer(&token))
             .to_request();
@@ -655,6 +687,7 @@ async fn bulk_returns_correct_scim_error() {
     let token = mint_token(&auth, user, tenant_id, org_id);
 
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Bulk")
         .insert_header(bearer(&token))
         .set_json(json!({"Operations": []}))
@@ -680,6 +713,7 @@ async fn complex_filter_returns_invalid_filter_error() {
     let token = mint_token(&auth, user, tenant_id, org_id);
 
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri(
             "/scim/v2/Users?filter=emails%5Btype%20eq%20%22work%22%5D.value%20eq%20%22x%40y.com%22",
         )
@@ -715,6 +749,7 @@ async fn unprivileged_tenant_user_is_forbidden_on_every_verb() {
         ("POST", "/scim/v2/Groups"),
     ] {
         let req = test::TestRequest::default()
+            .peer_addr(bench_peer())
             .method(method.parse().unwrap())
             .uri(uri)
             .insert_header(bearer(&token))
@@ -739,6 +774,7 @@ async fn least_privilege_scim_only_role_is_sufficient() {
     let token = mint_token(&auth, bearer_user, tenant_id, org_id);
 
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token))
         .to_request();
@@ -791,6 +827,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let token_b = mint_token(&auth, bearer_b_user, tenant_b.id, org_b.id);
     let create_body = fixture("okta/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token_b))
         .set_json(&create_body)
@@ -802,6 +839,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let bearer_a_user = scim_admin_user(&db, tenant_a).await;
     let token_a = mint_token(&auth, bearer_a_user, tenant_a, org_a);
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
         .to_request();
@@ -814,6 +852,7 @@ async fn cross_tenant_get_user_is_not_found() {
 
     // ... nor PUT ...
     let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
         .set_json(json!({"userName":"hijacked","emails":[{"value":"h@x.com"}]}))
@@ -827,6 +866,7 @@ async fn cross_tenant_get_user_is_not_found() {
 
     // ... nor PATCH ...
     let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
         .set_json(json!({"Operations":[{"op":"replace","path":"active","value":false}]}))
@@ -840,6 +880,7 @@ async fn cross_tenant_get_user_is_not_found() {
 
     // ... nor DELETE.
     let req = test::TestRequest::delete()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
         .to_request();
@@ -853,6 +894,7 @@ async fn cross_tenant_get_user_is_not_found() {
     // The victim is provably untouched: tenant B's own token still sees it,
     // active and unmodified.
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_b))
         .to_request();
@@ -900,6 +942,7 @@ async fn cross_tenant_group_mutation_is_not_found() {
     let token_b = mint_token(&auth, bearer_b, tenant_b.id, org_b.id);
     let group_body = fixture("okta/create_group.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Groups")
         .insert_header(bearer(&token_b))
         .set_json(&group_body)
@@ -920,6 +963,7 @@ async fn cross_tenant_group_mutation_is_not_found() {
         ("DELETE", None),
     ] {
         let mut builder = test::TestRequest::default()
+            .peer_addr(bench_peer())
             .method(method.parse().unwrap())
             .uri(&format!("/scim/v2/Groups/{victim_group_id}"))
             .insert_header(bearer(&token_a));
@@ -932,6 +976,7 @@ async fn cross_tenant_group_mutation_is_not_found() {
 
     // Group genuinely untouched — tenant B still sees its original name.
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri(&format!("/scim/v2/Groups/{victim_group_id}"))
         .insert_header(bearer(&token_b))
         .to_request();
@@ -981,6 +1026,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
     let token_b = mint_token(&auth, bearer_b, tenant_b.id, org_b.id);
     let body = fixture("okta/create_user.json");
     let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token_b))
         .set_json(&body)
@@ -994,6 +1040,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
     // Unfiltered list from tenant A: only the bearer-provisioning admin
     // user itself (created by `scim_admin_user`) — never tenant B's user.
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users")
         .insert_header(bearer(&token_a))
         .to_request();
@@ -1012,6 +1059,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
 
     // userName-filtered list from tenant A for tenant B's exact username.
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users?filter=userName%20eq%20%22jsmith%40example.com%22")
         .insert_header(bearer(&token_a))
         .to_request();
@@ -1025,6 +1073,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
 
     // externalId-filtered list from tenant A for tenant B's exact externalId.
     let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
         .uri("/scim/v2/Users?filter=externalId%20eq%20%2200u1a2b3c4d5e6f7g8h9%22")
         .insert_header(bearer(&token_a))
         .to_request();

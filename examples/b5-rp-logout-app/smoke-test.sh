@@ -28,6 +28,30 @@ ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
 RP_PORT="${RP_PORT:-9999}"
 RP_URL="http://localhost:${RP_PORT}"
 
+# Where AXIAM should POST logout tokens.
+#
+# This is the ONE url in this script that AXIAM DIALS ITSELF. Every other url
+# here is dialled by curl standing in for a browser, so every other url is
+# resolved in *this script's* network namespace — but a `backchannel_logout_uri`
+# is resolved in AXIAM's. Those are the same place only when AXIAM runs on this
+# host.
+#
+# They are not the same place in CI, which runs AXIAM in the
+# `axiam-e2e-server` container while this script runs on the runner: there,
+# `localhost` names the container, nothing listens on ${RP_PORT} inside it, and
+# all three delivery attempts are refused. The symptom is silence at both ends —
+# AXIAM logs `back-channel logout delivery failed` (which examples-smoke.yml
+# does not print), and this app never sees a request at all, so step 3 below
+# times out with no other evidence. `.github/workflows/examples-smoke.yml`
+# therefore sets this to `http://host.docker.internal:${RP_PORT}` and layers
+# `docker-compose.host-gateway.override.yml`, which maps that name to the
+# runner host.
+#
+# Default: same as RP_URL, which is correct whenever AXIAM and this script
+# share a network namespace (running the server with `just run`, or any
+# non-containerised local repro).
+RP_BACKCHANNEL_URL="${RP_BACKCHANNEL_URL:-${RP_URL}}"
+
 RUN_ID="$(date +%s)-$$"
 JAR="$(mktemp)"
 SERVER_LOG="$(mktemp)"
@@ -91,9 +115,9 @@ rm -f "${HEADERS}"
 TENANT_ID=$(printf '%s' "${LOGIN_BODY}" | jq -r '.user.tenant_id')
 [ "${TENANT_ID}" != "null" ] || fail "login did not return a tenant_id"
 
-log "registering this app as an AXIAM OAuth2 client"
+log "registering this app as an AXIAM OAuth2 client (back-channel uri: ${RP_BACKCHANNEL_URL}/backchannel-logout)"
 CLIENT_JSON=$(api_expect POST "${ADMIN_CSRF}" /api/v1/oauth2-clients \
-  "{\"name\":\"b5-rp-logout-app-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scopes\":[\"openid\",\"profile\"],\"post_logout_redirect_uris\":[\"${RP_URL}/\"],\"backchannel_logout_uri\":\"${RP_URL}/backchannel-logout\"}" \
+  "{\"name\":\"b5-rp-logout-app-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scopes\":[\"openid\",\"profile\"],\"post_logout_redirect_uris\":[\"${RP_URL}/\"],\"backchannel_logout_uri\":\"${RP_BACKCHANNEL_URL}/backchannel-logout\"}" \
   201)
 CLIENT_ID=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_id')
 CLIENT_SECRET=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_secret')
@@ -190,7 +214,16 @@ for i in $(seq 1 10); do
 done
 if [ -z "${BACKCHANNEL_OK}" ]; then
   cat "${SERVER_LOG}" >&2
-  fail "no verified back-channel logout token arrived within 10s of RP-Initiated Logout"
+  # The app log above distinguishes the two causes, which is why it prints an
+  # arrival line before validating anything:
+  #   - a "back-channel logout: POST received" line means AXIAM reached us and
+  #     the token was refused; the rejection reason is the next line.
+  #   - NO such line means AXIAM never reached us: it could not dial
+  #     RP_BACKCHANNEL_URL from its own network namespace (see the comment on
+  #     that variable), and its own log holds three
+  #     "back-channel logout delivery failed" warnings.
+  fail "no verified back-channel logout token arrived within 10s of RP-Initiated Logout" \
+    "(registered back-channel uri: ${RP_BACKCHANNEL_URL}/backchannel-logout — reachable from AXIAM?)"
 fi
 ok "back-channel logout token received and verified (§12.7.3 checklist passed)"
 

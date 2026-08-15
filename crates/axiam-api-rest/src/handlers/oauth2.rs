@@ -1996,12 +1996,21 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
         .map(|p| p.client_id.clone())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        if let Ok(c) = state
+        match state
             .oauth2_client_repo
             .get_by_client_id(tenant_id, &client_id)
             .await
         {
-            clients.push(c);
+            Ok(c) => clients.push(c),
+            // A participant whose registration cannot be loaded is dropped
+            // from the fan-out — correct (a deleted client keeps its
+            // participation rows), but silent until now. The RP that does not
+            // get told sees nothing, and neither did anyone reading the logs.
+            Err(e) => tracing::debug!(
+                %client_id,
+                error = %e,
+                "back-channel logout: session participant is not a loadable client, skipping"
+            ),
         }
     }
 
@@ -2009,17 +2018,49 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
     let auth_config = state.auth_config.clone();
     let participant_ids: Vec<String> = participants.into_iter().map(|p| p.client_id).collect();
 
-    let deliveries =
-        crate::backchannel_logout::select_targets(&participant_ids, &clients, |client_id| {
-            axiam_oauth2::logout::issue_logout_token(
+    let deliveries = crate::backchannel_logout::select_targets(
+        &participant_ids,
+        &clients,
+        |client_id| {
+            match axiam_oauth2::logout::issue_logout_token(
                 &issuer,
                 client_id,
                 session_id,
                 subject_id,
                 &auth_config,
-            )
-            .ok()
-        });
+            ) {
+                Ok(token) => Some(token),
+                // This used to be `.ok()`. A token that cannot be minted (a
+                // misconfigured issuer, an unusable signing key) silently
+                // removed the client from the fan-out, so a whole deployment
+                // could stop notifying anyone with no signal anywhere — on a
+                // session-termination path, where "nothing happened" is
+                // exactly the outcome an attacker wants. WARN, not DEBUG: this
+                // one is never routine.
+                Err(e) => {
+                    tracing::warn!(
+                        %client_id,
+                        error = %e,
+                        "back-channel logout: could not issue a logout token, client will NOT be notified"
+                    );
+                    None
+                }
+            }
+        },
+    );
+
+    // One line naming every stage of the funnel, so a delivery that never
+    // happens can be localised without a code read: how many clients joined
+    // the session, how many of those are still loadable registrations, and how
+    // many of those actually got a token and a URI to send it to. Each drop
+    // between those numbers has its own line above (or is the deliberate
+    // "client registered no backchannel_logout_uri" skip in `select_targets`).
+    tracing::debug!(
+        participants = participant_ids.len(),
+        clients = clients.len(),
+        deliveries = deliveries.len(),
+        "back-channel logout fan-out computed"
+    );
 
     // Participation records are dropped after the fan-out list is built, not
     // before — the list is what the fan-out iterates.

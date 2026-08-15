@@ -45,7 +45,10 @@ reference for integrating against AXIAM's OIDC surface in any language.
   `backchannel_logout_uri` are plain fields on the same request, not grants.
 
 ```bash
-docker compose -f docker/docker-compose.e2e.yml up -d --wait
+docker compose \
+  -f docker/docker-compose.e2e.yml \
+  -f examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml \
+  up -d --wait
 ./scripts/e2e-bootstrap.sh
 
 # Register this app as an AXIAM OAuth2 client (adjust ports/URIs to taste):
@@ -57,8 +60,17 @@ curl -sS -X POST http://localhost:8090/api/v1/oauth2-clients \
     "grant_types": ["authorization_code", "refresh_token"],
     "scopes": ["openid", "profile"],
     "post_logout_redirect_uris": ["http://localhost:9999/"],
-    "backchannel_logout_uri": "http://localhost:9999/backchannel-logout"
+    "backchannel_logout_uri": "http://host.docker.internal:9999/backchannel-logout"
   }'
+# ^ NOT localhost, and this is the one URI where that matters. The first three
+#   are dialled by your browser, which is on this host. `backchannel_logout_uri`
+#   is dialled by AXIAM, which is in a container — where `localhost` is the
+#   container itself and nothing listens on 9999, so every delivery attempt is
+#   refused and the back-channel half of this example silently does nothing.
+#   `docker-compose.host-gateway.override.yml` above is what makes
+#   `host.docker.internal` resolve on Linux. If you run AXIAM directly on this
+#   host instead (`just run`), use `http://localhost:9999/backchannel-logout`.
+#   See docs/api/logout.md, "The URI is resolved from AXIAM's network position".
 # (see examples/b1-deny-override/walkthrough.sh for the full login/CSRF dance
 # this curl call assumes — admin-cookies.txt + $CSRF come from the same
 # X-CSRF-Token-capture pattern used there)
@@ -101,9 +113,15 @@ and drives the full login → RP-Initiated Logout → Back-Channel Logout chain
 with plain `curl` — no headless browser needed, because a single curl
 cookie jar correctly carries both AXIAM's session cookie and this app's
 `rp_session` cookie across the redirect chain (see the script's own header
-comment). **None of this has actually been run** — no docker daemon in the
-environment this was authored in (see the repo root `examples/README.md`),
-so the login/logout/back-channel logic is protocol-correct against
-`sdks/CONTRACT.md` and `docs/api/logout.md` by construction and review, and
-the smoke script is believed correct by the same kind of review, but neither
-has been observed to run.
+comment).
+
+**It has now been run, end to end, against a live AXIAM server**, and all
+three pieces pass: login (PAR → authorize → callback → `id_token` validated),
+RP-Initiated Logout, and a back-channel logout token delivered by AXIAM,
+verified against the §12.7.3 checklist, and acted on.
+
+The first live run is also what found the one thing review could not: the
+back-channel `POST` is the only leg AXIAM dials outward, so it is the only
+one for which "localhost" means AXIAM's host rather than this app's. See
+`RP_BACKCHANNEL_URL` in [`smoke-test.sh`](smoke-test.sh) and
+[`docker-compose.host-gateway.override.yml`](docker-compose.host-gateway.override.yml).

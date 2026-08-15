@@ -280,8 +280,25 @@ app.get("/logout", requireConfig, async (req, res, next) => {
 // DIFFERENT device, or an admin force-ending the session. See
 // docs/api/logout.md "Back-channel logout".
 app.post("/backchannel-logout", requireConfig, async (req, res) => {
+  // Log ARRIVAL, before any validation.
+  //
+  // "No logout token was verified" is equally consistent with two completely
+  // different faults — AXIAM never reached this URI, or it reached us and we
+  // rejected the token — and nothing else in this process can tell them
+  // apart: the /internal/backchannel-log counter reads 0 either way, and
+  // AXIAM's own warnings live in AXIAM's logs, not the RP's. Without this
+  // line, localising a failed delivery costs a round trip. (It cost one:
+  // registering a `backchannel_logout_uri` AXIAM could not dial produced
+  // exactly this silence.)
+  //
+  // Never log the token itself, here or below: it is a signed
+  // session-termination command, so a log line carrying one is a replayable
+  // instruction (docs/api/logout.md, "The logout token").
+  console.log("back-channel logout: POST received");
+
   const logoutToken = typeof req.body?.logout_token === "string" ? req.body.logout_token : undefined;
   if (!logoutToken) {
+    console.error("back-channel logout rejected: no logout_token in the form body");
     res.status(400).send("missing logout_token");
     return;
   }
@@ -299,7 +316,9 @@ app.post("/backchannel-logout", requireConfig, async (req, res) => {
     // MUST NOT be treated as an error (§12.7.3 rule 7/8's "MUST NOT dedup
     // internally [in the SDK], but MUST make the key available" — here,
     // the RP application itself owns the dedup decision).
-    if (!seenLogoutJti.has(result.jti)) {
+    const duplicate = seenLogoutJti.has(result.jti);
+    let endedLocalSessions = 0;
+    if (!duplicate) {
       seenLogoutJti.add(result.jti);
       if (result.sid) {
         // §12.7.3: "When sid is present, the RP MUST end that session
@@ -308,16 +327,27 @@ app.post("/backchannel-logout", requireConfig, async (req, res) => {
         if (cookieValue) {
           sessionsByCookie.delete(cookieValue);
           cookieBySid.delete(result.sid);
+          endedLocalSessions += 1;
         }
       } else if (result.sub) {
         for (const [cookieValue, session] of sessionsByCookie) {
           if (session.sub === result.sub) {
             sessionsByCookie.delete(cookieValue);
             if (session.sid) cookieBySid.delete(session.sid);
+            endedLocalSessions += 1;
           }
         }
       }
     }
+
+    // The counterpart of the arrival line above: what the receiver *did*.
+    // Deliberately no identifiers — `sid`/`sub`/`jti` name a real session and
+    // a real person, and this line exists to answer "did it work", which
+    // three booleans answer completely.
+    console.log(
+      `back-channel logout accepted: identified_by=${result.sid ? "sid" : "sub"} ` +
+        `duplicate=${duplicate} local_sessions_ended=${endedLocalSessions}`,
+    );
 
     // No response body: the OP does not read one, and echoing anything
     // token-derived back into a 200 would be pointless exposure.

@@ -1,0 +1,33 @@
+# docker-compose.host-gateway.override.yml — lets the containerised AXIAM
+# server dial this example's back-channel logout receiver.
+#
+# `docker/docker-compose.e2e.yml` runs axiam-server in a container on a bridge
+# network. `smoke-test.sh` runs on the host (the CI runner), and so does the RP
+# app it starts on port 9999. Every other leg of the B5 flow crosses that
+# boundary in the direction Docker already handles — host -> container, through
+# the published port 8090.
+#
+# Back-channel logout is the one leg that goes the OTHER way: AXIAM itself
+# POSTs a logout token to the `backchannel_logout_uri` the client registered.
+# That URI is resolved inside the container, where `localhost` is the container
+# and nothing listens on 9999, so all three delivery attempts are refused and
+# the example's step 3 fails with no visible cause on either side. Adding the
+# `host-gateway` alias gives the container a name for the host, and the
+# workflow registers `http://host.docker.internal:9999/backchannel-logout`
+# instead (see `RP_BACKCHANNEL_URL` in smoke-test.sh).
+#
+# Docker Desktop provides `host.docker.internal` automatically; Linux (which is
+# what CI runs) does not, hence the explicit mapping — the same one
+# `conformance/docker-compose.yml` already uses for the same reason.
+#
+# Scope: this override exists ONLY for this example's CI smoke job and any
+# local repro of it, exactly like
+# `examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml`. It
+# adds one `/etc/hosts` entry inside the container and opens no port, but it
+# still has no place in `docker-compose.dev.yml` or `docker-compose.prod.yml`:
+# a production AXIAM has no business holding a name for its own host.
+
+services:
+  axiam-server:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

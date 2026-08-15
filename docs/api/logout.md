@@ -176,6 +176,34 @@ adding a second, cheaper check would invite an RP to verify that one instead.
 This is the one deliberate difference from AXIAM's webhook deliveries, which
 *are* HMAC-signed (see CONTRACT.md §13).
 
+### The URI is resolved from AXIAM's network position
+
+`backchannel_logout_uri` is the only URL in either half of logout that **AXIAM
+dials itself**. `redirect_uris` and `post_logout_redirect_uris` are dialled by
+the user's browser; this one is dialled by the server, from wherever the server
+runs.
+
+That distinction matters whenever those are different places — AXIAM in a
+container or a pod, the RP outside it, or the reverse. `http://localhost:9000`
+registered by an RP running next to your browser names *AXIAM's* loopback, not
+the RP's, and every delivery to it is refused. The registration succeeds and the
+logout succeeds; only the notification is lost.
+
+There is **no error surfaced to anyone** when this happens, by design: delivery
+is best-effort and never blocks the logout. The only evidence is in AXIAM's own
+log, one line per attempt:
+
+```
+WARN back-channel logout delivery failed  client_id=… error=… attempt=1
+WARN back-channel logout rejected by RP   client_id=… status=…  attempt=1
+```
+
+The first is "we could not reach it"; the second is "we reached it and it said
+no". If an RP reports that it is never told about logouts, that pair of lines is
+the first thing to look at — and if *neither* appears, the fan-out never
+selected the client, which `back-channel logout fan-out computed` (DEBUG) breaks
+down by stage.
+
 ## Discovery
 
 ```json

@@ -547,3 +547,52 @@ regenerated and CONTRACT §12.1 rule 4 amended because it stated the now-false i
 - The examples' runtime smoke job earned its keep: it found five real defects (two wrong status codes, a
   missing query parameter, a wrong JSON path, and the server-side OIDC issuer gap) that shellcheck, `bash
   -n` and review had all passed.
+
+### Execution log — update 3 (b5 back-channel logout, R5.1 follow-up)
+
+**The sixth defect the runtime smoke job found, and the first one no amount of review could have.**
+`examples-smoke.yml`'s b5 step got through login and RP-Initiated Logout and then failed step 3:
+`no verified back-channel logout token arrived within 10s`. Reproduced locally against a natively-run
+server (SurrealDB + RabbitMQ native, no docker daemon needed — see update 2's process note) by
+registering a `backchannel_logout_uri` AXIAM could not dial, which reproduces the CI symptom exactly,
+including the RP app's log containing nothing but its two startup lines.
+
+**Root cause — an example/CI-harness defect, not a server defect.** `smoke-test.sh` registered
+`http://localhost:9999/backchannel-logout`. That is the ONE url in the whole flow that AXIAM dials
+itself; every other one is dialled by curl standing in for a browser. In CI, AXIAM runs inside the
+`axiam-e2e-server` container while the script and the RP app run on the runner, so `localhost` named
+the container, nothing listened on 9999 there, and all three delivery attempts were refused. The
+server behaved correctly throughout and logged three
+`WARN back-channel logout delivery failed … error=error sending request for url (…)` lines — which
+nobody saw, because the workflow deliberately does not print server logs.
+
+Fixed by an `RP_BACKCHANNEL_URL` seam in `smoke-test.sh` (default = `RP_URL`, so a non-containerised
+local run is unaffected), `examples/b5-rp-logout-app/docker-compose.host-gateway.override.yml` mapping
+`host.docker.internal:host-gateway` into the server container, and the workflow setting the seam to
+that name — the same mechanism `conformance/docker-compose.yml` already uses for the same reason.
+The full smoke script now passes end to end against a live server; delivery is measured at **16 ms**
+from fan-out to 2xx, so the 10 s poll was never the problem and was not touched.
+
+**Two observability defects fixed alongside it, because the diagnosis cost a CI round-trip.**
+- *Server (`handlers/oauth2.rs`).* `issue_logout_token(...).ok()` discarded a token-issuance error and
+  silently dropped that client from the fan-out. On a session-termination path, "nothing happened" is
+  the outcome an attacker wants, and there was no signal anywhere. Now a `WARN`. A participant whose
+  client registration fails to load is likewise now a `DEBUG` line, and one
+  `back-channel logout fan-out computed` line names the whole funnel
+  (participants → loadable clients → deliveries) so the next failure is localised without a code read.
+  It is what empirically eliminated causes 1–3 in this investigation.
+- *Example (`src/server.ts`).* The receiver logged nothing on arrival, so "AXIAM never reached us" and
+  "AXIAM reached us and we rejected the token" were indistinguishable from the RP side — the
+  `verified_jti_count` debug endpoint reads 0 for both. It now logs arrival before validating anything,
+  logs the previously-silent `missing logout_token` 400, and logs the outcome (identified-by /
+  duplicate / sessions-ended, no identifiers).
+
+`docs/api/logout.md` gains "The URI is resolved from AXIAM's network position", which states the
+container/pod trap for operators and names the two WARN lines to look for. Its delivery contract
+("up to 3 attempts, 500 ms then 2 s backoff") was checked against measurement and is accurate:
+attempts landed at +0 ms, +502 ms, +2003 ms.
+
+**Carry forward.** A failure-only, grep-filtered `docker logs axiam-e2e-server | grep back-channel`
+step is now in the workflow. Back-channel delivery runs in a detached task, so a delivery fault
+produces nothing at all in the example's own output — three lines of server log is the only place the
+fault is visible, and that is a narrow enough exception to the job's no-log-dump rule to be worth it.

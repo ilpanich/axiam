@@ -142,11 +142,11 @@ DENY_ROLE_ID=$(api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" /api/v1/roles \
 
 # effect defaults to "allow" when omitted; spelled out here for clarity.
 api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/roles/${ALLOW_ROLE_ID}/permissions" \
-  "{\"permission_id\":\"${PERMISSION_ID}\",\"scope_ids\":[],\"effect\":\"allow\"}" 201 >/dev/null
+  "{\"permission_id\":\"${PERMISSION_ID}\",\"scope_ids\":[],\"effect\":\"allow\"}" 204 >/dev/null
 
 # The deny grant. This is the whole feature in one field.
 api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/roles/${DENY_ROLE_ID}/permissions" \
-  "{\"permission_id\":\"${PERMISSION_ID}\",\"scope_ids\":[],\"effect\":\"deny\"}" 201 >/dev/null
+  "{\"permission_id\":\"${PERMISSION_ID}\",\"scope_ids\":[],\"effect\":\"deny\"}" 204 >/dev/null
 
 # ---------------------------------------------------------------------------
 # 4. A test user, and the two role assignments that create the scenario:

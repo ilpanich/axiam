@@ -38,10 +38,37 @@ test.describe("Login flow", () => {
     await expect(page.getByLabel("Username or email")).toBeVisible();
   });
 
-  test("shows validation error when org/tenant fields are empty", async ({
+  // CQ-F11 removed `noValidate` from the login forms, so the browser's own
+  // constraint validation now runs first. Both slug fields are `required`,
+  // which means an EMPTY submit is blocked by the browser before React's
+  // onSubmit handler is reached — the custom message below is unreachable in
+  // that case by design. Native validation is the better path here: it is
+  // announced by screen readers and focuses the offending field, which is the
+  // whole point of dropping `noValidate`.
+  test("browser constraint validation blocks an empty org/tenant submit", async ({
     page,
   }) => {
     await page.goto("/login");
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    const orgSlug = page.getByLabel("Organization slug");
+    await expect(orgSlug).toBeVisible();
+    await expect(
+      await orgSlug.evaluate((el) => (el as HTMLInputElement).checkValidity())
+    ).toBe(false);
+    // and the form has not advanced to step 2
+    await expect(page.getByLabel("Username or email")).toHaveCount(0);
+  });
+
+  // The custom handler still has a job: whitespace-only input satisfies
+  // `required` but fails the handler's `.trim()` check, so this is the case
+  // that still surfaces the application-level message.
+  test("shows the custom validation error when org/tenant are whitespace only", async ({
+    page,
+  }) => {
+    await page.goto("/login");
+    await page.getByLabel("Organization slug").fill("   ");
+    await page.getByLabel("Tenant slug").fill("   ");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(
       page.getByText("Please enter both organization and tenant slug.")

@@ -212,8 +212,17 @@ async fn spawn_fake_reactor(
     channel
         .queue_declare(
             queue.clone().into(),
+            // durable, not transient. RabbitMQ deprecated transient
+            // non-exclusive queues and its recent images REFUSE the declare
+            // outright ("Feature `transient_nonexcl_queues` is deprecated ...
+            // not permitted anymore"), taking the whole connection down — which
+            // is how this first surfaced in CI. Durable also matches how
+            // axiam-amqp's own connection.rs declares every real queue, so the
+            // test exercises the production shape rather than a weaker one.
+            // auto_delete still cleans the queue up when the fake reactor
+            // disconnects at end of test.
             QueueDeclareOptions {
-                durable: false,
+                durable: true,
                 auto_delete: true,
                 ..QueueDeclareOptions::default()
             },

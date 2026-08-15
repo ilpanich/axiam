@@ -24,6 +24,10 @@ pub struct CreateOAuth2ClientRequest {
     /// Human-readable name for the client.
     pub name: String,
     /// Allowed redirect URIs (must be HTTPS, except localhost for dev).
+    /// SEC-089: this list doubles as the token-exchange audience allow-list
+    /// — adding a URI here also authorises it as a token audience for this
+    /// client, so review additions on exchange-capable clients with that in
+    /// mind (see `docs/api/token-exchange.md#audience`).
     pub redirect_uris: Vec<String>,
     /// Grant types this client is authorized to use.
     pub grant_types: Vec<String>,

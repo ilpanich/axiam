@@ -9544,7 +9544,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev)."
+            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev).\nSEC-089: this list doubles as the token-exchange audience allow-list\n— adding a URI here also authorises it as a token audience for this\nclient, so review additions on exchange-capable clients with that in\nmind (see `docs/api/token-exchange.md#audience`)."
           },
           "require_par": {
             "type": "boolean",
@@ -13604,7 +13604,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Target audience for the issued token. **The allow-list is the\nclient's `redirect_uris`** (SEC-089): a target is accepted if it\nappears in the client's registered redirect URIs, or is one of\nAXIAM's own built-in audiences. There is no separate audience field\nin v1 — adding a redirect URI to a client also authorises it as a\ntoken audience for that client. This allow-list is checked at two\ncall sites in this file (same-domain exchange, and the X4 external\nexchange) — both are tagged `SEC-089` and must be touched together\n(and together with this comment) if a future dedicated\n`allowed_token_targets` field replaces this reuse. Full write-up in\n`docs/api/token-exchange.md#audience`."
           },
           "requested_token_type": {
             "type": [

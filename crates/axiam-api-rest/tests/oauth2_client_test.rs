@@ -854,3 +854,78 @@ async fn update_oauth2_client_adding_auth_code_with_existing_redirect_uris_retur
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["grant_types"][1], "authorization_code");
 }
+
+/// A client can be registered for the device-code and token-exchange grants
+/// through the admin API.
+///
+/// Regression: `KNOWN_GRANT_TYPES` used to list only `authorization_code`,
+/// `client_credentials` and `refresh_token`, while `device_service` requires
+/// `urn:ietf:params:oauth:grant-type:device_code` and `token_exchange`
+/// requires `urn:ietf:params:oauth:grant-type:token-exchange`. Both flows
+/// shipped, but neither could be reached through this API — every attempt was
+/// rejected as "unknown grant_type". The existing tests for those flows build
+/// `OAuth2Client` values directly and so never crossed this validator.
+#[actix_rt::test]
+async fn update_oauth2_client_accepts_device_code_and_token_exchange_grants() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    for grant in [
+        "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code",
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+    ] {
+        let req = test::TestRequest::put()
+            .uri(&format!("/api/v1/oauth2-clients/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({ "grant_types": [grant] }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "grant type {grant} must be registrable through the admin API"
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["grant_types"][0], grant);
+    }
+}
+
+/// The impersonation capability marker stays NON-registrable through this API.
+///
+/// `may-impersonate` is deliberately absent from `KNOWN_GRANT_TYPES`: whether
+/// an admin-API caller may confer impersonation is an open security decision.
+/// This test pins the current posture so widening it has to be deliberate.
+#[actix_rt::test]
+async fn update_oauth2_client_rejects_the_may_impersonate_marker() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "grant_types": ["urn:axiam:params:oauth:grant-type:may-impersonate"]
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}

@@ -1,0 +1,35 @@
+[package]
+name = "axiam-scim"
+description = "AXIAM SCIM 2.0 provisioning endpoint (RFC 7643/7644), mounted under /scim/v2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# R3.1 (B4): SCIM maps onto the EXISTING user/group repositories and reuses
+# axiam-api-rest's AppState<C>, AuthenticatedUser extractor, RequirePermission
+# guard, and AuthzMiddleware — no parallel storage or authorization stack.
+axiam-core = { workspace = true }
+axiam-api-rest = { workspace = true }
+# Argon2id-hashes a SCIM-supplied `password` PATCH value / generates the
+# random initial password for SCIM-provisioned users — the same function
+# `axiam-db`'s user repository already uses internally (Security Standards:
+# Argon2id for all password storage).
+axiam-auth = { workspace = true }
+secrecy = { workspace = true }
+actix-web = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+surrealdb = { workspace = true }
+
+[dev-dependencies]
+axiam-db = { workspace = true }
+axiam-authz = { workspace = true }
+axiam-test-support = { workspace = true }
+actix-rt = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }

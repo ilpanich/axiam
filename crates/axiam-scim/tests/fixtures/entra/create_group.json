@@ -1,0 +1,6 @@
+{
+  "_source": "hand-constructed from Microsoft's Entra ID SCIM provisioning reference (group push create shape) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+  "displayName": "Sales",
+  "externalId": "b2c3d4e5-f6a7-4b2c-8d3e-4f5a6b7c8d9e"
+}

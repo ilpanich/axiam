@@ -1,0 +1,15 @@
+{
+  "_source": "hand-constructed from Okta's SCIM protocol reference (push-new-user request shape) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "userName": "jsmith@example.com",
+  "name": {
+    "givenName": "Jane",
+    "familyName": "Smith",
+    "formatted": "Jane Smith"
+  },
+  "emails": [
+    { "value": "jsmith@example.com", "type": "work", "primary": true }
+  ],
+  "active": true,
+  "externalId": "00u1a2b3c4d5e6f7g8h9"
+}

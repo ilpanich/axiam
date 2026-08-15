@@ -21,6 +21,8 @@ axiam-oauth2 = { workspace = true }
 axiam-federation = { workspace = true }
 axiam-audit = { workspace = true }
 axiam-pki = { workspace = true }
+# R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
+axiam-scim = { workspace = true }
 # `rustls-0_23` enables `HttpServer::bind_rustls_0_23` for the opt-in direct-TLS
 # path (F-04); TLS termination still defaults to the proxy layer.
 actix-web = { workspace = true, features = ["rustls-0_23"] }

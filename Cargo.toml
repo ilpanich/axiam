@@ -12,6 +12,7 @@ members = [
     "crates/axiam-audit",
     "crates/axiam-pki",
     "crates/axiam-email",
+    "crates/axiam-scim",
     "crates/axiam-server",
     "crates/axiam-test-support",
 ]
@@ -168,6 +169,8 @@ axiam-federation = { path = "crates/axiam-federation", default-features = false 
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }
+# R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2 by axiam-server.
+axiam-scim = { path = "crates/axiam-scim" }
 
 # Release build profile.
 #

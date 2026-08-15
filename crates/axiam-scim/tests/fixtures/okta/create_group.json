@@ -1,0 +1,6 @@
+{
+  "_source": "hand-constructed from Okta's SCIM protocol reference (push-group request shape) — not captured traffic. See ../README.md.",
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+  "displayName": "Engineering",
+  "externalId": "00g9z8y7x6w5v4u3t2s1"
+}

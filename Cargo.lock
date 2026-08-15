@@ -1149,6 +1149,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiam-scim"
+version = "1.0.0-alpha24"
+dependencies = [
+ "actix-rt",
+ "actix-web",
+ "axiam-api-rest",
+ "axiam-auth",
+ "axiam-authz",
+ "axiam-core",
+ "axiam-db",
+ "axiam-test-support",
+ "chrono",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "surrealdb",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "axiam-server"
 version = "1.0.0-alpha24"
 dependencies = [
@@ -1167,6 +1188,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
+ "axiam-scim",
  "axiam-test-support",
  "base64 0.23.1",
  "chrono",

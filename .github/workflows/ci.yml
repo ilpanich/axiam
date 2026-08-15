@@ -367,6 +367,43 @@ jobs:
         working-directory: benchmarks
         run: for f in runner/*.sh; do bash -n "$f"; done
 
+  limiter-tests:
+    name: Rate Limiter Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      # libxmlsec1-dev / libxml2-dev are required by axiam-api-rest's default
+      # `saml` feature (→ samael → libxmlsec1) — same as `build`/`test` above.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+      # R5.2 (A1 §5): a dedicated, fast-running job for the limiter unit +
+      # deterministic-integration suite, separate from the full `test` job so
+      # a limiter regression is legible on its own (not one red line among
+      # hundreds) and this job stays quick enough to run on every PR. Every
+      # test here is self-contained (in-memory SurrealDB, no RabbitMQ, no
+      # network) and completes in seconds — deliberately NOT the >= 60s
+      # `rate_limit_sustained_flood_test` (`#[ignore]`d; that one is a
+      # deliberately long-running proof run by hand / a scheduled job, not
+      # part of the fast PR gate).
+      - name: axiam-api-rest rate-limit config unit tests
+        run: cargo test -p axiam-api-rest --lib config::rate_limit
+      - name: axiam-api-rest rate-limit integration tests
+        run: |
+          cargo test -p axiam-api-rest --test rate_limit_shared_store_test
+          cargo test -p axiam-api-rest --test rate_limit_client_identity_test
+          cargo test -p axiam-api-rest --test rate_limit_keying_test
+          cargo test -p axiam-api-rest --test users_rate_limit_split_test
+      - name: axiam-api-grpc rate-limit unit + integration tests
+        run: |
+          cargo test -p axiam-api-grpc --lib middleware::rate_limit
+          cargo test -p axiam-api-grpc --test rate_limit_units_test
+          cargo test -p axiam-api-grpc --test rate_limit_shared_store_test
+      - name: axiam-db shared rate-limit counter unit tests
+        run: cargo test -p axiam-db --lib rate_limit_counter
+
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest

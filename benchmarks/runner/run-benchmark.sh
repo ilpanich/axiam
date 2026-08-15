@@ -201,7 +201,13 @@ fi
 # it exists to exercise a specific AXIAM limiter family, not to compare
 # vendors, and publishing its throughput against Keycloak/Zitadel would be
 # comparing a deliberately throttled cell to an unthrottled one.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js"
+#
+# R5.2 added six more, all for the same reason: RFC 8628 device flow
+# (device_authorization.js, device_verify.js, device_flow_poll.js), RFC 8693
+# token exchange (token_exchange.js) and UMA 2.0 (uma2_perm.js,
+# uma_ticket_grant.js) have no equivalent surface on Keycloak/Zitadel in this
+# harness's target set.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -216,12 +222,28 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # or the axiam client wasn't seeded (empty BENCH_CLIENT_SECRET). `just bench-up`
 # now configures OAuth2 and seed.sh provisions the client, so by default none are
 # skipped. jwks_fetch is intentionally excluded — it needs no client.
-OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js"
+#
+# R5.2's six additions all mint or spend a token against the seeded client
+# (device_authorization.js/device_flow_poll.js use client_id only, per RFC
+# 8628's public-client design, but still need the client seeded to exist).
+OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0
   return 1
 }
+
+# R5.2 / B4: scenarios written against a documented contract whose crate has
+# not landed yet (SCIM, R3.1 — see scim_provisioning.js's own header). Auto-
+# discovery (`ls ./*.js` above) would otherwise pick these up and run them
+# against a server with no route to answer, turning "not built yet" into a
+# spurious 404 failure on every matrix pass. Skipped unconditionally unless
+# BENCH_ENABLE_PENDING_SCENARIOS=1 (this applies even to an explicit
+# `--scenario scim_provisioning.js` invocation — there is no separate bypass
+# for that) — the same escape hatch shape as BENCH_SCENARIO_EXCLUDE below,
+# inverted. Remove a scenario from this list in the same commit that lands
+# the feature it was pending on.
+PENDING_SCENARIOS="scim_provisioning.js"
 
 # Skips are recorded into the dry-run ledger too (as SKIP rows), not just
 # echoed: "which cells does the matrix actually intend to run" is precisely the
@@ -231,6 +253,10 @@ skip_oauth2() {
 filter_scenarios() {
   local out=()
   for s in "${SCENARIOS[@]}"; do
+    if [ "${BENCH_ENABLE_PENDING_SCENARIOS:-0}" != "1" ] && [[ " $PENDING_SCENARIOS " == *" $s "* ]]; then
+      echo "[run] skipping $s (pending — see its header comment; set BENCH_ENABLE_PENDING_SCENARIOS=1 to force)"
+      record_dry "${s%.js}" "SKIP" "pending — feature not yet landed (BENCH_ENABLE_PENDING_SCENARIOS=1 to force)"; continue
+    fi
     if [ "$TARGET" != "axiam" ] && [[ " $AXIAM_ONLY_SCENARIOS " == *" $s "* ]]; then
       echo "[run] skipping $s (AXIAM-only) for target $TARGET"
       record_dry "${s%.js}" "SKIP" "AXIAM-only scenario, target is $TARGET (expected)"; continue

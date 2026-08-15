@@ -94,6 +94,13 @@ export const router = createBrowserRouter([
             element: <TenantDetailPage />,
             handle: { crumb: "Tenant Details" },
           },
+        ],
+      },
+      {
+        // CQ-F30: tenants gets its own permission (matches Sidebar's
+        // "tenants:list" gate) rather than piggybacking on organizations.
+        element: <ProtectedRoute permission="tenants:list" />,
+        children: [
           {
             path: "tenants",
             element: <TenantsPage />,
@@ -117,59 +124,104 @@ export const router = createBrowserRouter([
         ],
       },
       {
-        path: "groups",
-        element: <GroupsPage />,
-        handle: { crumb: "Groups" },
+        element: <ProtectedRoute permission="groups:list" />,
+        children: [
+          {
+            path: "groups",
+            element: <GroupsPage />,
+            handle: { crumb: "Groups" },
+          },
+          {
+            path: "groups/:groupId",
+            element: <GroupDetailPage />,
+            handle: { crumb: "Group Details" },
+          },
+        ],
       },
       {
-        path: "groups/:groupId",
-        element: <GroupDetailPage />,
-        handle: { crumb: "Group Details" },
+        element: <ProtectedRoute permission="roles:list" />,
+        children: [
+          {
+            path: "roles",
+            element: <RolesPage />,
+            handle: { crumb: "Roles" },
+          },
+          {
+            path: "roles/:roleId",
+            element: <RoleDetailPage />,
+            handle: { crumb: "Role Details" },
+          },
+        ],
       },
       {
-        path: "roles",
-        element: <RolesPage />,
-        handle: { crumb: "Roles" },
+        element: <ProtectedRoute permission="permissions:list" />,
+        children: [
+          {
+            path: "permissions",
+            element: <PermissionsPage />,
+            handle: { crumb: "Permissions" },
+          },
+        ],
       },
       {
-        path: "roles/:roleId",
-        element: <RoleDetailPage />,
-        handle: { crumb: "Role Details" },
+        element: <ProtectedRoute permission="resources:list" />,
+        children: [
+          {
+            path: "resources",
+            element: <ResourcesPage />,
+            handle: { crumb: "Resources" },
+          },
+        ],
       },
       {
-        path: "permissions",
-        element: <PermissionsPage />,
-        handle: { crumb: "Permissions" },
+        element: <ProtectedRoute permission="certificates:list" />,
+        children: [
+          {
+            path: "certificates",
+            element: <CertificatesPage />,
+            handle: { crumb: "Certificates" },
+          },
+        ],
       },
       {
-        path: "resources",
-        element: <ResourcesPage />,
-        handle: { crumb: "Resources" },
+        element: <ProtectedRoute permission="webhooks:list" />,
+        children: [
+          {
+            path: "webhooks",
+            element: <WebhooksPage />,
+            handle: { crumb: "Webhooks" },
+          },
+        ],
       },
       {
-        path: "certificates",
-        element: <CertificatesPage />,
-        handle: { crumb: "Certificates" },
+        element: <ProtectedRoute permission="reactors:list" />,
+        children: [
+          {
+            path: "reactors",
+            element: <ReactorsPage />,
+            handle: { crumb: "Reactors" },
+          },
+        ],
       },
       {
-        path: "webhooks",
-        element: <WebhooksPage />,
-        handle: { crumb: "Webhooks" },
+        element: <ProtectedRoute permission="pgp_keys:list" />,
+        children: [
+          {
+            path: "pgp-keys",
+            element: <PgpKeysPage />,
+            handle: { crumb: "PGP Keys" },
+          },
+        ],
       },
       {
-        path: "reactors",
-        element: <ReactorsPage />,
-        handle: { crumb: "Reactors" },
-      },
-      {
-        path: "pgp-keys",
-        element: <PgpKeysPage />,
-        handle: { crumb: "PGP Keys" },
-      },
-      {
-        path: "oauth2-clients",
-        element: <OAuth2ClientsPage />,
-        handle: { crumb: "OAuth2 Clients" },
+        element: <ProtectedRoute permission="oauth2_clients:list" />,
+        children: [
+          {
+            path: "oauth2-clients",
+            element: <OAuth2ClientsPage />,
+            handle: { crumb: "OAuth2 Clients" },
+          },
+        ],
       },
       {
         element: <ProtectedRoute permission="audit_logs:list" />,
@@ -182,24 +234,44 @@ export const router = createBrowserRouter([
         ],
       },
       {
-        path: "notification-rules",
-        element: <NotificationRulesPage />,
-        handle: { crumb: "Notification Rules" },
+        element: <ProtectedRoute permission="notification_rules:list" />,
+        children: [
+          {
+            path: "notification-rules",
+            element: <NotificationRulesPage />,
+            handle: { crumb: "Notification Rules" },
+          },
+        ],
       },
       {
-        path: "service-accounts",
-        element: <ServiceAccountsPage />,
-        handle: { crumb: "Service Accounts" },
+        element: <ProtectedRoute permission="service_accounts:list" />,
+        children: [
+          {
+            path: "service-accounts",
+            element: <ServiceAccountsPage />,
+            handle: { crumb: "Service Accounts" },
+          },
+        ],
       },
       {
-        path: "federation",
-        element: <FederationPage />,
-        handle: { crumb: "Federation" },
+        element: <ProtectedRoute permission="federation:list" />,
+        children: [
+          {
+            path: "federation",
+            element: <FederationPage />,
+            handle: { crumb: "Federation" },
+          },
+        ],
       },
       {
-        path: "settings",
-        element: <SettingsPage />,
-        handle: { crumb: "Settings" },
+        element: <ProtectedRoute permission="settings:get" />,
+        children: [
+          {
+            path: "settings",
+            element: <SettingsPage />,
+            handle: { crumb: "Settings" },
+          },
+        ],
       },
       {
         element: <ProtectedRoute permission="webauthn_policy:read" />,

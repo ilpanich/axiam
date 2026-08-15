@@ -173,6 +173,17 @@ services:
       # committed. A fresh pepper per run is correct here: E2E starts from an
       # empty database, so there are no v2 hashes to carry across runs.
       AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:-}"
+      # OIDC discovery (/.well-known/openid-configuration) returns 500
+      # "OIDC issuer is not configured as a valid URL" unless this is a real
+      # URL: effective_issuer() falls back to jwt_issuer, which is a bare name
+      # and fails url::Url::parse in the discovery handler's guard. Nothing in
+      # the e2e suite exercised discovery until the B5 relying-party example
+      # did, which is why this was never noticed.
+      # It must equal the URL clients actually reach the server on — the
+      # discovery `issuer` has to string-match the `iss` in issued tokens
+      # (OIDC Core §2) — and the stack publishes the server on localhost:8090,
+      # which is also what the examples use as AXIAM_URL.
+      AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-http://localhost:8090}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s

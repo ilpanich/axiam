@@ -657,7 +657,7 @@ async fn bulk_returns_correct_scim_error() {
     let req = test::TestRequest::post()
         .uri("/scim/v2/Bulk")
         .insert_header(bearer(&token))
-        .set_json(&json!({"Operations": []}))
+        .set_json(json!({"Operations": []}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 501);
@@ -718,7 +718,7 @@ async fn unprivileged_tenant_user_is_forbidden_on_every_verb() {
             .method(method.parse().unwrap())
             .uri(uri)
             .insert_header(bearer(&token))
-            .set_json(&json!({"userName":"x","displayName":"x","emails":[{"value":"x@y.com"}]}))
+            .set_json(json!({"userName":"x","displayName":"x","emails":[{"value":"x@y.com"}]}))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 403, "method={method} uri={uri}");
@@ -816,7 +816,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let req = test::TestRequest::put()
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
-        .set_json(&json!({"userName":"hijacked","emails":[{"value":"h@x.com"}]}))
+        .set_json(json!({"userName":"hijacked","emails":[{"value":"h@x.com"}]}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -829,7 +829,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let req = test::TestRequest::patch()
         .uri(&format!("/scim/v2/Users/{victim_id}"))
         .insert_header(bearer(&token_a))
-        .set_json(&json!({"Operations":[{"op":"replace","path":"active","value":false}]}))
+        .set_json(json!({"Operations":[{"op":"replace","path":"active","value":false}]}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(

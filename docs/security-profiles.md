@@ -276,3 +276,17 @@ measurement.
   too long a window; that is the knob that bounds the default posture.
 - **gRPC reachable by end-user sessions, or a compliance requirement that
   sign-out is immediate** → strict, with the session cache on.
+
+### Token exchange inherits this posture (SEC-091)
+
+`POST /oauth2/token` with `grant_type=…:token-exchange` does not consult
+session revocation either — it validates the subject token's signature,
+issuer, audience and expiry only, the same as the default (non-strict) posture
+above. A logged-out-but-unexpired access token can therefore still be
+exchanged. Two bounds, both enforced in code, keep this within the existing
+posture rather than widening it: the exchanged token's lifetime can never
+exceed the subject token's own remaining lifetime, and its granted privilege
+is always a subset of the intersection of the subject's and the client's
+scopes. See
+[Revocation is not consulted at exchange time](api/token-exchange.md#revocation-is-not-consulted-at-exchange-time-sec-091)
+for the full write-up.

@@ -101,10 +101,14 @@ interface ClientFormFieldsProps {
   grantTypes: string[];
   redirectUris: string;
   scopes: string[];
+  postLogoutRedirectUris: string;
+  backchannelLogoutUri: string;
   onNameChange: (v: string) => void;
   onGrantTypesChange: (v: string[]) => void;
   onRedirectUrisChange: (v: string) => void;
   onScopesChange: (v: string[]) => void;
+  onPostLogoutRedirectUrisChange: (v: string) => void;
+  onBackchannelLogoutUriChange: (v: string) => void;
   idPrefix: string;
 }
 
@@ -113,10 +117,14 @@ function ClientFormFields({
   grantTypes,
   redirectUris,
   scopes,
+  postLogoutRedirectUris,
+  backchannelLogoutUri,
   onNameChange,
   onGrantTypesChange,
   onRedirectUrisChange,
   onScopesChange,
+  onPostLogoutRedirectUrisChange,
+  onBackchannelLogoutUriChange,
   idPrefix,
 }: ClientFormFieldsProps) {
   return (
@@ -162,6 +170,45 @@ function ClientFormFields({
         selected={scopes}
         onChange={onScopesChange}
       />
+
+      {/* B5 — session/logout settings */}
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-post-logout-uris`}>
+          Post-Logout Redirect URIs
+        </Label>
+        <Textarea
+          id={`${idPrefix}-post-logout-uris`}
+          value={postLogoutRedirectUris}
+          onChange={(e) => onPostLogoutRedirectUrisChange(e.target.value)}
+          placeholder={"https://app.example.com/logged-out"}
+          rows={2}
+          className="font-mono"
+          aria-label="Post-Logout Redirect URIs (one per line)"
+        />
+        <p className="text-xs text-muted-foreground">
+          Allow-list for RP-initiated logout's <code>post_logout_redirect_uri</code>{" "}
+          — separate from Redirect URIs, since this one receives a browser
+          after logout rather than an authorization code. One URI per line.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-backchannel-logout-uri`}>
+          Back-Channel Logout URI
+        </Label>
+        <Input
+          id={`${idPrefix}-backchannel-logout-uri`}
+          value={backchannelLogoutUri}
+          onChange={(e) => onBackchannelLogoutUriChange(e.target.value)}
+          placeholder="https://app.example.com/backchannel-logout"
+          autoComplete="off"
+          className="font-mono"
+        />
+        <p className="text-xs text-muted-foreground">
+          Where OIDC back-channel logout tokens are delivered. Leave blank for
+          a client that does not participate.
+        </p>
+      </div>
     </>
   );
 }
@@ -173,6 +220,8 @@ function useClientFormState() {
   const [grantTypes, setGrantTypes] = useState<string[]>(["authorization_code"]);
   const [redirectUris, setRedirectUris] = useState("");
   const [scopes, setScopes] = useState<string[]>(["openid", "profile"]);
+  const [postLogoutRedirectUris, setPostLogoutRedirectUris] = useState("");
+  const [backchannelLogoutUri, setBackchannelLogoutUri] = useState("");
   const [error, setError] = useState("");
 
   function reset() {
@@ -180,6 +229,8 @@ function useClientFormState() {
     setGrantTypes(["authorization_code"]);
     setRedirectUris("");
     setScopes(["openid", "profile"]);
+    setPostLogoutRedirectUris("");
+    setBackchannelLogoutUri("");
     setError("");
   }
 
@@ -188,6 +239,12 @@ function useClientFormState() {
     setGrantTypes(client.grant_types);
     setRedirectUris(client.redirect_uris.join("\n"));
     setScopes(client.scopes);
+    // See the OAuth2Client.post_logout_redirect_uris doc: the backend
+    // response DTO doesn't echo these back today, so this will populate the
+    // field once that gap is fixed and is a harmless no-op (empty string)
+    // until then.
+    setPostLogoutRedirectUris((client.post_logout_redirect_uris ?? []).join("\n"));
+    setBackchannelLogoutUri(client.backchannel_logout_uri ?? "");
     setError("");
   }
 
@@ -200,6 +257,10 @@ function useClientFormState() {
     setRedirectUris,
     scopes,
     setScopes,
+    postLogoutRedirectUris,
+    setPostLogoutRedirectUris,
+    backchannelLogoutUri,
+    setBackchannelLogoutUri,
     error,
     setError,
     reset,
@@ -265,6 +326,8 @@ export function OAuth2ClientsPage() {
       redirect_uris: parseUris(createForm.redirectUris),
       grant_types: createForm.grantTypes,
       scopes: createForm.scopes.length > 0 ? createForm.scopes : undefined,
+      post_logout_redirect_uris: parseUris(createForm.postLogoutRedirectUris),
+      backchannel_logout_uri: createForm.backchannelLogoutUri.trim() || undefined,
     };
     createMutation.mutate(payload);
   }
@@ -315,6 +378,10 @@ export function OAuth2ClientsPage() {
         redirect_uris: parseUris(editForm.redirectUris),
         grant_types: editForm.grantTypes,
         scopes: editForm.scopes,
+        post_logout_redirect_uris: parseUris(editForm.postLogoutRedirectUris),
+        // "" clears a previously registered URI, matching the backend's
+        // Some("") semantics — trimming to empty is deliberate, not a bug.
+        backchannel_logout_uri: editForm.backchannelLogoutUri.trim(),
       },
     });
   }
@@ -451,10 +518,14 @@ export function OAuth2ClientsPage() {
           grantTypes={createForm.grantTypes}
           redirectUris={createForm.redirectUris}
           scopes={createForm.scopes}
+          postLogoutRedirectUris={createForm.postLogoutRedirectUris}
+          backchannelLogoutUri={createForm.backchannelLogoutUri}
           onNameChange={createForm.setName}
           onGrantTypesChange={createForm.setGrantTypes}
           onRedirectUrisChange={createForm.setRedirectUris}
           onScopesChange={createForm.setScopes}
+          onPostLogoutRedirectUrisChange={createForm.setPostLogoutRedirectUris}
+          onBackchannelLogoutUriChange={createForm.setBackchannelLogoutUri}
           idPrefix="create"
         />
       </FormDialog>
@@ -475,10 +546,14 @@ export function OAuth2ClientsPage() {
           grantTypes={editForm.grantTypes}
           redirectUris={editForm.redirectUris}
           scopes={editForm.scopes}
+          postLogoutRedirectUris={editForm.postLogoutRedirectUris}
+          backchannelLogoutUri={editForm.backchannelLogoutUri}
           onNameChange={editForm.setName}
           onGrantTypesChange={editForm.setGrantTypes}
           onRedirectUrisChange={editForm.setRedirectUris}
           onScopesChange={editForm.setScopes}
+          onPostLogoutRedirectUrisChange={editForm.setPostLogoutRedirectUris}
+          onBackchannelLogoutUriChange={editForm.setBackchannelLogoutUri}
           idPrefix="edit"
         />
       </FormDialog>

@@ -767,8 +767,7 @@ where
         // reliance on UUIDv4 role-id uniqueness for cross-tenant batch
         // isolation — a same-named `role_id` in two tenants' `Vec<Uuid>` below
         // simply lands in two different inner maps and can never collide.
-        let mut grants_by_role: HashMap<Uuid, HashMap<Uuid, Vec<PermissionGrant>>> =
-            HashMap::new();
+        let mut grants_by_role: HashMap<Uuid, HashMap<Uuid, Vec<PermissionGrant>>> = HashMap::new();
         for (tenant_id, role_ids) in &grant_role_ids {
             let map = self
                 .permission_repo

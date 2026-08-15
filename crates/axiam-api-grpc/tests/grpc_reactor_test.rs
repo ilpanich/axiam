@@ -108,7 +108,10 @@ async fn setup() -> (Surreal<TestDb>, Uuid, Uuid) {
             tenant_id: tenant.id,
             username: "reactor-grpc-admin".into(),
             email: "reactor-grpc-admin@example.com".into(),
-            password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+            // Generated, never a literal. A username/password pair in source is a
+            // secret-scanner finding regardless of the value, and this fixture
+            // never needs to know what the password is.
+            password: format!("pw-{}", Uuid::new_v4()),
             metadata: None,
         })
         .await

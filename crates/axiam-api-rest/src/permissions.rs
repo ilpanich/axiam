@@ -224,8 +224,22 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     // like `users:create` etc. See `axiam_scim::auth` for the enforcement
     // code path.
     (
+        // SEC-098: the description names the password capability because the
+        // permission is strictly more powerful than `users:create` +
+        // `users:update` combined, and nothing else told the operator. RFC
+        // 7643 §4.1.1 makes `password` a writable User attribute, and
+        // `PATCH /scim/v2/Users/{id}` honours it — so a holder can set ANY
+        // user's password in the tenant, including a tenant administrator's,
+        // and then log in as them. The native admin API has no equivalent:
+        // `handlers::users::update` never writes `password_hash`. An operator
+        // granting this to an Okta or Entra integration identity is granting
+        // tenant-wide account takeover, and must know that before they grant
+        // it.
         "scim:provision",
-        "Provision/deprovision users and groups via the SCIM 2.0 endpoint",
+        "Provision/deprovision users and groups via the SCIM 2.0 endpoint. \
+         WARNING: includes setting ANY user's password in this tenant \
+         (RFC 7643 §4.1.1), including an administrator's — a capability no \
+         native users:* permission confers.",
     ),
 ];
 

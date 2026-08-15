@@ -123,6 +123,39 @@ module docs for the full statement of this property, and
 adversarial cases it's checked against (cross-tenant GET/PUT/PATCH/DELETE
 and list-by-token, not merely "no token at all").
 
+### What `scim:provision` confers — read this before granting it
+
+> **A holder of `scim:provision` can set any user's password in this tenant,
+> including a tenant administrator's, and then log in as them.**
+
+RFC 7643 §4.1.1 defines `password` as a writable `User` attribute, and
+`PATCH /scim/v2/Users/{id}` honours it. The native admin API has **no**
+equivalent: `PUT /api/v1/users/{id}` never writes a password hash, and the
+only native password writes are self-service change and reset. So this one
+permission is strictly more powerful than `users:create` + `users:update`
+combined, and step 2 of the setup below — "grant it to your provisioning
+identity" — is therefore granting tenant-wide account takeover to whatever
+external system holds that bearer token.
+
+That is the correct reading of the RFC; what matters is that you know it
+before you grant it. Two practical consequences:
+
+- Treat the SCIM bearer token as an **administrator credential**, not as an
+  integration credential. Rotate it on the same schedule and store it in the
+  same place you store an admin password.
+- Most Okta/Entra deployments federate and never push a password. If yours is
+  one of them, nothing is lost by the IdP never exercising this capability —
+  but AXIAM does not yet let you take it away, because `password` writes are
+  not behind a second permission. If that matters to your threat model, say
+  so on the issue tracker; splitting it is a small change.
+
+**Deprovisioning is immediate.** A SCIM `password` write, an `active: false`
+(via `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every
+live session **and** every OAuth2 refresh token the target holds, in addition
+to flushing the authorization decision cache. Before this was fixed
+(SEC-098), only the decision cache was flushed, so an account deactivated by
+an IdP's offboarding job kept a spendable refresh token.
+
 ### Rate limiting
 
 The whole `/scim/v2` scope sits behind **one** rate-limit bucket,

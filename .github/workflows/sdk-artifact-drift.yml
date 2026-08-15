@@ -1,0 +1,104 @@
+name: SDK Artifact Drift (cross-repo)
+
+# publishing-and-secrets.md §8 — the second half of R5.8.
+#
+# Three artifacts are authored HERE and vendored into every SDK repo:
+#   sdks/CONTRACT.md       -> <sdk repo>/CONTRACT.md
+#   sdks/openapi.json      -> <sdk repo>/openapi.json
+#   proto/axiam/v1/*.proto -> <sdk repo>/proto/axiam/v1/*.proto
+#
+# `sdk-openapi-drift.yml` and `sdk-buf-gates.yml` guard the SOURCES. Until this
+# job existed, nothing detected a stale COPY downstream — §8 names that as "the
+# single sharpest edge introduced by the multi-repo split", because a silently
+# stale proto in one SDK produces stubs that compile fine and talk to the server
+# incorrectly.
+#
+# Empirical justification: during the 2026-08-15 R5.8 pass, eight SDK repos were
+# found pinned at contract 1.17 while this repo was at 1.19 — and the plan
+# driving that pass believed they were at 1.15. The staleness AND the belief
+# about the staleness were both wrong. That is the class of unverified belief an
+# automated gate replaces.
+#
+# NOT a substitute for each SDK's own codegen drift gate. This job compares the
+# vendored *artifacts*; it cannot see an SDK whose committed *stubs* have drifted
+# from its own (perfectly current) vendored proto. axiam-php-sdk was exactly that
+# case. Both gates are needed; neither subsumes the other.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME SETUP — this job is RED until it is done, on purpose.
+# ---------------------------------------------------------------------------
+# The job needs to READ eleven other repositories. The default Actions
+# `GITHUB_TOKEN` is scoped to THIS repository and cannot, so without a token the
+# script exits 2 ("the gate could not run") rather than 0.
+#
+# That is deliberate. A scheduled staleness job that goes green when its
+# credentials are missing manufactures confidence — it reports "nothing is
+# stale" when what actually happened is "nothing was checked". Exit 2 is a
+# distinct code from exit 1 (drift found) so the two are never confused.
+#
+# To make it operational, create a fine-grained PAT with `Contents: Read-only`
+# on the eleven ilpanich/axiam-*-sdk repos and store it as the repository secret
+# SDK_SYNC_READ_TOKEN. See publishing-and-secrets.md §8.
+#
+# ---------------------------------------------------------------------------
+# Why scheduled, and not on push to main
+# ---------------------------------------------------------------------------
+# Re-vendoring is inherently a multi-repo, multi-PR operation: the moment an
+# artifact changes here, all eleven copies ARE stale and stay stale until each
+# downstream PR merges. Firing on push would therefore guarantee a red run on
+# every legitimate contract change, and a check that is red by design is a check
+# people learn to ignore. A daily run answers the question that actually
+# matters — "did a re-vendor get abandoned half-finished?" — which is the shape
+# the 1.17-vs-1.19 drift actually had.
+
+on:
+  schedule:
+    # 05:17 UTC daily. Off the hour on purpose: scheduled jobs bunched on the
+    # hour are the ones GitHub delays under load.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  # Also runs when the checker itself changes, so a broken checker is caught by
+  # the PR that breaks it rather than by the next night's run. On a PR the
+  # cross-repo token is unavailable, so this path asserts the script is
+  # syntactically sound and self-consistent, not that the fleet is in sync.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/check-sdk-artifact-drift.py'
+      - '.github/workflows/sdk-artifact-drift.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-drift:
+    name: Vendored artifacts are in sync across the SDK repos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # PR path: the token cannot read the SDK repos, so a real fleet check is
+      # impossible and pretending otherwise would be the exact failure this job
+      # exists to prevent. Check the script instead.
+      - name: Checker is well-formed (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 -m py_compile scripts/check-sdk-artifact-drift.py
+          python3 scripts/check-sdk-artifact-drift.py --help > /dev/null
+          # An unknown repo name must be rejected, not silently ignored --
+          # otherwise a typo in the repo list would quietly shrink the fleet
+          # being checked.
+          if python3 scripts/check-sdk-artifact-drift.py --repo not-a-real-sdk 2>/dev/null; then
+            echo "::error::checker accepted an unknown repo name"
+            exit 1
+          fi
+          echo "checker compiles, --help works, and rejects unknown repos"
+
+      - name: Cross-repo artifact drift check
+        if: github.event_name != 'pull_request'
+        env:
+          # Falls back to the default token so the failure mode is an explicit
+          # HTTP 404 per repo (reported by name) rather than a bare "no token".
+          SDK_DRIFT_TOKEN: ${{ secrets.SDK_SYNC_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+        run: python3 scripts/check-sdk-artifact-drift.py

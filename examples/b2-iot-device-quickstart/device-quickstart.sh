@@ -94,11 +94,24 @@ log "client_id=${CLIENT_ID}"
 # ---------------------------------------------------------------------------
 # 2. Device side: start the flow. Unauthenticated — the device holds no
 #    credential of its own yet, that's the whole point of RFC 8628.
+#
+#    `tenant_id` is a required QUERY parameter on both /oauth2/device_authorization
+#    and /oauth2/token (both take `web::Query<TenantQuery>`); omitting it gets
+#    actix's own `Query deserialize error: missing field \`tenant_id\`` as a 400
+#    before any handler code runs. A real headless device has this baked into
+#    its config — resolved here from the admin session, which is the closest
+#    equivalent this script has.
 # ---------------------------------------------------------------------------
-log "device: POST /oauth2/device_authorization"
+TENANT_ID=$(curl -sS -b "${ADMIN_JAR}" "${AXIAM_URL}/api/v1/auth/me" | jq -r '.tenant_id')
+if [ "${TENANT_ID}" = "null" ] || [ -z "${TENANT_ID}" ]; then
+  fail "could not resolve tenant_id from /api/v1/auth/me"
+fi
+log "device: tenant_id=${TENANT_ID}"
+
+log "device: POST /oauth2/device_authorization?tenant_id=${TENANT_ID}"
 DEVICE_AUTH_TMP="$(mktemp)"
 DEVICE_AUTH_STATUS=$(curl -sS -o "${DEVICE_AUTH_TMP}" -w '%{http_code}' \
-  -X POST "${AXIAM_URL}/oauth2/device_authorization" \
+  -X POST "${AXIAM_URL}/oauth2/device_authorization?tenant_id=${TENANT_ID}" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "client_id=${CLIENT_ID}" \
   --data-urlencode "scope=openid")
@@ -136,9 +149,6 @@ ok "human approved ${USER_CODE}"
 #    login's /api/v1/auth/me the same way a real device's operator tooling
 #    would (baked into the device's config, in practice).
 # ---------------------------------------------------------------------------
-TENANT_ID=$(curl -sS -b "${ADMIN_JAR}" "${AXIAM_URL}/api/v1/auth/me" | jq -r '.tenant_id')
-[ "${TENANT_ID}" != "null" ] || fail "could not resolve tenant_id from /api/v1/auth/me"
-
 log "device: polling POST /oauth2/token?tenant_id=${TENANT_ID}"
 TOKEN_JSON=""
 for attempt in $(seq 1 15); do

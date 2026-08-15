@@ -155,10 +155,30 @@ jobs:
       # why this override is scoped to CI smoke-testing only.
       - name: Bring up the e2e stack (+ gRPC port override for b3)
         run: |
+          # Three secrets are mandatory in a release build; each one unset makes
+          # the server fail closed and panic on startup with exit 101, long
+          # before any example runs. These mirror ci.yml's E2E job exactly —
+          # omitting them is why this job's first runs never got past step 1.
+          #   - the Ed25519 JWT signing keypair (load_config asserts non-empty)
+          #   - AXIAM__AMQP__SIGNING_KEY (SEC-022/SECHRD-08/D-05c)
+          #   - AXIAM__AUTH__PEPPER (OBS-1; client secrets are a keyed HMAC with
+          #     no unkeyed fallback)
+          # A fresh set per run is correct: the stack starts from an empty
+          # database, so nothing outlives the run.
+          AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(openssl genpkey -algorithm ed25519)"
+          AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(printf '%s' "$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" | openssl pkey -pubout)"
+          export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM AXIAM__AUTH__JWT_PUBLIC_KEY_PEM
+          AXIAM__AMQP__SIGNING_KEY="$(openssl rand -hex 32)"
+          export AXIAM__AMQP__SIGNING_KEY
+          AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
+          export AXIAM__AUTH__PEPPER
+          # --build for the same reason ci.yml gives (W8): a pre-built registry
+          # image would not contain this PR's source and would produce
+          # false-green example runs.
           docker compose \
             -f docker/docker-compose.e2e.yml \
             -f examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml \
-            up -d --wait --wait-timeout 180
+            up -d --build --wait --wait-timeout 300
 
       - name: Seed org/tenant/admin
         run: ./scripts/e2e-bootstrap.sh

@@ -79,6 +79,30 @@ pub trait ReactorTransport: Send + Sync {
         event: &'static str,
         payload: serde_json::Value,
     ) -> impl std::future::Future<Output = Result<(), DispatchFailure>> + Send;
+
+    /// Whether this transport can actually deliver anything (SEC-101).
+    ///
+    /// `false` only for [`UnavailableReactorTransport`]. The REST layer reads
+    /// it through [`axiam_core::models::reactor::DynReactorGate`] and refuses
+    /// to accept a reactor registration while it is false, because
+    /// registering one today is a self-inflicted, tenant-wide, *complete*
+    /// login outage created by a supported admin action: the transport fails
+    /// every dispatch, `login.post_auth` defaults to `fail_closed`, and the
+    /// only warning is a `tracing::warn!` emitted once at boot, for every
+    /// deployment including the majority that will never register a reactor
+    /// — which is the classic recipe for a warning nobody reads.
+    ///
+    /// This is a statement about the transport's *capability*, not its
+    /// current health. A merged transport whose broker is momentarily down
+    /// returns `true` and lets each registration's `failure_policy` decide,
+    /// which is the whole design. Returning `false` on a blip would turn a
+    /// broker outage into a registration outage.
+    ///
+    /// Defaults to `true`, so a real transport says nothing and a test double
+    /// needs no change.
+    fn can_dispatch(&self) -> bool {
+        true
+    }
 }
 
 /// The transport a deployment has until the lapin one is merged.
@@ -139,6 +163,11 @@ impl ReactorTransport for UnavailableReactorTransport {
         Err(DispatchFailure::Transport(
             REACTOR_TRANSPORT_UNAVAILABLE.to_string(),
         ))
+    }
+
+    /// SEC-101 — the one implementation that answers `false`.
+    fn can_dispatch(&self) -> bool {
+        false
     }
 }
 

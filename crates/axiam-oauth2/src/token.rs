@@ -650,7 +650,12 @@ where
     /// configured binding, the resource servers were told to expect it, and
     /// the one request that arrives without a certificate would be the one
     /// that gets a bearer token.
-    fn certificate_binding_for(
+    /// SEC-096: `pub` because the token-exchange and uma-ticket grants are
+    /// dispatched from `axiam-api-rest` rather than through
+    /// [`Self::exchange`], and they must reach the same decision. A second
+    /// copy of this rule in the handler is how one of the two ends up
+    /// silently issuing an unbound token.
+    pub fn certificate_binding_for(
         &self,
         client: &OAuth2Client,
         ctx: &TokenRequestContext,
@@ -691,22 +696,6 @@ where
         }
 
         Ok(cnf)
-    }
-
-    /// RFC 9449 §5: the `token_type` a response should carry.
-    ///
-    /// `DPoP` when the token is DPoP-bound, `Bearer` otherwise — including for
-    /// a certificate-bound token, which RFC 8705 leaves as a bearer token at
-    /// the HTTP layer (the constraint is enforced by the TLS connection, not by
-    /// a different authorization scheme).
-    ///
-    /// A client that has never heard of DPoP therefore sees `Bearer`, exactly
-    /// as it always has. That is the property the whole design turns on.
-    fn token_type_for(cnf: Option<&axiam_auth::token::CnfClaim>) -> String {
-        match cnf {
-            Some(c) if c.dpop_thumbprint().is_some() => crate::dpop::TOKEN_TYPE_DPOP.to_owned(),
-            _ => crate::dpop::TOKEN_TYPE_BEARER.to_owned(),
-        }
     }
 
     /// Client-credentials for a **service account** (`sa_…` client id).
@@ -1077,7 +1066,7 @@ where
         let cnf = self.certificate_binding_for(&client, ctx)?;
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
-        let token_type = Self::token_type_for(cnf.as_ref());
+        let token_type = crate::dpop::token_type_for(cnf.as_ref());
         // X1 — the code has already been consumed at this point, so a veto
         // costs the caller the code. That is the correct order: the code is
         // single-use and PKCE-verified, and leaving it spendable while an
@@ -1358,7 +1347,7 @@ where
         let cnf = self.certificate_binding_for(&client, ctx)?;
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
-        let token_type = Self::token_type_for(cnf.as_ref());
+        let token_type = crate::dpop::token_type_for(cnf.as_ref());
         // X1. Deliberately measured INSIDE `token_mint_us` rather than as its
         // own stage: this is the number the R2.4 bench cell compares against an
         // unhooked run, and splitting it out would let the hooked and unhooked
@@ -1515,7 +1504,7 @@ where
         let cnf = self.certificate_binding_for(&client, ctx)?;
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
-        let token_type = Self::token_type_for(cnf.as_ref());
+        let token_type = crate::dpop::token_type_for(cnf.as_ref());
         // X1 — a refresh mints a new access token, so it is an issuance and it
         // is hooked. Enrichment is re-derived here rather than copied from the
         // token being refreshed, for the same reason `cnf` is: a claim a

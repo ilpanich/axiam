@@ -260,6 +260,30 @@ pub trait ReactorGate: Send + Sync {
         event: &'static str,
         payload: serde_json::Value,
     ) -> impl std::future::Future<Output = ReactorOutcome> + Send;
+
+    /// Whether a registration made now could ever be dispatched to (SEC-101).
+    ///
+    /// The REST layer refuses `POST`/`PUT /api/v1/reactors` while this is
+    /// `false`, because a registration that cannot be reached resolves through
+    /// its own `failure_policy` on every dispatch — and `login.post_auth`,
+    /// `user.pre_create`, `user.pre_update` and `grant.pre_assign` all default
+    /// to `fail_closed`. Accepting the registration therefore hands a tenant
+    /// admin a complete, self-inflicted login outage through a supported admin
+    /// action, with the only warning emitted at boot, hours earlier, in a log
+    /// nobody is reading at the time.
+    ///
+    /// The fail-closed *posture* is right and is not what this changes: a
+    /// registered fail-closed check that silently does nothing is worse. What
+    /// changes is that the refusal now happens at the moment of the action
+    /// that causes the consequence, where it can be explained.
+    ///
+    /// Defaults to `true`. [`NoopReactorGate`] keeps that default deliberately:
+    /// it runs no reactors at all, so a registration under it is inert rather
+    /// than dangerous, and refusing would break every deployment and test that
+    /// composes it.
+    fn can_dispatch(&self) -> bool {
+        true
+    }
 }
 
 /// The object-safe half of [`ReactorGate`].
@@ -284,6 +308,9 @@ pub trait DynReactorGate: Send + Sync {
         event: &'static str,
         payload: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>>;
+
+    /// Object-safe [`ReactorGate::can_dispatch`] (SEC-101).
+    fn can_dispatch_dyn(&self) -> bool;
 }
 
 impl<G: ReactorGate> DynReactorGate for G {
@@ -294,6 +321,10 @@ impl<G: ReactorGate> DynReactorGate for G {
         payload: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
         Box::pin(self.intercept(tenant_id, event, payload))
+    }
+
+    fn can_dispatch_dyn(&self) -> bool {
+        self.can_dispatch()
     }
 }
 
@@ -312,6 +343,10 @@ impl ReactorGate for SharedReactorGate {
         payload: serde_json::Value,
     ) -> ReactorOutcome {
         (**self).intercept_dyn(tenant_id, event, payload).await
+    }
+
+    fn can_dispatch(&self) -> bool {
+        (**self).can_dispatch_dyn()
     }
 }
 

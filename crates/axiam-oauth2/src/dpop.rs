@@ -76,6 +76,26 @@ pub const TOKEN_TYPE_DPOP: &str = "DPoP";
 /// of every unbound token it will ever issue.
 pub const TOKEN_TYPE_BEARER: &str = "Bearer";
 
+/// RFC 9449 §5: the `token_type` a response should carry for a given `cnf`.
+///
+/// `DPoP` when the token is DPoP-bound, `Bearer` otherwise — including for a
+/// certificate-bound token, which RFC 8705 leaves as a bearer token at the HTTP
+/// layer (the constraint is enforced by the TLS connection, not by a different
+/// authorization scheme).
+///
+/// A client that has never heard of DPoP therefore sees `Bearer`, exactly as it
+/// always has. That is the property the whole design turns on.
+///
+/// A free function rather than a `TokenService` associated one (SEC-096):
+/// `TokenService` serves three grants and `TokenExchangeService` serves a
+/// fourth, and the answer must not depend on which of them minted the token.
+pub fn token_type_for(cnf: Option<&axiam_auth::token::CnfClaim>) -> String {
+    match cnf {
+        Some(c) if c.dpop_thumbprint().is_some() => TOKEN_TYPE_DPOP.to_owned(),
+        _ => TOKEN_TYPE_BEARER.to_owned(),
+    }
+}
+
 /// How far `iat` may be from now, in either direction, for a proof to be fresh
 /// (RFC 9449 §4.3 step 12 leaves the window to the server).
 ///

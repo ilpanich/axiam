@@ -493,9 +493,26 @@ pub fn unverified_issuer_of(token: &str) -> Option<String> {
 /// * **`ext_exchange` may be set** (X4), naming the foreign issuer whose token
 ///   bought this one. Both exchange paths refuse a subject token that carries
 ///   it, which is what makes the exchange non-transitive.
+/// * **`cnf` may be set** (SEC-096), binding the *result* to the credential the
+///   exchanging client proved at the token endpoint. See the note on the
+///   parameter below for why this is not the subject token's `cnf`.
 ///
 /// Everything else — issuer, algorithm, key handling — is identical, so an
 /// exchanged token validates through exactly the same path as any other.
+///
+/// # `cnf` and who it names
+///
+/// An exchange does **not** inherit the subject token's sender constraint. RFC
+/// 8705 §3 binds a token to the certificate presented *at the token endpoint by
+/// the party the token is for*; the exchanging client is a different party from
+/// the subject, so copying the subject's `cnf` would bind the new token to a
+/// certificate its holder does not have.
+///
+/// What the caller passes here is derived from what **this** request proved —
+/// the exchanging client's own verified client certificate or DPoP proof,
+/// through the same `certificate_binding_for` that the three ordinary grants
+/// use. Passing `None` reproduces the pre-SEC-096 bytes exactly, which is what
+/// every client that asked for no binding still gets.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_exchanged_token(
     subject: &str,
@@ -509,6 +526,7 @@ pub fn issue_exchanged_token(
     expires_at: i64,
     act: Option<ActClaim>,
     ext_exchange: Option<ExtExchangeClaim>,
+    cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     if expires_at <= now {
@@ -540,16 +558,9 @@ pub fn issue_exchanged_token(
         // authorised it.
         permissions: None,
         ext_exchange,
-        // An exchange does not inherit the subject token's sender constraint,
-        // and must not invent one. RFC 8705 §3 binds a token to the
-        // certificate presented *at the token endpoint by the party the token
-        // is for*; the exchanging client is a different party from the subject,
-        // so copying the subject's `cnf` would bind the new token to a
-        // certificate its holder does not have — breaking every request — and
-        // minting a fresh one would assert a constraint the exchange never
-        // verified. Sender-constrained exchange is a distinct piece of work,
-        // deliberately not smuggled in here.
-        cnf: None,
+        // SEC-096: the exchanging client's OWN constraint, never the subject
+        // token's — see the function's doc comment.
+        cnf,
         ext: None,
     };
 
@@ -684,6 +695,7 @@ pub fn issue_rpt(
     permissions: Vec<RptPermission>,
     lifetime_secs: i64,
     config: &AuthConfig,
+    cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
 
@@ -710,7 +722,11 @@ pub fn issue_rpt(
         // fact belongs to *that* token and its audit record; re-stamping it
         // here would attribute this decision to a provenance it does not have.
         ext_exchange: None,
-        cnf: None,
+        // SEC-096: the RPT carries the constraint the *redeeming client*
+        // proved at the token endpoint, on the same terms as every other
+        // grant. `None` for a client that registered no binding, which
+        // reproduces the pre-SEC-096 bytes.
+        cnf,
         ext: None,
     };
 

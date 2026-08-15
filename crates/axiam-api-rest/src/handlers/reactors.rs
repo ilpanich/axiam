@@ -178,6 +178,62 @@ pub struct ReactorEventDescriptor {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// SEC-101 — refuse a registration while the composed transport cannot deliver
+/// to it.
+///
+/// Registering a reactor today is a **self-service, tenant-wide, complete
+/// login outage**. `UnavailableReactorTransport` fails every dispatch;
+/// `login.post_auth`, `user.pre_create`, `user.pre_update` and
+/// `grant.pre_assign` all default to `fail_closed`; so the first login after
+/// the registration is denied, and so is every one after that. The only thing
+/// standing between an operator and that today is one `tracing::warn!` emitted
+/// once at boot — for every deployment, including the overwhelming majority
+/// that will never register a reactor, which is how a warning becomes a line
+/// that is filtered out. The action that causes the outage happens hours or
+/// weeks later, in an admin UI that gives no indication anything is wrong.
+///
+/// The fail-closed posture itself is correct and is not changed here: a
+/// registered fail-closed fraud check that silently did nothing would be
+/// worse, and is the failure mode reactors exist to prevent. What changes is
+/// *when* the operator is told — at the point of the action, in the response
+/// to it, instead of in a boot log.
+///
+/// Both modes are refused. `intercept` for the reason above; `listen` because
+/// `ReactorTransport::publish_listen` has no caller in the tree
+/// (`run_chain` filters listeners out and `intercept` returns early when the
+/// interceptor list is empty), so a listen registration would receive nothing
+/// — the inverse of its contract. Refusing is the honest answer until the
+/// fan-out exists.
+///
+/// 503 rather than 400: nothing is wrong with the request. The dependency the
+/// resource needs is absent from this build, which is exactly what
+/// `AxiamError::ServiceUnavailable` means everywhere else in AXIAM.
+/// `would_be_enabled` is the merged result, not the request: an operator must
+/// always be able to **disable** or delete a registration, especially when the
+/// transport is missing, so only a write that would leave an enabled
+/// registration in place is refused. `DELETE` is never refused for the same
+/// reason.
+fn require_dispatchable_transport<C: Connection + Clone>(
+    state: &AppState<C>,
+    would_be_enabled: bool,
+) -> Result<(), AxiamApiError> {
+    use axiam_core::models::reactor::ReactorGate;
+
+    if !would_be_enabled || state.reactor_gate.can_dispatch() {
+        return Ok(());
+    }
+    Err(axiam_core::error::AxiamError::ServiceUnavailable(
+        "the AMQP reactor transport is not implemented in this build, so a registered \
+         reactor could never be reached. Registering one would apply its failure_policy \
+         to every dispatch instead — and login.post_auth, user.pre_create, \
+         user.pre_update and grant.pre_assign all default to fail_closed, so the \
+         registration would deny those operations for this tenant. Refusing rather than \
+         accepting a registration that causes an outage."
+            .into(),
+    )
+    .into())
+}
+
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     axiam_core::error::AxiamError::Validation {
         message: msg.into(),
@@ -245,6 +301,9 @@ pub async fn create<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+
+    // SEC-101: before anything is validated or written.
+    require_dispatchable_transport(state.get_ref(), req.enabled)?;
 
     // Validate the timeout that will actually be stored, not the one the
     // request happened to carry — an omitted value still has to be in range,
@@ -385,6 +444,12 @@ pub async fn update<C: Connection + Clone>(
     let merged_events = req.events.clone().unwrap_or_else(|| current.events.clone());
     let merged_mode = req.mode.unwrap_or(current.mode);
     let merged_timeout = req.timeout_ms.unwrap_or(current.timeout_ms);
+    let merged_enabled = req.enabled.unwrap_or(current.enabled);
+
+    // SEC-101, on the merged result: an update that leaves the registration
+    // enabled is refused while the transport cannot deliver, and one that
+    // disables it is always allowed — that is the operator's way out.
+    require_dispatchable_transport(state.get_ref(), merged_enabled)?;
 
     validate_registration(&merged_name, &merged_events, merged_mode, merged_timeout)
         .map_err(|e| validation_err(e.to_string()))?;

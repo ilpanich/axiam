@@ -25,8 +25,12 @@
 //!   2. A per-attempt nonce is read back **after** the commit, in a query of
 //!      its own; only the caller whose nonce survived reports a consume. It
 //!      asks the engine for nothing, so it catches a conflict the engine
-//!      missed, and it must stay outside the transaction — inside one, every
-//!      racer sees its own write and believes it won (`SCHEMA_V31`).
+//!      missed — unless the two commits interleave around the read-back (A
+//!      commits, A reads back and wins, *then* B commits and B's read-back also
+//!      wins), so the claim this layer supports is "a double consume needs two
+//!      independent failures", not "the nonce catches any conflict the engine
+//!      misses" (SEC-105). It must stay outside the transaction — inside one,
+//!      every racer sees its own write and believes it won (`SCHEMA_V31`).
 //!
 //! RFC 9126 §2.2 makes `request_uri` one-time-use precisely because a
 //! replayable one is a replayable authorization request. On `kv-mem` the

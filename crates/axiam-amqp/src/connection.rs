@@ -16,6 +16,31 @@ use crate::error::AmqpError;
 /// connection that fails because a mount is missing looks identical to one
 /// that fails because the broker is down, unless the error says which — and an
 /// operator debugging a cert mount at 3am is exactly who this message is for.
+///
+/// # No protocol-version floor is set here, and none can be (SEC-106)
+///
+/// CLAUDE.md's standard is "TLS 1.3 minimum for all external communication",
+/// and this connection crosses a service boundary by design. It is **not**
+/// pinned to 1.3, and that is a limitation of the dependency rather than a
+/// choice: lapin 4.10's only TLS-carrying entry point is
+/// `Connection::connect_with_config(uri, props, OwnedTLSConfig, runtime)`, and
+/// `OwnedTLSConfig` (`tcp-stream 0.34`) has exactly two fields — `identity`
+/// and `cert_chain`. There is no seam for a rustls `ClientConfig`, so a client
+/// -side floor would mean reimplementing `AMQPUriTcpExt::connect_with_config`
+/// against `tcp_stream::TcpStream::into_rustls` and owning lapin's handshake
+/// sequencing. rustls 0.23's default version set is TLS 1.2 + 1.3, so a broker
+/// offering only 1.2 is currently accepted.
+///
+/// **Enforce the floor on the broker**, which is where it is enforceable for
+/// this link and where it also covers every other AMQP client:
+///
+/// ```erlang
+/// %% rabbitmq.conf / advanced.config
+/// ssl_options.versions.1 = tlsv1.3
+/// ```
+///
+/// `docs/deployment/README.md` states this as a MUST-level deployment
+/// requirement. Revisit here if lapin gains a connector hook.
 fn build_tls_config(config: &AmqpConfig) -> Result<OwnedTLSConfig, AmqpError> {
     let cert_chain = match &config.tls.ca_cert_path {
         Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {

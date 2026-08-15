@@ -25,6 +25,34 @@
 //! this property adversarially (cross-tenant GET/PUT/PATCH/DELETE/list by
 //! UUID, not merely "no token").
 //!
+//! # What `scim:provision` actually confers (SEC-098) — read before granting
+//!
+//! **A holder of `scim:provision` can set any user's password in this tenant,
+//! including a tenant administrator's, and then log in as them.**
+//!
+//! RFC 7643 §4.1.1 defines `password` as a writable User attribute and
+//! `PATCH /scim/v2/Users/{id}` honours it ([`crate::users::patch`]). The
+//! native admin API has no equivalent — `handlers::users::update` never
+//! writes `password_hash`, and the only native password writes are
+//! self-service change and reset inside `AuthService`. So this single
+//! permission is strictly more powerful than `users:create` +
+//! `users:update` combined, and the provisioning guide's own advice ("grant
+//! it to your Okta/Entra integration identity") is therefore advice to grant
+//! tenant-wide account takeover to an external system.
+//!
+//! That is the correct reading of the RFC and it is not being changed here;
+//! what was wrong was that nothing said it. If a deployment federates and
+//! never pushes a password — which is most Okta/Entra deployments — the
+//! integration identity does not need this capability and splitting it behind
+//! a second permission is a reasonable follow-on.
+//!
+//! Two consequences that ARE fixed rather than documented, in
+//! [`crate::users`]: a SCIM password write, an `active: false`, and a
+//! `DELETE /Users/{id}` each revoke every live session and OAuth2 refresh
+//! token for the target. Before SEC-098 they flushed only the authorization
+//! *decision* cache, so a password rotated to lock out a compromised account
+//! left the attacker's session and refresh token spendable.
+//!
 //! # Principal — a note for operators (see `docs/api/scim-provisioning.md`)
 //!
 //! The bearer principal is deliberately whichever tenant-scoped AXIAM

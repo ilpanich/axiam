@@ -42,7 +42,9 @@
 //! redirect-bypass defense this module exists to provide (D-01b: "re-run
 //! the full SSRF guard against the redirect target").
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Maximum number of redirect hops [`guarded_fetch`] will follow before
@@ -76,6 +78,142 @@ pub enum SsrfError {
 /// read cap downstream; this is the coarse first line of defence for all four
 /// federation fetch types.
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// SEC-107 — the operator's same-network exception
+// ---------------------------------------------------------------------------
+
+/// The environment variable that names the exception hosts.
+///
+/// Comma-separated **host names or literal IPs**, matched exactly. Unset or
+/// empty — the default, and what every deployment gets until an operator
+/// decides otherwise — means the address rule admits no exceptions at all.
+pub const ALLOWED_HOSTS_ENV: &str = "AXIAM__PKI__SSRF_ALLOWED_HOSTS";
+
+static ALLOWED_HOSTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+
+/// Install the operator's SSRF host exception list (SEC-107).
+///
+/// # Why an exception exists at all
+///
+/// The address rule is a *network-topology* control being used as a *trust*
+/// control, and in real deployments the two diverge: a Kubernetes-internal
+/// Keycloak or Entra proxy at `10.x` is a perfectly legitimate IdP, and so is
+/// an internal webhook consumer, an internal MDS mirror, or an air-gapped
+/// deployment where *everything* is RFC1918. With no exception at all, an
+/// operator's only recourse is to run AXIAM outside the guard's assumptions or
+/// to patch the binary — and a guard that gets patched around protects nobody.
+/// It has already cost this project measurable work (R5.4's cross-vendor
+/// Keycloak test cannot use the containerized server for exactly this reason).
+///
+/// # Why it is a host list and not a switch or a CIDR range
+///
+/// A boolean `SSRF_ALLOW_PRIVATE=true` is the `verify_peer: false` of this
+/// module: it appears in a dev compose file, works, and travels unchanged into
+/// production. A CIDR exception can be *widened by a DNS answer* — allow
+/// `10.0.0.0/8` and any hostname an admin can set now reaches anything in it.
+/// A host exception cannot: the operator names the exact destination they
+/// intend to reach, and a DNS answer for some *other* host is still blocked.
+///
+/// # The four properties that keep it from being a hole
+///
+/// 1. **Default-empty.** Nothing is exempt unless this is called with a
+///    non-empty list. It is a `OnceLock`, so it is set once at composition and
+///    cannot be re-armed later by anything.
+/// 2. **Exact match only.** ASCII-lowercased equality — no wildcards, no
+///    suffix matching, no "ends with .internal". `*.corp` cannot be spelled.
+/// 3. **First hop only.** Redirect targets are always validated strictly, for
+///    the reason the module docs give about `allow_private`: a `Location`
+///    header is attacker-influenced response data, not the URL the operator
+///    chose to trust.
+/// 4. **The metadata services stay unreachable** — [`is_never_allowed`]. An
+///    operator asking for their `10.x` IdP is not asking for
+///    `169.254.169.254`, and an allowlisted host whose DNS is poisoned onto a
+///    metadata endpoint is exactly the attack this control would otherwise
+///    re-open. That includes SEC-094's IPv4-mapped spelling, because the
+///    canonicalisation runs before this check, not after it.
+///
+/// Returns the number of entries installed. Calling it twice is a no-op on the
+/// second call (the `OnceLock` keeps the first list), which is deliberate:
+/// re-arming a security exception at runtime is not a feature.
+pub fn set_allowed_hosts<I: IntoIterator<Item = String>>(hosts: I) -> usize {
+    let set: BTreeSet<String> = hosts
+        .into_iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    let _ = ALLOWED_HOSTS.set(set);
+    allowed_hosts().len()
+}
+
+/// Parse the comma-separated [`ALLOWED_HOSTS_ENV`] form.
+pub fn parse_allowed_hosts(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+/// The installed exception list. Empty until [`set_allowed_hosts`] is called.
+pub fn allowed_hosts() -> &'static BTreeSet<String> {
+    static EMPTY: OnceLock<BTreeSet<String>> = OnceLock::new();
+    ALLOWED_HOSTS
+        .get()
+        .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+}
+
+/// Whether `host` is one the operator explicitly named (SEC-107).
+fn host_is_allowlisted(host: &str) -> bool {
+    let set = allowed_hosts();
+    !set.is_empty() && set.contains(&host.trim().to_ascii_lowercase())
+}
+
+/// Addresses that stay blocked **even for an allowlisted host** (SEC-107).
+///
+/// The exception exists so an operator can reach their own internal IdP. It
+/// does not exist so a poisoned DNS answer for that IdP's name can reach the
+/// cloud metadata service, which is the one destination on the private-address
+/// map that turns SSRF into credential theft. Each entry below is a metadata
+/// endpoint or a transition encoding that can name one:
+///
+/// | Address | Who |
+/// |---|---|
+/// | `169.254.0.0/16` | AWS / GCP / Azure IMDS (`169.254.169.254`) — the whole link-local range, because `169.254.170.2` (ECS task roles) is in it too |
+/// | `fe80::/10` | the IPv6 link-local equivalent |
+/// | `fd00:ec2::254` | AWS IMDS over IPv6 |
+/// | `100.100.100.200` | Alibaba Cloud metadata |
+/// | `192.0.0.192` | Oracle Cloud metadata |
+/// | `::/96` | the deprecated IPv4-compatible encoding — nothing legitimate resolves to it, and it is a second spelling of everything above |
+///
+/// Canonicalisation happens in [`is_disallowed_ip`]'s caller path *before*
+/// this runs, so `::ffff:169.254.169.254` is classified as the v4 address it
+/// denotes and is refused here too — SEC-094 is not re-opened by SEC-107.
+fn is_never_allowed(ip: IpAddr) -> bool {
+    let canonical = match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => ip,
+        },
+        v4 => v4,
+    };
+    match canonical {
+        IpAddr::V4(v4) => {
+            v4.is_link_local()
+                || v4 == Ipv4Addr::new(100, 100, 100, 200)
+                || v4 == Ipv4Addr::new(192, 0, 0, 192)
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // fe80::/10
+            (s[0] & 0xffc0 == 0xfe80)
+                // ::/96, including :: and ::1 — the deprecated
+                // IPv4-compatible form, which `to_ipv4_mapped` does not fold.
+                || is_ipv4_compatible_v6(v6)
+                // fd00:ec2::254 — AWS IMDS over IPv6, exactly.
+                || v6 == "fd00:ec2::254".parse::<Ipv6Addr>().expect("literal")
+        }
+    }
+}
 
 /// Returns `true` for IPv4 addresses that must never be contacted from a
 /// server-side outbound fetch (SEC-094).
@@ -229,6 +367,13 @@ fn is_ipv4_compatible_v6(v6: Ipv6Addr) -> bool {
 /// exists solely to preserve the pre-existing loopback mock-server
 /// integration-test seam (mirrors `JwksCache::new_allow_private_networks`);
 /// it MUST be `false` in production code paths.
+///
+/// SEC-107: a host the operator named through [`set_allowed_hosts`] is also
+/// exempt from the address rule — but only from the *address* rule, only on
+/// this hop, and never for a metadata endpoint ([`is_never_allowed`]). Every
+/// use of the exception is logged at WARN with the host and the address it
+/// resolved to, so a poisoned answer for an allowlisted name leaves a record
+/// rather than passing silently.
 pub async fn resolve_and_pick(
     host: &str,
     port: u16,
@@ -244,8 +389,34 @@ pub async fn resolve_and_pick(
         return Err(SsrfError::ResolveFailed);
     }
 
-    if !allow_private && addrs.iter().any(|ip| is_disallowed_ip(*ip)) {
-        return Err(SsrfError::Blocked);
+    if allow_private {
+        return Ok(addrs[0]);
+    }
+
+    if let Some(bad) = addrs.iter().find(|ip| is_disallowed_ip(**ip)) {
+        // The exception is evaluated only once the strict rule has already
+        // said no, so an allowlisted host that resolves to a public address
+        // costs nothing and logs nothing.
+        if !host_is_allowlisted(host) {
+            return Err(SsrfError::Blocked);
+        }
+        if let Some(forbidden) = addrs.iter().find(|ip| is_never_allowed(**ip)) {
+            tracing::error!(
+                host,
+                address = %forbidden,
+                "SSRF: {host} is on {ALLOWED_HOSTS_ENV} but resolved to a cloud metadata \
+                 endpoint; refusing. An allowlist entry exempts a host from the \
+                 private-address rule, never from this one — treat this as a possible \
+                 DNS poisoning attempt against a trusted name."
+            );
+            return Err(SsrfError::Blocked);
+        }
+        tracing::warn!(
+            host,
+            address = %bad,
+            "SSRF: allowing a non-routable address because {host} is named in \
+             {ALLOWED_HOSTS_ENV}"
+        );
     }
 
     Ok(addrs[0])

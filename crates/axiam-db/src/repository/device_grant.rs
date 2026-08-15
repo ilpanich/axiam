@@ -30,8 +30,13 @@
 //!   2. A per-attempt nonce is read back **after** the commit, in a query of
 //!      its own, and only the caller whose nonce survived reports a redemption.
 //!      That layer asks the engine for nothing, so it catches a conflict the
-//!      engine missed. It must stay outside the transaction: inside it every
-//!      racer sees its own write and believes it won (`SCHEMA_V31`).
+//!      engine missed — unless the two commits interleave around the read-back
+//!      (A commits, A reads back and wins, *then* B commits and B's read-back
+//!      also wins), which is why the honest claim is "a double redemption needs
+//!      two independent failures" rather than "the nonce catches any conflict
+//!      the engine misses" (SEC-105). It must stay outside the transaction:
+//!      inside it every racer sees its own write and believes it won
+//!      (`SCHEMA_V31`).
 //!
 //! What is at stake if both fail: one user approval minting two token sets,
 //! on a flow whose normal shape is a device polling on a short interval and

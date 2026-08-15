@@ -781,6 +781,48 @@ rest.
 An `amqps://` connection that fails verification is an error. It does not
 retry in the clear.
 
+### You MUST pin TLS 1.3 on the broker (SEC-106)
+
+AXIAM's stated standard is TLS 1.3 minimum for all external communication, and
+the broker link is external by design — six SDKs consume it directly. **The
+AXIAM client cannot enforce that floor**, and this is a dependency limitation
+rather than an oversight: lapin's only TLS-carrying entry point takes an
+`OwnedTLSConfig` with exactly two fields (an identity and a certificate chain)
+and no seam for a rustls `ClientConfig`, so there is nowhere to set a minimum
+version without reimplementing lapin's handshake. rustls's default version set
+is TLS 1.2 **and** 1.3, so a broker that offers only 1.2 is accepted today.
+
+Set the floor on RabbitMQ, where it is enforceable and where it also covers
+every other client of the same broker:
+
+```ini
+# rabbitmq.conf
+ssl_options.versions.1 = tlsv1.3
+```
+
+Verify it from outside the cluster:
+
+```bash
+# must succeed
+openssl s_client -connect rabbitmq:5671 -tls1_3 </dev/null
+# must fail
+openssl s_client -connect rabbitmq:5671 -tls1_2 </dev/null
+```
+
+### A supplied CA bundle is ADDED to the platform roots, not substituted
+
+`AXIAM__AMQP__TLS__CA_CERT_PATH` does **not** narrow trust to your CA. The
+bundle is added on top of the platform verifier's existing root set
+(`tcp-stream`'s rustls backend calls `add_parsable_certificates`), so after
+setting it, a certificate for the broker's hostname issued by any publicly
+trusted CA is still accepted. The trust set got wider, not narrower.
+
+If you need it genuinely restricted to your CA, do it in the container's
+platform trust store and leave the variable unset — or, better, authenticate
+the broker with **mutual TLS** (`AXIAM__AMQP__TLS__CLIENT_CERT_PATH` +
+`..._KEY_PATH`), which is a stronger statement than root pinning and is what
+the `rabbitmq-broker-tls` Secret above is already shaped for.
+
 ### Dev, e2e and bench stay plaintext, deliberately
 
 `docker/docker-compose.dev.yml`, the e2e stack and the benchmark target still
@@ -806,7 +848,7 @@ refuses to boot, which is easy to misread as an unrelated infrastructure fault.
 | Variable | Default | Meaning |
 |---|---|---|
 | `AXIAM__AMQP__URL` | `amqp://localhost:5672` | `amqps://` selects TLS (port 5671). |
-| `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA. Unset = system roots. |
+| `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA, **added to** the platform roots (not substituted — see above). Unset = platform roots only. |
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__ALLOW_PLAINTEXT` | `false` | Permit `amqp://` in a release build. |

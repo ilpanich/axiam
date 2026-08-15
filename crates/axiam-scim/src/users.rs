@@ -526,7 +526,7 @@ pub async fn replace<C: Connection + Clone>(
             UpdateUser {
                 username: Some(req.user_name.clone()),
                 email: Some(email),
-                status: Some(status),
+                status: Some(status.clone()),
                 metadata: Some(metadata),
                 ..Default::default()
             },
@@ -541,6 +541,12 @@ pub async fn replace<C: Connection + Clone>(
         .invalidate_subject(user.tenant_id, id)
         .await?;
 
+    // SEC-098: a PUT carrying `active: false` is the RFC 7644 §3.5.1 spelling
+    // of a deactivation and must revoke on the same terms as the PATCH one.
+    if status == UserStatus::Inactive {
+        revoke_live_credentials(&state, user.tenant_id, id, "scim.deactivated").await;
+    }
+
     state
         .emit_webhook(
             updated.tenant_id,
@@ -550,6 +556,69 @@ pub async fn replace<C: Connection + Clone>(
         .await;
 
     Ok(HttpResponse::Ok().json(ScimUser::from_user(&updated, &http_req)))
+}
+
+/// Revoke every live credential a user holds (SEC-098).
+///
+/// Both chokepoints, exactly as `AuthService::revoke_all_sessions` does them:
+/// the session table (which backs the session-flow refresh token) *and* the
+/// OAuth2 refresh-token table. They are two tables and a credential change
+/// that hits only one leaves the other spendable.
+///
+/// # Why SCIM needs this and the native handlers were allowed not to
+///
+/// Flushing `invalidate_subject` — which every SCIM write already did — clears
+/// the *authorization decision* cache. It does not touch a single credential:
+/// the attacker's access token still validates until it expires, and their
+/// refresh token still mints new ones. So a password rotated through SCIM to
+/// lock out a compromised account, or an `active: false` written by an IdP's
+/// offboarding job, left the session it was meant to kill alive.
+///
+/// SCIM is the path an IdP drives *deprovisioning* through. RFC 7644's
+/// consumers — Okta, Entra — treat `active: false` and `DELETE` as "this
+/// person is gone as of now", and the immediacy is the whole reason the
+/// integration exists.
+///
+/// Best-effort by design: a revocation failure is logged at ERROR and does not
+/// fail the SCIM write. The write itself is the durable half (the password is
+/// changed, the account is deactivated, and the refresh path re-reads
+/// `check_user_status`); refusing the whole operation because the session
+/// table blipped would leave the IdP retrying a deprovisioning that has in
+/// fact already been applied.
+async fn revoke_live_credentials<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    reason: &'static str,
+) {
+    use axiam_core::repository::{RefreshTokenRepository, SessionRepository};
+
+    if let Err(e) = state
+        .session_repo
+        .invalidate_user_sessions(tenant_id, user_id)
+        .await
+    {
+        tracing::error!(
+            %tenant_id, %user_id, reason, error = %e,
+            "SCIM: could not invalidate sessions after a credential-affecting write"
+        );
+    }
+    match state
+        .refresh_token_repo
+        .revoke_all_for_user(tenant_id, user_id)
+        .await
+    {
+        Ok(revoked) => tracing::info!(
+            target: "axiam::audit",
+            event = "scim.credentials_revoked",
+            %tenant_id, %user_id, reason, oauth2_tokens_revoked = revoked,
+            "SCIM write revoked every live session and OAuth2 refresh token for the user"
+        ),
+        Err(e) => tracing::error!(
+            %tenant_id, %user_id, reason, error = %e,
+            "SCIM: could not revoke OAuth2 refresh tokens after a credential-affecting write"
+        ),
+    }
 }
 
 fn user_patch_is_noop(u: &UpdateUser) -> bool {
@@ -629,6 +698,18 @@ pub async fn patch<C: Connection + Clone>(
         ..Default::default()
     };
 
+    // SEC-098: read before `update` is moved. A password write and a
+    // deactivation are the two PATCH shapes that must not leave a live
+    // credential behind.
+    let revocation_reason = match (
+        update.password_hash.is_some(),
+        update.status == Some(UserStatus::Inactive),
+    ) {
+        (true, _) => Some("scim.password_set"),
+        (false, true) => Some("scim.deactivated"),
+        (false, false) => None,
+    };
+
     let updated = if user_patch_is_noop(&update) {
         current
     } else {
@@ -638,6 +719,9 @@ pub async fn patch<C: Connection + Clone>(
             .as_ref()
             .invalidate_subject(user.tenant_id, id)
             .await?;
+        if let Some(reason) = revocation_reason {
+            revoke_live_credentials(&state, user.tenant_id, id, reason).await;
+        }
         state
             .emit_webhook(
                 u.tenant_id,
@@ -667,6 +751,11 @@ pub async fn delete<C: Connection + Clone>(
         .as_ref()
         .invalidate_subject(user.tenant_id, id)
         .await?;
+
+    // SEC-098: `DELETE /Users/{id}` is a soft delete to `Inactive`, so without
+    // this the offboarded account keeps a live session and a spendable refresh
+    // token. This is the endpoint an IdP calls when someone leaves.
+    revoke_live_credentials(&state, user.tenant_id, id, "scim.deleted").await;
 
     state
         .emit_webhook(user.tenant_id, "user.deleted", json!({ "id": id }))

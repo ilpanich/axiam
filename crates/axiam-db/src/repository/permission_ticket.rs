@@ -26,9 +26,16 @@
 //!   2. **The nonce audits it.** Each attempt stamps its own `redemption_id`,
 //!      and after the transaction commits a separate query reads the row back;
 //!      only the caller whose nonce survived reports a redemption. This asks
-//!      the engine for nothing, so a conflict the engine misses is still caught
-//!      here — it is what turns 0-in-40 000 from strong evidence into a
-//!      mechanism that does not depend on that evidence holding.
+//!      the engine for nothing, so a conflict the engine misses is caught here
+//!      **unless the two commits interleave around the read-back** — if A
+//!      commits, A reads back and sees its own nonce, and only then B's
+//!      concurrent transaction commits, B's later read-back sees B's nonce and
+//!      both callers report a redemption (SEC-105). So what this layer buys is
+//!      precisely what §X6.2 promises and no more: a double redemption needs
+//!      **two independent failures**, not one. It is not "the nonce catches
+//!      any conflict the engine misses" — the project's own measurement agrees,
+//!      recording the nonce-with-read-back shape at 1/640 on `kv-mem`
+//!      (`claude_dev/extra-B-track-features.md` §X6.1).
 //!
 //! The read-back **must** stay outside the transaction, in a query of its own
 //! after the commit. Inside it, snapshot isolation shows every racer its own

@@ -354,6 +354,25 @@ pub async fn token<C: Connection + Clone>(
         };
     }
 
+    // SEC-096: ONE context construction and ONE DPoP verification, ahead of
+    // every grant that authenticates a client. Before this, the
+    // token-exchange and uma-ticket grants each `return`ed above this point,
+    // so a DPoP proof on those requests was never verified, never recorded as
+    // single-use, and never available to the binding decision — which meant a
+    // client holding a `cnf`-bound token could exchange it for a plain bearer
+    // one, and a `fapi2` client could obtain an unconstrained token from a
+    // grant `fapi::enforce_token_request` never saw.
+    //
+    // The device-code grant stays above this line deliberately: RFC 8628
+    // performs no client authentication at all, so there is no registration
+    // in hand for the profile gate to enforce and no party for a proof to
+    // bind to.
+    let ctx = token_request_context(&req).with_assertion_from(&form);
+    let ctx = match dpop_from_request(&req, &state, tenant_id, ctx).await {
+        Ok(ctx) => ctx,
+        Err(response) => return response,
+    };
+
     // B3 / RFC 8693. Like the device grant, its own service behind one match
     // arm. Unlike the device grant, the exchanging client DOES authenticate —
     // it is a confidential service, not a television, and an exchange is
@@ -363,7 +382,6 @@ pub async fn token<C: Connection + Clone>(
         // registered for `tls_client_auth` / `private_key_jwt` is
         // authenticated by the credential its registration names rather than
         // by the secret it was also, unavoidably, issued.
-        let ctx = token_request_context(&req).with_assertion_from(&form);
         return handle_token_exchange(tenant_id, form, &state, &ctx).await;
     }
 
@@ -384,15 +402,8 @@ pub async fn token<C: Connection + Clone>(
             ));
         };
         // SEC-093, as for the token-exchange grant above.
-        let ctx = token_request_context(&req).with_assertion_from(&form);
         return handle_uma_ticket(tenant_id, form, &state, &authz, &ctx).await;
     }
-
-    let ctx = token_request_context(&req).with_assertion_from(&form);
-    let ctx = match dpop_from_request(&req, &state, tenant_id, ctx).await {
-        Ok(ctx) => ctx,
-        Err(response) => return response,
-    };
 
     match state.token_service.exchange(tenant_id, form, &ctx).await {
         Ok(resp) => {
@@ -496,6 +507,32 @@ fn token_request_context(req: &HttpRequest) -> TokenRequestContext {
     }
 }
 
+/// The `htu` a DPoP proof must name for this request (SEC-102, RFC 9449 §4.3
+/// step 9).
+///
+/// Built from the **configured** issuer plus the request's path. RFC 9449 says
+/// `htu` is compared against "the HTTP URI used for the request, without query
+/// and fragment parts" — meaning the server's own view of its own endpoint.
+/// `HttpRequest::full_url()` does not give that: it takes the authority from
+/// `ConnectionInfo`, which prefers `Forwarded`, then `X-Forwarded-Host`, then
+/// `Host`, and this deployment has no trusted-proxy layer that normalises any
+/// of the three. With the authority sourced from the request, a caller chooses
+/// *both* sides of the comparison and the check degrades to "the proof names
+/// some authority consistently" — so a client phished into signing a proof for
+/// `https://attacker.example/oauth2/token` could have it accepted here by
+/// sending a matching `Host`.
+///
+/// The path still comes from the request, and must: it is what keeps a
+/// `/oauth2/par` proof from being replayed at `/oauth2/token`. `req.path()` is
+/// actix's already-normalised path and carries neither query nor fragment,
+/// which is exactly the string the RFC compares.
+///
+/// `effective_issuer()` is trimmed of any trailing slash by `AuthConfig`, and
+/// `req.path()` always begins with one, so the join never doubles it.
+fn dpop_htu<C: Connection + Clone>(state: &AppState<C>, req: &HttpRequest) -> String {
+    format!("{}{}", state.auth_config.effective_issuer(), req.path())
+}
+
 /// The header a DPoP proof arrives in (RFC 9449 §4).
 const DPOP_HEADER: &str = "DPoP";
 
@@ -552,16 +589,24 @@ async fn dpop_from_request<C: Connection + Clone>(
         ));
     }
 
-    let htu = req.full_url().to_string();
+    // SEC-102: the authority comes from the CONFIGURED issuer, never from the
+    // request. `HttpRequest::full_url()` builds it from `ConnectionInfo`,
+    // which prefers `Forwarded`, then `X-Forwarded-Host`, then `Host` — all
+    // three request-controlled. Sourcing it there let the caller choose both
+    // sides of RFC 9449 §4.3 step 9's comparison, reducing the `htu` check to
+    // "the proof names *some* authority consistently". Only the path is taken
+    // from the request, and only `req.path()`, which actix has already
+    // normalised and which carries no query or fragment — exactly what the
+    // RFC compares against.
+    let htu = dpop_htu(&state, &req);
     let expect = DpopExpectation {
         htm: req.method().as_str(),
         htu: &htu,
-        // The nonce a rotating deployment would compare against is not stored
-        // per client today; `dpop_require_nonce` is a per-client switch that
-        // makes the *first* request of a session a challenge, and the client
-        // then echoes the nonce this server issued in the challenge. Wiring a
-        // stored, rotating nonce is a deliberate non-goal of this pass, and the
-        // absence is what `expected_nonce: None` says.
+        // SEC-097: `expected_nonce` stays `None` because this deployment
+        // stores no per-client nonce to compare against — see
+        // `dpop_nonce_required_for`, which is what decides whether a nonce is
+        // demanded at all, and `docs/security-profiles.md` for what v1's
+        // nonce challenge does and does not prove.
         expected_nonce: None,
         require_nonce: false,
         access_token: None,
@@ -1239,6 +1284,18 @@ async fn handle_uma_ticket<C: Connection + Clone>(
             });
     }
 
+    // SEC-096: the same two gates the token-exchange grant now runs, for the
+    // same reason — an RPT is an access token, and a `fapi2` client must not
+    // be able to obtain an unconstrained one through the grant nobody wired
+    // the profile gate into.
+    if let Err(e) = axiam_oauth2::fapi::enforce_token_request(&client, ctx.evidence()) {
+        return build_oauth2_error_response(&e);
+    }
+    let cnf = match state.token_service.certificate_binding_for(&client, ctx) {
+        Ok(cnf) => cnf,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
     let Some(ticket) = form.ticket.as_deref().filter(|t| !t.is_empty()) else {
         return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
             "ticket is required for the uma-ticket grant".into(),
@@ -1333,6 +1390,7 @@ async fn handle_uma_ticket<C: Connection + Clone>(
         granted.permissions.clone(),
         granted.lifetime_secs,
         &state.auth_config,
+        cnf.clone(),
     ) {
         Ok(token) => token,
         Err(e) => return build_oauth2_error_response(&OAuth2Error::ServerError(e.to_string())),
@@ -1357,7 +1415,10 @@ async fn handle_uma_ticket<C: Connection + Clone>(
         .append_header(("Pragma", "no-cache"))
         .json(TokenResponse {
             access_token: rpt,
-            token_type: "Bearer".into(),
+            // SEC-096 / RFC 9449 §5: `DPoP` when the RPT is DPoP-bound,
+            // `Bearer` for everything else — which is every client that did
+            // not register DPoP binding.
+            token_type: axiam_oauth2::dpop::token_type_for(cnf.as_ref()),
             expires_in: granted.lifetime_secs as u64,
             refresh_token: None,
             scope: None,
@@ -1462,6 +1523,26 @@ async fn handle_token_exchange<C: Connection + Clone>(
             });
     }
 
+    // SEC-096, gate 1: the profile the REGISTRATION declares, re-checked at
+    // the moment it matters — the same call the authorization_code,
+    // client_credentials and refresh_token grants make. Without it a `fapi2`
+    // client could obtain an unconstrained token through this grant while
+    // being refused one through the other three, which is a conformance
+    // failure and an authentication downgrade in the same request.
+    if let Err(e) = axiam_oauth2::fapi::enforce_token_request(&client, ctx.evidence()) {
+        return build_oauth2_error_response(&e);
+    }
+
+    // SEC-096, gate 2: the confirmation claim the EXCHANGING client earned on
+    // this request. `None` for every client that registered no binding, so
+    // this is byte-identical to the pre-SEC-096 response for them; for a
+    // client that registered binding and presented nothing it refuses rather
+    // than laundering a bound token into an unbound one.
+    let cnf = match state.token_service.certificate_binding_for(&client, ctx) {
+        Ok(cnf) => cnf,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
     let Some(exchange_req) = form.exchange_request() else {
         return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
             "subject_token and subject_token_type are required for the \
@@ -1472,7 +1553,7 @@ async fn handle_token_exchange<C: Connection + Clone>(
 
     match state
         .token_exchange_service
-        .exchange(tenant_id, &client, exchange_req)
+        .exchange(tenant_id, &client, exchange_req, cnf)
         .await
     {
         Ok(outcome) => {

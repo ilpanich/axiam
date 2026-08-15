@@ -401,11 +401,20 @@ where
     /// The exchanging client is assumed already authenticated by the caller —
     /// the token endpoint does that for every grant — and `client` is the row
     /// that authentication produced.
+    ///
+    /// `cnf` is the confirmation claim the *exchanging client* earned on this
+    /// request, produced by `TokenService::certificate_binding_for` from the
+    /// certificate or DPoP proof it actually presented (SEC-096). It is
+    /// threaded in rather than computed here because the transport context
+    /// belongs to the HTTP layer and this service must not learn about it.
+    /// `None` — every client that registered no binding — issues exactly the
+    /// bytes this grant issued before SEC-096.
     pub async fn exchange(
         &self,
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         if !client
             .grant_types
@@ -477,7 +486,7 @@ where
         };
 
         if is_external {
-            return self.exchange_external(tenant_id, client, req).await;
+            return self.exchange_external(tenant_id, client, req, cnf).await;
         }
 
         // From here down is B3, unchanged except for the transitivity check.
@@ -668,6 +677,7 @@ where
             act,
             // Same-domain: no foreign provenance to record.
             None,
+            cnf.clone(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -675,7 +685,11 @@ where
             response: TokenExchangeResponse {
                 access_token,
                 issued_token_type: TOKEN_TYPE_ACCESS_TOKEN.to_string(),
-                token_type: "Bearer".into(),
+                // RFC 9449 §5: a DPoP-bound token is announced as such.
+                // Certificate-bound tokens stay `Bearer` (RFC 8705 leaves the
+                // HTTP scheme alone), so this is `Bearer` for every client
+                // that did not ask for DPoP binding.
+                token_type: crate::dpop::token_type_for(cnf.as_ref()),
                 expires_in: lifetime as u64,
                 scope: Some(granted.join(" ")),
                 // No refresh token, ever. One would let the holder outlive the
@@ -708,6 +722,7 @@ where
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         // Not configured ⇒ the external path does not exist. Deliberately the
         // same answer as "no provider trusts this issuer": whether a
@@ -894,6 +909,7 @@ where
             Some(ExtExchangeClaim {
                 iss: external.issuer.clone(),
             }),
+            cnf.clone(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -901,7 +917,8 @@ where
             response: TokenExchangeResponse {
                 access_token,
                 issued_token_type: TOKEN_TYPE_ACCESS_TOKEN.to_string(),
-                token_type: "Bearer".into(),
+                // SEC-096, as on the same-domain path above.
+                token_type: crate::dpop::token_type_for(cnf.as_ref()),
                 expires_in: lifetime as u64,
                 scope: Some(granted.join(" ")),
             },

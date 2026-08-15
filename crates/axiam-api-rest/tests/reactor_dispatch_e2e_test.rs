@@ -709,7 +709,7 @@ async fn token_pre_issue_enriches_a_client_credentials_token_over_http() {
             .peer_addr(TEST_PEER.parse::<std::net::SocketAddr>().unwrap())
             .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
-            .set_form(&[
+            .set_form([
                 ("grant_type", "client_credentials"),
                 ("client_id", &client_id),
                 ("client_secret", &client_secret),

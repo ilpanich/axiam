@@ -2511,9 +2511,13 @@ use axiam_core::models::reactor::{
     DynReactorGate, ReactorOutcome, SharedReactorGate, noop_reactor_gate,
 };
 
+/// What a [`FixedGate`] recorded: one entry per interception, as
+/// `(tenant_id, event, payload)`.
+type SeenInterceptions = Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>;
+
 struct FixedGate {
     outcome: ReactorOutcome,
-    seen: Arc<Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>>,
+    seen: SeenInterceptions,
 }
 
 impl DynReactorGate for FixedGate {

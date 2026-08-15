@@ -171,6 +171,11 @@ jobs:
 
       - name: b3-mesh-delegation-grpc
         working-directory: examples/b3-mesh-delegation-grpc
+        # E2E_ADMIN_PASSWORD is required and has no in-source default — the
+        # example refuses to carry a credential literal. This is the same
+        # value scripts/e2e-bootstrap.sh seeds the stack with.
+        env:
+          E2E_ADMIN_PASSWORD: Test@Admin123!
         run: cargo run --locked
 
       - name: b5-rp-logout-app (build)
@@ -183,13 +188,19 @@ jobs:
         working-directory: examples/b5-rp-logout-app
         run: ./smoke-test.sh
 
+      # Only the axiam server, and only a short tail. Dumping every service's
+      # full log buries the actual failure under ~1000 lines of RabbitMQ and
+      # SurrealDB boot chatter, which is exactly what happened the first time
+      # this job went red.
       - name: Dump server logs on failure
         if: failure()
         run: |
+          echo "::group::axiam server (last 120 lines)"
           docker compose \
             -f docker/docker-compose.e2e.yml \
             -f examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml \
-            logs --no-color --tail 500
+            logs --no-color --tail 120 server || true
+          echo "::endgroup::"
 
       - name: Tear down
         if: always()

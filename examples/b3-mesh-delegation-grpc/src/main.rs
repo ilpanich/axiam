@@ -115,8 +115,15 @@ async fn main() -> anyhow::Result<()> {
     let org_slug = std::env::var("E2E_ORG_SLUG").unwrap_or_else(|_| "test-org".into());
     let tenant_slug = std::env::var("E2E_TENANT_SLUG").unwrap_or_else(|_| "default".into());
     let admin_email = std::env::var("E2E_ADMIN_EMAIL").unwrap_or_else(|_| "admin@axiam.dev".into());
-    let admin_password =
-        std::env::var("E2E_ADMIN_PASSWORD").unwrap_or_else(|_| "Test@Admin123!".into());
+    // Required, with no baked-in default: a credential literal in source is a
+    // hard-coded-secret finding, and examples get copied. The compose stack's
+    // value is documented in this example's README instead.
+    let admin_password = std::env::var("E2E_ADMIN_PASSWORD").map_err(|_| {
+        anyhow::anyhow!(
+            "E2E_ADMIN_PASSWORD must be set (see this example's README for the \
+             docker-compose.e2e.yml default)"
+        )
+    })?;
 
     let run_id = format!(
         "{}-{}",
@@ -212,7 +219,14 @@ async fn main() -> anyhow::Result<()> {
 
     let user_username = format!("orders-caller-{run_id}");
     let user_email = format!("orders-caller-{run_id}@example.invalid");
-    let user_password = "Orders@Caller123!";
+    // This example creates the user itself, so nothing needs to know the
+    // password ahead of time — generate one per run rather than carrying a
+    // literal in source.
+    let user_password = format!(
+        "Ax{}!aA1",
+        uuid::Uuid::new_v4().simple().to_string()[..20].to_uppercase()
+    );
+    let user_password = user_password.as_str();
     let (status, user) = post_json(
         &admin,
         &format!("{axiam_url}/api/v1/users"),

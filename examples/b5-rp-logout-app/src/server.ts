@@ -92,6 +92,40 @@ function requireConfig(_req: Request, res: Response, next: NextFunction): void {
 const app = express();
 app.use(express.urlencoded({ extended: false })); // for the back-channel logout POST
 
+/**
+ * Minimal fixed-window rate limiter.
+ *
+ * Every route below either performs authorization or accepts an
+ * attacker-reachable token, so none of them should be callable in an
+ * unbounded loop. Kept dependency-free and in-memory deliberately: this is a
+ * single-process example. A real RP should use a shared store (Redis) so the
+ * limit holds across replicas — see `docs/api/rate-limiting.md`.
+ */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 60;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const key = req.ip ?? "unknown";
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    rateBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    next();
+    return;
+  }
+  if (bucket.count >= RATE_LIMIT_MAX) {
+    res
+      .status(429)
+      .type("text/plain")
+      .set("Retry-After", String(Math.ceil((bucket.resetAt - now) / 1000)))
+      .send("rate limit exceeded");
+    return;
+  }
+  bucket.count += 1;
+  next();
+});
+
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true });
 });
@@ -163,7 +197,15 @@ app.get("/callback", requireConfig, async (req, res, next) => {
     const state = typeof req.query["state"] === "string" ? req.query["state"] : undefined;
     const error = typeof req.query["error"] === "string" ? req.query["error"] : undefined;
     if (error) {
-      res.status(400).send(`AXIAM returned an error: ${error}`);
+      // Never interpolate an OP-supplied value into an HTML response body:
+      // Express infers text/html for a string, which would make this a
+      // reflected-XSS sink. RFC 6749 §4.1.2.1 restricts `error` to %x20-21 /
+      // %x23-5B / %x5D-7E, so anything outside that is not a real OAuth2
+      // error code and is not worth echoing at all.
+      const safe = /^[\x20-\x21\x23-\x5B\x5D-\x7E]{1,64}$/.test(error)
+        ? error
+        : "(unprintable error code)";
+      res.status(400).type("text/plain").send(`AXIAM returned an error: ${safe}`);
       return;
     }
     if (!code || !state) {
@@ -296,7 +338,11 @@ app.post("/backchannel-logout", requireConfig, async (req, res) => {
     // MUST NOT echo the token. AXIAM's own delivery retries a non-2xx per
     // docs/api/logout.md "Delivery" (up to 3 attempts), so refusing here is
     // safe — a transient failure gets a legitimate second chance.
-    res.status(400).send(err instanceof Error ? err.message : "invalid logout_token");
+    // Log the detail server-side; return a fixed string. Echoing the
+    // exception text would both reinterpret it as HTML and leak validator
+    // internals to whoever posted the token.
+    console.error("back-channel logout rejected:", err);
+    res.status(400).type("text/plain").send("invalid logout_token");
   }
 });
 

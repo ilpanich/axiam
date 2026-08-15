@@ -77,8 +77,16 @@ docker compose -f docker/docker-compose.e2e.yml \
   up -d --wait
 ./scripts/e2e-bootstrap.sh
 AXIAM_URL=http://localhost:8090 AXIAM_GRPC_URL=http://127.0.0.1:50051 \
+  E2E_ADMIN_PASSWORD='Test@Admin123!' \
   cargo run --manifest-path examples/b3-mesh-delegation-grpc/Cargo.toml
 ```
+
+`E2E_ADMIN_PASSWORD` is **required** and has no default. It is the seeded admin
+password from `docker/docker-compose.e2e.yml`, shown above for convenience —
+it is deliberately not a literal in `src/main.rs`, because example code gets
+copied and a credential in source is a real finding wherever it lands. The
+second account this example provisions gets a freshly generated password per
+run for the same reason.
 
 ## History: the registration gap found while building this example
 

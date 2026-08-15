@@ -174,6 +174,7 @@ V13 (API), V15 (Build).
 | V14.1.2 | Compiler flags set for security (stack canaries, ASLR) | Pass | Rust's default build flags include stack protection; no unsafe code in production paths | Rust memory-safety |
 | V14.2.1 | All components from trusted sources, updated, unused removed | Pass | `ci.yml:86` — `cargo deny check --all-features` (sources + licenses + bans); `deny.toml` bans unauthorized sources | Phase 6 D-06 |
 | V14.2.2 | Software composition analysis (SCA) integrated in CI | Pass | `ci.yml:81` — `cargo audit`; `ci.yml:86` — `cargo deny`; `ci.yml:117` — Trivy | Phase 6 supply chain |
+| SBOM-01 | Software Bill of Materials (SBOM) generated for all shipped components (CRA supply-chain transparency theme) | Pass (see FINDINGS.md #SBOM-01) | `.github/workflows/release.yml` `sbom` job — `cargo cyclonedx` (Rust workspace, one CycloneDX 1.5 SBOM per crate) + `@cyclonedx/cyclonedx-npm` (`frontend/` npm tree, one CycloneDX 1.5 SBOM); both uploaded as the `sboms` artifact and attached to every GitHub Release | Not a numbered ASVS 4.0.3 control (V14.2 has no SBOM item); tracked here under its FINDINGS.md ID per CMPL-01 self-reference, same as F-03/F-04/F-05 above |
 | V14.3.1 | Web/app server error handling does not expose stack traces or component details | Pass | `crates/axiam-api-rest/src/errors.rs` — internal errors mapped to generic 500 body | |
 | V14.3.2 | Default framework features / sample endpoints removed | Pass | No demo/sample routes in any handler file; only explicitly registered routes | |
 | V14.4.1 | HTTP security headers present on all responses | Pass | `crates/axiam-api-rest/src/middleware/security_headers.rs` — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`; `crates/axiam-api-rest/tests/security_headers_test.rs` | Phase 2 |
@@ -205,6 +206,12 @@ V13 (API), V15 (Build).
 **Deferred findings:** F-03 (V2.1.7 HIBP breach check — Low). F-04 (V9.1.2/V9.1.3
 TLS 1.3 minimum) and F-05 (V14.4.4 CSP header) are now resolved — see FINDINGS.md.
 **No Deferred row has High or Critical severity.** Beta compliance gate: SATISFIED.
+
+SBOM-01 (CRA SBOM theme, tracked in the V14 table above and in FINDINGS.md) is
+also now resolved. It is excluded from the `Total`/`Pass` column counts above
+because it is not a numbered ASVS 4.0.3 control — the Family totals in this
+Summary describe ASVS-scope coverage only (D-02); SBOM-01 is a CRA/ISO A.5
+tracking item this checklist happens to carry in the same row shape.
 
 ---
 

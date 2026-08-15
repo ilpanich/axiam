@@ -387,9 +387,79 @@ jobs:
           name: axiam-server-${{ matrix.arch }}-linux
           path: axiam-server-${{ matrix.arch }}-linux.tar.gz
 
+  # ---------------------------------------------------------------------------
+  # SBOM-01 (CRA / ISO A.5 supply-chain transparency, see docs/compliance/):
+  # generate a CycloneDX SBOM for the Rust workspace and the frontend npm tree.
+  # ---------------------------------------------------------------------------
+  # CycloneDX, not SPDX: both ecosystems here have an actively maintained,
+  # OWASP-native generator (cargo-cyclonedx, @cyclonedx/cyclonedx-npm) that
+  # installs from the public crates.io/npm registries with no paid registry or
+  # license key, so one format keeps both SBOMs consistent. Tool versions are
+  # pinned below for reproducibility, same as the other supply-chain steps in
+  # ci.yml (cargo-deny-action, actions-rust-lang/audit).
+  sbom:
+    name: Generate SBOMs (CycloneDX)
+    needs: verify-tag-on-main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+
+      # cargo-cyclonedx reads Cargo.toml/Cargo.lock via `cargo metadata`; it
+      # does not compile the workspace, so none of the native build
+      # dependencies (protobuf-compiler, libxml2, swagger-ui placeholder,
+      # etc.) that the other jobs in this workflow need are required here.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx@0.5.9 --locked
+
+      # One CycloneDX 1.5 JSON SBOM per workspace member, written next to each
+      # crate's Cargo.toml (cargo-cyclonedx's default layout). 1.5 is the
+      # newest spec version cargo-cyclonedx 0.5.9 supports; the npm SBOM below
+      # is pinned to the same 1.5 spec so both outputs share one format
+      # version.
+      - name: Generate Rust workspace SBOM
+        run: cargo cyclonedx --all --format json --spec-version 1.5
+
+      - name: Collect Rust SBOMs
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          find . -name '*.cdx.json' -path './crates/*' -exec cp {} sbom/ \;
+          ls -la sbom/
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Generate frontend SBOM
+        working-directory: frontend
+        run: npx --yes @cyclonedx/cyclonedx-npm@1.20.0 --output-format json --spec-version 1.5 --output-file ../sbom/frontend.cdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sboms
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
   release:
     name: Create GitHub Release
-    needs: [merge-images, build-binary]
+    needs: [merge-images, build-binary, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -402,6 +472,13 @@ jobs:
         with:
           pattern: axiam-server-*-linux
           merge-multiple: true
+
+      # SBOM-01: SBOMs land flat in sbom/, alongside the binary tarballs.
+      - name: Download SBOM artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sboms
+          path: sbom
 
       - name: Generate changelog
         id: changelog
@@ -418,4 +495,5 @@ jobs:
           files: |
             axiam-server-x86_64-linux.tar.gz
             axiam-server-aarch64-linux.tar.gz
+            sbom/*.cdx.json
           generate_release_notes: false

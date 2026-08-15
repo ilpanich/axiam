@@ -392,3 +392,79 @@ R8 (certification/operator)     — R8.1 whenever docker is available; R8.2/R8.3
 
 Cheapest-adequate model totals: **Opus 5** only for R1.5, R2.1, R2.2, R5.6 (decision),
 R5.7 (F-01/F-06), R6, R7 (D2 diagnosis), R8.5 — everything else Sonnet 5 or operator.
+
+---
+
+## Execution log — 2026-08-15 (Claude Code Cloud container)
+
+Recorded per the execution brief: where an acceptance criterion could not be met in this
+environment, the precise residual is stated here rather than silently skipped.
+
+### Environment constraints (fixed, not failures of the tasks)
+- **No docker daemon and no bench hardware.** Every R7 measurement cell, R8.1's FAPI
+  conformance run, R5.4's live Keycloak exchange and the examples' compose smoke-runs are
+  therefore authoring-only. No measured number was written anywhere in this pass.
+- **SAGE MCP not connected** — no `sage_*` tools exposed. Noted once; not blocking.
+- **Quota-limited volume (~38 GB).** A full `axiam` workspace build (~17 GB peak) and a full
+  `axiam-rust-sdk` build (~14 GB peak, incl. a 3.2 GB `llvm-cov-target`) cannot coexist. They
+  were serialised and all builds moved to `CARGO_INCREMENTAL=0`. One mid-build incremental-cache
+  deletion by the orchestrator did destroy two in-flight builds before this was understood.
+- **`libxml2-dev` + `xmlsec1` were installed**, so R1.5 was built and tested with the real
+  `saml` feature rather than `--no-default-features`.
+
+### Correction to §0 — the R5.7 premise was stale
+`sdk-oidc-sso-conformance-review.md` assessed each SDK at its 2026-07-27 commit. Several repos
+have moved far past that: `axiam-rust-sdk` `main` is **64 commits** beyond the reviewed
+`b2d7930`, and **all seven** of its assigned findings (F-01, F-04, F-05, F-07, F-09, F-10,
+F-19) were closed on 2026-07-27 in `2ea4308`, with a follow-up in `04780fd`. F-02 (java),
+F-03 (kotlin) and F-08 (python) were likewise already fixed. The plan's "18 of 19 open" is
+therefore wrong; genuinely open and now fixed were F-11, F-12, F-13, F-14, F-15, F-17, F-18.
+
+**Do not re-apply F-01's literal six-step spec.** Step 4 prescribes `broadcast::Sender`;
+`04780fd` deliberately migrated `broadcast` → `watch` because `broadcast` is not value-retaining,
+forcing retire-before-send and reopening the window where a second leader replays a consumed
+refresh token. CONTRACT §9 rule 6(a) ("publish-before-vacate") now names this, citing that repo
+as the reference implementation. Implementing the spec verbatim would reintroduce a fixed
+security defect.
+
+### New findings raised during execution (not in the plan)
+- **`KNOWN_GRANT_TYPES` omits two shipped grants.**
+  `crates/axiam-api-rest/src/handlers/oauth2_clients.rs:220` allows only `authorization_code`,
+  `client_credentials`, `refresh_token`. But `device_service.rs:145` requires
+  `urn:ietf:params:oauth:grant-type:device_code` and `token_exchange.rs:331/411` requires
+  `urn:ietf:params:oauth:grant-type:token-exchange`. **B2 (device flow) and B3 (token exchange)
+  are therefore unreachable through the admin REST API** — their tests pass only because they
+  construct clients directly, bypassing the validator. Fix pending.
+  `urn:axiam:params:oauth:grant-type:may-impersonate` is deliberately NOT being added: whether an
+  admin-API caller may grant impersonation is a security decision this plan does not answer.
+  **Routed to R6 for adjudication.**
+- **Go SDK: a real data race** in `TestUmaExchangeTicketIsNotRetriedOnATransportFailure`,
+  pre-existing on `main`, skipped under `-race`. Out of R5.7's scope; needs its own follow-up.
+- **Python SDK: coverage floor is not gating.** Local `fail_under` is 97.0 and the tree measures
+  96.93 (pre-existing on `main`), yet the CI coverage job passes. The local gate and the CI gate
+  disagree; one of them is wrong.
+- **C# SDK: `dotnet format --verify-no-changes` is not actually configured in CI**, contrary to
+  the assumption in the task brief.
+- **Kotlin/C# do not speak AMQP today** (§8 lists six SDKs; Kotlin defers §8), yet R2.5 assigns
+  them a `reactor_serve` runtime. Recorded in CONTRACT §22.10 as a prerequisite.
+
+### Divergences between the plan's prose and the implementation (R2.1)
+CONTRACT §22 was drafted from the code, so eight plan statements were written as the code
+actually behaves, not as the plan described. The load-bearing ones: reactor replies rely on
+freshness + single-use `correlation_id`, **not** the durable nonce dedup the audit/authz
+consumers do; the budget is a wall-clock ceiling with `min(timeout, remaining)` per reactor
+rather than `min(sum, 5000)`, and an unreached `fail_closed` reactor still denies; failure policy
+is per-registration with strictest-wins composition, not per-reply; `patch` values are strings,
+not arbitrary JSON; and reactor bodies serialize `"hmac_signature":null` where §8's two message
+types omit the field — previously undocumented anywhere, and now pinned by the new fixture.
+
+### Residuals carried
+- **R1.5**: the public first-time-SSO ACS path cannot compare `@Recipient` *by value* —
+  `saml_login_public` builds its AuthnRequest with an empty ACS URL and `FederationLoginState`
+  has no column for one. Presence is required and `@NotOnOrAfter`/`@InResponseTo` are fully
+  enforced there. Closing the value check needs a schema addition. Recorded as SAML-01.
+- **R5.2**: the SCIM flood scenario is written against the documented `/scim/v2` contract and
+  parked in a `PENDING_ENDPOINTS`/`PENDING_SCENARIOS` lane; it must be re-verified against the
+  real DTOs once `axiam-scim` lands, and folded into `ENDPOINTS` then.
+- **R7**: every measurement cell remains unrun. The two previously-missing scenarios
+  (`device-flow-poll`, `token-exchange`) now exist and are registered.

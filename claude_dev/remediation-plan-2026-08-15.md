@@ -866,3 +866,89 @@ before any test body ran. The change could not have caused it (the `sanitizers` 
 `build-asan`/`build-vg` trees and never sets `AXIAM_BUILD_EXAMPLES`), which is what made a cancel-and-rerun
 the right call rather than a guess; the re-run completed in 3:14. **Check job *duration* against that
 job's own history, not just its status** — "still running" and "stuck" look identical in the checks API.
+
+**4. SEC-096 … SEC-107 — nine fixed, two decided, one deferred.**
+
+Triaged against `cd1af8f` first, per the brief. **None was closed by #323/#324** — those merges added
+the SCIM crate, its bucket, the coverage ratchet and the three HIGH fixes, and touched none of this
+code. Three findings were mis-sized in the review, in both directions:
+
+- **SEC-099 narrower.** Only the cap-breach path applied `listen` registrations' policy; the
+  unreadable-registry path does not use `fail_whole_chain` at all, contrary to §8.
+- **SEC-100 narrower.** `resolve` already served a stale entry with no TTL bound, so a warm process
+  was covered. The live defect is a **cold cache** only — which is exactly the window a restart opens.
+- **SEC-101 and SEC-102 wider**, and these are the two that mattered:
+  - `axiam-api-grpc`'s `ReactorAdminService` is a **second, unguarded registration door**. Refusing
+    only in REST would have left the self-service outage one `grpcurl` away.
+  - SEC-102 has a **second site**: `extractors/auth.rs` built the resource-server `htu` from
+    `req.full_url()` too. Fixed fail-closed — with no `AuthConfig`, no proof verifies, so a
+    `jkt`-bound token is refused rather than accepted against an attacker-chosen `htu`.
+
+**Fixed (9):** SEC-096, SEC-098, SEC-099, SEC-100, SEC-101, SEC-102, SEC-104, SEC-105, SEC-107.
+
+**SEC-097 — decided, and neither option the review offered was taken.** Implementing the nonce needs
+the client row *before* the client lookup, which is the thing `dpop_from_request`'s own doc argues
+against, and without server-side storage the echoed nonce cannot be verified — a second control that
+does less than it appears to. Removing the field is a wire break across eleven SDK repos for a value
+that is always `false`. So the field stays, the lying comment is gone, and the admin API now **refuses
+`dpop_require_nonce: true` with 400**. That removes what §6 called unacceptable — a persisted,
+API-visible switch that does nothing — at the point where someone would try to rely on it.
+
+**SEC-107 — decided: allowlist implemented** (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`), §14.6's preferred
+option. It is a security control with a deliberate bypass in it, so the shape is the substance:
+default-empty, composition-root only, **exact** host match (no wildcards, no CIDRs), first hop only
+with redirects always strict, every use logged, and **metadata endpoints blocked even for an
+allowlisted host** with IPv4-mapped canonicalisation running *before* that check — so **SEC-094 is not
+re-opened through its own remedy**, which was the first thing tested.
+
+**SEC-103 — deferred, residual stated.** The lapin transport is unmerged and `round_trip` has one impl
+that always fails, so changing `derive_tenant_key`'s HKDF info now would alter a derivation nobody can
+exercise end to end. Open, precisely: (a) every reactor in a tenant shares the reply key, so reactor A
+can answer as reactor B — only `correlation_id` secrecy prevents it; (b) `ReactorReply::nonce` is
+signed and never checked, and the "one reply per `correlation_id`" half has **no implementation**. Both
+are now named acceptance criteria on the transport PR.
+
+**SEC-106 — split.** The CA-trust doc was wrong and is corrected: a supplied CA is **added to** the
+system roots (`add_parsable_certificates`), so any publicly-trusted CA still validates the broker — an
+operator pinning a private CA to *constrain* trust was not getting that. One correction to the review
+itself: the backend is **rustls-connector, not native-tls**; the conclusion holds either way. The TLS
+1.3 floor **could not** be pinned client-side, and the reason is recorded rather than left as
+"not done": lapin's `connect_with_config` takes an `OwnedTLSConfig` of exactly `identity` +
+`cert_chain`, with no seam for a rustls `ClientConfig`, so a client-side floor means reimplementing
+`AMQPUriTcpExt::connect_with_config`. It becomes a MUST-level broker-side requirement with
+verification commands.
+
+**Two existing tests asserted the behaviour SEC-104 removes**, and were rewritten rather than relaxed:
+`delete_role_does_not_strip_foreign_tenant_edge` (its survival assertions — the actual security
+property — unchanged) and `delete_permission_not_found_is_idempotent_204`, which called an uninspected
+statement result "idempotence". It was pinning the defect. A test that pins a bug is worse than no
+test, because it converts the fix into an apparent regression.
+
+**Verification.** `cargo fmt --all -- --check` clean (re-run independently); `cargo clippy --workspace
+--all-targets -- -D warnings` clean, CI-exact, with libxml2/xmlsec1 installed; the same clippy clean
+under `--no-default-features`; `--dump-openapi` diffed against `sdks/openapi.json` — in sync;
+`cargo test --workspace --no-default-features --lib` → **1229 passed, 0 failed**; and every integration
+target run per `--test` with disk reclaim between (axiam-db 46, axiam-api-rest 63, axiam-amqp 9,
+axiam-auth 9, axiam-pki 7, axiam-api-grpc 6 incl. `--features client`, axiam-server 11, and the rest)
+— all passed.
+
+**Could not run, precisely:** `axiam-api-rest`'s `federation_test` with the **`saml` feature on**. Its
+15 `saml_acs_*` tests 404 under `--no-default-features` because the ACS routes are
+`#[cfg(feature = "saml")]` — pre-existing, not a regression, and that file is untouched. The SAML-on
+build needs a second full dependency tree and hit ENOSPC. The volume hit 100% three times and was
+reclaimed by deleting regenerable test executables and 11 of 12 stale `libsurrealdb_core-*.rlib`
+copies — no `cargo clean`, no source touched.
+
+**⚠ Wire/contract change — CONTRACT.md is now 1.20 and the fleet is stale again.**
+SEC-096 is behavioural: an exchanged access token (and a §20 RPT) is now sender-constrained to whatever
+the *exchanging client* proved, so `token_type` on the token-exchange and uma-ticket grants can be
+`"DPoP"` where it was unconditionally `"Bearer"`. **An SDK that hard-codes `Bearer` when forwarding
+will send a DPoP token under the wrong scheme.** A client registered for DPoP/certificate binding that
+exchanges *without* presenting its credential now gets `invalid_client` instead of an unbound token,
+and that refusal must not be retried unbound. **A client that registered no binding sees byte-identical
+responses** — that is the compatibility property, and both halves are pinned by tests. §22.8 and §22.9
+rule 3 add the reactor statements an SDK could not infer.
+
+`sdks/CONTRACT.md` and `sdks/openapi.json` therefore need re-vendoring into the SDK repos — which is
+exactly what R5.8b's new job exists to report, rather than letting it sit unnoticed the way eight repos
+came to sit at 1.17 while this one was at 1.19.

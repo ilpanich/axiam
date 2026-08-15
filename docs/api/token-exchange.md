@@ -258,5 +258,6 @@ The grant is advertised in `grant_types_supported` at
 ## See also
 
 - [`device-flow.md`](device-flow.md) — the other new OAuth2 grant
+- [`examples/b3-mesh-delegation-grpc`](../../examples/b3-mesh-delegation-grpc/README.md) — worked gRPC mesh-delegation example
 - [`claude_dev/token-exchange-design.md`](../../claude_dev/token-exchange-design.md) — design rationale and threat model
 - [`README.md`](README.md) — API documentation index

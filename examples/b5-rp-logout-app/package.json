@@ -1,0 +1,21 @@
+{
+  "name": "b5-rp-logout-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "B5 example relying-party app: OIDC login (authorization_code + PKCE), RP-Initiated Logout, Back-Channel Logout, and PAR against AXIAM.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "jose": "^6.2.9"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.9.0",
+    "typescript": "^6.0.3"
+  }
+}

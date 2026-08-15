@@ -1,0 +1,28 @@
+# docker-compose.grpc-port.override.yml — publishes the gRPC port for this
+# example's smoke run.
+#
+# `docker/docker-compose.e2e.yml` (which this file is layered on top of via
+# `docker compose -f docker/docker-compose.e2e.yml -f
+# examples/b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml`)
+# does not publish axiam-server's gRPC port, and the server binds it to
+# 127.0.0.1 inside the container by default
+# (`crates/axiam-api-grpc/src/config.rs`'s `default_host` — a deliberate
+# security posture: "Deploy behind mTLS or an internal network when binding
+# to 0.0.0.0"). A loopback-bound port cannot be published by Docker's `-p`
+# regardless of the port mapping, so smoke-testing B3's gRPC call needs both
+# a wider bind address AND a published port.
+#
+# Scope: this override exists ONLY for this example's CI smoke job and any
+# local repro of it. It is not wired into `docker/docker-compose.dev.yml` or
+# `docker/docker-compose.prod.yml`, and nothing here should ever be copied
+# into either — an operator-facing compose file binding gRPC to 0.0.0.0
+# needs the mTLS/network-boundary story the config doc comment calls for,
+# which this throwaway CI stack (ephemeral, synthetic fixture data, torn
+# down at the end of the job) does not need and does not have.
+
+services:
+  axiam-server:
+    environment:
+      AXIAM__GRPC__HOST: "0.0.0.0"
+    ports:
+      - "50051:50051"

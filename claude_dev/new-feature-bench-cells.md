@@ -21,13 +21,19 @@
 | `authz-deny-present` | B1 deny-override | **ready** — run it |
 | `grpc-strict-revocation` | A4 opt-in strict mode | **ready** — run it |
 | `seed-scale` | E3 bulk fixture | **ready** — run it |
-| `device-flow-poll` | B2 device authorization grant | blocked: the grant's core, storage and state machine landed, but no REST handlers are mounted yet |
-| `token-exchange` | B3 RFC 8693 | blocked: not implemented |
+| `device-flow-poll` | B2 device authorization grant | unblocked, scenario unwritten — REST surface mounted in `ffaaed1` (`POST /oauth2/device_authorization`, the `device_code` arm of `POST /oauth2/token`, `GET /api/v1/device/verify`, `POST /api/v1/device/decide`); the k6 scenario itself still needs authoring |
+| `token-exchange` | B3 RFC 8693 | unblocked, scenario unwritten — grant implemented and wired into the server in `4dbd832` (`handle_token_exchange` in `crates/axiam-api-rest/src/handlers/oauth2.rs`, dispatched from `POST /oauth2/token`); the k6 scenario itself still needs authoring |
 | `amqp-tls` | A6 broker TLS | optional; see A6 step 6 |
 
 A blocked cell has no scenario file on purpose. Writing a k6 script against
 endpoints that do not exist produces a scenario that fails for the wrong
-reason and quietly rots; the cell lands with its feature.
+reason and quietly rots; the cell lands with its feature. `device-flow-poll`
+and `token-exchange` have graduated out of that state — the endpoints exist
+and are reachable in a real deployment (verified against `ffaaed1` and
+`4dbd832` respectively) — but neither k6 scenario has been written yet, so
+neither cell has ever been run. That authoring work is tracked in the
+remediation plan's Wave R7 (the E4 row: "author the two missing k6 scenarios
+first").
 
 ---
 
@@ -143,7 +149,7 @@ index, so the three rows differ in exactly one variable.
 
 ---
 
-## Cells waiting on their features
+## Cells still waiting on their k6 scenarios
 
 ### `device-flow-poll` (B2)
 
@@ -154,15 +160,27 @@ once — a different load profile from anything currently in the matrix, and
 one whose rate-limiting posture (A1's family for polling, distinct from the
 generic token bucket) is what the cell exists to validate.
 
-Lands with B2's REST handlers. Until then there is nothing to point k6 at:
-`crates/axiam-oauth2/src/device_service.rs` has `authorize`, `poll`,
-`lookup_for_verification` and `decide`, but no route mounts them.
+The feature is no longer the blocker: `ffaaed1` mounted
+`POST /oauth2/device_authorization`, the `device_code` arm of
+`POST /oauth2/token`, and `GET /api/v1/device/verify` /
+`POST /api/v1/device/decide`, each with its own rate-limit bucket
+(`device_authorization` 12/min, `device_verify` 10/min). What is still owed
+is the scenario file itself — nobody has written the k6 script that drives
+the polling loop against these routes, so the cell has never been run.
 
 ### `token-exchange` (B3)
 
 One exchange per request against the token endpoint, measuring the
 scope-narrowing and audience-restriction work on the hot path, plus its own
-rate-limit bucket under flood. Lands with B3.
+rate-limit bucket under flood.
+
+The feature is no longer the blocker: `4dbd832` finished the exchange
+service, wired it into the server's `AppState`, and dispatches it from
+`POST /oauth2/token` (`handle_token_exchange` in
+`crates/axiam-api-rest/src/handlers/oauth2.rs`) ahead of its own rate-limit
+bucket (`token_exchange_per_min`). What is still owed is the scenario file
+itself — nobody has written the k6 script exercising one exchange per
+request, so the cell has never been run.
 
 ### `amqp-tls` (A6, optional)
 

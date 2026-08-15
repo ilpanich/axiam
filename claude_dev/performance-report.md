@@ -85,6 +85,50 @@ Sub-50-microsecond cost confirms the cryptographic chain-verify step is not the 
 
 ---
 
+## 6. A2 post-mortem — `token_refresh` round-trip reduction (fix landed, measurement pending)
+
+**The regression this addresses** (`improvement-after-run5-benchmark.md` §A2):
+run 5 measured `token_refresh` at 545 req/s, p50 88.8 ms, against run 4's 839
+req/s, p50 47.5 ms — a −35% throughput regression with tight medians in both
+runs, the signature of added serialized per-request work rather than
+contention or a slow tail. The suspect was the 53-commit post-run-4 security
+series that added two datastore round trips to the refresh-rotation path.
+
+**The fix** landed in `98a8b79` (`perf(auth): cut refresh rotation from five
+datastore round trips to three (A2/J2)`), verified here via `git show --stat
+98a8b79` and by reading the diff (`crates/axiam-auth/src/service.rs`,
+`crates/axiam-api-rest/src/handlers/auth.rs`, `crates/axiam-api-rest/src/tenant_org_cache.rs`).
+Two round trips were removed, neither by weakening a security property:
+
+- `consume_by_token_hash` collapses the session read and the single-use
+  consume into one statement (`DELETE ... WHERE token_hash = $h RETURN
+  BEFORE`), closing a read-then-delete race window in the process rather than
+  merely making it faster.
+- The per-refresh tenant read (added post-run-4 so `org_id` comes from the
+  server's own view of the tenant, not the client-supplied body) is now
+  served from a small TTL cache. A tenant's owning organization is immutable,
+  so re-reading it on every refresh bought nothing; the cache degrades to
+  today's one-read-per-request behavior, never to unbounded growth.
+
+Single-use rotation, the pre-mint user-status check, and consuming (rather
+than stranding) an expired token are all unchanged and covered by existing
+tests. A new round-trip budget test wraps the session repository in a
+counting delegate and fails a rotation that makes more than two
+session-repository calls, so a future regression on this path is caught
+mechanically rather than only by benchmark.
+
+**Measurement status: PENDING.** This section documents the fix and its
+mechanism only — it does **not** report a re-measured throughput or latency
+number, because no benchmark pass has been run against the fixed code. The
+re-measurement is the `token_refresh` re-measure row of
+`remediation-plan-2026-08-15.md` Wave R7 (source obligation: A2 §5),
+blocked on the same one full benchmark session everything else in that wave
+is blocked on. Until that pass runs and publishes a result, treat the A2
+regression as **fixed in code, unverified in throughput** — do not infer or
+imply a recovered req/s or p50 figure from the round-trip count alone.
+
+---
+
 ## Profiling — `cargo-flamegraph` (documented, not run)
 
 Per RESEARCH Environment Availability, flamegraph generation requires OS-level profiling support (`perf` on Linux) that is typically unavailable/unpermitted in a constrained sandbox. This was confirmed in this session:

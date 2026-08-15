@@ -255,6 +255,7 @@ app.get("/logout", requireConfig, async (req, res, next) => {
     const state = randomBytes(12).toString("base64url");
     const url = logoutUrl({
       discovery,
+      tenantId: TENANT_ID,
       idToken: session.idToken,
       postLogoutRedirectUri: POST_LOGOUT_REDIRECT_URI,
       state,

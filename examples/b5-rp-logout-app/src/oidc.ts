@@ -228,6 +228,7 @@ export async function exchangeCode(opts: {
  */
 export function logoutUrl(opts: {
   discovery: OidcDiscoveryDocument;
+  tenantId: string;
   idToken: string;
   postLogoutRedirectUri?: string;
   state?: string;
@@ -236,6 +237,13 @@ export function logoutUrl(opts: {
     throw new Error("logout_url: discovery document has no end_session_endpoint");
   }
   const url = new URL(opts.discovery.end_session_endpoint);
+  // AXIAM is multi-tenant and `tenant_id` is a REQUIRED query parameter on
+  // /oauth2/end_session (EndSessionQuery.tenant_id is a non-optional Uuid),
+  // exactly as it is on /oauth2/token and /oauth2/device_authorization.
+  // OIDC RP-Initiated Logout 1.0 does not define it, so a generic RP library
+  // will not send it and the request fails deserialization before the handler
+  // runs. Set it first so it survives any later parameter juggling.
+  url.searchParams.set("tenant_id", opts.tenantId);
   url.searchParams.set("id_token_hint", opts.idToken);
   if (opts.postLogoutRedirectUri) {
     url.searchParams.set("post_logout_redirect_uri", opts.postLogoutRedirectUri);

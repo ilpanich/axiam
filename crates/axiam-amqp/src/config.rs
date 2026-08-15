@@ -34,9 +34,29 @@ const DEV_DEFAULT_SIGNING_KEY: &[u8] = b"axiam-dev-only-amqp-signing-key-DO-NOT-
 pub struct AmqpTlsConfig {
     /// PEM bundle of the CA(s) that issued the broker's certificate.
     ///
-    /// Unset = verify against the system root store. Set this when the broker
+    /// Unset = verify against the platform root store. Set this when the broker
     /// certificate is issued by a private CA — including one issued by AXIAM's
     /// own `axiam-pki` org CA, which is the recommended dogfooding path.
+    ///
+    /// # This ADDS a root; it does not replace the platform store (SEC-106)
+    ///
+    /// Setting this does **not** narrow the trust set to your CA. lapin hands
+    /// the bundle to `tcp-stream`, whose rustls backend calls
+    /// `RustlsConnectorConfig::add_parsable_certificates` on top of the
+    /// platform verifier's existing roots
+    /// (`tcp-stream-0.34/src/rustls_impl.rs`). So after setting it, a
+    /// certificate for the broker's hostname issued by *any* publicly trusted
+    /// CA is still accepted — the trust set got wider, not narrower, which is
+    /// the opposite of what "pin my private broker CA" is usually meant to
+    /// achieve.
+    ///
+    /// There is no configuration here that changes that: `OwnedTLSConfig`
+    /// carries only an identity and a certificate chain, with no hook for a
+    /// rustls `ClientConfig`. If you need the trust set actually restricted to
+    /// your CA, restrict it at the platform trust store the container image
+    /// ships (`/etc/ssl/certs`) and leave this unset, or authenticate the
+    /// broker with mutual TLS via [`Self::client_cert_path`], which is a
+    /// stronger statement than root pinning anyway.
     pub ca_cert_path: Option<String>,
     /// PEM client certificate, for mutual TLS toward the broker.
     ///

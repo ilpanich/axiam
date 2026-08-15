@@ -596,3 +596,89 @@ attempts landed at +0 ms, +502 ms, +2003 ms.
 step is now in the workflow. Back-channel delivery runs in a detached task, so a delivery fault
 produces nothing at all in the example's own output — three lines of server log is the only place the
 fault is visible, and that is a narrow enough exception to the job's no-log-dump rule to be worth it.
+
+---
+
+### Execution log — update 4 (R5.8 fan-out, merges, R5.9, R5.2 tail)
+
+**Everything merged.** `#323` merged as `306e7b6` (merge commit, not squash — the project requires a
+signed commit per task and a squash would collapse all 54). All eleven SDK re-vendoring PRs merged
+behind it, in contract-flow order: rust#61, typescript#59, python#45, java#50, kotlin#29, csharp#48,
+go#42, php#35, swift#28, c#27, cplusplus#27.
+
+**Two of this plan's own premises about R5.8 were wrong, and both should be corrected before the text
+is reused.**
+
+1. *"All 11 vendor the 1.15-era blob `ff6a0a02`."* False in every repo checked. All were at contract
+   **1.17** — c/cplusplus at `CONTRACT.md` `c535943d…`, and the other nine likewise one revision back,
+   not four. The re-vendor was 1.17 → 1.19 (§22 Reactors from 1.18, SDK-Q10 from 1.19), not
+   1.15 → 1.19.
+2. *"Re-vendor `proto/` into all 11 SDK repos."* Not applicable to two of them. `axiam-c-sdk` and
+   `axiam-cplusplus-sdk` vendor no protos and have no generated stubs — no `.proto`, no `*.pb.*`, no
+   `protoc` in CMake or CI. They are pure REST/libcurl SDKs, so `reactor.proto` has no home there and
+   none was invented. This is a bad premise rather than a residual, and **R5.8's second half must
+   tolerate it**: a cross-repo check asserting "every repo has every artifact" would fail permanently.
+
+**SDK-Q10 was not an inert proto bump.** Landing `authorization.proto` is not the same as satisfying
+§11.2 rule 9 (read `reason`; fall back to `deny_reason` only when absent on a refusal; expose one
+accessor). Where codegen runs on every build the compiler forced the issue — in rust, `deny_reason`
+reads became deprecation warnings that `clippy -D warnings` rejects and test struct literals stopped
+compiling. Implemented with tests in **rust, typescript and python** (python's collapses four
+duplicated mapping sites into one `_to_decision` guarded by `HasField("reason")`, not truthiness —
+truthiness would misread an explicitly-empty `reason`).
+
+**Still open: java and csharp.** Both generate stubs into gitignored directories at build time, so
+nothing broke and nothing complained. That is the dangerous shape of this gap — the SDKs where it is
+easiest to miss are exactly the ones where no build fails. `go` is unaudited. Two residuals were taken
+consistently everywhere and deliberately: `subject_id` was **not** relaxed to optional (a breaking
+signature move, out of scope for an artifact sync; rust and TS doc comments that asserted the
+*opposite* of the contract were corrected), and `reactor.proto` is vendored but **not compiled** in
+rust/python/php (exposing a `ReactorAdminService` client is a feature decision).
+
+**New finding — the php SDK's stubs were stale against its own vendored proto.** `CheckAccessResponse.php`
+was missing `reason_code = 3`, the B1 deny-override field, which predates 1.17 — so PHP consumers could
+not read `reason_code` off a gRPC CheckAccess response at all. Found by running codegen against the
+*pre-change* protos as a control and getting a non-empty diff; the same control against go produced a
+zero diff, which is how go's prior "regenerated" claim was verified rather than trusted. Root cause:
+php has **no codegen drift gate** (D-03 uses plain protoc, not buf), where go has one. Fixed in php#35;
+the missing gate is not. **Note this is a different gate from R5.8's second half** — php's *vendored
+proto* was correct and only the generated stubs had drifted, so a cross-repo artifact-hash job would
+not have caught it. Both gates are needed.
+
+**Operational finding worth carrying into every future multi-repo pass.** GitHub runs **no
+`pull_request` workflows at all** on a PR whose `mergeable_state` is `dirty`. There is no error, no
+failed check and no skipped check — the runs are simply absent, so a conflicted PR presents as "nothing
+failing". rust#61 hit this: it showed only CodeQL and GitGuardian (which run on other triggers) and zero
+Actions runs, because its branch still carried a pre-squash R5.7 commit that `main` had absorbed.
+Closing/reopening and force-pushing did **not** clear it; rebasing onto current `main` did. Any
+downstream branch cut before its predecessor PR was squash-merged is exposed. **Before merging
+anything, verify both that `mergeable_state` is not `dirty` and that the expected checks actually ran
+— an absence of failures is not a pass.**
+
+**R5.9 Rust half — done, and the residual was self-inflicted.** It had been recorded as blocked on a
+full-workspace instrumented build the sandbox disk could not host. It never needed one: the coverage
+job already prints the achieved TOTAL into the run summary one step above the gate. Measured
+**88.60% lines** (60898 lines, 6942 missed; regions 87.40%, functions 79.32%). `--fail-under-lines`
+gates on lines, so the floor was ratcheted **80 → 88**, a 0.6pp margin comparable to the 0.3pp the
+previous 77 → 80 ratchet used. The comment now records that future ratchets must use a number CI has
+printed, never an estimate.
+
+**R5.2 tail — SCIM had no rate limit at all.** `grep -rn "scim.*_per_min" --include=*.rs crates/`
+returned nothing: `#323` introduced the SCIM crate and shipped its provisioning endpoints with no
+bucket, while every one of the other ~18 families has one. R5.2 scopes this ("and (after R3) SCIM")
+and R3 had landed, so it was unblocked rather than pending. Closed in `#324` at
+**`scim_per_min = 600`**, taken from the gRPC Admin family's `ADMIN_PER_SEC_DEFAULT` (10/s) — the other
+fully-privileged machine-driven admin surface, sized as a CPU guard on Argon2id, which is exactly
+SCIM's cost profile since `POST /Users` and a `password` PATCH both hash. Enforcement is wired and
+tested, not merely configured. Three collateral findings: adding the limiter broke all 15 existing SCIM
+contract tests (`TestRequest` has no peer address, and the IP-keyed extractor refuses a request it
+cannot key — the test was the unrealistic thing, not the limiter, and **any** future crate mounting
+routes behind `build_governor` inherits this); `run-benchmark.sh`'s `PENDING_SCENARIOS` and
+`scim_provisioning.js`'s header were two further sites carrying the same stale "crate not landed"
+claim; and `documented_defaults_match_shipped_config` was silently not checking the two device knobs.
+
+**R5.11 went stale within the same session it was written.** `new-feature-bench-cells.md` still said
+both k6 scenarios "still need authoring" after R7/E4 had authored them. Fixed in `25443b6`. The doc now
+distinguishes the scenario being *written* (done, in-repo) from the cell being *measured* (outstanding,
+and blocked on operator hardware) — which keeps "publish every cell honestly" from being misread as a
+claim that these two have numbers. They do not; no benchmark cell was executed in this pass, per scope.

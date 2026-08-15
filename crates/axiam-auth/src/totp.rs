@@ -1,6 +1,6 @@
 //! TOTP generation, verification, and AES-256-GCM secret encryption.
 
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 use crate::crypto;
 use crate::error::AuthError;
@@ -23,28 +23,61 @@ pub fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthErro
     crypto::aes256gcm_decrypt(key, encoded)
 }
 
+/// TOTP step size in seconds (RFC 6238 default), shared by every [`build`]
+/// call in this module.
+const TOTP_STEP_SECS: u64 = 30;
+
+/// TOTP skew tolerance (±1 step), shared by every [`build`] call in this
+/// module.
+///
+/// `u16` since totp-rs 6.0, which widened `Builder::with_skew`. The tolerated
+/// window is unchanged.
+const TOTP_SKEW: u16 = 1;
+
+/// Digits in a generated code (RFC 6238 default).
+const TOTP_DIGITS: u8 = 6;
+
+/// Build a configured [`Totp`] over the given raw secret.
+///
+/// One constructor for the whole module. totp-rs 6.0 replaced `TOTP::new`'s
+/// seven positional arguments with a builder, and seven positional arguments --
+/// three of which were bare numbers -- repeated at four call sites was exactly
+/// the shape a silent parameter swap lives in. Centralising it means the
+/// algorithm, digit count, skew and step duration are stated once and every
+/// caller gets the same ones by construction.
+fn build(secret_bytes: Vec<u8>, issuer: &str, account: &str) -> Result<Totp, AuthError> {
+    Builder::new()
+        .with_algorithm(Algorithm::SHA1) // RFC 6238 default
+        .with_digits(TOTP_DIGITS)
+        .with_skew(TOTP_SKEW)
+        .with_step_duration(TOTP_STEP_SECS)
+        .with_secret(secret_bytes)
+        .with_issuer(Some(issuer))
+        .with_account_name(account)
+        .build()
+        .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))
+}
+
 /// Generate a TOTP enrollment: secret + otpauth URI.
 ///
 /// Returns `(base32_secret, otpauth_uri)`.
 pub fn generate_enrollment(issuer: &str, account: &str) -> Result<(String, String), AuthError> {
-    let secret = Secret::generate_secret();
-    let secret_bytes = secret
-        .to_bytes()
-        .map_err(|e| AuthError::Crypto(format!("secret bytes: {e}")))?;
+    let secret = Secret::generate();
+    // 6.0's `as_bytes` is infallible; 5.x's `to_bytes` returned a
+    // `Result` whose error branch a freshly generated secret could not
+    // reach, so the `map_err` it forced is gone with it.
+    let secret_bytes = secret.as_bytes().to_vec();
 
-    let totp = TOTP::new(
-        Algorithm::SHA1, // RFC 6238 default
-        6,               // digits
-        1,               // skew (±1 step)
-        30,              // step seconds
-        secret_bytes,
-        Some(issuer.to_string()),
-        account.to_string(),
-    )
-    .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))?;
+    let totp = build(secret_bytes, issuer, account)?;
 
-    let base32 = secret.to_encoded().to_string();
-    let uri = totp.get_url();
+    let base32 = secret.to_base32();
+    // 6.0 renamed `get_url` to `to_url` and made it fallible: rendering an
+    // otpauth URI can fail on an issuer or account name that cannot be encoded.
+    // Propagating that beats 5.x's infallible signature, which could not report
+    // it at all.
+    let uri = totp
+        .to_url()
+        .map_err(|e| AuthError::Crypto(format!("TOTP otpauth URL: {e}")))?;
 
     Ok((base32, uri))
 }
@@ -56,39 +89,28 @@ pub fn verify_code(
     issuer: &str,
     account: &str,
 ) -> Result<bool, AuthError> {
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes.to_vec(),
-        Some(issuer.to_string()),
-        account.to_string(),
-    )
-    .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))?;
-
-    totp.check_current(code)
-        .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))
+    let totp = build(secret_bytes.to_vec(), issuer, account)?;
+    // 6.0 changed `check_current` from `Result<bool, SystemTimeError>` to
+    // `Option<u64>`, where `Some(step)` names WHICH step matched. Only the
+    // pass/fail is wanted here; `verify_code_with_replay_check` is where the
+    // step itself becomes load-bearing.
+    Ok(totp.check_current(code).is_some())
 }
-
-/// TOTP step size in seconds (RFC 6238 default), shared by every `TOTP::new`
-/// call in this module.
-const TOTP_STEP_SECS: u64 = 30;
-
-/// TOTP skew tolerance (±1 step), shared by every `TOTP::new` call in this
-/// module.
-const TOTP_SKEW: u8 = 1;
 
 /// Verify a TOTP code with replay protection.
 ///
-/// Computes the current time-step (`unix_timestamp / 30`) and, if the HMAC is
-/// valid within the tolerated ±1-step skew window, determines WHICH step
-/// actually matched (`current_step - 1`, `current_step`, or
-/// `current_step + 1`) rather than assuming it was always `current_step`.
-/// This matters because `totp-rs`'s `check()`/`check_current()` only report
-/// pass/fail for the whole skew window, not the matched step — recording
+/// Determines WHICH step in the tolerated ±1-step skew window actually matched
+/// (`current_step - 1`, `current_step`, or `current_step + 1`) rather than
+/// assuming it was always `current_step`. This matters because recording
 /// `current_step` unconditionally would let a code accepted via the -1-skew
 /// step be replayed again once the wall clock advances past it (T-24-02).
+///
+/// Under totp-rs 5.x, `check_current` reported only pass/fail for the whole
+/// window, so this function re-derived `generate()` across the three candidate
+/// steps to identify the match. **6.0 answers with the matched step directly**
+/// (`Option<u64>`), so that probe is gone — and with it the only place in this
+/// module that compared a generated code against user input outside the
+/// library's own constant-time path.
 ///
 /// The code is rejected (even though the HMAC is correct) unless the matched
 /// step is strictly greater than `last_used_step.unwrap_or(0)`.
@@ -107,49 +129,23 @@ pub fn verify_code_with_replay_check(
     account: &str,
     last_used_step: Option<u64>,
 ) -> Result<(bool, u64), AuthError> {
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        TOTP_SKEW,
-        TOTP_STEP_SECS,
-        secret_bytes.to_vec(),
-        Some(issuer.to_string()),
-        account.to_string(),
-    )
-    .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))?;
+    let totp = build(secret_bytes.to_vec(), issuer, account)?;
 
-    // Compute current step independently of totp-rs internals.
+    // Computed independently of totp-rs internals, because it is the value
+    // reported alongside a REJECTION -- where there is no matched step to
+    // report.
     let current_step = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| AuthError::Crypto(format!("system time error: {e}")))?
         .as_secs()
         / TOTP_STEP_SECS;
 
-    // Check the HMAC across the tolerated ±1-step skew window.
-    let hmac_valid = totp
-        .check_current(code)
-        .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))?;
-
-    if !hmac_valid {
+    // Check the HMAC across the tolerated ±1-step skew window. Since 6.0 this
+    // answers with the matched step rather than a bare bool, which is exactly
+    // the value T-24-02 needs and which 5.x forced this function to re-derive.
+    let Some(matched_step) = totp.check_current(code) else {
         return Ok((false, current_step));
-    }
-
-    // Determine which candidate step actually matched, probing in the same
-    // order totp-rs's own `check()` does for skew=1: current_step - 1,
-    // current_step, current_step + 1. The code has already passed the
-    // constant-time HMAC check above, so re-deriving `generate()` here to
-    // identify the matched candidate does not introduce a new secret-timing
-    // side channel — it only distinguishes between three already-known-valid
-    // outcomes.
-    let matched_step = [
-        current_step.checked_sub(1),
-        Some(current_step),
-        current_step.checked_add(1),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|&candidate_step| totp.generate(candidate_step * TOTP_STEP_SECS) == code)
-    .unwrap_or(current_step);
+    };
 
     // Replay check: reject unless the ACTUAL matched step (incl. -1 skew) is
     // strictly greater than the last-used step.
@@ -193,50 +189,36 @@ mod tests {
 
     #[test]
     fn verify_code_with_valid_totp() {
-        let secret = Secret::generate_secret();
-        let secret_bytes = secret.to_bytes().unwrap();
+        let secret = Secret::generate();
+        let secret_bytes = secret.as_bytes().to_vec();
 
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes.clone(),
-            Some("AXIAM".into()),
-            "test@test.com".into(),
-        )
-        .unwrap();
+        let totp = build(secret_bytes.clone(), "AXIAM", "test@test.com").unwrap();
 
-        let code = totp.generate_current().unwrap();
+        // 6.0's `generate_current` is infallible and answers a `Token`; render it
+        // to the string a client would actually submit.
+        let code = totp.generate_current().to_string();
         assert!(verify_code(&secret_bytes, &code, "AXIAM", "test@test.com").unwrap());
     }
 
     #[test]
     fn verify_code_wrong_code() {
-        let secret = Secret::generate_secret();
-        let secret_bytes = secret.to_bytes().unwrap();
+        let secret = Secret::generate();
+        let secret_bytes = secret.as_bytes().to_vec();
         assert!(!verify_code(&secret_bytes, "000000", "AXIAM", "test@test.com").unwrap());
     }
 
     /// Regression: a TOTP code produced by the SAME base32 secret returned to the
-    /// client (the live enroll path encrypts `Secret::Encoded(base32).to_bytes()`
+    /// client (the live enroll path encrypts `Secret::try_from_base32(base32)?.as_bytes()`
     /// and confirm verifies those bytes) must validate. Guards the enroll→confirm
     /// round-trip end to end (RFC 6238 dynamic-truncation compliant).
     #[test]
     fn enroll_base32_roundtrip_confirms() {
         let (base32, _uri) = generate_enrollment("AXIAM", "admin@axiam.dev").unwrap();
-        let secret_bytes = Secret::Encoded(base32).to_bytes().unwrap();
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes.clone(),
-            Some("AXIAM".into()),
-            "admin@axiam.dev".into(),
-        )
-        .unwrap();
-        let code = totp.generate_current().unwrap();
+        let secret_bytes = Secret::try_from_base32(base32).unwrap().as_bytes().to_vec();
+        let totp = build(secret_bytes.clone(), "AXIAM", "admin@axiam.dev").unwrap();
+        // 6.0's `generate_current` is infallible and answers a `Token`; render it
+        // to the string a client would actually submit.
+        let code = totp.generate_current().to_string();
         assert!(verify_code(&secret_bytes, &code, "AXIAM", "admin@axiam.dev").unwrap());
     }
 
@@ -246,19 +228,10 @@ mod tests {
     /// it still falls inside the ±1 skew window relative to a later call.
     #[test]
     fn totp_skew_step_recorded() {
-        let secret = Secret::generate_secret();
-        let secret_bytes = secret.to_bytes().unwrap();
+        let secret = Secret::generate();
+        let secret_bytes = secret.as_bytes().to_vec();
 
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes.clone(),
-            Some("AXIAM".into()),
-            "skew@test.com".into(),
-        )
-        .unwrap();
+        let totp = build(secret_bytes.clone(), "AXIAM", "skew@test.com").unwrap();
 
         let current_step = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -270,7 +243,8 @@ mod tests {
         // Hand-generate a code for the PREVIOUS step (simulates a client
         // that entered a code right at a step boundary) — this is the -1
         // skew case `TOTP::check` tolerates.
-        let prev_code = totp.generate(prev_step * 30);
+        // 6.0's `generate` answers a `Token` rather than a String.
+        let prev_code = totp.generate(prev_step * 30).to_string();
 
         let (valid, matched_step) = verify_code_with_replay_check(
             &secret_bytes,

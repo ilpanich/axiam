@@ -1019,19 +1019,19 @@ async fn mfa_setup_full_flow_sets_cookies() {
     let secret_base32 = body["secret_base32"].as_str().unwrap();
 
     // Step 3: Generate TOTP code.
-    let secret = totp_rs::Secret::Encoded(secret_base32.to_string());
-    let secret_bytes = secret.to_bytes().unwrap();
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        "alice@example.com".into(),
-    )
-    .unwrap();
-    let code = totp.generate_current().unwrap();
+    let secret = totp_rs::Secret::try_from_base32(secret_base32).unwrap();
+    let secret_bytes = secret.as_bytes().to_vec();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
+    let code = totp.generate_current().to_string();
 
     // Step 4: Confirm → 200 with cookies (not tokens in body).
     let req = test::TestRequest::post()
@@ -1551,25 +1551,26 @@ async fn enroll_and_confirm_mfa_then_login_requires_verify() {
     // already consumed in step 3 (no real sleep needed — skew=1 accepts the
     // next step early).
     let gen_code_at_offset = |secret_b32: &str, step_offset: i64| -> String {
-        let secret = totp_rs::Secret::Encoded(secret_b32.to_string());
-        let secret_bytes = secret.to_bytes().unwrap();
-        let totp = totp_rs::TOTP::new(
-            totp_rs::Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes,
-            Some("AXIAM-Test".into()),
-            "alice@example.com".into(),
-        )
-        .unwrap();
+        let secret = totp_rs::Secret::try_from_base32(secret_b32).unwrap();
+        let secret_bytes = secret.as_bytes().to_vec();
+        let totp = totp_rs::Builder::new()
+            .with_algorithm(totp_rs::Algorithm::SHA1)
+            .with_digits(6)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret_bytes)
+            .with_issuer(Some("AXIAM-Test"))
+            .with_account_name("alice@example.com")
+            .build()
+            .unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let current_step = now / 30;
         let target_time = ((current_step as i64 + step_offset).max(0) as u64) * 30;
-        totp.generate(target_time)
+        // 6.0's `generate` answers a `Token`; this closure yields a String.
+        totp.generate(target_time).to_string()
     };
     let gen_code = |secret_b32: &str| -> String { gen_code_at_offset(secret_b32, 0) };
 

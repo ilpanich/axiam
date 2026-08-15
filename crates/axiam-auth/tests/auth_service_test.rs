@@ -661,19 +661,19 @@ async fn mfa_enroll_and_confirm() {
     assert!(enrollment.totp_uri.starts_with("otpauth://totp/"));
 
     // Step 2: generate a valid TOTP code from the secret.
-    let secret = totp_rs::Secret::Encoded(enrollment.secret_base32.clone());
-    let secret_bytes = secret.to_bytes().unwrap();
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        "alice@example.com".into(),
-    )
-    .unwrap();
-    let code = totp.generate_current().unwrap();
+    let secret = totp_rs::Secret::try_from_base32(&enrollment.secret_base32).unwrap();
+    let secret_bytes = secret.as_bytes().to_vec();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
+    let code = totp.generate_current().to_string();
 
     // Step 3: confirm with valid code.
     svc.confirm_mfa(tenant_id, user_id, &code).await.unwrap();
@@ -695,19 +695,19 @@ async fn mfa_login_challenge_flow() {
 
     // Enroll and confirm MFA.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
-    let secret = totp_rs::Secret::Encoded(enrollment.secret_base32.clone());
-    let secret_bytes = secret.to_bytes().unwrap();
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        "alice@example.com".into(),
-    )
-    .unwrap();
-    let code = totp.generate_current().unwrap();
+    let secret = totp_rs::Secret::try_from_base32(&enrollment.secret_base32).unwrap();
+    let secret_bytes = secret.as_bytes().to_vec();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
+    let code = totp.generate_current().to_string();
     svc.confirm_mfa(tenant_id, user_id, &code).await.unwrap();
 
     // Login should now return MfaRequired.
@@ -766,19 +766,19 @@ async fn mfa_wrong_code_rejected() {
 
     // Enroll + confirm.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
-    let secret = totp_rs::Secret::Encoded(enrollment.secret_base32);
-    let secret_bytes = secret.to_bytes().unwrap();
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        "alice@example.com".into(),
-    )
-    .unwrap();
-    let code = totp.generate_current().unwrap();
+    let secret = totp_rs::Secret::try_from_base32(enrollment.secret_base32).unwrap();
+    let secret_bytes = secret.as_bytes().to_vec();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
+    let code = totp.generate_current().to_string();
     svc.confirm_mfa(tenant_id, user_id, &code).await.unwrap();
 
     // Login → get challenge.
@@ -1076,19 +1076,19 @@ async fn exponential_backoff_increases_lockout() {
 // -----------------------------------------------------------------------
 
 /// Helper: build a TOTP verifier from a base32 secret returned by enrollment.
-fn totp_from_secret(secret_base32: &str, email: &str) -> totp_rs::TOTP {
-    let secret = totp_rs::Secret::Encoded(secret_base32.to_string());
-    let secret_bytes = secret.to_bytes().unwrap();
-    totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        email.into(),
-    )
-    .unwrap()
+fn totp_from_secret(secret_base32: &str, email: &str) -> totp_rs::Totp {
+    let secret = totp_rs::Secret::try_from_base32(secret_base32).unwrap();
+    let secret_bytes = secret.as_bytes().to_vec();
+    totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name(email)
+        .build()
+        .unwrap()
 }
 
 /// Generate a TOTP code for the step AFTER the current wall-clock step.
@@ -1101,13 +1101,15 @@ fn totp_from_secret(secret_base32: &str, email: &str) -> totp_rs::TOTP {
 /// this generates one without needing to sleep past a real 30s boundary
 /// (the code is still accepted via the ±1 skew tolerance, since the real
 /// current step hasn't advanced yet).
-fn generate_next_step_code(totp: &totp_rs::TOTP) -> String {
+fn generate_next_step_code(totp: &totp_rs::Totp) -> String {
     let current_step = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
         / 30;
-    totp.generate((current_step + 1) * 30)
+    // 6.0's `generate` answers a `Token`; this helper's contract is the
+    // string a client would submit.
+    totp.generate((current_step + 1) * 30).to_string()
 }
 
 /// Helper: enroll + confirm MFA for user alice, returning the TOTP verifier.
@@ -1120,10 +1122,10 @@ async fn enable_mfa_for_alice(
     >,
     tenant_id: Uuid,
     user_id: Uuid,
-) -> totp_rs::TOTP {
+) -> totp_rs::Totp {
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
     let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
-    let code = totp.generate_current().unwrap();
+    let code = totp.generate_current().to_string();
     svc.confirm_mfa(tenant_id, user_id, &code).await.unwrap();
     totp
 }
@@ -1388,7 +1390,7 @@ async fn confirm_mfa_with_setup_token_returns_login_tokens() {
 
     // Step 3: Generate TOTP code and confirm.
     let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
-    let code = totp.generate_current().unwrap();
+    let code = totp.generate_current().to_string();
 
     let output = svc
         .confirm_mfa_with_setup_token(&setup_token, &code, None, None)
@@ -1451,16 +1453,16 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
     let encryption_key = test_config().mfa_encryption_key.unwrap();
     let encrypted = user.mfa_secret.as_ref().unwrap();
     let secret_bytes = axiam_auth::totp::decrypt_secret(&encryption_key, encrypted).unwrap();
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("AXIAM-Test".into()),
-        "alice@example.com".into(),
-    )
-    .unwrap();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret_bytes)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
     // SECHRD-01: enable_mfa_for_alice's confirm_mfa already seeded
     // totp_last_used_step at the current step, so use a code from the
     // NEXT step here (still accepted via ±1 skew) rather than the same

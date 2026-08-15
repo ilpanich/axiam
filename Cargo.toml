@@ -87,7 +87,7 @@ arc-swap = "1"
 # features is active; enabling both re-triggers the same panic.
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 argon2 = "0.5"
-totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+totp-rs = { version = "6", features = ["gen_secret", "otpauth"] }
 rand = "0.10"
 hmac = "0.13"
 hkdf = "0.13"

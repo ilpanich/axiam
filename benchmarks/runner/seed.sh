@@ -241,6 +241,25 @@ seed_axiam() {
     username "$BENCH_USERNAME")
   [ -n "$USER_ID" ] || { echo "[seed/axiam] could not create/find bench user"; exit 1; }
 
+  # POST /api/v1/users creates the account as `PendingVerification`, and AXIAM
+  # only lets such an account log in during the email-verification grace period
+  # (`email_verification_grace_period_hours`, default 24 — see
+  # AuthService::check_user_status). So a seed is NOT time-stable: the first run
+  # passes, and any re-seed that FINDS the day-old user (create_or_find) leaves
+  # it pending, after which /api/v1/auth/login answers
+  #   {"error":"authentication_failed","message":"account is pending verification"}
+  # and the user-login smoke check aborts the whole matrix. Activate explicitly,
+  # unconditionally (same reasoning as the Keycloak PUT below): PUT is a partial
+  # update, so `status` is the only field this touches, and `users:update` on
+  # another user is an admin-only path, which the bootstrap admin holds.
+  # runner/bulk-seed.py already does the equivalent (`status = 'Active'`) in SQL.
+  echo "[seed/axiam] activating bench user (created PendingVerification)"
+  local user_status
+  user_status=$(api_checked PUT "/api/v1/users/$USER_ID" '{"status":"Active"}' \
+    | jq -r '.status // empty')
+  [ "$user_status" = "Active" ] || {
+    echo "[seed/axiam] bench user '$BENCH_USERNAME' is '$user_status', expected 'Active'"; exit 1; }
+
   echo "[seed/axiam] creating benchmark resource"
   RESOURCE_ID=$(create_or_find /api/v1/resources \
     '{"name":"bench-resource","resource_type":"bench"}' name "bench-resource")

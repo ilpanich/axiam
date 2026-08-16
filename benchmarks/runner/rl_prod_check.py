@@ -42,6 +42,14 @@ This only reflects the shipped `internet` posture defaults (no
 --configured-json to override any field for a run against a different
 posture/override set (e.g. a `gateway`-preset rl=prod pass).
 
+Results layout (M2): `--results` accepts either tree the harness produces —
+the flat `<results>/<target>/<profile>/…` a plain `bench-run` writes, or the
+`<results>/run-<i>/<target>/<profile>/…` a `bench-matrix` pass writes (which
+it does even at `repeat=1`). Reading only the flat one made a bare
+`just rl-prod-check` against a matrix tree report "no data" for every
+endpoint — a whole rl=prod pass silently unverified. Multi-pass trees are
+medianed per cell, the same aggregation `report.py` applies.
+
 Usage:
     python3 rl_prod_check.py --results results --target axiam --profile p0-plaintext
     python3 rl_prod_check.py --results results --target axiam --profile p0-plaintext \\
@@ -65,6 +73,11 @@ GRPC_RATE_LIMIT_RS = os.path.join(
 # I1's own acceptance bar ("admitted-per-minute ≈ configured×60 (±10%)"),
 # reused uniformly here for every endpoint, REST and gRPC alike.
 TOLERANCE = 0.10
+
+# C1's per-pass directory shape, as `report.py` spells it (`RUN_DIR_RE` there).
+# `bench-matrix` writes `results/run-<i>/<target>/<profile>/…` even at
+# `repeat=1`; see load_k6_admitted_per_min for why this script has to know.
+RUN_DIR_RE = re.compile(r"run-\d+")
 
 # endpoint key -> (k6 scenario filename, human label).
 #
@@ -205,26 +218,71 @@ def read_configured_defaults():
     return configured
 
 
-def load_k6_admitted_per_min(results, target, profile, scenario_file):
-    """Best-effort: ops/min actually admitted (bench_ok), read via the same
-    report.py helper report.py itself uses, so this script can never drift
-    from how the main report computes throughput."""
+def _import_report():
+    """Import runner/report.py without leaving `runner/` on sys.path."""
     sys.path.insert(0, HERE)
     try:
         import report as bench_report  # runner/report.py
     finally:
         if HERE in sys.path:
             sys.path.remove(HERE)
-    meta_path = os.path.join(results, target, profile, f"{scenario_file[:-3]}.meta.json")
+    return bench_report
+
+
+def _admitted_per_min_from_cell_dir(bench_report, cell_dir, scenario_file):
+    """ops/min actually admitted (bench_ok) for one flat
+    `<target>/<profile>/` cell dir, or None when that cell wasn't run."""
+    meta_path = os.path.join(cell_dir, f"{scenario_file[:-3]}.meta.json")
     if not os.path.exists(meta_path):
         return None
     with open(meta_path) as f:
         meta = json.load(f)
-    k6_path = os.path.join(results, target, profile, meta.get("k6_summary_file", ""))
+    k6_path = os.path.join(cell_dir, meta.get("k6_summary_file", ""))
     if not os.path.exists(k6_path):
         return None
     perf = bench_report.load_k6_summary(k6_path)
     return perf["throughput"] * 60.0  # ops/s -> ops/min
+
+
+def run_dirs(results):
+    """M2: the `results/run-<i>/` passes inside `results`, sorted, or [] for a
+    classic flat tree. Same detection `report.collect` does (RUN_DIR_RE), kept
+    here rather than imported so the two can be read side by side."""
+    try:
+        entries = sorted(os.listdir(results))
+    except OSError:
+        return []
+    return [os.path.join(results, e) for e in entries
+            if RUN_DIR_RE.fullmatch(e) and os.path.isdir(os.path.join(results, e))]
+
+
+def load_k6_admitted_per_min(results, target, profile, scenario_file):
+    """Best-effort: ops/min actually admitted (bench_ok), read via the same
+    report.py helper report.py itself uses, so this script can never drift
+    from how the main report computes throughput.
+
+    M2: `bench-matrix` writes `results/run-<i>/<target>/<profile>/…` even at
+    `repeat=1`, while a plain `bench-run` writes the flat
+    `results/<target>/<profile>/…`. Reading only the flat layout meant a
+    matrix tree reported "no data" for EVERY endpoint — a whole rl=prod pass
+    silently unverified. Try flat first (unchanged behaviour for a
+    `BENCH_RESULTS_DIR`-scoped single cell), then fall back to the `run-*/`
+    passes, medianing across them exactly as `report.aggregate_cell` does so
+    the two scripts never disagree about a repeat>1 tree."""
+    bench_report = _import_report()
+
+    flat = _admitted_per_min_from_cell_dir(
+        bench_report, os.path.join(results, target, profile), scenario_file)
+    if flat is not None:
+        return flat
+
+    per_run = [_admitted_per_min_from_cell_dir(
+                   bench_report, os.path.join(d, target, profile), scenario_file)
+               for d in run_dirs(results)]
+    per_run = [v for v in per_run if v is not None]
+    if not per_run:
+        return None
+    return bench_report.median(per_run)
 
 
 def check(results, target, profile, configured_overrides):
@@ -251,6 +309,22 @@ def check(results, target, profile, configured_overrides):
     return rows, any_fail
 
 
+def _layout_note(results):
+    """One line of provenance: which results layout the admitted numbers were
+    read from. A matrix tree's cells are medianed across its passes, a flat
+    tree's are a single measurement — the reader should not have to guess."""
+    passes = len(run_dirs(results))
+    if passes == 0:
+        return ("Layout: flat single-run tree (`<target>/<profile>/…`); each admitted "
+                "figure is one measured cell.")
+    if passes == 1:
+        return ("Layout: `bench-matrix` tree with 1 pass (`run-1/<target>/<profile>/…`); "
+                "each admitted figure is that single pass's cell.")
+    return (f"Layout: `bench-matrix` tree with {passes} passes "
+            "(`run-<i>/<target>/<profile>/…`); each admitted figure is the MEDIAN "
+            "across the passes that ran the cell, as `report.py` aggregates.")
+
+
 def write_summary(results, profile, rows):
     lines = [
         "# rl-prod sensitivity summary (I19)",
@@ -260,6 +334,8 @@ def write_summary(results, profile, rows):
         "`crates/axiam-api-grpc/src/{config.rs,middleware/rate_limit.rs}` "
         f"(shipped `internet` posture unless overridden). Tolerance: ±{int(TOLERANCE * 100)}% "
         "(I1's own acceptance bar).",
+        "",
+        _layout_note(results),
         "",
         "| endpoint | configured (per min) | admitted (per min) | verdict |",
         "|---|---|---|---|",

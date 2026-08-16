@@ -21,6 +21,9 @@ set shell := ["bash", "-uc"]
 
 target := "axiam"
 profile := "p0-plaintext"
+# "all", or one scenario. M1: the `.js` is optional — run-benchmark.sh
+# normalizes `scenario=authz_check_rest` to `authz_check_rest.js` before the
+# AXIAM-only/OAuth2/pending filters run, so both spellings are the same cell.
 scenario := "all"
 sdk := "python"
 # I19: optional JSON override for `rl-prod-check`'s configured-limit table

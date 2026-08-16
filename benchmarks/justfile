@@ -803,6 +803,147 @@ sdk-bench-all:
       exit "$MEDIAN_RC"
     fi
 
+# ---------------------------------------------------------------------------
+# bench-nested (N1) — nested-resource authorization, swept by depth
+# ---------------------------------------------------------------------------
+#
+# The question this answers: what does it cost to authorize a resource that
+# sits N levels below the one carrying the grant, and how does that cost move
+# as N grows — for AXIAM, Keycloak and Zitadel, over REST and (where the
+# capability exists at all) gRPC.
+#
+#   just bench-nested                                    # the default ladder, p0
+#   just profile=p2-tls13 bench-nested                   # same ladder over TLS 1.3
+#   just nestedtargets="axiam" nesteddepths="0 4 16" bench-nested
+#   just bench-nested-report                             # re-render the summary only
+#
+# Each rung is a real measured cell run through the SAME runner as every matrix
+# cell (settle gate, samplers, meta.json), written into its own subtree:
+#
+#     results/nested/d<N>/<target>/<profile>/authz_nested_{rest,grpc}.*
+#
+# That is one level deeper than `report.py`'s walk reaches, so `bench-report`
+# never sees these cells — deliberately, exactly as it never sees
+# results/dry-run/. A depth ladder is not a matrix: its cells differ in a knob,
+# not in a target/profile coordinate, and medianing or ranking them alongside
+# matrix cells would be meaningless. `runner/nested_report.py` is this tree's
+# own reader and it runs automatically at the end of the sweep.
+#
+# WHAT THE THREE ARMS MEASURE — this is not a like-for-like race, and the
+# summary says so on every table. Only AXIAM has a hierarchical resource model;
+# Keycloak expresses nesting as URI paths over a flat resource set; Zitadel has
+# no per-resource decision endpoint at all and its arm is a declared capability
+# gap. See `scenarios/lib/nested.js`'s header for the full reasoning, and
+# `claude_dev/quick-bench-runbook-2026-08-16.md` §9 for the run procedure.
+#
+# ONE STACK PER TARGET, SWEPT: the ladder brings each target up once, seeds it
+# once, and runs every depth against that one stack — the chain is provisioned
+# incrementally in setup() and re-used, so a deeper rung adds levels rather
+# than rebuilding. That is minutes instead of hours, at the cost of later rungs
+# meeting a warmer stack than earlier ones; `nestedpause` puts a settling gap
+# between rungs and the per-cell settle gate still runs. If you need the
+# cold-stack version, run the rungs by hand with a bench-down between them and
+# say so in the write-up.
+nesteddepths := "0 1 2 4 8 16"
+nestedtargets := "axiam keycloak zitadel"
+nestedvus := "50"
+nestedwarmup := "20s"
+nesteddur := "60s"
+nestedpause := "30"
+
+bench-nested:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    SWEEP="${BENCH_RESULTS_DIR:-$PWD/results}/nested"
+    mkdir -p "$SWEEP"
+
+    # Validate the ladder BEFORE spending any bring-up time. A non-numeric rung
+    # would reach k6 as BENCH_AUTHZ_DEPTH=<garbage>, which lib/nested.js clamps
+    # to 0 — i.e. it would silently measure the control point again and file it
+    # under a directory named after the depth nobody actually ran. The ceiling
+    # is MAX_NESTED_DEPTH in scenarios/lib/nested.js, itself well below
+    # crates/axiam-db's MAX_ANCESTOR_DEPTH=50, past which get_ancestors returns
+    # an ERROR rather than a walk.
+    for d in {{nesteddepths}}; do
+      case "$d" in ''|*[!0-9]*)
+        echo "[bench-nested] depth '$d' is not a non-negative integer (nesteddepths=\"{{nesteddepths}}\")" >&2
+        exit 1 ;;
+      esac
+      if [ "$d" -gt 40 ]; then
+        echo "[bench-nested] depth $d exceeds MAX_NESTED_DEPTH=40 (scenarios/lib/nested.js). AXIAM's" >&2
+        echo "               get_ancestors ERRORS at 50 ancestors, so a rung near it would measure the" >&2
+        echo "               depth-overflow path, not the authorization path." >&2
+        exit 1
+      fi
+    done
+
+    echo "[bench-nested] targets=\"{{nestedtargets}}\" depths=\"{{nesteddepths}}\" profile={{profile}}"
+    echo "[bench-nested] load: {{nestedvus}} VUs, warm-up {{nestedwarmup}}, measured {{nesteddur}} per rung"
+    echo
+
+    for t in {{nestedtargets}}; do
+      echo "=== nested sweep: $t / {{profile}} (rl={{rl}} dbcaps={{dbcaps}}) ==="
+      just target=$t profile={{profile}} rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+      # Seed ONCE per target, into the sweep root. seed.sh honours
+      # BENCH_RESULTS_DIR for its post-smoke-check marker, and run-benchmark.sh
+      # refuses to start without that marker in ITS results dir — which is a
+      # different (per-depth) directory here. Copying the marker per rung keeps
+      # the guard intact without re-seeding (and therefore re-timing) every rung.
+      BENCH_RESULTS_DIR="$SWEEP" just target=$t profile={{profile}} bench-seed
+
+      for d in {{nesteddepths}}; do
+        RUN_DIR="$SWEEP/d$d"
+        mkdir -p "$RUN_DIR"
+        cp "$SWEEP/$t.seed.ok" "$RUN_DIR/$t.seed.ok"
+        for s in authz_nested_rest.js authz_nested_grpc.js; do
+          # The gRPC arm is AXIAM-only (no competitor in this target set exposes
+          # a gRPC authorization-decision RPC). run-benchmark.sh's
+          # AXIAM_ONLY_SCENARIOS filter would skip it anyway; skipping here too
+          # avoids spending a settle gate on a cell that cannot run.
+          if [ "$s" = "authz_nested_grpc.js" ] && [ "$t" != "axiam" ]; then continue; fi
+          echo "--- $t depth=$d $s ---"
+          BENCH_RESULTS_DIR="$RUN_DIR" \
+          BENCH_AUTHZ_DEPTH="$d" \
+          BENCH_VUS="{{nestedvus}}" BENCH_WARMUP="{{nestedwarmup}}" BENCH_DURATION="{{nesteddur}}" \
+            just target=$t profile={{profile}} scenario=$s bench-run
+          if [ "{{nestedpause}}" -gt 0 ] 2>/dev/null; then
+            echo "[bench-nested] pausing {{nestedpause}}s before the next rung (nestedpause=0 to disable)"
+            sleep {{nestedpause}}
+          fi
+        done
+      done
+
+      just target=$t bench-down
+    done
+
+    echo
+    # nested_report.py exits 1 when any rung is invalid. That is information,
+    # not a reason to lose the summary it has already written — so capture it,
+    # print the sweep's own closing banner, and only then propagate.
+    rc=0
+    python3 runner/nested_report.py --results "$SWEEP" || rc=$?
+    echo "[bench-nested] sweep complete — $SWEEP/SUMMARY.md"
+    if [ "$rc" -ne 0 ]; then
+      echo "[bench-nested] at least one rung is INVALID (see the summary's 'Invalid rungs' table)." >&2
+      echo "               Do not publish the ladder until those rungs are re-run or explained." >&2
+    fi
+    exit "$rc"
+
+# Re-render results/nested/SUMMARY.md from an existing sweep tree — no
+# containers, no k6. Use after hand-running extra rungs, or to re-read a packed
+# archive. Honours BENCH_RESULTS_DIR the same way `bench-nested` does.
+bench-nested-report:
+    python3 runner/nested_report.py --results "${BENCH_RESULTS_DIR:-$PWD/results}/nested"
+
+# Hermetic regression guard for the nested sweep's harness wiring: asserts the
+# depth knob reaches meta.json, that the sweep cells stay OUT of the default
+# `--scenario all` set, and that nested_report.py reads a sweep tree and
+# refuses to fabricate a depth slope for the capability-gap arm. No docker, no
+# k6, no seeded stack — CI runs the same script on every PR.
+bench-nested-selftest:
+    bash runner/nested-selftest.sh
+
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the
 # test stands up a stub HTTPS server that DEMANDS a client cert and asserts

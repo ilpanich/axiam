@@ -192,10 +192,17 @@ BASE="${BENCH_SCHEME:-http}://${BENCH_HOST}:${BENCH_PORT:-8090}"
 # none of them and bypassed every filter (silent). Normalizing here, before
 # filter_scenarios() runs, fixes both: `scenario=authz_check_rest` and
 # `scenario=authz_check_rest.js` are now the same cell, filters included.
+#
+# N1: SCENARIO_SET_IS_ALL records WHERE the set came from, because
+# OPT_IN_SCENARIOS below is filtered out of the auto-discovered set and kept in
+# an explicitly-named one. Derived here rather than re-tested later so a future
+# third way of building SCENARIOS has to answer the question deliberately.
 if [ "$SCENARIO" = "all" ]; then
   mapfile -t SCENARIOS < <(cd "$BENCH/scenarios" && ls ./*.js | sed 's#^\./##')
+  SCENARIO_SET_IS_ALL=1
 else
   case "$SCENARIO" in *.js) SCENARIOS=("$SCENARIO") ;; *) SCENARIOS=("$SCENARIO.js") ;; esac
+  SCENARIO_SET_IS_ALL=0
 fi
 
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.
@@ -219,7 +226,12 @@ fi
 # harness's target set.
 # R2.4 added one more: oauth2_client_credentials_reactor_hook.js (X1) — no
 # other bench target has reactors.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js"
+# N1 added authz_nested_grpc.js: the gRPC half of the nested-resource depth
+# sweep. Keycloak exposes no gRPC surface at all, and Zitadel's gRPC APIs carry
+# no per-resource authorization-decision RPC, so there is nothing to compare it
+# against. Its REST sibling (authz_nested_rest.js) is deliberately NOT here —
+# that one IS wired for all three targets (see scenarios/lib/nested.js).
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -283,6 +295,26 @@ skip_oauth2() {
 # BOTH, not the first one alone.
 PENDING_SCENARIOS="scim_provisioning.js oauth2_client_credentials_reactor_hook.js"
 
+# N1: scenarios that are complete and runnable but are NOT default-matrix
+# cells — they are rungs of a labelled sweep whose meaning comes from the knob
+# that drives them, so auto-discovery (`ls ./*.js`, i.e. `--scenario all`)
+# must not pick them up.
+#
+# This is deliberately NOT PENDING_SCENARIOS: a pending cell cannot run at all
+# and its escape hatch (BENCH_ENABLE_PENDING_SCENARIOS=1) applies even to an
+# explicit `--scenario` request, precisely so an unsupervised operator cannot
+# turn a skip into a red matrix cell. These are the inverse — always runnable,
+# always correct when named explicitly, and only ever wrong as an unlabelled
+# member of the default set. Naming one (`--scenario authz_nested_rest.js`, as
+# `just bench-nested` does) runs it with no override needed.
+#
+# authz_nested_rest.js / authz_nested_grpc.js: one cell per rung of the
+# BENCH_AUTHZ_DEPTH ladder. Folding them into `all` would (a) add ~2 cells per
+# target per profile to every future matrix — hours — and (b) publish a single
+# arbitrary depth as though it were "the" nested number, which is exactly the
+# reading the sweep exists to prevent. Run them with `just bench-nested`.
+OPT_IN_SCENARIOS="authz_nested_rest.js authz_nested_grpc.js"
+
 # Skips are recorded into the dry-run ledger too (as SKIP rows), not just
 # echoed: "which cells does the matrix actually intend to run" is precisely the
 # kind of thing you want confirmed up front. An OAuth2 skip in particular is
@@ -294,6 +326,10 @@ filter_scenarios() {
     if [ "${BENCH_ENABLE_PENDING_SCENARIOS:-0}" != "1" ] && [[ " $PENDING_SCENARIOS " == *" $s "* ]]; then
       echo "[run] skipping $s (pending — see its header comment; set BENCH_ENABLE_PENDING_SCENARIOS=1 to force)"
       record_dry "${s%.js}" "SKIP" "pending — feature not yet landed (BENCH_ENABLE_PENDING_SCENARIOS=1 to force)"; continue
+    fi
+    if [ "$SCENARIO_SET_IS_ALL" = "1" ] && [[ " $OPT_IN_SCENARIOS " == *" $s "* ]]; then
+      echo "[run] skipping $s (labelled sweep cell — run it by name, e.g. 'just bench-nested')"
+      record_dry "${s%.js}" "SKIP" "labelled sweep cell, not a default-matrix scenario (run 'just bench-nested')"; continue
     fi
     if [ "$TARGET" != "axiam" ] && [[ " $AXIAM_ONLY_SCENARIOS " == *" $s "* ]]; then
       echo "[run] skipping $s (AXIAM-only) for target $TARGET"
@@ -1134,6 +1170,20 @@ run_one() {
     k6_cpu_cores_avg="$(awk -F, 'NR>1 && $6!="" {s+=$6; n++} END{if(n>0) printf "%.3f", s/n; else print 0}' "$hostcsv")"
   fi
 
+  # N1: the depth rung, as a JSON NUMBER — `null` for every cell that is not a
+  # nested-sweep rung (the overwhelming majority), which is what
+  # nested_report.py keys off to tell a rung from an ordinary cell. Validated
+  # rather than interpolated raw: meta.json is parsed by report.py,
+  # rl_prod_check.py and nested_report.py alike, so one operator typo in
+  # BENCH_AUTHZ_DEPTH would otherwise emit malformed JSON and take down the
+  # aggregation of every OTHER cell in the tree with it.
+  local NESTED_DEPTH_JSON="null"
+  case "${BENCH_AUTHZ_DEPTH:-}" in
+    "") : ;;
+    *[!0-9]*) echo "[run] WARN: BENCH_AUTHZ_DEPTH='${BENCH_AUTHZ_DEPTH}' is not a non-negative integer — recording null" >&2 ;;
+    *) NESTED_DEPTH_JSON="$BENCH_AUTHZ_DEPTH" ;;
+  esac
+
   # Write run metadata (joined by report.py).
   cat > "$meta" <<EOF
 {
@@ -1180,6 +1230,11 @@ run_one() {
     "tenants_extra": ${BENCH_SEED_TENANTS_EXTRA:-0},
     "resource_depth": ${BENCH_SEED_DEPTH:-null},
     "deny_ratio": ${BENCH_SEED_DENY_RATIO:-0}
+  },
+  "nested_authz": {
+    "depth": $NESTED_DEPTH_JSON,
+    "kc_mode": "$(json_escape "${BENCH_KC_NESTED_MODE:-wildcard}")",
+    "prefix": "$(json_escape "${BENCH_NESTED_PREFIX:-bench-nest}")"
   },
   "axiam_env_required": "$(json_escape "${BENCH_REQUIRE_ENV:-}")",
   "axiam_env_missing": $(env_missing_json),

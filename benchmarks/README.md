@@ -156,6 +156,7 @@ just bench-quick
 | `bench-matrix` | a number that goes in a comparison table, a README, a plan's claim, or the public archive. Median-of-3, full cross-product, competitors included. |
 | `bench-dry-run` | rehearsing the matrix — does every cell's client actually connect and get the answer it expects? Never a measurement. |
 | `bench-quick` | "did this change cost anything, roughly?" One target, one profile, one short window per arm, no repeats. |
+| `bench-nested` | "what does depth cost?" A labelled depth ladder for nested-resource authorization across all three targets — see [Nested-resource authorization](#nested-resource-authorization-depth-bench-nested) below. |
 
 It measures the per-request cost of RFC 8705 certificate-bound access tokens
 (X5.1) as an A/B between two AXIAM clients that differ in exactly one registered
@@ -347,6 +348,58 @@ cell's `meta.json` as `seed_scale` / `seed_fixture`, so a 10× measurement can
 never be mistaken for a base-fixture one. Absent file means scale 1.
 
 `just bench-bulk-verify` prints the row counts without writing anything.
+
+### Nested-resource authorization depth (`bench-nested`)
+
+`bench-bulk-seed` above makes the *fixture* deep. This makes the **question**
+deep: what does it cost to authorize a resource that sits N levels below the one
+carrying the grant, and how does that cost move as N grows — for AXIAM, Keycloak
+and Zitadel, over REST and (where the capability exists at all) gRPC.
+
+```bash
+just bench-nested                                   # depths 0 1 2 4 8 16, all three targets
+just nestedtargets="axiam" nesteddepths="0 4 16" bench-nested
+just profile=p2-tls13 bench-nested                  # the same ladder over TLS 1.3
+just bench-nested-report                            # re-render the summary, no containers
+```
+
+Each rung is a real measured cell through the same runner as every matrix cell
+(settle gate, samplers, `meta.json`), written to
+`results/nested/d<N>/<target>/<profile>/authz_nested_{rest,grpc}.*` — one level
+deeper than `report.py`'s walk reaches, so `bench-report` never sees it, the same
+way it never sees `results/dry-run/`. **A depth ladder is not a matrix**: its
+cells differ in a knob, not in a target/profile coordinate, so medianing or
+ranking them against matrix cells would be meaningless.
+`runner/nested_report.py` is the tree's own reader and writes
+`results/nested/SUMMARY.md` at the end of the sweep.
+
+The three arms **do not run the same product mechanism**, because only one of the
+three has the mechanism — `scenarios/lib/nested.js` carries the full reasoning and
+the summary repeats the caveat on every table:
+
+| target | its arm | depth meaningful? |
+|---|---|---|
+| **axiam** | A real hierarchy walk: one role assignment on the chain root cascades to the leaf, and the engine resolves the ancestor chain before it can decide. | yes |
+| **keycloak** | No parent/child relation exists. Nesting is URI paths over a flat resource set: one `/<root>/*` resource + one scope-based permission covers the subtree, and the decision request names the full leaf path (`permission_resource_format=uri`). Same administrative shape, different resolution mechanism. Set `BENCH_KC_NESTED_MODE=per-node` for the one-resource-per-level control. | yes |
+| **zitadel** | **No per-resource decision endpoint exists at all** — project roles ride in the token and the application decides locally. The arm measures the role-claim round trip a resource server makes first, and is depth-invariant *by construction*; `nested_report.py` refuses to compute a slope for it and prints why. | no — capability gap |
+
+So the publishable artifact is **per-target depth sensitivity** (each product
+against itself); the absolute cross-target table is printed too, never without
+its model caveat. Every arm's `setup()` is fail-closed — the decision at the
+requested depth must return the expected verdict before the measured window
+opens, because a misprovisioned fixture takes the SHORT deny path, which is
+*cheaper* than the walk the cell exists to measure.
+
+Depth is capped at 40: `crates/axiam-db/src/repository/resource.rs` sets
+`MAX_ANCESTOR_DEPTH = 50` and `get_ancestors` returns an **error** — not a
+truncated walk — at that many ancestors, so a rung near 50 would measure the
+depth-overflow path instead of the authorization path. `just
+bench-nested-selftest` is the hermetic guard (no docker, no k6) that keeps the
+sweep cells out of the default matrix, keeps the gRPC arm AXIAM-only, and keeps
+the capability-gap arm from being handed a slope; CI runs it on every PR.
+
+Run procedure for a release round:
+[`claude_dev/quick-bench-runbook-2026-08-16.md`](../claude_dev/quick-bench-runbook-2026-08-16.md) §6b.
 
 ## Out of scope (v1.0-beta)
 

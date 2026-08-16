@@ -9,9 +9,13 @@
 > [`run5-runbook.md`](run5-runbook.md) (the full-matrix procedure),
 > [`new-feature-bench-cells.md`](new-feature-bench-cells.md) (E4 labeled cells).
 >
-> **Time budget: ~7 h** for steps 2–6 (≈4.5 h matrix + ≈2.5 h targeted); step 7 adds
-> ~35 min. If time runs short, cut from the bottom of this priority order:
-> matrix (§2) → rl-prod (§4) → deny arms (§3) → strict-revocation (§5) → SCIM (§6).
+> **Time budget: ~8 h** for steps 2–6b (≈4.5 h matrix + ≈2.5 h targeted + ≈1 h the
+> nested-resource sweep in §6b); step 7 adds ~35 min. If time runs short, cut from
+> the bottom of this priority order: matrix (§2) → rl-prod (§4) → deny arms (§3) →
+> nested sweep (§6b) → strict-revocation (§5) → SCIM (§6). §6b is the only step
+> here that runs competitors, so cutting it costs the round its only head-to-head
+> material — prefer trimming its ladder (`nesteddepths`) or its target list over
+> dropping it entirely.
 >
 > **What this quick run does NOT discharge:** the §7 "flip every row" obligation in
 > `PUBLIC_BENCH_ANALYSIS.md` is defined against a *full* rl-prod pass; §4 here populates
@@ -184,6 +188,88 @@ user token because a `client_credentials` service-account subject can hold no RB
 permission). Check `k6_exit_code == 0` in the cell's `meta.json`, then hand to Claude
 for the un-pend commit (§0 post-run task).
 
+## 6b) Targeted cell E — nested-resource authorization depth sweep (~1 h)
+
+The one cell in this round that runs competitors. It answers a question the archive
+has never had an answer to: **what does it cost to authorize a resource that sits N
+levels below the one carrying the grant, and how does that cost move as N grows** —
+for AXIAM, Keycloak and Zitadel, over REST and (where the capability exists at all)
+gRPC.
+
+```bash
+# The default ladder — depths 0 1 2 4 8 16, all three targets, both transports
+# where they exist. ~1 h.
+just bench-nested
+
+# Narrower/cheaper variants (pick one if time is short):
+just nestedtargets="axiam keycloak" bench-nested          # drop the capability-gap arm
+just nesteddepths="0 4 16" bench-nested                   # three rungs instead of six
+just profile=p2-tls13 bench-nested                        # the same ladder over TLS 1.3
+
+# Re-render the summary from an existing tree (no containers, no k6):
+just bench-nested-report
+```
+
+`bench-nested` brings each target up **once**, seeds it **once**, and runs every rung
+against that one stack — the resource chain is provisioned incrementally in `setup()`
+and re-used, so a deeper rung adds levels rather than rebuilding. That is minutes
+instead of hours; the cost is that later rungs meet a warmer stack than earlier ones.
+`nestedpause` (default 30 s) sits between rungs and the per-cell settle gate still
+runs. If a cold-stack ladder is needed, run the rungs by hand with a `bench-down`
+between them and **say so in the write-up**.
+
+Output lands in `results/nested/d<N>/<target>/<profile>/authz_nested_{rest,grpc}.*`,
+one level deeper than `report.py`'s walk reaches — so `bench-report` never sees these
+cells, deliberately, exactly as it never sees `results/dry-run/`. A depth ladder is
+not a matrix: its cells differ in a knob, not in a target/profile coordinate.
+`runner/nested_report.py` is that tree's own reader and runs automatically at the end
+of the sweep, writing `results/nested/SUMMARY.md`. `bench-pack` picks the tree up by
+extension, so nothing extra is needed to share it.
+
+**Read this before quoting a single number from it.** The three arms do not run the
+same product mechanism, because only one of the three has the mechanism
+(`benchmarks/scenarios/lib/nested.js` carries the full reasoning; the summary repeats
+the caveat on every table):
+
+| target | what its arm actually does | depth meaningful? |
+|---|---|---|
+| **axiam** | A real hierarchy walk. One role assignment on the chain root cascades to the leaf; `engine.rs`'s `applicable_role_ids` accepts an assignment scoped to any ancestor, and the ancestor set comes from one recursive graph query over the `child_of` edge. | yes |
+| **keycloak** | No parent/child relation exists. Nesting is expressed as URI paths over a flat resource set: one `/<root>/*` resource + one scope-based permission covers the subtree, and the decision request asks about the full leaf path with `permission_resource_format=uri` + `permission_resource_matching_uri=true`. Same administrative shape (one grant covers the subtree), different resolution mechanism. | yes |
+| **zitadel** | **No per-resource decision endpoint exists at all.** Project roles ride in the token and the application decides locally. The arm measures the role-claim round trip a resource server makes before deciding — depth-invariant *by construction*. `nested_report.py` refuses to compute a slope for it and prints why. | no — capability gap |
+
+So the publishable artifact is **per-target depth sensitivity** (each product against
+itself), plus an absolute cross-target table that is never quoted without its caveat.
+Do not write "AXIAM is Nx faster at depth 16" — write what each arm did.
+
+Two failure modes worth knowing before you start:
+
+- **Every arm's `setup()` is fail-closed.** The decision at the requested depth must
+  return the expected verdict before the measured window opens. A misprovisioned
+  fixture takes the SHORT deny path — *cheaper* than the walk the cell exists to
+  measure — so a silent deny would publish an optimistic number for the wrong code
+  path. A rung that dies in setup has told you something; do not work around it.
+- **If the Keycloak probe fails on the leaf path**, that build's URI matcher did not
+  recurse through `/*`. Re-run that arm with `BENCH_KC_NESTED_MODE=per-node` (one
+  registered resource + permission per level) and **label it as the per-node
+  control** — its decision cost is depth-flat by construction and its admin cost is
+  O(N), so it is not interchangeable with the wildcard arm:
+
+  ```bash
+  BENCH_KC_NESTED_MODE=per-node just nestedtargets="keycloak" bench-nested
+  ```
+
+Depth ceiling: the ladder validator refuses anything above 40, because
+`crates/axiam-db/src/repository/resource.rs` sets `MAX_ANCESTOR_DEPTH = 50` and
+`get_ancestors` returns an **error** — not a truncated walk — at that many ancestors.
+A rung near 50 would measure the depth-overflow path, not the authorization path.
+
+Prerequisites: none beyond the usual (docker, k6, jq, and Keycloak/Zitadel able to
+seed — `just targets="axiam keycloak zitadel" profiles="p0-plaintext" bench-dry-run`
+rehearses that in minutes). The sweep provisions everything else itself: AXIAM's
+resource chain through the admin REST API, and Keycloak's whole resource server
+(a **dedicated** `bench-nest-rs` client — the seeded `bench-client` is deliberately
+left untouched so no other cell's fixture changes under it).
+
 ## 7) Optional, if time remains (priority order)
 
 1. **seed-scale, 1× vs 10× only** (~30 min): one p2 stack; run `authz_check_rest.js` at
@@ -204,8 +290,16 @@ for the un-pend commit (§0 post-run task).
 ## 8) After the run — hand back to Claude (Opus 5)
 
 - `just bench-report` for the matrix tree; collect the labeled dirs
-  (`results/e4-*`, `results/rl-prod`, `results/quick`); `just bench-pack` to share
-  (pack-filelist guards `.seed/` and secrets).
+  (`results/e4-*`, `results/rl-prod`, `results/quick`, `results/nested`);
+  `just bench-pack` to share (pack-filelist guards `.seed/` and secrets).
+- Read `results/nested/SUMMARY.md` (§6b) before writing up anything about nested
+  authorization. Publish **per-target depth sensitivity** as the headline and the
+  absolute cross-target table only with its model caveat attached; state plainly
+  that the Zitadel arm is a capability gap rather than a slow result, and which
+  Keycloak nesting model (`wildcard` or the `per-node` control) produced the
+  numbers. If any rung is listed under "Invalid rungs", it is not publishable
+  until re-run or explained — `nested_report.py` exits non-zero precisely so that
+  cannot be scrolled past.
 - Update **`benchmarks/PUBLIC_BENCH_ANALYSIS.md`**: flip the §7 rows that now PASS
   (stating the pass was single-profile p0), close A2 with before/after (or document the
   accepted trade honestly), publish each labeled cell with its distinguishing config.

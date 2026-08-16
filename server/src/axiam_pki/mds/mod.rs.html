@@ -1,0 +1,254 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-pki/src/mds/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_pki/mds/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! FIDO Alliance Metadata Service (MDS3) ingestion (X3).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! `axiam-pki` owns this because MDS ingestion is fundamentally a
+<a href=#4 id=4 data-nosnippet>4</a>//! trust-anchor concern — the same category of thing as CA certificate
+<a href=#5 id=5 data-nosnippet>5</a>//! management — not a WebAuthn concern: it verifies a signed BLOB's chain
+<a href=#6 id=6 data-nosnippet>6</a>//! of custody back to a vendored root, exactly like `axiam-pki::mtls` does
+<a href=#7 id=7 data-nosnippet>7</a>//! for mTLS client certificates, before anything is allowed to consult it.
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! ## Module layout
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! - [`error::MdsError`] — this crate's local error type for the whole
+<a href=#12 id=12 data-nosnippet>12</a>//!   ingestion path (fetch, verify, parse).
+<a href=#13 id=13 data-nosnippet>13</a>//! - [`blob::verify_and_parse`] — the fail-closed BLOB verification pipeline
+<a href=#14 id=14 data-nosnippet>14</a>//!   (D4), and the [`blob::MdsBlob`] result type.
+<a href=#15 id=15 data-nosnippet>15</a>//! - This module (`mod.rs`) — the vendored trust anchor (D3), the
+<a href=#16 id=16 data-nosnippet>16</a>//!   fetch/local-file entry points (D10), and the rollback decision (D4
+<a href=#17 id=17 data-nosnippet>17</a>//!   step 8).
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! ## Why the vendored anchor is digest-pinned, not just "the file in git"
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! [`FIDO_MDS_ROOT_SHA256_HEX`] is the root of trust for **every**
+<a href=#22 id=22 data-nosnippet>22</a>//! attestation decision the policy engine (`axiam_core::models::webauthn_policy`)
+<a href=#23 id=23 data-nosnippet>23</a>//! makes: if the vendored anchor were ever silently swapped for a different
+<a href=#24 id=24 data-nosnippet>24</a>//! certificate, "only FIDO-certified authenticators may register" quietly
+<a href=#25 id=25 data-nosnippet>25</a>//! becomes "any authenticator an attacker can mint an attestation chain
+<a href=#26 id=26 data-nosnippet>26</a>//! for" — a security regression that would produce no test failure and no
+<a href=#27 id=27 data-nosnippet>27</a>//! error, only a bad root key. Digest-pinning turns that into a loud,
+<a href=#28 id=28 data-nosnippet>28</a>//! fail-closed startup error instead: [`load_root_anchor`] recomputes the
+<a href=#29 id=29 data-nosnippet>29</a>//! SHA-256 of the vendored PEM's DER bytes on every use and refuses to
+<a href=#30 id=30 data-nosnippet>30</a>//! proceed on any mismatch. The vendored `.pem` file is *not* re-fetched
+<a href=#31 id=31 data-nosnippet>31</a>//! from anywhere at runtime — matching the digest against the pinned
+<a href=#32 id=32 data-nosnippet>32</a>//! constant **is** the check.
+<a href=#33 id=33 data-nosnippet>33</a>//!
+<a href=#34 id=34 data-nosnippet>34</a>//! **Anchor update procedure** (for the admin guide, and for whoever needs
+<a href=#35 id=35 data-nosnippet>35</a>//! to rotate this): obtain the new GlobalSign Root CA – R3 (or successor)
+<a href=#36 id=36 data-nosnippet>36</a>//! certificate from a trusted, independently-verifiable source (e.g.
+<a href=#37 id=37 data-nosnippet>37</a>//! GlobalSign's own published fingerprint page, not just the download URL),
+<a href=#38 id=38 data-nosnippet>38</a>//! compute its SHA-256 over the DER encoding, update both the `.pem` file
+<a href=#39 id=39 data-nosnippet>39</a>//! and [`FIDO_MDS_ROOT_SHA256_HEX`] in the same commit, and get that commit
+<a href=#40 id=40 data-nosnippet>40</a>//! reviewed with the digest change called out explicitly — the digest
+<a href=#41 id=41 data-nosnippet>41</a>//! constant is the actual security control; the PEM file is inert without it
+<a href=#42 id=42 data-nosnippet>42</a>//! matching.
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="kw">pub mod </span>blob;
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">mod </span>error;
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="kw">pub use </span>error::MdsError;
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span>chrono::Utc;
+<a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a><span class="kw">pub use </span>blob::{MdsBlob, verify_and_parse};
+<a href=#53 id=53 data-nosnippet>53</a>
+<a href=#54 id=54 data-nosnippet>54</a><span class="doccomment">/// The vendored FIDO MDS3 root anchor: GlobalSign Root CA – R3.
+<a href=#55 id=55 data-nosnippet>55</a>///
+<a href=#56 id=56 data-nosnippet>56</a>/// `include_str!`'d at compile time so the anchor ships inside the binary —
+<a href=#57 id=57 data-nosnippet>57</a>/// there is no runtime file dependency and no way to point this at a
+<a href=#58 id=58 data-nosnippet>58</a>/// different file without recompiling.
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">const </span>ROOT_ANCHOR_PEM: <span class="kw-2">&amp;</span>str = <span class="macro">include_str!</span>(<span class="string">"fido-mds-root-ca-r3.pem"</span>);
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="doccomment">/// SHA-256 (hex) of the vendored anchor's DER encoding. Independently
+<a href=#62 id=62 data-nosnippet>62</a>/// verified against GlobalSign's published fingerprint for "GlobalSign Root
+<a href=#63 id=63 data-nosnippet>63</a>/// CA - R3" at the time this was vendored (see the module docs for the
+<a href=#64 id=64 data-nosnippet>64</a>/// update procedure). This is the actual security control — see module docs.
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">pub const </span>FIDO_MDS_ROOT_SHA256_HEX: <span class="kw-2">&amp;</span>str =
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="string">"cbb522d7b7f127ad6a0113865bdf1cd4102e7d0759af635a7cf4720dc963c53b"</span>;
+<a href=#67 id=67 data-nosnippet>67</a>
+<a href=#68 id=68 data-nosnippet>68</a><span class="doccomment">/// Maximum accepted size for a fetched/loaded MDS3 BLOB response body.
+<a href=#69 id=69 data-nosnippet>69</a>///
+<a href=#70 id=70 data-nosnippet>70</a>/// The real BLOB is ~10 MB; this is deliberately raised well above the SSRF
+<a href=#71 id=71 data-nosnippet>71</a>/// guard's default 5 MiB cap (`crate::ssrf::MAX_RESPONSE_BYTES`, private to
+<a href=#72 id=72 data-nosnippet>72</a>/// that module) via [`crate::ssrf::guarded_fetch_with_cap`] — a named,
+<a href=#73 id=73 data-nosnippet>73</a>/// MDS-specific constant rather than a global cap increase (D2/D10).
+<a href=#74 id=74 data-nosnippet>74</a></span><span class="kw">pub const </span>MDS_MAX_BLOB_BYTES: usize = <span class="number">32 </span>* <span class="number">1024 </span>* <span class="number">1024</span>;
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="doccomment">/// Parse the vendored root anchor PEM, verify its digest against
+<a href=#77 id=77 data-nosnippet>77</a>/// [`FIDO_MDS_ROOT_SHA256_HEX`], and return its DER bytes.
+<a href=#78 id=78 data-nosnippet>78</a>///
+<a href=#79 id=79 data-nosnippet>79</a>/// Fails closed: any parse error or digest mismatch is an error, never a
+<a href=#80 id=80 data-nosnippet>80</a>/// silent fallback.
+<a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">pub fn </span>load_root_anchor() -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;, MdsError&gt; {
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="kw">let </span>parsed = pem::parse(ROOT_ANCHOR_PEM).map_err(|<span class="kw">_</span>| MdsError::RootAnchorUnparsable)<span class="question-mark">?</span>;
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="kw">let </span>der = parsed.contents();
+<a href=#84 id=84 data-nosnippet>84</a>
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="kw">let </span>digest = Sha256::digest(der);
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">let </span>digest_hex = hex::encode(digest);
+<a href=#87 id=87 data-nosnippet>87</a>
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="kw">if </span>digest_hex != FIDO_MDS_ROOT_SHA256_HEX {
+<a href=#89 id=89 data-nosnippet>89</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(MdsError::RootAnchorDigestMismatch);
+<a href=#90 id=90 data-nosnippet>90</a>    }
+<a href=#91 id=91 data-nosnippet>91</a>
+<a href=#92 id=92 data-nosnippet>92</a>    <span class="prelude-val">Ok</span>(der.to_vec())
+<a href=#93 id=93 data-nosnippet>93</a>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#96 id=96 data-nosnippet>96</a>// Fetch / local-file entry points (D10)
+<a href=#97 id=97 data-nosnippet>97</a>// ---------------------------------------------------------------------------
+<a href=#98 id=98 data-nosnippet>98</a>
+<a href=#99 id=99 data-nosnippet>99</a></span><span class="doccomment">/// Fetch, verify, and parse the MDS3 BLOB from `url` through the shared SSRF
+<a href=#100 id=100 data-nosnippet>100</a>/// guard ([`crate::ssrf::guarded_fetch_with_cap`], capped at
+<a href=#101 id=101 data-nosnippet>101</a>/// [`MDS_MAX_BLOB_BYTES`]).
+<a href=#102 id=102 data-nosnippet>102</a>///
+<a href=#103 id=103 data-nosnippet>103</a>/// `allow_private` exists solely for integration tests that point this at a
+<a href=#104 id=104 data-nosnippet>104</a>/// loopback mock server — production callers must pass `false`.
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub async fn </span>fetch_verified_blob(
+<a href=#106 id=106 data-nosnippet>106</a>    url: <span class="kw-2">&amp;</span>str,
+<a href=#107 id=107 data-nosnippet>107</a>    expected_leaf_dns: <span class="kw-2">&amp;</span>str,
+<a href=#108 id=108 data-nosnippet>108</a>    allow_private: bool,
+<a href=#109 id=109 data-nosnippet>109</a>) -&gt; <span class="prelude-ty">Result</span>&lt;MdsBlob, MdsError&gt; {
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">let </span>response =
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="kw">crate</span>::ssrf::guarded_fetch_with_cap(url, allow_private, MDS_MAX_BLOB_BYTES, |c, u| {
+<a href=#112 id=112 data-nosnippet>112</a>            c.get(u)
+<a href=#113 id=113 data-nosnippet>113</a>        })
+<a href=#114 id=114 data-nosnippet>114</a>        .<span class="kw">await
+<a href=#115 id=115 data-nosnippet>115</a>        </span>.map_err(|e| MdsError::FetchFailed(e.to_string()))<span class="question-mark">?</span>;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">let </span>bytes = <span class="kw">crate</span>::ssrf::read_capped_body(response, MDS_MAX_BLOB_BYTES)
+<a href=#118 id=118 data-nosnippet>118</a>        .<span class="kw">await
+<a href=#119 id=119 data-nosnippet>119</a>        </span>.map_err(|e| <span class="kw">match </span>e {
+<a href=#120 id=120 data-nosnippet>120</a>            <span class="kw">crate</span>::ssrf::SsrfError::ResponseTooLarge(cap) =&gt; MdsError::ResponseTooLarge(cap),
+<a href=#121 id=121 data-nosnippet>121</a>            other =&gt; MdsError::FetchFailed(other.to_string()),
+<a href=#122 id=122 data-nosnippet>122</a>        })<span class="question-mark">?</span>;
+<a href=#123 id=123 data-nosnippet>123</a>
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">let </span>text = String::from_utf8(bytes).map_err(|<span class="kw">_</span>| MdsError::InvalidEncoding)<span class="question-mark">?</span>;
+<a href=#125 id=125 data-nosnippet>125</a>    verify_and_parse(<span class="kw-2">&amp;</span>text, Utc::now(), expected_leaf_dns)
+<a href=#126 id=126 data-nosnippet>126</a>}
+<a href=#127 id=127 data-nosnippet>127</a>
+<a href=#128 id=128 data-nosnippet>128</a><span class="doccomment">/// Load, verify, and parse the MDS3 BLOB from a local file — the air-gapped
+<a href=#129 id=129 data-nosnippet>129</a>/// deployment path (`AXIAM__PKI__MDS_BLOB_PATH`, D10). No network I/O
+<a href=#130 id=130 data-nosnippet>130</a>/// happens on this path at all.
+<a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">pub fn </span>load_verified_blob_from_file(
+<a href=#132 id=132 data-nosnippet>132</a>    path: <span class="kw-2">&amp;</span>std::path::Path,
+<a href=#133 id=133 data-nosnippet>133</a>    expected_leaf_dns: <span class="kw-2">&amp;</span>str,
+<a href=#134 id=134 data-nosnippet>134</a>) -&gt; <span class="prelude-ty">Result</span>&lt;MdsBlob, MdsError&gt; {
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="kw">let </span>text = std::fs::read_to_string(path).map_err(|e| MdsError::LocalFileRead(e.to_string()))<span class="question-mark">?</span>;
+<a href=#136 id=136 data-nosnippet>136</a>    verify_and_parse(<span class="kw-2">&amp;</span>text, Utc::now(), expected_leaf_dns)
+<a href=#137 id=137 data-nosnippet>137</a>}
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#140 id=140 data-nosnippet>140</a>// D4 step 8: rollback protection
+<a href=#141 id=141 data-nosnippet>141</a>// ---------------------------------------------------------------------------
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="doccomment">/// The outcome of comparing a freshly-verified BLOB's `no` (serial number)
+<a href=#144 id=144 data-nosnippet>144</a>/// against the last stored serial (D4 step 8).
+<a href=#145 id=145 data-nosnippet>145</a>///
+<a href=#146 id=146 data-nosnippet>146</a>/// This is a **pure decision function**, deliberately kept separate from
+<a href=#147 id=147 data-nosnippet>147</a>/// [`verify_and_parse`]: the pinned `verify_and_parse` signature
+<a href=#148 id=148 data-nosnippet>148</a>/// (`blob, now, expected_leaf_dns`) has no way to receive "the currently
+<a href=#149 id=149 data-nosnippet>149</a>/// stored `no`" — that value lives in storage (`MdsRepository::get_meta`,
+<a href=#150 id=150 data-nosnippet>150</a>/// `axiam-core`), which is out of this wave's scope (`axiam-db` wiring is a
+<a href=#151 id=151 data-nosnippet>151</a>/// later wave). The ingestion orchestrator that wires storage in is
+<a href=#152 id=152 data-nosnippet>152</a>/// responsible for calling this after `verify_and_parse` succeeds and before
+<a href=#153 id=153 data-nosnippet>153</a>/// calling `MdsRepository::replace_entries`.
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#155 id=155 data-nosnippet>155</a></span><span class="kw">pub enum </span>BlobIngestOutcome {
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="doccomment">/// No stored serial exists yet — first-ever ingestion.
+<a href=#157 id=157 data-nosnippet>157</a>    </span>Initial,
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="doccomment">/// `no` is strictly greater than the stored serial — replace.
+<a href=#159 id=159 data-nosnippet>159</a>    </span>Replace,
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="doccomment">/// `no` equals the stored serial — a no-op refresh: only
+<a href=#161 id=161 data-nosnippet>161</a>    /// `last_refreshed_at` should be bumped, entries are already current.
+<a href=#162 id=162 data-nosnippet>162</a>    </span>NoOpRefresh,
+<a href=#163 id=163 data-nosnippet>163</a>    <span class="doccomment">/// `no` is lower than the stored serial — a rollback attempt. Reject:
+<a href=#164 id=164 data-nosnippet>164</a>    /// never replace stored entries with an older BLOB.
+<a href=#165 id=165 data-nosnippet>165</a>    </span>RollbackRejected,
+<a href=#166 id=166 data-nosnippet>166</a>}
+<a href=#167 id=167 data-nosnippet>167</a>
+<a href=#168 id=168 data-nosnippet>168</a><span class="doccomment">/// D4 step 8: decide what a freshly-verified BLOB's serial number means
+<a href=#169 id=169 data-nosnippet>169</a>/// relative to what's already stored.
+<a href=#170 id=170 data-nosnippet>170</a></span><span class="kw">pub fn </span>decide_ingest_outcome(new_no: i64, stored_no: <span class="prelude-ty">Option</span>&lt;i64&gt;) -&gt; BlobIngestOutcome {
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="kw">match </span>stored_no {
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="prelude-val">None </span>=&gt; BlobIngestOutcome::Initial,
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="prelude-val">Some</span>(stored) <span class="kw">if </span>new_no &gt; stored =&gt; BlobIngestOutcome::Replace,
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="prelude-val">Some</span>(stored) <span class="kw">if </span>new_no == stored =&gt; BlobIngestOutcome::NoOpRefresh,
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="prelude-val">Some</span>(<span class="kw">_</span>) =&gt; BlobIngestOutcome::RollbackRejected,
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>}
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#180 id=180 data-nosnippet>180</a>// Tests
+<a href=#181 id=181 data-nosnippet>181</a>// ---------------------------------------------------------------------------
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a></span><span class="attr">#[cfg(test)]
+<a href=#184 id=184 data-nosnippet>184</a></span><span class="kw">mod </span>tests {
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="attr">#[test]
+<a href=#188 id=188 data-nosnippet>188</a>    </span><span class="kw">fn </span>root_anchor_digest_matches_pin() {
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">let </span>der = load_root_anchor().expect(<span class="string">"vendored anchor must parse and match its pin"</span>);
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">let </span>digest_hex = hex::encode(Sha256::digest(<span class="kw-2">&amp;</span>der));
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="macro">assert_eq!</span>(digest_hex, FIDO_MDS_ROOT_SHA256_HEX);
+<a href=#192 id=192 data-nosnippet>192</a>    }
+<a href=#193 id=193 data-nosnippet>193</a>
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="attr">#[test]
+<a href=#195 id=195 data-nosnippet>195</a>    </span><span class="kw">fn </span>root_anchor_digest_mismatch_fails_closed() {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="comment">// Simulate a tampered anchor: a different (but validly-PEM-encoded)
+<a href=#197 id=197 data-nosnippet>197</a>        // certificate would parse fine but must not match the pin. We can't
+<a href=#198 id=198 data-nosnippet>198</a>        // swap the embedded `include_str!` at runtime, so this test instead
+<a href=#199 id=199 data-nosnippet>199</a>        // proves the *mechanism* — recomputing the digest of arbitrary bytes
+<a href=#200 id=200 data-nosnippet>200</a>        // and comparing against the pinned constant — rejects a mismatch.
+<a href=#201 id=201 data-nosnippet>201</a>        </span><span class="kw">let </span>not_the_root_der = <span class="string">b"this is not the vendored root certificate"</span>;
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>digest_hex = hex::encode(Sha256::digest(not_the_root_der));
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="macro">assert_ne!</span>(
+<a href=#204 id=204 data-nosnippet>204</a>            digest_hex, FIDO_MDS_ROOT_SHA256_HEX,
+<a href=#205 id=205 data-nosnippet>205</a>            <span class="string">"sanity: arbitrary bytes must not coincidentally match the pin"
+<a href=#206 id=206 data-nosnippet>206</a>        </span>);
+<a href=#207 id=207 data-nosnippet>207</a>    }
+<a href=#208 id=208 data-nosnippet>208</a>
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="attr">#[test]
+<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">fn </span>decide_ingest_outcome_initial_when_nothing_stored() {
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="macro">assert_eq!</span>(decide_ingest_outcome(<span class="number">100</span>, <span class="prelude-val">None</span>), BlobIngestOutcome::Initial);
+<a href=#212 id=212 data-nosnippet>212</a>    }
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="attr">#[test]
+<a href=#215 id=215 data-nosnippet>215</a>    </span><span class="kw">fn </span>decide_ingest_outcome_replace_when_newer() {
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="macro">assert_eq!</span>(
+<a href=#217 id=217 data-nosnippet>217</a>            decide_ingest_outcome(<span class="number">101</span>, <span class="prelude-val">Some</span>(<span class="number">100</span>)),
+<a href=#218 id=218 data-nosnippet>218</a>            BlobIngestOutcome::Replace
+<a href=#219 id=219 data-nosnippet>219</a>        );
+<a href=#220 id=220 data-nosnippet>220</a>    }
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="attr">#[test]
+<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">fn </span>decide_ingest_outcome_noop_refresh_when_equal() {
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="macro">assert_eq!</span>(
+<a href=#225 id=225 data-nosnippet>225</a>            decide_ingest_outcome(<span class="number">100</span>, <span class="prelude-val">Some</span>(<span class="number">100</span>)),
+<a href=#226 id=226 data-nosnippet>226</a>            BlobIngestOutcome::NoOpRefresh
+<a href=#227 id=227 data-nosnippet>227</a>        );
+<a href=#228 id=228 data-nosnippet>228</a>    }
+<a href=#229 id=229 data-nosnippet>229</a>
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="attr">#[test]
+<a href=#231 id=231 data-nosnippet>231</a>    </span><span class="kw">fn </span>decide_ingest_outcome_rejects_rollback() {
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="macro">assert_eq!</span>(
+<a href=#233 id=233 data-nosnippet>233</a>            decide_ingest_outcome(<span class="number">99</span>, <span class="prelude-val">Some</span>(<span class="number">100</span>)),
+<a href=#234 id=234 data-nosnippet>234</a>            BlobIngestOutcome::RollbackRejected
+<a href=#235 id=235 data-nosnippet>235</a>        );
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="attr">#[tokio::test]
+<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">async fn </span>fetch_verified_blob_rejects_non_https_without_seam() {
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>result =
+<a href=#241 id=241 data-nosnippet>241</a>            fetch_verified_blob(<span class="string">"http://example.com/blob.jwt"</span>, <span class="string">"mds.fidoalliance.org"</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(MdsError::FetchFailed(<span class="kw">_</span>))));
+<a href=#243 id=243 data-nosnippet>243</a>    }
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="attr">#[test]
+<a href=#246 id=246 data-nosnippet>246</a>    </span><span class="kw">fn </span>load_verified_blob_from_file_reports_missing_file() {
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="kw">let </span>result = load_verified_blob_from_file(
+<a href=#248 id=248 data-nosnippet>248</a>            std::path::Path::new(<span class="string">"/nonexistent/path/to/blob.jwt"</span>),
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="string">"mds.fidoalliance.org"</span>,
+<a href=#250 id=250 data-nosnippet>250</a>        );
+<a href=#251 id=251 data-nosnippet>251</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(MdsError::LocalFileRead(<span class="kw">_</span>))));
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PairOutcome","UmaError"],"struct":["GrantedPermissions","MintedTicket","UmaService"],"trait":["PermissionEvaluator","ScopeCatalog"]};

@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="SCIM authorization: the dedicated `scim:provision` permission (B4)."><title>axiam_scim::auth - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_scim" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module auth</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_scim/index.html">axiam_<wbr>scim</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module auth</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#tenant-scoping--the-code-path" title="Tenant scoping — the code path">Tenant scoping — the code path</a></li><li><a href="#what-scimprovision-actually-confers-sec-098--read-before-granting" title="What `scim:provision` actually confers (SEC-098) — read before granting">What <code>scim:provision</code> actually confers (SEC-098) — read before granting</a></li><li><a href="#principal--a-note-for-operators-see-docsapiscim-provisioningmd" title="Principal — a note for operators (see `docs/api/scim-provisioning.md`)">Principal — a note for operators (see <code>docs/api/scim-provisioning.md</code>)</a></li></ul><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>scim</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_scim</a></div><h1>Module <span>auth</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_scim/auth.rs.html#1-97">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>SCIM authorization: the dedicated <code>scim:provision</code> permission (B4).</p>
+<h2 id="tenant-scoping--the-code-path"><a class="doc-anchor" href="#tenant-scoping--the-code-path">§</a>Tenant scoping — the code path</h2>
+<p>SCIM reuses <code>axiam-api-rest</code>’s <a href="../../axiam_api_rest/extractors/auth/struct.AuthenticatedUser.html" title="struct axiam_api_rest::extractors::auth::AuthenticatedUser"><code>AuthenticatedUser</code></a> extractor unchanged:
+every <code>/scim/v2/*</code> handler takes <code>user: AuthenticatedUser</code> exactly like a
+native <code>/api/v1/users</code> handler does, and the middleware chain in front of
+it (<code>AuthzMiddleware</code>, wired in <code>crate::routes</code>) is the same one every
+other authenticated scope uses. <code>AuthenticatedUser::tenant_id</code> comes
+<strong>only</strong> from the validated JWT’s <code>tenant_id</code> claim — never from anything
+in the SCIM request path or body. Every repository call this crate makes
+(<code>UserRepository</code>/<code>GroupRepository</code>) takes that same <code>tenant_id</code> as an
+explicit, mandatory parameter and every generated SurrealDB query filters
+on it (see <code>axiam-db</code>’s <code>user.rs</code>/<code>group.rs</code>). A caller cannot name
+another tenant’s resources into existence in the query, and a token
+minted for tenant A therefore cannot read or mutate tenant B’s data
+through this crate — not because SCIM adds a check, but because it never
+introduces a second source of tenant identity for the check to miss.</p>
+<p>This is call-time enforcement (checked on every request), not a
+provisioning-time assumption: even a handler bug that forgot to call
+<a href="fn.require_scim_provision.html" title="fn axiam_scim::auth::require_scim_provision"><code>require_scim_provision</code></a> would still be unable to cross tenants, because
+the cross-tenant channel does not exist in the repository calls it would
+make. <code>tests/contract_test.rs</code>’s tenant-isolation tests exercise exactly
+this property adversarially (cross-tenant GET/PUT/PATCH/DELETE/list by
+UUID, not merely “no token”).</p>
+<h2 id="what-scimprovision-actually-confers-sec-098--read-before-granting"><a class="doc-anchor" href="#what-scimprovision-actually-confers-sec-098--read-before-granting">§</a>What <code>scim:provision</code> actually confers (SEC-098) — read before granting</h2>
+<p><strong>A holder of <code>scim:provision</code> can set any user’s password in this tenant,
+including a tenant administrator’s, and then log in as them.</strong></p>
+<p>RFC 7643 §4.1.1 defines <code>password</code> as a writable User attribute and
+<code>PATCH /scim/v2/Users/{id}</code> honours it (<a href="../users/fn.patch.html" title="fn axiam_scim::users::patch"><code>crate::users::patch</code></a>). The
+native admin API has no equivalent — <code>handlers::users::update</code> never
+writes <code>password_hash</code>, and the only native password writes are
+self-service change and reset inside <code>AuthService</code>. So this single
+permission is strictly more powerful than <code>users:create</code> +
+<code>users:update</code> combined, and the provisioning guide’s own advice (“grant
+it to your Okta/Entra integration identity”) is therefore advice to grant
+tenant-wide account takeover to an external system.</p>
+<p>That is the correct reading of the RFC and it is not being changed here;
+what was wrong was that nothing said it. If a deployment federates and
+never pushes a password — which is most Okta/Entra deployments — the
+integration identity does not need this capability and splitting it behind
+a second permission is a reasonable follow-on.</p>
+<p>Two consequences that ARE fixed rather than documented, in
+<a href="../users/index.html" title="mod axiam_scim::users"><code>crate::users</code></a>: a SCIM password write, an <code>active: false</code>, and a
+<code>DELETE /Users/{id}</code> each revoke every live session and OAuth2 refresh
+token for the target. Before SEC-098 they flushed only the authorization
+<em>decision</em> cache, so a password rotated to lock out a compromised account
+left the attacker’s session and refresh token spendable.</p>
+<h2 id="principal--a-note-for-operators-see-docsapiscim-provisioningmd"><a class="doc-anchor" href="#principal--a-note-for-operators-see-docsapiscim-provisioningmd">§</a>Principal — a note for operators (see <code>docs/api/scim-provisioning.md</code>)</h2>
+<p>The bearer principal is deliberately whichever tenant-scoped AXIAM
+identity holds <code>scim:provision</code> — in practice a dedicated tenant user
+(e.g. <code>scim-provisioner</code>) created and role-granted through the existing
+<code>/api/v1/users</code> + <code>/api/v1/roles</code> APIs, <strong>not</strong> a <code>service_account</code> row:
+AXIAM’s RBAC role-assignment edge (<code>has_role</code>) is hard-scoped to the
+<code>user</code> table today (<code>axiam-db</code>’s <code>RoleRepository::assign_to_user</code>/
+<code>get_user_role_assignments</code> both query <code>type::record('user', $id)</code>), so a
+<code>service_account</code> subject cannot currently hold ANY RBAC permission,
+<code>scim:provision</code> included. That gap predates this crate and is out of
+R3.1’s file scope (<code>axiam-db</code>, <code>axiam-authz</code>) to close; it is flagged
+here, in the provisioning guide, and in this task’s final report so a
+follow-on (the planned SCIM token-management UI, or a dedicated fix) has
+a precise pointer.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.SCIM_PROVISION_PERMISSION.html" title="constant axiam_scim::auth::SCIM_PROVISION_PERMISSION">SCIM_<wbr>PROVISION_<wbr>PERMISSION</a></dt><dd>The permission every <code>/scim/v2/*</code> route requires (B4: “a DEDICATED
+<code>scim:provision</code> permission”). Declared here, and separately registered
+in <code>axiam_api_rest::permissions::PERMISSION_REGISTRY</code> (the same array
+every other AXIAM permission is declared in) so it is seeded per-tenant
+exactly like <code>users:create</code>, <code>groups:list</code>, etc.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.require_scim_provision.html" title="fn axiam_scim::auth::require_scim_provision">require_<wbr>scim_<wbr>provision</a></dt><dd>Enforce <code>scim:provision</code> for the calling principal, using the SAME
+<a href="../../axiam_api_rest/authz/struct.RequirePermission.html" title="struct axiam_api_rest::authz::RequirePermission"><code>RequirePermission</code></a> guard every native <code>/api/v1/*</code> handler uses. Not
+resource-scoped (SCIM has no notion of an AXIAM <code>resource</code> hierarchy), so
+the check runs against the global sentinel (<code>Uuid::nil()</code>), exactly like
+<code>users:create</code>/<code>groups:create</code> do today.</dd></dl></section></div></main></body></html>

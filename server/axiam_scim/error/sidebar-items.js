@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SCIM_ERROR_SCHEMA"],"struct":["ScimError"]};

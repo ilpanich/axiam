@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The FAPI 2.0 profile switch (X5.1)."><title>axiam_oauth2::fapi - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module fapi</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module fapi</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-the-switch-actually-requires" title="What the switch actually requires">What the switch actually requires</a></li><li><a href="#registration-time-not-just-request-time" title="Registration-time, not just request-time">Registration-time, not just request-time</a></li><li><a href="#two-families-two-mechanisms-and-the-pairing-rule" title="Two families, two mechanisms, and the pairing rule">Two families, two mechanisms, and the pairing rule</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>fapi</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/fapi.rs.html#1-979">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The FAPI 2.0 profile switch (X5.1).</p>
+<p>FAPI 2.0 Security Profile (Final) is not one feature. It is a bundle of
+constraints, and a client that satisfies eleven of twelve is not
+“mostly FAPI” — it is a client with a hole. This module is where the bundle
+is defined once, so that:</p>
+<ul>
+<li>an operator turns the whole posture on with <strong>one field</strong>
+(<code>profile: "fapi2"</code>), exactly as the rate-limit postures work; and</li>
+<li><strong>ordinary clients are untouched.</strong> Every function here is a no-op for
+<a href="../../axiam_core/models/oauth2_client/enum.ClientProfile.html#variant.Standard" title="variant axiam_core::models::oauth2_client::ClientProfile::Standard"><code>ClientProfile::Standard</code></a>, which is the serde default and what every
+row written before schema v38 decodes to. There is no behaviour change
+for a deployment that never sets the flag — that is a property the tests
+at the bottom of this file assert directly, not an aspiration.</li>
+</ul>
+<h2 id="what-the-switch-actually-requires"><a class="doc-anchor" href="#what-the-switch-actually-requires">§</a>What the switch actually requires</h2><div><table><thead><tr><th>Constraint</th><th>Where enforced</th><th>FAPI 2.0 §</th></tr></thead><tbody>
+<tr><td>PAR mandatory</td><td><code>require_par</code> forced true at registration; <code>authorize</code> refuses a direct request</td><td>5.3.1.2</td></tr>
+<tr><td>PKCE with <code>S256</code> mandatory</td><td><a href="fn.enforce_authorization_request.html" title="fn axiam_oauth2::fapi::enforce_authorization_request"><code>enforce_authorization_request</code></a>; <code>S256</code>-only is already global</td><td>5.3.1.2</td></tr>
+<tr><td><code>response_type=code</code> only</td><td>already global in <code>authorize</code> — no other value is accepted for any client</td><td>5.3.1.1</td></tr>
+<tr><td>Strong client authentication</td><td><a href="fn.validate_registration.html" title="fn axiam_oauth2::fapi::validate_registration"><code>validate_registration</code></a> requires an mTLS method <strong>or</strong> <code>private_key_jwt</code></td><td>5.3.1.1</td></tr>
+<tr><td>Sender-constrained tokens</td><td><a href="fn.validate_registration.html" title="fn axiam_oauth2::fapi::validate_registration"><code>validate_registration</code></a> requires certificate binding <strong>or</strong> DPoP</td><td>5.3.1.1</td></tr>
+<tr><td>Strict <code>redirect_uri</code> equality</td><td>already global — <code>redirect_uris.contains()</code>, no prefix or wildcard matching anywhere</td><td>5.3.1.2</td></tr>
+<tr><td>Authorization code single-use</td><td>already global, and since #318/schema v37 guaranteed by a transaction plus a post-commit nonce read-back</td><td>5.3.1.2</td></tr>
+<tr><td>No token in any URL</td><td>already global — <code>response_type=token</code> does not exist in this server</td><td>5.3.1.1</td></tr>
+<tr><td>EdDSA/PS256/ES256, never <code>none</code></td><td>already global — <code>Algorithm::EdDSA</code> is hard-coded at both encode and decode</td><td>5.3.1.1</td></tr>
+</tbody></table>
+</div>
+<p>Four of those nine rows say “already global”. That is the honest reading of
+the tree and the reason X5.1’s gap table listed them as <em>audit</em> items
+rather than <em>work</em> items: AXIAM never implemented the relaxations FAPI
+forbids. What this module adds is the machinery for the five that were
+genuinely absent, plus tests that pin the four so a later convenience
+change cannot quietly reintroduce one.</p>
+<h2 id="registration-time-not-just-request-time"><a class="doc-anchor" href="#registration-time-not-just-request-time">§</a>Registration-time, not just request-time</h2>
+<p>The heavy lifting is <a href="fn.validate_registration.html" title="fn axiam_oauth2::fapi::validate_registration"><code>validate_registration</code></a>, which refuses to <em>create</em> a
+FAPI client that could not satisfy the profile. Enforcing only at request
+time would leave a registered client that answers <code>invalid_request</code> to
+every request it ever makes — a configuration error discovered by the
+client’s users rather than by the operator who made it. Request-time checks
+remain as defence in depth, because a row edited directly in the database
+never passes through registration validation.</p>
+<h2 id="two-families-two-mechanisms-and-the-pairing-rule"><a class="doc-anchor" href="#two-families-two-mechanisms-and-the-pairing-rule">§</a>Two families, two mechanisms, and the pairing rule</h2>
+<p>FAPI 2.0 §5.3.1.1 asks two independent questions, and each has two
+acceptable answers:</p>
+<div><table><thead><tr><th></th><th>mutual TLS</th><th>asymmetric JWT</th></tr></thead><tbody>
+<tr><td><strong>Client authentication</strong></td><td><code>tls_client_auth</code>, <code>self_signed_tls_client_auth</code> (RFC 8705 §2)</td><td><code>private_key_jwt</code> (RFC 7523 §2.2)</td></tr>
+<tr><td><strong>Sender-constraining</strong></td><td><code>tls_client_certificate_bound_access_tokens</code> (RFC 8705 §3)</td><td><code>dpop_bound_access_tokens</code> (RFC 9449)</td></tr>
+</tbody></table>
+</div>
+<p>All four pairings are legitimate, and the gate accepts all four. The profile
+does <strong>not</strong> require the two columns to match: a client may authenticate
+with <code>private_key_jwt</code> and bind its tokens to a certificate, or authenticate
+with mTLS and bind with DPoP. What it requires is one answer from each <em>row</em>,
+and <a href="fn.validate_registration.html" title="fn axiam_oauth2::fapi::validate_registration"><code>validate_registration</code></a> refuses a client that has authentication from
+one family and sender-constraining from neither — which is the shape a
+half-finished migration produces and the one an operator is most likely to
+create by accident.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RegistrationView.html" title="struct axiam_oauth2::fapi::RegistrationView">Registration<wbr>View</a></dt><dd>The registration fields the profile rules actually look at.</dd><dt><a class="struct" href="struct.TokenRequestEvidence.html" title="struct axiam_oauth2::fapi::TokenRequestEvidence">Token<wbr>Request<wbr>Evidence</a></dt><dd>What a token request actually carried, as opposed to what its body claimed.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.FapiRegistrationError.html" title="enum axiam_oauth2::fapi::FapiRegistrationError">Fapi<wbr>Registration<wbr>Error</a></dt><dd>Why a client registration cannot satisfy the profile it asked for.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.enforce_authorization_request.html" title="fn axiam_oauth2::fapi::enforce_authorization_request">enforce_<wbr>authorization_<wbr>request</a></dt><dd>Request-time gate on the authorization endpoint (X5.1).</dd><dt><a class="fn" href="fn.enforce_token_request.html" title="fn axiam_oauth2::fapi::enforce_token_request">enforce_<wbr>token_<wbr>request</a></dt><dd>Request-time gate on the token endpoint (X5.1).</dd><dt><a class="fn" href="fn.validate_registration.html" title="fn axiam_oauth2::fapi::validate_registration">validate_<wbr>registration</a></dt><dd>Validate a client registration against the profile it declares.</dd><dt><a class="fn" href="fn.wants_certificate_binding.html" title="fn axiam_oauth2::fapi::wants_certificate_binding">wants_<wbr>certificate_<wbr>binding</a></dt><dd>Whether a token issued to this client must carry a <code>cnf.x5t#S256</code>
+certificate confirmation.</dd><dt><a class="fn" href="fn.wants_dpop_binding.html" title="fn axiam_oauth2::fapi::wants_dpop_binding">wants_<wbr>dpop_<wbr>binding</a></dt><dd>Whether a token issued to this client must carry a <code>cnf.jkt</code> DPoP
+confirmation (RFC 9449 §5).</dd></dl></section></div></main></body></html>

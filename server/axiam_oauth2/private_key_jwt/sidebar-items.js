@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ASSERTION_AUTH_FAILED","CLIENT_ASSERTION_TYPE","CLOCK_SKEW_SECS","MAX_ASSERTION_LIFETIME_SECS"],"enum":["AssertionError","ClientKeySource"],"fn":["check_assertion_type","key_source_of","verify_client_assertion"],"struct":["JwksAssertionVerifier","VerifiedAssertion"],"trait":["ClientAssertionVerifier"],"type":["VerifyFuture"]};

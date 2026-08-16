@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="DPoP — Demonstrating Proof of Possession (RFC 9449) — X5.1."><title>axiam_oauth2::dpop - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module dpop</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module dpop</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-a-proof-is-checked-against" title="What a proof is checked against">What a proof is checked against</a></li><li><a href="#what-this-module-deliberately-does-not-do" title="What this module deliberately does not do">What this module deliberately does not do</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>dpop</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/dpop.rs.html#1-952">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>DPoP — Demonstrating Proof of Possession (RFC 9449) — X5.1.</p>
+<p>The second half of X5.1’s sender-constraining row, and the counterpart to
+<a href="../mtls/index.html" title="mod axiam_oauth2::mtls"><code>crate::mtls</code></a>’s §3. Both answer the same question — <em>may this bearer use
+this token?</em> — and they differ in what the holder must possess:</p>
+<div><table><thead><tr><th></th><th>Possession proved by</th><th>Cost per request</th></tr></thead><tbody>
+<tr><td>mTLS binding (RFC 8705 §3)</td><td>a TLS handshake the transport already performed</td><td>one SHA-256</td></tr>
+<tr><td>DPoP (RFC 9449)</td><td>a freshly signed proof JWT, per request</td><td><strong>one asymmetric signature verification</strong></td></tr>
+</tbody></table>
+</div>
+<p>That second row is the reason DPoP exists and the reason it is not free.
+mTLS binding is cheap because the expensive part — proving possession of the
+certificate’s private key — happened during the handshake and is amortised
+over every request on the connection. DPoP has no connection to amortise
+over, so it pays a public-key verification <em>per request</em>. <code>bench_dpop_proof</code>
+in <code>axiam-auth</code>’s benchmark measures it, and §X5.1’s write-up publishes the
+number rather than an adjective. A client that can do mTLS should.</p>
+<p>What DPoP buys for that cost is the deployment it fits: a client behind a
+TLS-terminating load balancer it does not control cannot present a client
+certificate to AXIAM at all. Before this module, such a client had no route
+to a sender-constrained token — which the conformance runbook recorded as a
+coverage gap. It is now closed.</p>
+<h2 id="what-a-proof-is-checked-against"><a class="doc-anchor" href="#what-a-proof-is-checked-against">§</a>What a proof is checked against</h2>
+<p>RFC 9449 §4.3. Every one of these is a refusal, never a warning:</p>
+<ol>
+<li><code>typ</code> is exactly <code>dpop+jwt</code>. A proof that is not typed as one is not one —
+this is the header confusion the <code>typ</code> member exists to prevent, and it is
+what stops an access token or an ID token being replayed as a proof.</li>
+<li><code>alg</code> is an asymmetric algorithm this profile permits, <strong>taken from the
+embedded key</strong> (see <a href="../jose/index.html" title="mod axiam_oauth2::jose"><code>crate::jose</code></a>) rather than believed from the header.</li>
+<li>The header carries a public <code>jwk</code>, and the signature verifies under it.
+A <code>jwk</code> carrying private key material is refused outright (§4.3 step 4):
+a client that leaks its private key in a proof has already lost, and
+accepting it would make the leak silent.</li>
+<li><code>htm</code> matches the HTTP method and <code>htu</code> the request URI, compared after
+stripping query and fragment (§4.3 step 9).</li>
+<li><code>iat</code> is within <a href="constant.DEFAULT_PROOF_MAX_AGE_SECS.html" title="constant axiam_oauth2::dpop::DEFAULT_PROOF_MAX_AGE_SECS"><code>DEFAULT_PROOF_MAX_AGE_SECS</code></a> of now, in both directions.</li>
+<li><code>jti</code> is present and, at the caller’s discretion, single-use. <strong>Freshness
+is not replay protection</strong>: <code>iat</code> bounds the window, and the <code>jti</code> guard
+is what makes the window unusable. See <a href="../private_key_jwt/index.html" title="mod axiam_oauth2::private_key_jwt"><code>crate::private_key_jwt</code></a> for the
+storage mechanism both share.</li>
+<li>When the server requires one, <code>nonce</code> matches the nonce the server
+issued — otherwise the caller answers <code>use_dpop_nonce</code> with a fresh one.</li>
+<li>When a proof accompanies an access token, <code>ath</code> is the base64url SHA-256
+of that token, so a proof captured on one request cannot be re-aimed at
+another token held by the same key.</li>
+</ol>
+<h2 id="what-this-module-deliberately-does-not-do"><a class="doc-anchor" href="#what-this-module-deliberately-does-not-do">§</a>What this module deliberately does not do</h2>
+<p>It does not touch the database and it does not know what a client is. Replay
+recording is the caller’s, because the caller is the one that knows the
+tenant and holds the repository — and because keeping the signature check
+synchronous and pure is what makes it benchmarkable and unit-testable
+against RFC 9449’s own vectors.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DpopExpectation.html" title="struct axiam_oauth2::dpop::DpopExpectation">Dpop<wbr>Expectation</a></dt><dd>What the verifier checks a proof against.</dd><dt><a class="struct" href="struct.VerifiedDpopProof.html" title="struct axiam_oauth2::dpop::VerifiedDpopProof">Verified<wbr>Dpop<wbr>Proof</a></dt><dd>A proof that verified, and the facts a caller needs from it.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.DpopError.html" title="enum axiam_oauth2::dpop::DpopError">Dpop<wbr>Error</a></dt><dd>Why a DPoP proof was refused.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_PROOF_MAX_AGE_SECS.html" title="constant axiam_oauth2::dpop::DEFAULT_PROOF_MAX_AGE_SECS">DEFAULT_<wbr>PROOF_<wbr>MAX_<wbr>AGE_<wbr>SECS</a></dt><dd>How far <code>iat</code> may be from now, in either direction, for a proof to be fresh
+(RFC 9449 §4.3 step 12 leaves the window to the server).</dd><dt><a class="constant" href="constant.DPOP_TYP.html" title="constant axiam_oauth2::dpop::DPOP_TYP">DPOP_<wbr>TYP</a></dt><dd>RFC 9449 §4.2: the <code>typ</code> every DPoP proof must carry.</dd><dt><a class="constant" href="constant.TOKEN_TYPE_BEARER.html" title="constant axiam_oauth2::dpop::TOKEN_TYPE_BEARER">TOKEN_<wbr>TYPE_<wbr>BEARER</a></dt><dd>RFC 6749 §7.1: the <code>token_type</code> of everything AXIAM issued before X5.1, and
+of every unbound token it will ever issue.</dd><dt><a class="constant" href="constant.TOKEN_TYPE_DPOP.html" title="constant axiam_oauth2::dpop::TOKEN_TYPE_DPOP">TOKEN_<wbr>TYPE_<wbr>DPOP</a></dt><dd>RFC 9449 §5: the <code>token_type</code> of a DPoP-bound access token.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.is_dpop_scheme.html" title="fn axiam_oauth2::dpop::is_dpop_scheme">is_<wbr>dpop_<wbr>scheme</a></dt><dd>Whether an <code>Authorization</code> scheme names DPoP.</dd><dt><a class="fn" href="fn.new_nonce.html" title="fn axiam_oauth2::dpop::new_nonce">new_<wbr>nonce</a></dt><dd>Mint a <code>DPoP-Nonce</code> value.</dd><dt><a class="fn" href="fn.token_type_for.html" title="fn axiam_oauth2::dpop::token_type_for">token_<wbr>type_<wbr>for</a></dt><dd>RFC 9449 §5: the <code>token_type</code> a response should carry for a given <code>cnf</code>.</dd><dt><a class="fn" href="fn.verify_dpop_proof.html" title="fn axiam_oauth2::dpop::verify_dpop_proof">verify_<wbr>dpop_<wbr>proof</a></dt><dd>Verify a DPoP proof against what the request actually was (RFC 9449 §4.3).</dd></dl></section></div></main></body></html>

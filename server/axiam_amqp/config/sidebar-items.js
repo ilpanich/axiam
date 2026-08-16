@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AmqpConfig"]};
+window.SIDEBAR_ITEMS = {"struct":["AmqpConfig","AmqpTlsConfig"]};

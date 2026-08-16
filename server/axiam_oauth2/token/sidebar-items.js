@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["IntrospectRequest","IntrospectionResponse","RevokeRequest","TokenRequest","TokenResponse","TokenService"]};
+window.SIDEBAR_ITEMS = {"struct":["IntrospectRequest","IntrospectionResponse","RevokeRequest","TokenRequest","TokenRequestContext","TokenResponse","TokenService"]};

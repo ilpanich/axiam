@@ -1,0 +1,144 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-pki/src/mds/error.rs`."><title>error.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_pki/mds/</div>error.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Error type for FIDO MDS3 BLOB ingestion (X3).
+<a href=#2 id=2 data-nosnippet>2</a>
+<a href=#3 id=3 data-nosnippet>3</a>/// Errors from fetching, verifying, and parsing a FIDO MDS3 BLOB.
+<a href=#4 id=4 data-nosnippet>4</a>///
+<a href=#5 id=5 data-nosnippet>5</a>/// Every variant here corresponds to a fail-closed rejection point in
+<a href=#6 id=6 data-nosnippet>6</a>/// [`crate::mds::blob::verify_and_parse`] or the fetch/load wrappers around
+<a href=#7 id=7 data-nosnippet>7</a>/// it — there is no variant that means "trust this anyway".
+<a href=#8 id=8 data-nosnippet>8</a></span><span class="attr">#[derive(Debug, thiserror::Error)]
+<a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">pub enum </span>MdsError {
+<a href=#10 id=10 data-nosnippet>10</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#11 id=11 data-nosnippet>11</a>    // D3: vendored root anchor
+<a href=#12 id=12 data-nosnippet>12</a>    // -----------------------------------------------------------------
+<a href=#13 id=13 data-nosnippet>13</a>    </span><span class="attr">#[error(<span class="string">"vendored FIDO MDS root anchor PEM could not be parsed"</span>)]
+<a href=#14 id=14 data-nosnippet>14</a>    </span>RootAnchorUnparsable,
+<a href=#15 id=15 data-nosnippet>15</a>
+<a href=#16 id=16 data-nosnippet>16</a>    <span class="doccomment">/// The vendored anchor's SHA-256 digest does not match the pinned
+<a href=#17 id=17 data-nosnippet>17</a>    /// constant. This must never happen for an untampered checkout — if it
+<a href=#18 id=18 data-nosnippet>18</a>    /// does, treat the build as compromised (see the module docs on
+<a href=#19 id=19 data-nosnippet>19</a>    /// `FIDO_MDS_ROOT_SHA256_HEX`).
+<a href=#20 id=20 data-nosnippet>20</a>    </span><span class="attr">#[error(
+<a href=#21 id=21 data-nosnippet>21</a>        <span class="string">"vendored FIDO MDS root anchor digest mismatch — the anchor file may have been tampered with"
+<a href=#22 id=22 data-nosnippet>22</a>    </span>)]
+<a href=#23 id=23 data-nosnippet>23</a>    </span>RootAnchorDigestMismatch,
+<a href=#24 id=24 data-nosnippet>24</a>
+<a href=#25 id=25 data-nosnippet>25</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#26 id=26 data-nosnippet>26</a>    // D4 steps 1-3: JWT structure / header
+<a href=#27 id=27 data-nosnippet>27</a>    // -----------------------------------------------------------------
+<a href=#28 id=28 data-nosnippet>28</a>    </span><span class="attr">#[error(<span class="string">"malformed JWT: expected exactly 3 dot-separated segments"</span>)]
+<a href=#29 id=29 data-nosnippet>29</a>    </span>MalformedJwt,
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="attr">#[error(<span class="string">"JWT header is not valid base64url"</span>)]
+<a href=#32 id=32 data-nosnippet>32</a>    </span>InvalidHeaderEncoding,
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a>    <span class="attr">#[error(<span class="string">"JWT header is not valid JSON"</span>)]
+<a href=#35 id=35 data-nosnippet>35</a>    </span>InvalidHeaderJson,
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a>    <span class="doccomment">/// The header's `alg` is not exactly `RS256`. Carries the rejected
+<a href=#38 id=38 data-nosnippet>38</a>    /// value (or `"none"`/absent) for diagnostics — never used to decide
+<a href=#39 id=39 data-nosnippet>39</a>    /// anything, only to report.
+<a href=#40 id=40 data-nosnippet>40</a>    </span><span class="attr">#[error(<span class="string">"unsupported JWT algorithm {0:?} — only RS256 is accepted"</span>)]
+<a href=#41 id=41 data-nosnippet>41</a>    </span>UnsupportedAlgorithm(String),
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="attr">#[error(<span class="string">"JWT header x5c claim is missing or empty"</span>)]
+<a href=#44 id=44 data-nosnippet>44</a>    </span>MissingX5c,
+<a href=#45 id=45 data-nosnippet>45</a>
+<a href=#46 id=46 data-nosnippet>46</a>    <span class="attr">#[error(<span class="string">"JWT header x5c claim has more than 8 entries"</span>)]
+<a href=#47 id=47 data-nosnippet>47</a>    </span>X5cTooLong,
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="attr">#[error(<span class="string">"JWT header x5c entry is not valid base64"</span>)]
+<a href=#50 id=50 data-nosnippet>50</a>    </span>InvalidX5cEncoding,
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="attr">#[error(<span class="string">"x5c certificate entry could not be parsed as DER: {0}"</span>)]
+<a href=#53 id=53 data-nosnippet>53</a>    </span>InvalidCertificate(String),
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#56 id=56 data-nosnippet>56</a>    // D4 step 4: chain build
+<a href=#57 id=57 data-nosnippet>57</a>    // -----------------------------------------------------------------
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="attr">#[error(<span class="string">"a certificate in the x5c chain is outside its validity window"</span>)]
+<a href=#59 id=59 data-nosnippet>59</a>    </span>CertificateExpired,
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="attr">#[error(<span class="string">"x5c certificate chain signature verification failed"</span>)]
+<a href=#62 id=62 data-nosnippet>62</a>    </span>ChainVerifyFailed,
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// A certificate used as an issuer in the chain is not permitted to issue
+<a href=#65 id=65 data-nosnippet>65</a>    /// certificates (`basicConstraints` absent or `CA=false`, or `keyUsage`
+<a href=#66 id=66 data-nosnippet>66</a>    /// present without `keyCertSign`).
+<a href=#67 id=67 data-nosnippet>67</a>    ///
+<a href=#68 id=68 data-nosnippet>68</a>    /// This is the check that keeps the vendored anchor meaningful: without
+<a href=#69 id=69 data-nosnippet>69</a>    /// it, any holder of an ordinary end-entity certificate issued under the
+<a href=#70 id=70 data-nosnippet>70</a>    /// same public root could splice a self-minted leaf beneath their own
+<a href=#71 id=71 data-nosnippet>71</a>    /// certificate and produce a chain that verifies. See
+<a href=#72 id=72 data-nosnippet>72</a>    /// `blob::assert_is_issuer`.
+<a href=#73 id=73 data-nosnippet>73</a>    </span><span class="attr">#[error(<span class="string">"a certificate used as an issuer in the x5c chain is not a CA"</span>)]
+<a href=#74 id=74 data-nosnippet>74</a>    </span>IssuerNotCa,
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="attr">#[error(<span class="string">"x5c chain is deeper than an issuing certificate's pathLenConstraint permits"</span>)]
+<a href=#77 id=77 data-nosnippet>77</a>    </span>PathLenExceeded,
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="attr">#[error(<span class="string">"the x5c leaf certificate is itself a CA certificate"</span>)]
+<a href=#80 id=80 data-nosnippet>80</a>    </span>LeafIsCa,
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#83 id=83 data-nosnippet>83</a>    // D4 step 5: leaf identity pinning
+<a href=#84 id=84 data-nosnippet>84</a>    // -----------------------------------------------------------------
+<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="attr">#[error(
+<a href=#86 id=86 data-nosnippet>86</a>        <span class="string">"leaf certificate identity does not match the expected MDS hostname (checked SAN DNS names, falling back to CN only when no SAN extension is present)"
+<a href=#87 id=87 data-nosnippet>87</a>    </span>)]
+<a href=#88 id=88 data-nosnippet>88</a>    </span>LeafIdentityMismatch,
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#91 id=91 data-nosnippet>91</a>    // D4 step 6: JWT signature
+<a href=#92 id=92 data-nosnippet>92</a>    // -----------------------------------------------------------------
+<a href=#93 id=93 data-nosnippet>93</a>    </span><span class="attr">#[error(<span class="string">"JWT signature verification failed"</span>)]
+<a href=#94 id=94 data-nosnippet>94</a>    </span>SignatureInvalid,
+<a href=#95 id=95 data-nosnippet>95</a>
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#97 id=97 data-nosnippet>97</a>    // D4 steps 7-9: payload
+<a href=#98 id=98 data-nosnippet>98</a>    // -----------------------------------------------------------------
+<a href=#99 id=99 data-nosnippet>99</a>    </span><span class="attr">#[error(<span class="string">"BLOB payload is not valid JSON matching the expected MDS schema: {0}"</span>)]
+<a href=#100 id=100 data-nosnippet>100</a>    </span>InvalidPayload(String),
+<a href=#101 id=101 data-nosnippet>101</a>
+<a href=#102 id=102 data-nosnippet>102</a>    <span class="attr">#[error(<span class="string">"nextUpdate field could not be parsed as YYYY-MM-DD: {0}"</span>)]
+<a href=#103 id=103 data-nosnippet>103</a>    </span>InvalidNextUpdate(String),
+<a href=#104 id=104 data-nosnippet>104</a>
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#106 id=106 data-nosnippet>106</a>    // Fetch / local-file paths (D10)
+<a href=#107 id=107 data-nosnippet>107</a>    // -----------------------------------------------------------------
+<a href=#108 id=108 data-nosnippet>108</a>    </span><span class="attr">#[error(<span class="string">"MDS BLOB fetch failed: {0}"</span>)]
+<a href=#109 id=109 data-nosnippet>109</a>    </span>FetchFailed(String),
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="attr">#[error(<span class="string">"MDS BLOB response exceeded the {0}-byte cap"</span>)]
+<a href=#112 id=112 data-nosnippet>112</a>    </span>ResponseTooLarge(usize),
+<a href=#113 id=113 data-nosnippet>113</a>
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="attr">#[error(<span class="string">"MDS BLOB response was not valid UTF-8"</span>)]
+<a href=#115 id=115 data-nosnippet>115</a>    </span>InvalidEncoding,
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="attr">#[error(<span class="string">"local MDS BLOB file could not be read: {0}"</span>)]
+<a href=#118 id=118 data-nosnippet>118</a>    </span>LocalFileRead(String),
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a>    <span class="attr">#[error(<span class="string">"MDS ingestion is disabled (AXIAM__PKI__MDS_ENABLED=false)"</span>)]
+<a href=#121 id=121 data-nosnippet>121</a>    </span>IngestionDisabled,
+<a href=#122 id=122 data-nosnippet>122</a>}
+<a href=#123 id=123 data-nosnippet>123</a>
+<a href=#124 id=124 data-nosnippet>124</a><span class="kw">impl </span>From&lt;MdsError&gt; <span class="kw">for </span>axiam_core::error::AxiamError {
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="kw">fn </span>from(err: MdsError) -&gt; <span class="self">Self </span>{
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="kw">match </span>err {
+<a href=#128 id=128 data-nosnippet>128</a>            <span class="comment">// Upstream/network problems — not our bug, mirrors
+<a href=#129 id=129 data-nosnippet>129</a>            // axiam-federation's FederationError -&gt; AxiamError mapping for
+<a href=#130 id=130 data-nosnippet>130</a>            // the same class of failure.
+<a href=#131 id=131 data-nosnippet>131</a>            </span>MdsError::FetchFailed(msg) =&gt; AxiamError::ServiceUnavailable(msg),
+<a href=#132 id=132 data-nosnippet>132</a>            MdsError::IngestionDisabled =&gt; AxiamError::Validation {
+<a href=#133 id=133 data-nosnippet>133</a>                message: err.to_string(),
+<a href=#134 id=134 data-nosnippet>134</a>            },
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="comment">// Everything else is a verification/parsing failure: the BLOB
+<a href=#136 id=136 data-nosnippet>136</a>            // (or its vendored anchor) failed a security-relevant check.
+<a href=#137 id=137 data-nosnippet>137</a>            // None of these should ever be shown to an end user verbatim —
+<a href=#138 id=138 data-nosnippet>138</a>            // callers log/audit the specific variant and surface a fixed
+<a href=#139 id=139 data-nosnippet>139</a>            // message, same posture as WebauthnAttestationDenied (D11).
+<a href=#140 id=140 data-nosnippet>140</a>            </span>other =&gt; AxiamError::Internal(other.to_string()),
+<a href=#141 id=141 data-nosnippet>141</a>        }
+<a href=#142 id=142 data-nosnippet>142</a>    }
+<a href=#143 id=143 data-nosnippet>143</a>}
+</code></pre></div></section></main></body></html>

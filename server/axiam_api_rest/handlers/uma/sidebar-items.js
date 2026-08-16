@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACCEPTED_CLAIM_TOKEN_FORMAT"],"fn":["delete_resource_set","list_resource_sets","permission_request","read_resource_set","register_resource_set","uma2_configuration","update_resource_set"],"struct":["PermissionRequestBody","PermissionTicketResponse","ProtectionApiToken","ResourceSet","Uma2Configuration"]};

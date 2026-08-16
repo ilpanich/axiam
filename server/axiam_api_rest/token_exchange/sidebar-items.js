@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["external_collaborators"],"struct":["FederationSubjectResolver","RbacScopeAuthority"]};

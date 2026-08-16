@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Mutual-TLS client authentication and certificate-bound tokens (RFC 8705) — X5.1."><title>axiam_oauth2::mtls - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module mtls</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module mtls</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#where-the-trust-actually-comes-from" title="Where the trust actually comes from">Where the trust actually comes from</a></li><li><a href="#self-signed-certificates-and-the-x5ts256-shortcut" title="Self-signed certificates and the `x5t#S256` shortcut">Self-signed certificates and the <code>x5t#S256</code> shortcut</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>mtls</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/mtls.rs.html#1-656">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Mutual-TLS client authentication and certificate-bound tokens
+(RFC 8705) — X5.1.</p>
+<p>Two mechanisms live here, and RFC 8705 keeps them deliberately separate
+because they answer different questions:</p>
+<ul>
+<li><strong>§2, client authentication.</strong> <em>Who is this client?</em> The certificate
+replaces the shared secret at the token endpoint. AXIAM implements both
+variants: <code>tls_client_auth</code> (PKI — the certificate chains to a CA the
+deployment’s listener trusts, and AXIAM matches a registered subject DN
+or SAN) and <code>self_signed_tls_client_auth</code> (the certificate <em>is</em> the
+registered credential, matched by thumbprint).</li>
+<li><strong>§3, sender-constrained tokens.</strong> <em>May this bearer use this token?</em> The
+access token carries a <code>cnf.x5t#S256</code> confirmation naming the
+certificate it was issued to, so a stolen token is inert without the
+corresponding private key.</li>
+</ul>
+<h2 id="where-the-trust-actually-comes-from"><a class="doc-anchor" href="#where-the-trust-actually-comes-from">§</a>Where the trust actually comes from</h2>
+<p>Nothing in this module verifies a certificate chain, and it must not: by
+the time a <a href="struct.PresentedCertificate.html" title="struct axiam_oauth2::mtls::PresentedCertificate"><code>PresentedCertificate</code></a> exists, rustls has already verified the
+peer chain against the configured client-CA bundle during the TLS 1.3
+handshake (<code>axiam-server</code>’s <code>on_connect</code> hook → <code>VerifiedClientCert</code>). This
+module’s job is the <em>matching</em> step — deciding whether the certificate the
+transport verified is the one this particular client registered.</p>
+<p>That division is why the <code>X-Client-Certificate</code> proxy header, which the
+device-auth extractor accepts as a fallback, is <strong>not</strong> accepted here. That
+header is an assertion by a reverse proxy; for device authentication, where
+the certificate is looked up against a per-tenant issued-certificate table,
+a deployment can reasonably choose to trust its own proxy. For OAuth2
+client authentication under a FAPI profile it cannot: FAPI 2.0 requires the
+authorization server to authenticate the client, and a header is forgeable
+by anything that can reach the server on a non-mTLS port. So the header path
+is absent by construction rather than gated by configuration — there is no
+setting that turns it on.</p>
+<h2 id="self-signed-certificates-and-the-x5ts256-shortcut"><a class="doc-anchor" href="#self-signed-certificates-and-the-x5ts256-shortcut">§</a>Self-signed certificates and the <code>x5t#S256</code> shortcut</h2>
+<p>RFC 8705 §2.2 registers a self-signed client’s certificates inside its
+<code>jwks</code>/<code>jwks_uri</code>. AXIAM registers the SHA-256 thumbprint instead. The
+comparison the spec performs against a self-signed certificate reduces to
+an equality check against a registered key, and a thumbprint is that check
+without a JWKS parser on the authentication path. What it costs is
+JWKS-driven rotation: a self-signed client’s new certificate must be
+registered rather than merely published. The operator guide says so.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CertificateIdentity.html" title="struct axiam_oauth2::mtls::CertificateIdentity">Certificate<wbr>Identity</a></dt><dd>The identity fields of a certificate, parsed on demand.</dd><dt><a class="struct" href="struct.PresentedCertificate.html" title="struct axiam_oauth2::mtls::PresentedCertificate">Presented<wbr>Certificate</a></dt><dd>A client certificate that the TLS layer verified on this connection.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.authenticate_mtls_client.html" title="fn axiam_oauth2::mtls::authenticate_mtls_client">authenticate_<wbr>mtls_<wbr>client</a></dt><dd>Authenticate a client by the certificate it presented (RFC 8705 §2).</dd><dt><a class="fn" href="fn.thumbprint_s256.html" title="fn axiam_oauth2::mtls::thumbprint_s256">thumbprint_<wbr>s256</a></dt><dd>RFC 8705 §3.1 <code>x5t#S256</code>: base64url-encoded, unpadded SHA-256 of the DER
+certificate.</dd></dl></section></div></main></body></html>

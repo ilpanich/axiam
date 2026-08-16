@@ -205,489 +205,498 @@
 <a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">pub </span>allowed: bool,
 <a href=#206 id=206 data-nosnippet>206</a>    <span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
 <a href=#207 id=207 data-nosnippet>207</a>    </span><span class="kw">pub </span>reason: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#208 id=208 data-nosnippet>208</a>}
-<a href=#209 id=209 data-nosnippet>209</a>
-<a href=#210 id=210 data-nosnippet>210</a><span class="doccomment">/// Audit event received from external services via `axiam.audit.events`.
-<a href=#211 id=211 data-nosnippet>211</a>///
-<a href=#212 id=212 data-nosnippet>212</a>/// Maps directly to `CreateAuditLogEntry` from `axiam-core`.
-<a href=#213 id=213 data-nosnippet>213</a></span><span class="attr">#[derive(Debug, Deserialize, Serialize)]
-<a href=#214 id=214 data-nosnippet>214</a></span><span class="kw">pub struct </span>AuditEventMessage {
-<a href=#215 id=215 data-nosnippet>215</a>    <span class="kw">pub </span>tenant_id: Uuid,
-<a href=#216 id=216 data-nosnippet>216</a>    <span class="kw">pub </span>actor_id: Uuid,
-<a href=#217 id=217 data-nosnippet>217</a>    <span class="kw">pub </span>actor_type: String,
-<a href=#218 id=218 data-nosnippet>218</a>    <span class="kw">pub </span>action: String,
-<a href=#219 id=219 data-nosnippet>219</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="kw">pub </span>resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
-<a href=#221 id=221 data-nosnippet>221</a>    <span class="kw">pub </span>outcome: String,
-<a href=#222 id=222 data-nosnippet>222</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">pub </span>ip_address: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#224 id=224 data-nosnippet>224</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="kw">pub </span>metadata: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
-<a href=#226 id=226 data-nosnippet>226</a>    <span class="doccomment">/// HKDF master-key rotation version (SECHRD-08 / D-05b). Selects which
-<a href=#227 id=227 data-nosnippet>227</a>    /// per-tenant subkey derivation the signature was produced with.
-<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="attr">#[serde(default = <span class="string">"default_key_version"</span>)]
-<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">pub </span>key_version: u8,
-<a href=#230 id=230 data-nosnippet>230</a>    <span class="doccomment">/// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
-<a href=#231 id=231 data-nosnippet>231</a>    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
-<a href=#232 id=232 data-nosnippet>232</a>    /// consumer records it in the durable `amqp_nonce_replay` store; a
-<a href=#233 id=233 data-nosnippet>233</a>    /// duplicate within the freshness window is a replay and is rejected.
-<a href=#234 id=234 data-nosnippet>234</a>    </span><span class="attr">#[serde(default = <span class="string">"default_nonce"</span>)]
-<a href=#235 id=235 data-nosnippet>235</a>    </span><span class="kw">pub </span>nonce: Uuid,
-<a href=#236 id=236 data-nosnippet>236</a>    <span class="doccomment">/// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
-<a href=#237 id=237 data-nosnippet>237</a>    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
-<a href=#238 id=238 data-nosnippet>238</a>    /// consumer rejects the message if this lies outside ±skew of its clock.
-<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="attr">#[serde(default = <span class="string">"default_issued_at"</span>)]
-<a href=#240 id=240 data-nosnippet>240</a>    </span><span class="kw">pub </span>issued_at: DateTime&lt;Utc&gt;,
-<a href=#241 id=241 data-nosnippet>241</a>    <span class="doccomment">/// HMAC-SHA256 of the JSON-serialized message body (SEC-022/055).
-<a href=#242 id=242 data-nosnippet>242</a>    /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
-<a href=#243 id=243 data-nosnippet>243</a>    /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
-<a href=#244 id=244 data-nosnippet>244</a>    /// and invalid-signature messages; there is no fail-open path (D-05c).
-<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#246 id=246 data-nosnippet>246</a>    </span><span class="kw">pub </span>hmac_signature: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#247 id=247 data-nosnippet>247</a>}
-<a href=#248 id=248 data-nosnippet>248</a>
-<a href=#249 id=249 data-nosnippet>249</a><span class="doccomment">/// Notification event published to `axiam.notifications`.
-<a href=#250 id=250 data-nosnippet>250</a>///
-<a href=#251 id=251 data-nosnippet>251</a>/// Carries event type, tenant context, and event-specific payload.
-<a href=#252 id=252 data-nosnippet>252</a></span><span class="attr">#[derive(Debug, Clone, Serialize)]
-<a href=#253 id=253 data-nosnippet>253</a></span><span class="kw">pub struct </span>NotificationEvent {
-<a href=#254 id=254 data-nosnippet>254</a>    <span class="kw">pub </span>event_type: String,
-<a href=#255 id=255 data-nosnippet>255</a>    <span class="kw">pub </span>tenant_id: Uuid,
-<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">pub </span>actor_id: Uuid,
-<a href=#257 id=257 data-nosnippet>257</a>    <span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">pub </span>resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
-<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">pub </span>timestamp: DateTime&lt;Utc&gt;,
-<a href=#260 id=260 data-nosnippet>260</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="kw">pub </span>data: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
-<a href=#262 id=262 data-nosnippet>262</a>}
-<a href=#263 id=263 data-nosnippet>263</a>
-<a href=#264 id=264 data-nosnippet>264</a><span class="doccomment">/// Cross-replica authorization **decision-cache invalidation** broadcast
-<a href=#265 id=265 data-nosnippet>265</a>/// (§4.2), carried on the `axiam.authz.cache.invalidate` **fanout** exchange.
-<a href=#266 id=266 data-nosnippet>266</a>///
-<a href=#267 id=267 data-nosnippet>267</a>/// This is a control-plane instruction, not data: it tells every replica to
-<a href=#268 id=268 data-nosnippet>268</a>/// drop cached authorization decisions for a tenant (or for one subject within
-<a href=#269 id=269 data-nosnippet>269</a>/// a tenant) so a revocation takes effect everywhere instead of only on the
-<a href=#270 id=270 data-nosnippet>270</a>/// replica that handled the mutation. It therefore carries the **same §8
-<a href=#271 id=271 data-nosnippet>271</a>/// signed envelope as [`AuthzRequest`] / [`AuditEventMessage`]** — per-tenant
-<a href=#272 id=272 data-nosnippet>272</a>/// HKDF subkey, `key_version &gt;= 2`, per-message `nonce`, `issued_at` freshness
-<a href=#273 id=273 data-nosnippet>273</a>/// — rather than trusting the broker's ACLs alone. The threat is not
-<a href=#274 id=274 data-nosnippet>274</a>/// escalation (the worst a verified message can do is evict entries) but a
-<a href=#275 id=275 data-nosnippet>275</a>/// cheap cache-eviction / thundering-herd lever, and, if the payload is ever
-<a href=#276 id=276 data-nosnippet>276</a>/// extended, worse.
-<a href=#277 id=277 data-nosnippet>277</a>///
-<a href=#278 id=278 data-nosnippet>278</a>/// **Wire order is load-bearing** (the HMAC is over these bytes in declaration
-<a href=#279 id=279 data-nosnippet>279</a>/// order, exactly as for `AuthzRequest`):
-<a href=#280 id=280 data-nosnippet>280</a>/// `origin_id, tenant_id, subject_id?, key_version, nonce, issued_at,
-<a href=#281 id=281 data-nosnippet>281</a>/// hmac_signature?`.
-<a href=#282 id=282 data-nosnippet>282</a>///
-<a href=#283 id=283 data-nosnippet>283</a>/// `origin_id` identifies the **publishing replica** and exists solely for
-<a href=#284 id=284 data-nosnippet>284</a>/// self-echo suppression: a fanout exchange delivers the message back to the
-<a href=#285 id=285 data-nosnippet>285</a>/// publisher's own queue, and re-applying an invalidation the publisher
-<a href=#286 id=286 data-nosnippet>286</a>/// already applied locally is pure waste. It is not a security boundary —
-<a href=#287 id=287 data-nosnippet>287</a>/// claiming someone else's `origin_id` can only suppress your *own* message.
-<a href=#288 id=288 data-nosnippet>288</a></span><span class="attr">#[derive(Debug, Clone, Deserialize, Serialize)]
-<a href=#289 id=289 data-nosnippet>289</a></span><span class="kw">pub struct </span>CacheInvalidationMessage {
-<a href=#290 id=290 data-nosnippet>290</a>    <span class="doccomment">/// Publishing replica's process-unique id (self-echo suppression).
-<a href=#291 id=291 data-nosnippet>291</a>    </span><span class="kw">pub </span>origin_id: Uuid,
-<a href=#292 id=292 data-nosnippet>292</a>    <span class="doccomment">/// Tenant whose cached decisions are invalidated. Also selects the
-<a href=#293 id=293 data-nosnippet>293</a>    /// per-tenant HKDF subkey, so a message signed for tenant A can never be
-<a href=#294 id=294 data-nosnippet>294</a>    /// replayed as tenant B's.
-<a href=#295 id=295 data-nosnippet>295</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
-<a href=#296 id=296 data-nosnippet>296</a>    <span class="doccomment">/// Subject to narrow the invalidation to. Absent = flush the whole tenant.
-<a href=#297 id=297 data-nosnippet>297</a>    /// These are the only two granularities the decision cache supports; no
-<a href=#298 id=298 data-nosnippet>298</a>    /// finer key is invented here.
-<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#300 id=300 data-nosnippet>300</a>    </span><span class="kw">pub </span>subject_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
-<a href=#301 id=301 data-nosnippet>301</a>    <span class="doccomment">/// HKDF master-key rotation version (SECHRD-08 / D-05b).
-<a href=#302 id=302 data-nosnippet>302</a>    </span><span class="attr">#[serde(default = <span class="string">"default_key_version"</span>)]
-<a href=#303 id=303 data-nosnippet>303</a>    </span><span class="kw">pub </span>key_version: u8,
-<a href=#304 id=304 data-nosnippet>304</a>    <span class="doccomment">/// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
-<a href=#305 id=305 data-nosnippet>305</a>    /// so it is inside the signed HMAC body. Deduplicated **per replica, in
-<a href=#306 id=306 data-nosnippet>306</a>    /// memory** — never against the shared durable nonce store, which would be
-<a href=#307 id=307 data-nosnippet>307</a>    /// catastrophic here: on a fanout every replica sees the same nonce, so a
-<a href=#308 id=308 data-nosnippet>308</a>    /// shared store would let exactly one replica win and make all the others
-<a href=#309 id=309 data-nosnippet>309</a>    /// reject the invalidation as a replay.
-<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="attr">#[serde(default = <span class="string">"default_nonce"</span>)]
-<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub </span>nonce: Uuid,
-<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
-<a href=#313 id=313 data-nosnippet>313</a>    /// so it is inside the signed HMAC body.
-<a href=#314 id=314 data-nosnippet>314</a>    </span><span class="attr">#[serde(default = <span class="string">"default_issued_at"</span>)]
-<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">pub </span>issued_at: DateTime&lt;Utc&gt;,
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="doccomment">/// Marks this message as a **liveness heartbeat**, not an invalidation
-<a href=#317 id=317 data-nosnippet>317</a>    /// (§13.4 observation 1). A heartbeat is published by a replica to itself:
-<a href=#318 id=318 data-nosnippet>318</a>    /// receiving its own back proves the whole publish → exchange → binding →
-<a href=#319 id=319 data-nosnippet>319</a>    /// queue → consumer loop is intact, which plain consumer liveness does not.
-<a href=#320 id=320 data-nosnippet>320</a>    /// A heartbeat NEVER touches the cache, in either direction.
-<a href=#321 id=321 data-nosnippet>321</a>    ///
-<a href=#322 id=322 data-nosnippet>322</a>    /// `skip_serializing_if` is load-bearing, not tidiness. The signature is
-<a href=#323 id=323 data-nosnippet>323</a>    /// computed over this struct with `hmac_signature` absent, so any field that
-<a href=#324 id=324 data-nosnippet>324</a>    /// serialized unconditionally would change the canonical bytes and break
-<a href=#325 id=325 data-nosnippet>325</a>    /// verification of messages produced by a replica running the previous
-<a href=#326 id=326 data-nosnippet>326</a>    /// version. Omitting `false` keeps an ordinary invalidation byte-identical
-<a href=#327 id=327 data-nosnippet>327</a>    /// to what pre-heartbeat replicas sign and verify, so a rolling upgrade is
-<a href=#328 id=328 data-nosnippet>328</a>    /// safe in both directions.
-<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"is_false"</span>)]
-<a href=#330 id=330 data-nosnippet>330</a>    </span><span class="kw">pub </span>heartbeat: bool,
-<a href=#331 id=331 data-nosnippet>331</a>    <span class="doccomment">/// HMAC-SHA256 over the JSON body with this field set to null, using the
-<a href=#332 id=332 data-nosnippet>332</a>    /// per-tenant subkey from [`derive_tenant_key`]. Mandatory — consumers
-<a href=#333 id=333 data-nosnippet>333</a>    /// reject unsigned and invalid-signature messages alike; no fail-open path.
-<a href=#334 id=334 data-nosnippet>334</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
-<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">pub </span>hmac_signature: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#336 id=336 data-nosnippet>336</a>}
-<a href=#337 id=337 data-nosnippet>337</a>
-<a href=#338 id=338 data-nosnippet>338</a><span class="doccomment">/// `skip_serializing_if` predicate for [`CacheInvalidationMessage::heartbeat`].
-<a href=#339 id=339 data-nosnippet>339</a></span><span class="kw">fn </span>is_false(value: <span class="kw-2">&amp;</span>bool) -&gt; bool {
-<a href=#340 id=340 data-nosnippet>340</a>    !<span class="kw-2">*</span>value
-<a href=#341 id=341 data-nosnippet>341</a>}
-<a href=#342 id=342 data-nosnippet>342</a>
-<a href=#343 id=343 data-nosnippet>343</a><span class="doccomment">/// Webhook delivery message carried on the `axiam.webhook` /
-<a href=#344 id=344 data-nosnippet>344</a>/// `axiam.webhook.retry` queues (CORR-03/D-07).
-<a href=#345 id=345 data-nosnippet>345</a>///
-<a href=#346 id=346 data-nosnippet>346</a>/// Produced by `WebhookDeliveryService::emit` (`axiam-api-rest`), consumed
-<a href=#347 id=347 data-nosnippet>347</a>/// by the webhook AMQP consumer (wired in 26-07) which drives
-<a href=#348 id=348 data-nosnippet>348</a>/// `WebhookDeliveryService::deliver_once` per (re)delivery. `attempt` is
-<a href=#349 id=349 data-nosnippet>349</a>/// incremented by the consumer on each republish to the retry queue and
-<a href=#350 id=350 data-nosnippet>350</a>/// checked against `AXIAM__WEBHOOK__MAX_ATTEMPTS` before a terminal nack
-<a href=#351 id=351 data-nosnippet>351</a>/// routes the message to `WEBHOOK_DLQ` (D-07).
-<a href=#352 id=352 data-nosnippet>352</a>///
-<a href=#353 id=353 data-nosnippet>353</a>/// `tenant_id` is not in the plan's original DTO sketch, but is required
-<a href=#354 id=354 data-nosnippet>354</a>/// for `deliver_once` to resolve the webhook via the tenant-scoped
-<a href=#355 id=355 data-nosnippet>355</a>/// `WebhookRepository::get_by_id` without a cross-tenant lookup — AXIAM's
-<a href=#356 id=356 data-nosnippet>356</a>/// multi-tenant data-isolation model requires every domain-entity lookup to
-<a href=#357 id=357 data-nosnippet>357</a>/// be tenant-scoped.
-<a href=#358 id=358 data-nosnippet>358</a></span><span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
-<a href=#359 id=359 data-nosnippet>359</a></span><span class="kw">pub struct </span>WebhookMessage {
-<a href=#360 id=360 data-nosnippet>360</a>    <span class="kw">pub </span>webhook_id: Uuid,
-<a href=#361 id=361 data-nosnippet>361</a>    <span class="kw">pub </span>delivery_id: Uuid,
-<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">pub </span>tenant_id: Uuid,
-<a href=#363 id=363 data-nosnippet>363</a>    <span class="kw">pub </span>event_type: String,
-<a href=#364 id=364 data-nosnippet>364</a>    <span class="kw">pub </span>payload: serde_json::Value,
-<a href=#365 id=365 data-nosnippet>365</a>    <span class="kw">pub </span>attempt: u32,
-<a href=#366 id=366 data-nosnippet>366</a>}
-<a href=#367 id=367 data-nosnippet>367</a>
-<a href=#368 id=368 data-nosnippet>368</a><span class="attr">#[cfg(test)]
-<a href=#369 id=369 data-nosnippet>369</a></span><span class="kw">mod </span>tests {
-<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#371 id=371 data-nosnippet>371</a>    <span class="kw">use </span>chrono::TimeZone;
-<a href=#372 id=372 data-nosnippet>372</a>
-<a href=#373 id=373 data-nosnippet>373</a>    <span class="kw">fn </span>sample_message(mail_type: MailType) -&gt; OutboundMailMessage {
-<a href=#374 id=374 data-nosnippet>374</a>        OutboundMailMessage {
-<a href=#375 id=375 data-nosnippet>375</a>            mail_type,
-<a href=#376 id=376 data-nosnippet>376</a>            tenant_id: Uuid::nil(),
-<a href=#377 id=377 data-nosnippet>377</a>            org_id: Uuid::nil(),
-<a href=#378 id=378 data-nosnippet>378</a>            user_id: Uuid::nil(),
-<a href=#379 id=379 data-nosnippet>379</a>            to_address: <span class="string">"user@example.com"</span>.to_string(),
-<a href=#380 id=380 data-nosnippet>380</a>            template_context: <span class="macro">serde_json::json!</span>({<span class="string">"key"</span>: <span class="string">"value"</span>}),
-<a href=#381 id=381 data-nosnippet>381</a>            attempt_count: <span class="number">0</span>,
-<a href=#382 id=382 data-nosnippet>382</a>            enqueued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
-<a href=#383 id=383 data-nosnippet>383</a>        }
-<a href=#384 id=384 data-nosnippet>384</a>    }
-<a href=#385 id=385 data-nosnippet>385</a>
-<a href=#386 id=386 data-nosnippet>386</a>    <span class="attr">#[test]
-<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">fn </span>outbound_mail_message_serde_round_trip() {
-<a href=#388 id=388 data-nosnippet>388</a>        <span class="kw">let </span>variants = [
-<a href=#389 id=389 data-nosnippet>389</a>            MailType::PasswordReset,
-<a href=#390 id=390 data-nosnippet>390</a>            MailType::EmailVerification,
-<a href=#391 id=391 data-nosnippet>391</a>            MailType::Notification,
-<a href=#392 id=392 data-nosnippet>392</a>            MailType::DeletionCancel,
-<a href=#393 id=393 data-nosnippet>393</a>            MailType::ExportReady,
-<a href=#394 id=394 data-nosnippet>394</a>        ];
-<a href=#395 id=395 data-nosnippet>395</a>
-<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw">for </span>variant <span class="kw">in </span>variants {
-<a href=#397 id=397 data-nosnippet>397</a>            <span class="kw">let </span>msg = sample_message(variant);
-<a href=#398 id=398 data-nosnippet>398</a>            <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>msg).expect(<span class="string">"serialize"</span>);
-<a href=#399 id=399 data-nosnippet>399</a>            <span class="kw">let </span>decoded: OutboundMailMessage = serde_json::from_str(<span class="kw-2">&amp;</span>json).expect(<span class="string">"deserialize"</span>);
-<a href=#400 id=400 data-nosnippet>400</a>
-<a href=#401 id=401 data-nosnippet>401</a>            <span class="comment">// Verify structural fields survive round-trip
-<a href=#402 id=402 data-nosnippet>402</a>            </span><span class="macro">assert_eq!</span>(decoded.to_address, <span class="string">"user@example.com"</span>);
-<a href=#403 id=403 data-nosnippet>403</a>            <span class="macro">assert_eq!</span>(decoded.attempt_count, <span class="number">0</span>);
-<a href=#404 id=404 data-nosnippet>404</a>            <span class="macro">assert_eq!</span>(decoded.tenant_id, Uuid::nil());
-<a href=#405 id=405 data-nosnippet>405</a>        }
-<a href=#406 id=406 data-nosnippet>406</a>    }
-<a href=#407 id=407 data-nosnippet>407</a>
-<a href=#408 id=408 data-nosnippet>408</a>    <span class="attr">#[test]
-<a href=#409 id=409 data-nosnippet>409</a>    </span><span class="kw">fn </span>mail_type_snake_case_serialization() {
-<a href=#410 id=410 data-nosnippet>410</a>        <span class="macro">assert_eq!</span>(
-<a href=#411 id=411 data-nosnippet>411</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::PasswordReset).unwrap(),
-<a href=#412 id=412 data-nosnippet>412</a>            <span class="string">r#""password_reset""#
-<a href=#413 id=413 data-nosnippet>413</a>        </span>);
-<a href=#414 id=414 data-nosnippet>414</a>        <span class="macro">assert_eq!</span>(
-<a href=#415 id=415 data-nosnippet>415</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::EmailVerification).unwrap(),
-<a href=#416 id=416 data-nosnippet>416</a>            <span class="string">r#""email_verification""#
-<a href=#417 id=417 data-nosnippet>417</a>        </span>);
-<a href=#418 id=418 data-nosnippet>418</a>        <span class="macro">assert_eq!</span>(
-<a href=#419 id=419 data-nosnippet>419</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::Notification).unwrap(),
-<a href=#420 id=420 data-nosnippet>420</a>            <span class="string">r#""notification""#
-<a href=#421 id=421 data-nosnippet>421</a>        </span>);
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="macro">assert_eq!</span>(
-<a href=#423 id=423 data-nosnippet>423</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::DeletionCancel).unwrap(),
-<a href=#424 id=424 data-nosnippet>424</a>            <span class="string">r#""deletion_cancel""#
-<a href=#425 id=425 data-nosnippet>425</a>        </span>);
-<a href=#426 id=426 data-nosnippet>426</a>        <span class="macro">assert_eq!</span>(
-<a href=#427 id=427 data-nosnippet>427</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::ExportReady).unwrap(),
-<a href=#428 id=428 data-nosnippet>428</a>            <span class="string">r#""export_ready""#
-<a href=#429 id=429 data-nosnippet>429</a>        </span>);
-<a href=#430 id=430 data-nosnippet>430</a>    }
-<a href=#431 id=431 data-nosnippet>431</a>
-<a href=#432 id=432 data-nosnippet>432</a>    <span class="comment">// SEC-022: HMAC sign/verify round-trip
-<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="attr">#[test]
-<a href=#434 id=434 data-nosnippet>434</a>    </span><span class="kw">fn </span>amqp_hmac_sign_verify_round_trip() {
-<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">let </span>key = <span class="string">b"test-amqp-signing-key"</span>;
-<a href=#436 id=436 data-nosnippet>436</a>        <span class="kw">let </span>payload = <span class="string">b"{\"tenant_id\":\"...\",\"action\":\"read\"}"</span>;
-<a href=#437 id=437 data-nosnippet>437</a>        <span class="kw">let </span>sig = sign_payload(key, payload);
-<a href=#438 id=438 data-nosnippet>438</a>        <span class="macro">assert!</span>(!sig.is_empty());
-<a href=#439 id=439 data-nosnippet>439</a>        <span class="macro">assert!</span>(
-<a href=#440 id=440 data-nosnippet>440</a>            verify_payload(key, payload, <span class="kw-2">&amp;</span>sig),
-<a href=#441 id=441 data-nosnippet>441</a>            <span class="string">"valid signature must verify"
-<a href=#442 id=442 data-nosnippet>442</a>        </span>);
-<a href=#443 id=443 data-nosnippet>443</a>    }
-<a href=#444 id=444 data-nosnippet>444</a>
-<a href=#445 id=445 data-nosnippet>445</a>    <span class="attr">#[test]
-<a href=#446 id=446 data-nosnippet>446</a>    </span><span class="kw">fn </span>amqp_hmac_wrong_key_fails_verify() {
-<a href=#447 id=447 data-nosnippet>447</a>        <span class="kw">let </span>key1 = <span class="string">b"key-one"</span>;
-<a href=#448 id=448 data-nosnippet>448</a>        <span class="kw">let </span>key2 = <span class="string">b"key-two"</span>;
-<a href=#449 id=449 data-nosnippet>449</a>        <span class="kw">let </span>payload = <span class="string">b"some-payload"</span>;
-<a href=#450 id=450 data-nosnippet>450</a>        <span class="kw">let </span>sig = sign_payload(key1, payload);
-<a href=#451 id=451 data-nosnippet>451</a>        <span class="macro">assert!</span>(
-<a href=#452 id=452 data-nosnippet>452</a>            !verify_payload(key2, payload, <span class="kw-2">&amp;</span>sig),
-<a href=#453 id=453 data-nosnippet>453</a>            <span class="string">"wrong key must not verify"
-<a href=#454 id=454 data-nosnippet>454</a>        </span>);
-<a href=#455 id=455 data-nosnippet>455</a>    }
-<a href=#456 id=456 data-nosnippet>456</a>
-<a href=#457 id=457 data-nosnippet>457</a>    <span class="attr">#[test]
-<a href=#458 id=458 data-nosnippet>458</a>    </span><span class="kw">fn </span>amqp_hmac_tampered_payload_fails_verify() {
-<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span>key = <span class="string">b"hmac-key"</span>;
-<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">let </span>payload = <span class="string">b"original-payload"</span>;
-<a href=#461 id=461 data-nosnippet>461</a>        <span class="kw">let </span>tampered = <span class="string">b"tampered-payload"</span>;
-<a href=#462 id=462 data-nosnippet>462</a>        <span class="kw">let </span>sig = sign_payload(key, payload);
-<a href=#463 id=463 data-nosnippet>463</a>        <span class="macro">assert!</span>(
-<a href=#464 id=464 data-nosnippet>464</a>            !verify_payload(key, tampered, <span class="kw-2">&amp;</span>sig),
-<a href=#465 id=465 data-nosnippet>465</a>            <span class="string">"tampered payload must not verify"
-<a href=#466 id=466 data-nosnippet>466</a>        </span>);
-<a href=#467 id=467 data-nosnippet>467</a>    }
-<a href=#468 id=468 data-nosnippet>468</a>
-<a href=#469 id=469 data-nosnippet>469</a>    <span class="comment">// SEC-022: AuthzRequest carries hmac_signature field
-<a href=#470 id=470 data-nosnippet>470</a>    </span><span class="attr">#[test]
-<a href=#471 id=471 data-nosnippet>471</a>    </span><span class="kw">fn </span>authz_request_hmac_signature_serializes_when_present() {
-<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">let </span>req = AuthzRequest {
-<a href=#473 id=473 data-nosnippet>473</a>            correlation_id: Uuid::nil(),
-<a href=#474 id=474 data-nosnippet>474</a>            tenant_id: Uuid::nil(),
-<a href=#475 id=475 data-nosnippet>475</a>            subject_id: Uuid::nil(),
-<a href=#476 id=476 data-nosnippet>476</a>            action: <span class="string">"read"</span>.into(),
-<a href=#477 id=477 data-nosnippet>477</a>            resource_id: Uuid::nil(),
-<a href=#478 id=478 data-nosnippet>478</a>            scope: <span class="prelude-val">None</span>,
-<a href=#479 id=479 data-nosnippet>479</a>            key_version: CURRENT_KEY_VERSION,
-<a href=#480 id=480 data-nosnippet>480</a>            nonce: Uuid::nil(),
-<a href=#481 id=481 data-nosnippet>481</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
-<a href=#482 id=482 data-nosnippet>482</a>            hmac_signature: <span class="prelude-val">Some</span>(<span class="string">"abc123"</span>.into()),
-<a href=#483 id=483 data-nosnippet>483</a>        };
-<a href=#484 id=484 data-nosnippet>484</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
-<a href=#485 id=485 data-nosnippet>485</a>        <span class="macro">assert!</span>(
-<a href=#486 id=486 data-nosnippet>486</a>            json.contains(<span class="string">"hmac_signature"</span>),
-<a href=#487 id=487 data-nosnippet>487</a>            <span class="string">"hmac_signature must be in JSON when Some"
-<a href=#488 id=488 data-nosnippet>488</a>        </span>);
-<a href=#489 id=489 data-nosnippet>489</a>        <span class="comment">// NEW-4: nonce + issued_at are always emitted (inside the signed body).
-<a href=#490 id=490 data-nosnippet>490</a>        </span><span class="macro">assert!</span>(json.contains(<span class="string">"nonce"</span>), <span class="string">"nonce must always be serialized"</span>);
-<a href=#491 id=491 data-nosnippet>491</a>        <span class="macro">assert!</span>(
-<a href=#492 id=492 data-nosnippet>492</a>            json.contains(<span class="string">"issued_at"</span>),
-<a href=#493 id=493 data-nosnippet>493</a>            <span class="string">"issued_at must always be serialized"
-<a href=#494 id=494 data-nosnippet>494</a>        </span>);
-<a href=#495 id=495 data-nosnippet>495</a>    }
-<a href=#496 id=496 data-nosnippet>496</a>
-<a href=#497 id=497 data-nosnippet>497</a>    <span class="attr">#[test]
-<a href=#498 id=498 data-nosnippet>498</a>    </span><span class="kw">fn </span>authz_request_hmac_signature_omitted_when_none() {
-<a href=#499 id=499 data-nosnippet>499</a>        <span class="kw">let </span>req = AuthzRequest {
-<a href=#500 id=500 data-nosnippet>500</a>            correlation_id: Uuid::nil(),
-<a href=#501 id=501 data-nosnippet>501</a>            tenant_id: Uuid::nil(),
-<a href=#502 id=502 data-nosnippet>502</a>            subject_id: Uuid::nil(),
-<a href=#503 id=503 data-nosnippet>503</a>            action: <span class="string">"read"</span>.into(),
-<a href=#504 id=504 data-nosnippet>504</a>            resource_id: Uuid::nil(),
-<a href=#505 id=505 data-nosnippet>505</a>            scope: <span class="prelude-val">None</span>,
-<a href=#506 id=506 data-nosnippet>506</a>            key_version: CURRENT_KEY_VERSION,
-<a href=#507 id=507 data-nosnippet>507</a>            nonce: Uuid::nil(),
-<a href=#508 id=508 data-nosnippet>508</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
-<a href=#509 id=509 data-nosnippet>509</a>            hmac_signature: <span class="prelude-val">None</span>,
-<a href=#510 id=510 data-nosnippet>510</a>        };
-<a href=#511 id=511 data-nosnippet>511</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
-<a href=#512 id=512 data-nosnippet>512</a>        <span class="macro">assert!</span>(
-<a href=#513 id=513 data-nosnippet>513</a>            !json.contains(<span class="string">"hmac_signature"</span>),
-<a href=#514 id=514 data-nosnippet>514</a>            <span class="string">"hmac_signature must be omitted when None"
-<a href=#515 id=515 data-nosnippet>515</a>        </span>);
-<a href=#516 id=516 data-nosnippet>516</a>    }
-<a href=#517 id=517 data-nosnippet>517</a>
-<a href=#518 id=518 data-nosnippet>518</a>    <span class="comment">// NEW-4: field/wire order of the signed AuthzRequest body is
-<a href=#519 id=519 data-nosnippet>519</a>    // correlation_id, tenant_id, subject_id, action, resource_id,
-<a href=#520 id=520 data-nosnippet>520</a>    // scope?, key_version, nonce, issued_at, hmac_signature? — this order is
-<a href=#521 id=521 data-nosnippet>521</a>    // load-bearing (the HMAC is computed over these bytes) and the SDKs
-<a href=#522 id=522 data-nosnippet>522</a>    // reproduce it byte-for-byte.
-<a href=#523 id=523 data-nosnippet>523</a>    </span><span class="attr">#[test]
-<a href=#524 id=524 data-nosnippet>524</a>    </span><span class="kw">fn </span>authz_request_canonical_field_order() {
-<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">let </span>req = AuthzRequest {
-<a href=#526 id=526 data-nosnippet>526</a>            correlation_id: Uuid::nil(),
-<a href=#527 id=527 data-nosnippet>527</a>            tenant_id: Uuid::nil(),
-<a href=#528 id=528 data-nosnippet>528</a>            subject_id: Uuid::nil(),
-<a href=#529 id=529 data-nosnippet>529</a>            action: <span class="string">"read"</span>.into(),
-<a href=#530 id=530 data-nosnippet>530</a>            resource_id: Uuid::nil(),
-<a href=#531 id=531 data-nosnippet>531</a>            scope: <span class="prelude-val">Some</span>(<span class="string">"s"</span>.into()),
-<a href=#532 id=532 data-nosnippet>532</a>            key_version: CURRENT_KEY_VERSION,
-<a href=#533 id=533 data-nosnippet>533</a>            nonce: Uuid::nil(),
-<a href=#534 id=534 data-nosnippet>534</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
-<a href=#535 id=535 data-nosnippet>535</a>            hmac_signature: <span class="prelude-val">None</span>,
-<a href=#536 id=536 data-nosnippet>536</a>        };
-<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
-<a href=#538 id=538 data-nosnippet>538</a>        <span class="kw">let </span>expected = [
-<a href=#539 id=539 data-nosnippet>539</a>            <span class="string">"correlation_id"</span>,
-<a href=#540 id=540 data-nosnippet>540</a>            <span class="string">"tenant_id"</span>,
-<a href=#541 id=541 data-nosnippet>541</a>            <span class="string">"subject_id"</span>,
-<a href=#542 id=542 data-nosnippet>542</a>            <span class="string">"action"</span>,
-<a href=#543 id=543 data-nosnippet>543</a>            <span class="string">"resource_id"</span>,
-<a href=#544 id=544 data-nosnippet>544</a>            <span class="string">"scope"</span>,
-<a href=#545 id=545 data-nosnippet>545</a>            <span class="string">"key_version"</span>,
-<a href=#546 id=546 data-nosnippet>546</a>            <span class="string">"nonce"</span>,
-<a href=#547 id=547 data-nosnippet>547</a>            <span class="string">"issued_at"</span>,
-<a href=#548 id=548 data-nosnippet>548</a>        ];
-<a href=#549 id=549 data-nosnippet>549</a>        <span class="kw">let </span>positions: Vec&lt;usize&gt; = expected
-<a href=#550 id=550 data-nosnippet>550</a>            .iter()
-<a href=#551 id=551 data-nosnippet>551</a>            .map(|f| json.find(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"\"{f}\""</span>)).expect(<span class="string">"field present"</span>))
-<a href=#552 id=552 data-nosnippet>552</a>            .collect();
-<a href=#553 id=553 data-nosnippet>553</a>        <span class="kw">let </span><span class="kw-2">mut </span>sorted = positions.clone();
-<a href=#554 id=554 data-nosnippet>554</a>        sorted.sort_unstable();
-<a href=#555 id=555 data-nosnippet>555</a>        <span class="macro">assert_eq!</span>(
-<a href=#556 id=556 data-nosnippet>556</a>            positions, sorted,
-<a href=#557 id=557 data-nosnippet>557</a>            <span class="string">"AuthzRequest fields must serialize in declaration order (NEW-4 wire order)"
-<a href=#558 id=558 data-nosnippet>558</a>        </span>);
-<a href=#559 id=559 data-nosnippet>559</a>    }
-<a href=#560 id=560 data-nosnippet>560</a>
-<a href=#561 id=561 data-nosnippet>561</a>    <span class="attr">#[test]
-<a href=#562 id=562 data-nosnippet>562</a>    </span><span class="kw">fn </span>is_fresh_accepts_within_and_rejects_outside_skew() {
-<a href=#563 id=563 data-nosnippet>563</a>        <span class="kw">let </span>now = Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">12</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap();
-<a href=#564 id=564 data-nosnippet>564</a>        <span class="kw">let </span>skew = chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS);
-<a href=#565 id=565 data-nosnippet>565</a>        <span class="macro">assert!</span>(is_fresh(now, now, skew), <span class="string">"exact-now must be fresh"</span>);
-<a href=#566 id=566 data-nosnippet>566</a>        <span class="macro">assert!</span>(
-<a href=#567 id=567 data-nosnippet>567</a>            is_fresh(now - chrono::Duration::seconds(<span class="number">299</span>), now, skew),
-<a href=#568 id=568 data-nosnippet>568</a>            <span class="string">"within skew (past) must be fresh"
-<a href=#569 id=569 data-nosnippet>569</a>        </span>);
-<a href=#570 id=570 data-nosnippet>570</a>        <span class="macro">assert!</span>(
-<a href=#571 id=571 data-nosnippet>571</a>            is_fresh(now + chrono::Duration::seconds(<span class="number">299</span>), now, skew),
-<a href=#572 id=572 data-nosnippet>572</a>            <span class="string">"within skew (future clock drift) must be fresh"
-<a href=#573 id=573 data-nosnippet>573</a>        </span>);
-<a href=#574 id=574 data-nosnippet>574</a>        <span class="macro">assert!</span>(
-<a href=#575 id=575 data-nosnippet>575</a>            !is_fresh(now - chrono::Duration::seconds(<span class="number">301</span>), now, skew),
-<a href=#576 id=576 data-nosnippet>576</a>            <span class="string">"stale past must be rejected"
-<a href=#577 id=577 data-nosnippet>577</a>        </span>);
-<a href=#578 id=578 data-nosnippet>578</a>        <span class="macro">assert!</span>(
-<a href=#579 id=579 data-nosnippet>579</a>            !is_fresh(now + chrono::Duration::seconds(<span class="number">301</span>), now, skew),
-<a href=#580 id=580 data-nosnippet>580</a>            <span class="string">"too-far-future must be rejected"
-<a href=#581 id=581 data-nosnippet>581</a>        </span>);
-<a href=#582 id=582 data-nosnippet>582</a>    }
-<a href=#583 id=583 data-nosnippet>583</a>
-<a href=#584 id=584 data-nosnippet>584</a>    <span class="comment">// SECHRD-08 / D-05a/b: HKDF per-tenant key derivation.
-<a href=#585 id=585 data-nosnippet>585</a>    </span><span class="attr">#[test]
-<a href=#586 id=586 data-nosnippet>586</a>    </span><span class="kw">fn </span>derive_tenant_key_is_deterministic_and_versioned() {
-<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#589 id=589 data-nosnippet>589</a>
-<a href=#590 id=590 data-nosnippet>590</a>        <span class="kw">let </span>k1 = derive_tenant_key(master, tenant, <span class="number">1</span>);
-<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">let </span>k2 = derive_tenant_key(master, tenant, <span class="number">1</span>);
-<a href=#592 id=592 data-nosnippet>592</a>        <span class="macro">assert_eq!</span>(k1, k2, <span class="string">"same inputs must derive the same key"</span>);
-<a href=#593 id=593 data-nosnippet>593</a>
-<a href=#594 id=594 data-nosnippet>594</a>        <span class="kw">let </span>k_v2 = derive_tenant_key(master, tenant, <span class="number">2</span>);
-<a href=#595 id=595 data-nosnippet>595</a>        <span class="macro">assert_ne!</span>(
-<a href=#596 id=596 data-nosnippet>596</a>            k1, k_v2,
-<a href=#597 id=597 data-nosnippet>597</a>            <span class="string">"a different key_version must derive a different key"
-<a href=#598 id=598 data-nosnippet>598</a>        </span>);
-<a href=#599 id=599 data-nosnippet>599</a>    }
-<a href=#600 id=600 data-nosnippet>600</a>
-<a href=#601 id=601 data-nosnippet>601</a>    <span class="comment">// SECHRD-08 / T-25-19 (SC #5a): a tenant-A signature must not validate
-<a href=#602 id=602 data-nosnippet>602</a>    // under tenant-B's derived subkey, even from the same master key.
-<a href=#603 id=603 data-nosnippet>603</a>    </span><span class="attr">#[test]
-<a href=#604 id=604 data-nosnippet>604</a>    </span><span class="kw">fn </span>per_tenant_signature_cross_tenant_rejected() {
-<a href=#605 id=605 data-nosnippet>605</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
-<a href=#606 id=606 data-nosnippet>606</a>        <span class="kw">let </span>tenant_a = Uuid::new_v4();
-<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw">let </span>tenant_b = Uuid::new_v4();
-<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">let </span>key_version = <span class="number">1</span>;
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// B1: machine-readable decision reason — `allowed`, `no_grant`, or
+<a href=#209 id=209 data-nosnippet>209</a>    /// `denied_by_rule` (SDK contract §11).
+<a href=#210 id=210 data-nosnippet>210</a>    ///
+<a href=#211 id=211 data-nosnippet>211</a>    /// `no_grant` and `denied_by_rule` are both refusals, but they mean
+<a href=#212 id=212 data-nosnippet>212</a>    /// opposite things to the caller: one says "ask an admin for access", the
+<a href=#213 id=213 data-nosnippet>213</a>    /// other says "an admin has already decided". A consumer that only reads
+<a href=#214 id=214 data-nosnippet>214</a>    /// `allowed` behaves exactly as before.
+<a href=#215 id=215 data-nosnippet>215</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub </span>reason_code: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#217 id=217 data-nosnippet>217</a>}
+<a href=#218 id=218 data-nosnippet>218</a>
+<a href=#219 id=219 data-nosnippet>219</a><span class="doccomment">/// Audit event received from external services via `axiam.audit.events`.
+<a href=#220 id=220 data-nosnippet>220</a>///
+<a href=#221 id=221 data-nosnippet>221</a>/// Maps directly to `CreateAuditLogEntry` from `axiam-core`.
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="attr">#[derive(Debug, Deserialize, Serialize)]
+<a href=#223 id=223 data-nosnippet>223</a></span><span class="kw">pub struct </span>AuditEventMessage {
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="kw">pub </span>tenant_id: Uuid,
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">pub </span>actor_id: Uuid,
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">pub </span>actor_type: String,
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="kw">pub </span>action: String,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">pub </span>resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="kw">pub </span>outcome: String,
+<a href=#231 id=231 data-nosnippet>231</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">pub </span>ip_address: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#233 id=233 data-nosnippet>233</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#234 id=234 data-nosnippet>234</a>    </span><span class="kw">pub </span>metadata: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
+<a href=#235 id=235 data-nosnippet>235</a>    <span class="doccomment">/// HKDF master-key rotation version (SECHRD-08 / D-05b). Selects which
+<a href=#236 id=236 data-nosnippet>236</a>    /// per-tenant subkey derivation the signature was produced with.
+<a href=#237 id=237 data-nosnippet>237</a>    </span><span class="attr">#[serde(default = <span class="string">"default_key_version"</span>)]
+<a href=#238 id=238 data-nosnippet>238</a>    </span><span class="kw">pub </span>key_version: u8,
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="doccomment">/// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
+<a href=#240 id=240 data-nosnippet>240</a>    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+<a href=#241 id=241 data-nosnippet>241</a>    /// consumer records it in the durable `amqp_nonce_replay` store; a
+<a href=#242 id=242 data-nosnippet>242</a>    /// duplicate within the freshness window is a replay and is rejected.
+<a href=#243 id=243 data-nosnippet>243</a>    </span><span class="attr">#[serde(default = <span class="string">"default_nonce"</span>)]
+<a href=#244 id=244 data-nosnippet>244</a>    </span><span class="kw">pub </span>nonce: Uuid,
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="doccomment">/// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
+<a href=#246 id=246 data-nosnippet>246</a>    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+<a href=#247 id=247 data-nosnippet>247</a>    /// consumer rejects the message if this lies outside ±skew of its clock.
+<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="attr">#[serde(default = <span class="string">"default_issued_at"</span>)]
+<a href=#249 id=249 data-nosnippet>249</a>    </span><span class="kw">pub </span>issued_at: DateTime&lt;Utc&gt;,
+<a href=#250 id=250 data-nosnippet>250</a>    <span class="doccomment">/// HMAC-SHA256 of the JSON-serialized message body (SEC-022/055).
+<a href=#251 id=251 data-nosnippet>251</a>    /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
+<a href=#252 id=252 data-nosnippet>252</a>    /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
+<a href=#253 id=253 data-nosnippet>253</a>    /// and invalid-signature messages; there is no fail-open path (D-05c).
+<a href=#254 id=254 data-nosnippet>254</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">pub </span>hmac_signature: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#256 id=256 data-nosnippet>256</a>}
+<a href=#257 id=257 data-nosnippet>257</a>
+<a href=#258 id=258 data-nosnippet>258</a><span class="doccomment">/// Notification event published to `axiam.notifications`.
+<a href=#259 id=259 data-nosnippet>259</a>///
+<a href=#260 id=260 data-nosnippet>260</a>/// Carries event type, tenant context, and event-specific payload.
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="attr">#[derive(Debug, Clone, Serialize)]
+<a href=#262 id=262 data-nosnippet>262</a></span><span class="kw">pub struct </span>NotificationEvent {
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="kw">pub </span>event_type: String,
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">pub </span>tenant_id: Uuid,
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">pub </span>actor_id: Uuid,
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#267 id=267 data-nosnippet>267</a>    </span><span class="kw">pub </span>resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#268 id=268 data-nosnippet>268</a>    <span class="kw">pub </span>timestamp: DateTime&lt;Utc&gt;,
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#270 id=270 data-nosnippet>270</a>    </span><span class="kw">pub </span>data: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
+<a href=#271 id=271 data-nosnippet>271</a>}
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a><span class="doccomment">/// Cross-replica authorization **decision-cache invalidation** broadcast
+<a href=#274 id=274 data-nosnippet>274</a>/// (§4.2), carried on the `axiam.authz.cache.invalidate` **fanout** exchange.
+<a href=#275 id=275 data-nosnippet>275</a>///
+<a href=#276 id=276 data-nosnippet>276</a>/// This is a control-plane instruction, not data: it tells every replica to
+<a href=#277 id=277 data-nosnippet>277</a>/// drop cached authorization decisions for a tenant (or for one subject within
+<a href=#278 id=278 data-nosnippet>278</a>/// a tenant) so a revocation takes effect everywhere instead of only on the
+<a href=#279 id=279 data-nosnippet>279</a>/// replica that handled the mutation. It therefore carries the **same §8
+<a href=#280 id=280 data-nosnippet>280</a>/// signed envelope as [`AuthzRequest`] / [`AuditEventMessage`]** — per-tenant
+<a href=#281 id=281 data-nosnippet>281</a>/// HKDF subkey, `key_version &gt;= 2`, per-message `nonce`, `issued_at` freshness
+<a href=#282 id=282 data-nosnippet>282</a>/// — rather than trusting the broker's ACLs alone. The threat is not
+<a href=#283 id=283 data-nosnippet>283</a>/// escalation (the worst a verified message can do is evict entries) but a
+<a href=#284 id=284 data-nosnippet>284</a>/// cheap cache-eviction / thundering-herd lever, and, if the payload is ever
+<a href=#285 id=285 data-nosnippet>285</a>/// extended, worse.
+<a href=#286 id=286 data-nosnippet>286</a>///
+<a href=#287 id=287 data-nosnippet>287</a>/// **Wire order is load-bearing** (the HMAC is over these bytes in declaration
+<a href=#288 id=288 data-nosnippet>288</a>/// order, exactly as for `AuthzRequest`):
+<a href=#289 id=289 data-nosnippet>289</a>/// `origin_id, tenant_id, subject_id?, key_version, nonce, issued_at,
+<a href=#290 id=290 data-nosnippet>290</a>/// hmac_signature?`.
+<a href=#291 id=291 data-nosnippet>291</a>///
+<a href=#292 id=292 data-nosnippet>292</a>/// `origin_id` identifies the **publishing replica** and exists solely for
+<a href=#293 id=293 data-nosnippet>293</a>/// self-echo suppression: a fanout exchange delivers the message back to the
+<a href=#294 id=294 data-nosnippet>294</a>/// publisher's own queue, and re-applying an invalidation the publisher
+<a href=#295 id=295 data-nosnippet>295</a>/// already applied locally is pure waste. It is not a security boundary —
+<a href=#296 id=296 data-nosnippet>296</a>/// claiming someone else's `origin_id` can only suppress your *own* message.
+<a href=#297 id=297 data-nosnippet>297</a></span><span class="attr">#[derive(Debug, Clone, Deserialize, Serialize)]
+<a href=#298 id=298 data-nosnippet>298</a></span><span class="kw">pub struct </span>CacheInvalidationMessage {
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="doccomment">/// Publishing replica's process-unique id (self-echo suppression).
+<a href=#300 id=300 data-nosnippet>300</a>    </span><span class="kw">pub </span>origin_id: Uuid,
+<a href=#301 id=301 data-nosnippet>301</a>    <span class="doccomment">/// Tenant whose cached decisions are invalidated. Also selects the
+<a href=#302 id=302 data-nosnippet>302</a>    /// per-tenant HKDF subkey, so a message signed for tenant A can never be
+<a href=#303 id=303 data-nosnippet>303</a>    /// replayed as tenant B's.
+<a href=#304 id=304 data-nosnippet>304</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
+<a href=#305 id=305 data-nosnippet>305</a>    <span class="doccomment">/// Subject to narrow the invalidation to. Absent = flush the whole tenant.
+<a href=#306 id=306 data-nosnippet>306</a>    /// These are the only two granularities the decision cache supports; no
+<a href=#307 id=307 data-nosnippet>307</a>    /// finer key is invented here.
+<a href=#308 id=308 data-nosnippet>308</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#309 id=309 data-nosnippet>309</a>    </span><span class="kw">pub </span>subject_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="doccomment">/// HKDF master-key rotation version (SECHRD-08 / D-05b).
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="attr">#[serde(default = <span class="string">"default_key_version"</span>)]
+<a href=#312 id=312 data-nosnippet>312</a>    </span><span class="kw">pub </span>key_version: u8,
+<a href=#313 id=313 data-nosnippet>313</a>    <span class="doccomment">/// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
+<a href=#314 id=314 data-nosnippet>314</a>    /// so it is inside the signed HMAC body. Deduplicated **per replica, in
+<a href=#315 id=315 data-nosnippet>315</a>    /// memory** — never against the shared durable nonce store, which would be
+<a href=#316 id=316 data-nosnippet>316</a>    /// catastrophic here: on a fanout every replica sees the same nonce, so a
+<a href=#317 id=317 data-nosnippet>317</a>    /// shared store would let exactly one replica win and make all the others
+<a href=#318 id=318 data-nosnippet>318</a>    /// reject the invalidation as a replay.
+<a href=#319 id=319 data-nosnippet>319</a>    </span><span class="attr">#[serde(default = <span class="string">"default_nonce"</span>)]
+<a href=#320 id=320 data-nosnippet>320</a>    </span><span class="kw">pub </span>nonce: Uuid,
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="doccomment">/// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
+<a href=#322 id=322 data-nosnippet>322</a>    /// so it is inside the signed HMAC body.
+<a href=#323 id=323 data-nosnippet>323</a>    </span><span class="attr">#[serde(default = <span class="string">"default_issued_at"</span>)]
+<a href=#324 id=324 data-nosnippet>324</a>    </span><span class="kw">pub </span>issued_at: DateTime&lt;Utc&gt;,
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="doccomment">/// Marks this message as a **liveness heartbeat**, not an invalidation
+<a href=#326 id=326 data-nosnippet>326</a>    /// (§13.4 observation 1). A heartbeat is published by a replica to itself:
+<a href=#327 id=327 data-nosnippet>327</a>    /// receiving its own back proves the whole publish → exchange → binding →
+<a href=#328 id=328 data-nosnippet>328</a>    /// queue → consumer loop is intact, which plain consumer liveness does not.
+<a href=#329 id=329 data-nosnippet>329</a>    /// A heartbeat NEVER touches the cache, in either direction.
+<a href=#330 id=330 data-nosnippet>330</a>    ///
+<a href=#331 id=331 data-nosnippet>331</a>    /// `skip_serializing_if` is load-bearing, not tidiness. The signature is
+<a href=#332 id=332 data-nosnippet>332</a>    /// computed over this struct with `hmac_signature` absent, so any field that
+<a href=#333 id=333 data-nosnippet>333</a>    /// serialized unconditionally would change the canonical bytes and break
+<a href=#334 id=334 data-nosnippet>334</a>    /// verification of messages produced by a replica running the previous
+<a href=#335 id=335 data-nosnippet>335</a>    /// version. Omitting `false` keeps an ordinary invalidation byte-identical
+<a href=#336 id=336 data-nosnippet>336</a>    /// to what pre-heartbeat replicas sign and verify, so a rolling upgrade is
+<a href=#337 id=337 data-nosnippet>337</a>    /// safe in both directions.
+<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"is_false"</span>)]
+<a href=#339 id=339 data-nosnippet>339</a>    </span><span class="kw">pub </span>heartbeat: bool,
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// HMAC-SHA256 over the JSON body with this field set to null, using the
+<a href=#341 id=341 data-nosnippet>341</a>    /// per-tenant subkey from [`derive_tenant_key`]. Mandatory — consumers
+<a href=#342 id=342 data-nosnippet>342</a>    /// reject unsigned and invalid-signature messages alike; no fail-open path.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="attr">#[serde(default, skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">pub </span>hmac_signature: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#345 id=345 data-nosnippet>345</a>}
+<a href=#346 id=346 data-nosnippet>346</a>
+<a href=#347 id=347 data-nosnippet>347</a><span class="doccomment">/// `skip_serializing_if` predicate for [`CacheInvalidationMessage::heartbeat`].
+<a href=#348 id=348 data-nosnippet>348</a></span><span class="kw">fn </span>is_false(value: <span class="kw-2">&amp;</span>bool) -&gt; bool {
+<a href=#349 id=349 data-nosnippet>349</a>    !<span class="kw-2">*</span>value
+<a href=#350 id=350 data-nosnippet>350</a>}
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a><span class="doccomment">/// Webhook delivery message carried on the `axiam.webhook` /
+<a href=#353 id=353 data-nosnippet>353</a>/// `axiam.webhook.retry` queues (CORR-03/D-07).
+<a href=#354 id=354 data-nosnippet>354</a>///
+<a href=#355 id=355 data-nosnippet>355</a>/// Produced by `WebhookDeliveryService::emit` (`axiam-api-rest`), consumed
+<a href=#356 id=356 data-nosnippet>356</a>/// by the webhook AMQP consumer (wired in 26-07) which drives
+<a href=#357 id=357 data-nosnippet>357</a>/// `WebhookDeliveryService::deliver_once` per (re)delivery. `attempt` is
+<a href=#358 id=358 data-nosnippet>358</a>/// incremented by the consumer on each republish to the retry queue and
+<a href=#359 id=359 data-nosnippet>359</a>/// checked against `AXIAM__WEBHOOK__MAX_ATTEMPTS` before a terminal nack
+<a href=#360 id=360 data-nosnippet>360</a>/// routes the message to `WEBHOOK_DLQ` (D-07).
+<a href=#361 id=361 data-nosnippet>361</a>///
+<a href=#362 id=362 data-nosnippet>362</a>/// `tenant_id` is not in the plan's original DTO sketch, but is required
+<a href=#363 id=363 data-nosnippet>363</a>/// for `deliver_once` to resolve the webhook via the tenant-scoped
+<a href=#364 id=364 data-nosnippet>364</a>/// `WebhookRepository::get_by_id` without a cross-tenant lookup — AXIAM's
+<a href=#365 id=365 data-nosnippet>365</a>/// multi-tenant data-isolation model requires every domain-entity lookup to
+<a href=#366 id=366 data-nosnippet>366</a>/// be tenant-scoped.
+<a href=#367 id=367 data-nosnippet>367</a></span><span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
+<a href=#368 id=368 data-nosnippet>368</a></span><span class="kw">pub struct </span>WebhookMessage {
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="kw">pub </span>webhook_id: Uuid,
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">pub </span>delivery_id: Uuid,
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="kw">pub </span>tenant_id: Uuid,
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="kw">pub </span>event_type: String,
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="kw">pub </span>payload: serde_json::Value,
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="kw">pub </span>attempt: u32,
+<a href=#375 id=375 data-nosnippet>375</a>}
+<a href=#376 id=376 data-nosnippet>376</a>
+<a href=#377 id=377 data-nosnippet>377</a><span class="attr">#[cfg(test)]
+<a href=#378 id=378 data-nosnippet>378</a></span><span class="kw">mod </span>tests {
+<a href=#379 id=379 data-nosnippet>379</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#380 id=380 data-nosnippet>380</a>    <span class="kw">use </span>chrono::TimeZone;
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">fn </span>sample_message(mail_type: MailType) -&gt; OutboundMailMessage {
+<a href=#383 id=383 data-nosnippet>383</a>        OutboundMailMessage {
+<a href=#384 id=384 data-nosnippet>384</a>            mail_type,
+<a href=#385 id=385 data-nosnippet>385</a>            tenant_id: Uuid::nil(),
+<a href=#386 id=386 data-nosnippet>386</a>            org_id: Uuid::nil(),
+<a href=#387 id=387 data-nosnippet>387</a>            user_id: Uuid::nil(),
+<a href=#388 id=388 data-nosnippet>388</a>            to_address: <span class="string">"user@example.com"</span>.to_string(),
+<a href=#389 id=389 data-nosnippet>389</a>            template_context: <span class="macro">serde_json::json!</span>({<span class="string">"key"</span>: <span class="string">"value"</span>}),
+<a href=#390 id=390 data-nosnippet>390</a>            attempt_count: <span class="number">0</span>,
+<a href=#391 id=391 data-nosnippet>391</a>            enqueued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
+<a href=#392 id=392 data-nosnippet>392</a>        }
+<a href=#393 id=393 data-nosnippet>393</a>    }
+<a href=#394 id=394 data-nosnippet>394</a>
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="attr">#[test]
+<a href=#396 id=396 data-nosnippet>396</a>    </span><span class="kw">fn </span>outbound_mail_message_serde_round_trip() {
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw">let </span>variants = [
+<a href=#398 id=398 data-nosnippet>398</a>            MailType::PasswordReset,
+<a href=#399 id=399 data-nosnippet>399</a>            MailType::EmailVerification,
+<a href=#400 id=400 data-nosnippet>400</a>            MailType::Notification,
+<a href=#401 id=401 data-nosnippet>401</a>            MailType::DeletionCancel,
+<a href=#402 id=402 data-nosnippet>402</a>            MailType::ExportReady,
+<a href=#403 id=403 data-nosnippet>403</a>        ];
+<a href=#404 id=404 data-nosnippet>404</a>
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="kw">for </span>variant <span class="kw">in </span>variants {
+<a href=#406 id=406 data-nosnippet>406</a>            <span class="kw">let </span>msg = sample_message(variant);
+<a href=#407 id=407 data-nosnippet>407</a>            <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>msg).expect(<span class="string">"serialize"</span>);
+<a href=#408 id=408 data-nosnippet>408</a>            <span class="kw">let </span>decoded: OutboundMailMessage = serde_json::from_str(<span class="kw-2">&amp;</span>json).expect(<span class="string">"deserialize"</span>);
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a>            <span class="comment">// Verify structural fields survive round-trip
+<a href=#411 id=411 data-nosnippet>411</a>            </span><span class="macro">assert_eq!</span>(decoded.to_address, <span class="string">"user@example.com"</span>);
+<a href=#412 id=412 data-nosnippet>412</a>            <span class="macro">assert_eq!</span>(decoded.attempt_count, <span class="number">0</span>);
+<a href=#413 id=413 data-nosnippet>413</a>            <span class="macro">assert_eq!</span>(decoded.tenant_id, Uuid::nil());
+<a href=#414 id=414 data-nosnippet>414</a>        }
+<a href=#415 id=415 data-nosnippet>415</a>    }
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="attr">#[test]
+<a href=#418 id=418 data-nosnippet>418</a>    </span><span class="kw">fn </span>mail_type_snake_case_serialization() {
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="macro">assert_eq!</span>(
+<a href=#420 id=420 data-nosnippet>420</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::PasswordReset).unwrap(),
+<a href=#421 id=421 data-nosnippet>421</a>            <span class="string">r#""password_reset""#
+<a href=#422 id=422 data-nosnippet>422</a>        </span>);
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="macro">assert_eq!</span>(
+<a href=#424 id=424 data-nosnippet>424</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::EmailVerification).unwrap(),
+<a href=#425 id=425 data-nosnippet>425</a>            <span class="string">r#""email_verification""#
+<a href=#426 id=426 data-nosnippet>426</a>        </span>);
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="macro">assert_eq!</span>(
+<a href=#428 id=428 data-nosnippet>428</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::Notification).unwrap(),
+<a href=#429 id=429 data-nosnippet>429</a>            <span class="string">r#""notification""#
+<a href=#430 id=430 data-nosnippet>430</a>        </span>);
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="macro">assert_eq!</span>(
+<a href=#432 id=432 data-nosnippet>432</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::DeletionCancel).unwrap(),
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="string">r#""deletion_cancel""#
+<a href=#434 id=434 data-nosnippet>434</a>        </span>);
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="macro">assert_eq!</span>(
+<a href=#436 id=436 data-nosnippet>436</a>            serde_json::to_string(<span class="kw-2">&amp;</span>MailType::ExportReady).unwrap(),
+<a href=#437 id=437 data-nosnippet>437</a>            <span class="string">r#""export_ready""#
+<a href=#438 id=438 data-nosnippet>438</a>        </span>);
+<a href=#439 id=439 data-nosnippet>439</a>    }
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="comment">// SEC-022: HMAC sign/verify round-trip
+<a href=#442 id=442 data-nosnippet>442</a>    </span><span class="attr">#[test]
+<a href=#443 id=443 data-nosnippet>443</a>    </span><span class="kw">fn </span>amqp_hmac_sign_verify_round_trip() {
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="kw">let </span>key = <span class="string">b"test-amqp-signing-key"</span>;
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="kw">let </span>payload = <span class="string">b"{\"tenant_id\":\"...\",\"action\":\"read\"}"</span>;
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>sig = sign_payload(key, payload);
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="macro">assert!</span>(!sig.is_empty());
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="macro">assert!</span>(
+<a href=#449 id=449 data-nosnippet>449</a>            verify_payload(key, payload, <span class="kw-2">&amp;</span>sig),
+<a href=#450 id=450 data-nosnippet>450</a>            <span class="string">"valid signature must verify"
+<a href=#451 id=451 data-nosnippet>451</a>        </span>);
+<a href=#452 id=452 data-nosnippet>452</a>    }
+<a href=#453 id=453 data-nosnippet>453</a>
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="attr">#[test]
+<a href=#455 id=455 data-nosnippet>455</a>    </span><span class="kw">fn </span>amqp_hmac_wrong_key_fails_verify() {
+<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span>key1 = <span class="string">b"key-one"</span>;
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">let </span>key2 = <span class="string">b"key-two"</span>;
+<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">let </span>payload = <span class="string">b"some-payload"</span>;
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span>sig = sign_payload(key1, payload);
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="macro">assert!</span>(
+<a href=#461 id=461 data-nosnippet>461</a>            !verify_payload(key2, payload, <span class="kw-2">&amp;</span>sig),
+<a href=#462 id=462 data-nosnippet>462</a>            <span class="string">"wrong key must not verify"
+<a href=#463 id=463 data-nosnippet>463</a>        </span>);
+<a href=#464 id=464 data-nosnippet>464</a>    }
+<a href=#465 id=465 data-nosnippet>465</a>
+<a href=#466 id=466 data-nosnippet>466</a>    <span class="attr">#[test]
+<a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">fn </span>amqp_hmac_tampered_payload_fails_verify() {
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span>key = <span class="string">b"hmac-key"</span>;
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>payload = <span class="string">b"original-payload"</span>;
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="kw">let </span>tampered = <span class="string">b"tampered-payload"</span>;
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">let </span>sig = sign_payload(key, payload);
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert!</span>(
+<a href=#473 id=473 data-nosnippet>473</a>            !verify_payload(key, tampered, <span class="kw-2">&amp;</span>sig),
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="string">"tampered payload must not verify"
+<a href=#475 id=475 data-nosnippet>475</a>        </span>);
+<a href=#476 id=476 data-nosnippet>476</a>    }
+<a href=#477 id=477 data-nosnippet>477</a>
+<a href=#478 id=478 data-nosnippet>478</a>    <span class="comment">// SEC-022: AuthzRequest carries hmac_signature field
+<a href=#479 id=479 data-nosnippet>479</a>    </span><span class="attr">#[test]
+<a href=#480 id=480 data-nosnippet>480</a>    </span><span class="kw">fn </span>authz_request_hmac_signature_serializes_when_present() {
+<a href=#481 id=481 data-nosnippet>481</a>        <span class="kw">let </span>req = AuthzRequest {
+<a href=#482 id=482 data-nosnippet>482</a>            correlation_id: Uuid::nil(),
+<a href=#483 id=483 data-nosnippet>483</a>            tenant_id: Uuid::nil(),
+<a href=#484 id=484 data-nosnippet>484</a>            subject_id: Uuid::nil(),
+<a href=#485 id=485 data-nosnippet>485</a>            action: <span class="string">"read"</span>.into(),
+<a href=#486 id=486 data-nosnippet>486</a>            resource_id: Uuid::nil(),
+<a href=#487 id=487 data-nosnippet>487</a>            scope: <span class="prelude-val">None</span>,
+<a href=#488 id=488 data-nosnippet>488</a>            key_version: CURRENT_KEY_VERSION,
+<a href=#489 id=489 data-nosnippet>489</a>            nonce: Uuid::nil(),
+<a href=#490 id=490 data-nosnippet>490</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
+<a href=#491 id=491 data-nosnippet>491</a>            hmac_signature: <span class="prelude-val">Some</span>(<span class="string">"abc123"</span>.into()),
+<a href=#492 id=492 data-nosnippet>492</a>        };
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
+<a href=#494 id=494 data-nosnippet>494</a>        <span class="macro">assert!</span>(
+<a href=#495 id=495 data-nosnippet>495</a>            json.contains(<span class="string">"hmac_signature"</span>),
+<a href=#496 id=496 data-nosnippet>496</a>            <span class="string">"hmac_signature must be in JSON when Some"
+<a href=#497 id=497 data-nosnippet>497</a>        </span>);
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="comment">// NEW-4: nonce + issued_at are always emitted (inside the signed body).
+<a href=#499 id=499 data-nosnippet>499</a>        </span><span class="macro">assert!</span>(json.contains(<span class="string">"nonce"</span>), <span class="string">"nonce must always be serialized"</span>);
+<a href=#500 id=500 data-nosnippet>500</a>        <span class="macro">assert!</span>(
+<a href=#501 id=501 data-nosnippet>501</a>            json.contains(<span class="string">"issued_at"</span>),
+<a href=#502 id=502 data-nosnippet>502</a>            <span class="string">"issued_at must always be serialized"
+<a href=#503 id=503 data-nosnippet>503</a>        </span>);
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>
+<a href=#506 id=506 data-nosnippet>506</a>    <span class="attr">#[test]
+<a href=#507 id=507 data-nosnippet>507</a>    </span><span class="kw">fn </span>authz_request_hmac_signature_omitted_when_none() {
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">let </span>req = AuthzRequest {
+<a href=#509 id=509 data-nosnippet>509</a>            correlation_id: Uuid::nil(),
+<a href=#510 id=510 data-nosnippet>510</a>            tenant_id: Uuid::nil(),
+<a href=#511 id=511 data-nosnippet>511</a>            subject_id: Uuid::nil(),
+<a href=#512 id=512 data-nosnippet>512</a>            action: <span class="string">"read"</span>.into(),
+<a href=#513 id=513 data-nosnippet>513</a>            resource_id: Uuid::nil(),
+<a href=#514 id=514 data-nosnippet>514</a>            scope: <span class="prelude-val">None</span>,
+<a href=#515 id=515 data-nosnippet>515</a>            key_version: CURRENT_KEY_VERSION,
+<a href=#516 id=516 data-nosnippet>516</a>            nonce: Uuid::nil(),
+<a href=#517 id=517 data-nosnippet>517</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
+<a href=#518 id=518 data-nosnippet>518</a>            hmac_signature: <span class="prelude-val">None</span>,
+<a href=#519 id=519 data-nosnippet>519</a>        };
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="macro">assert!</span>(
+<a href=#522 id=522 data-nosnippet>522</a>            !json.contains(<span class="string">"hmac_signature"</span>),
+<a href=#523 id=523 data-nosnippet>523</a>            <span class="string">"hmac_signature must be omitted when None"
+<a href=#524 id=524 data-nosnippet>524</a>        </span>);
+<a href=#525 id=525 data-nosnippet>525</a>    }
+<a href=#526 id=526 data-nosnippet>526</a>
+<a href=#527 id=527 data-nosnippet>527</a>    <span class="comment">// NEW-4: field/wire order of the signed AuthzRequest body is
+<a href=#528 id=528 data-nosnippet>528</a>    // correlation_id, tenant_id, subject_id, action, resource_id,
+<a href=#529 id=529 data-nosnippet>529</a>    // scope?, key_version, nonce, issued_at, hmac_signature? — this order is
+<a href=#530 id=530 data-nosnippet>530</a>    // load-bearing (the HMAC is computed over these bytes) and the SDKs
+<a href=#531 id=531 data-nosnippet>531</a>    // reproduce it byte-for-byte.
+<a href=#532 id=532 data-nosnippet>532</a>    </span><span class="attr">#[test]
+<a href=#533 id=533 data-nosnippet>533</a>    </span><span class="kw">fn </span>authz_request_canonical_field_order() {
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="kw">let </span>req = AuthzRequest {
+<a href=#535 id=535 data-nosnippet>535</a>            correlation_id: Uuid::nil(),
+<a href=#536 id=536 data-nosnippet>536</a>            tenant_id: Uuid::nil(),
+<a href=#537 id=537 data-nosnippet>537</a>            subject_id: Uuid::nil(),
+<a href=#538 id=538 data-nosnippet>538</a>            action: <span class="string">"read"</span>.into(),
+<a href=#539 id=539 data-nosnippet>539</a>            resource_id: Uuid::nil(),
+<a href=#540 id=540 data-nosnippet>540</a>            scope: <span class="prelude-val">Some</span>(<span class="string">"s"</span>.into()),
+<a href=#541 id=541 data-nosnippet>541</a>            key_version: CURRENT_KEY_VERSION,
+<a href=#542 id=542 data-nosnippet>542</a>            nonce: Uuid::nil(),
+<a href=#543 id=543 data-nosnippet>543</a>            issued_at: Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap(),
+<a href=#544 id=544 data-nosnippet>544</a>            hmac_signature: <span class="prelude-val">None</span>,
+<a href=#545 id=545 data-nosnippet>545</a>        };
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>req).expect(<span class="string">"serialize"</span>);
+<a href=#547 id=547 data-nosnippet>547</a>        <span class="kw">let </span>expected = [
+<a href=#548 id=548 data-nosnippet>548</a>            <span class="string">"correlation_id"</span>,
+<a href=#549 id=549 data-nosnippet>549</a>            <span class="string">"tenant_id"</span>,
+<a href=#550 id=550 data-nosnippet>550</a>            <span class="string">"subject_id"</span>,
+<a href=#551 id=551 data-nosnippet>551</a>            <span class="string">"action"</span>,
+<a href=#552 id=552 data-nosnippet>552</a>            <span class="string">"resource_id"</span>,
+<a href=#553 id=553 data-nosnippet>553</a>            <span class="string">"scope"</span>,
+<a href=#554 id=554 data-nosnippet>554</a>            <span class="string">"key_version"</span>,
+<a href=#555 id=555 data-nosnippet>555</a>            <span class="string">"nonce"</span>,
+<a href=#556 id=556 data-nosnippet>556</a>            <span class="string">"issued_at"</span>,
+<a href=#557 id=557 data-nosnippet>557</a>        ];
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="kw">let </span>positions: Vec&lt;usize&gt; = expected
+<a href=#559 id=559 data-nosnippet>559</a>            .iter()
+<a href=#560 id=560 data-nosnippet>560</a>            .map(|f| json.find(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"\"{f}\""</span>)).expect(<span class="string">"field present"</span>))
+<a href=#561 id=561 data-nosnippet>561</a>            .collect();
+<a href=#562 id=562 data-nosnippet>562</a>        <span class="kw">let </span><span class="kw-2">mut </span>sorted = positions.clone();
+<a href=#563 id=563 data-nosnippet>563</a>        sorted.sort_unstable();
+<a href=#564 id=564 data-nosnippet>564</a>        <span class="macro">assert_eq!</span>(
+<a href=#565 id=565 data-nosnippet>565</a>            positions, sorted,
+<a href=#566 id=566 data-nosnippet>566</a>            <span class="string">"AuthzRequest fields must serialize in declaration order (NEW-4 wire order)"
+<a href=#567 id=567 data-nosnippet>567</a>        </span>);
+<a href=#568 id=568 data-nosnippet>568</a>    }
+<a href=#569 id=569 data-nosnippet>569</a>
+<a href=#570 id=570 data-nosnippet>570</a>    <span class="attr">#[test]
+<a href=#571 id=571 data-nosnippet>571</a>    </span><span class="kw">fn </span>is_fresh_accepts_within_and_rejects_outside_skew() {
+<a href=#572 id=572 data-nosnippet>572</a>        <span class="kw">let </span>now = Utc.with_ymd_and_hms(<span class="number">2026</span>, <span class="number">7</span>, <span class="number">10</span>, <span class="number">12</span>, <span class="number">0</span>, <span class="number">0</span>).unwrap();
+<a href=#573 id=573 data-nosnippet>573</a>        <span class="kw">let </span>skew = chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS);
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="macro">assert!</span>(is_fresh(now, now, skew), <span class="string">"exact-now must be fresh"</span>);
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="macro">assert!</span>(
+<a href=#576 id=576 data-nosnippet>576</a>            is_fresh(now - chrono::Duration::seconds(<span class="number">299</span>), now, skew),
+<a href=#577 id=577 data-nosnippet>577</a>            <span class="string">"within skew (past) must be fresh"
+<a href=#578 id=578 data-nosnippet>578</a>        </span>);
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="macro">assert!</span>(
+<a href=#580 id=580 data-nosnippet>580</a>            is_fresh(now + chrono::Duration::seconds(<span class="number">299</span>), now, skew),
+<a href=#581 id=581 data-nosnippet>581</a>            <span class="string">"within skew (future clock drift) must be fresh"
+<a href=#582 id=582 data-nosnippet>582</a>        </span>);
+<a href=#583 id=583 data-nosnippet>583</a>        <span class="macro">assert!</span>(
+<a href=#584 id=584 data-nosnippet>584</a>            !is_fresh(now - chrono::Duration::seconds(<span class="number">301</span>), now, skew),
+<a href=#585 id=585 data-nosnippet>585</a>            <span class="string">"stale past must be rejected"
+<a href=#586 id=586 data-nosnippet>586</a>        </span>);
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="macro">assert!</span>(
+<a href=#588 id=588 data-nosnippet>588</a>            !is_fresh(now + chrono::Duration::seconds(<span class="number">301</span>), now, skew),
+<a href=#589 id=589 data-nosnippet>589</a>            <span class="string">"too-far-future must be rejected"
+<a href=#590 id=590 data-nosnippet>590</a>        </span>);
+<a href=#591 id=591 data-nosnippet>591</a>    }
+<a href=#592 id=592 data-nosnippet>592</a>
+<a href=#593 id=593 data-nosnippet>593</a>    <span class="comment">// SECHRD-08 / D-05a/b: HKDF per-tenant key derivation.
+<a href=#594 id=594 data-nosnippet>594</a>    </span><span class="attr">#[test]
+<a href=#595 id=595 data-nosnippet>595</a>    </span><span class="kw">fn </span>derive_tenant_key_is_deterministic_and_versioned() {
+<a href=#596 id=596 data-nosnippet>596</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
+<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#598 id=598 data-nosnippet>598</a>
+<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>k1 = derive_tenant_key(master, tenant, <span class="number">1</span>);
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="kw">let </span>k2 = derive_tenant_key(master, tenant, <span class="number">1</span>);
+<a href=#601 id=601 data-nosnippet>601</a>        <span class="macro">assert_eq!</span>(k1, k2, <span class="string">"same inputs must derive the same key"</span>);
+<a href=#602 id=602 data-nosnippet>602</a>
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">let </span>k_v2 = derive_tenant_key(master, tenant, <span class="number">2</span>);
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="macro">assert_ne!</span>(
+<a href=#605 id=605 data-nosnippet>605</a>            k1, k_v2,
+<a href=#606 id=606 data-nosnippet>606</a>            <span class="string">"a different key_version must derive a different key"
+<a href=#607 id=607 data-nosnippet>607</a>        </span>);
+<a href=#608 id=608 data-nosnippet>608</a>    }
 <a href=#609 id=609 data-nosnippet>609</a>
-<a href=#610 id=610 data-nosnippet>610</a>        <span class="kw">let </span>subkey_a = derive_tenant_key(master, tenant_a, key_version);
-<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>subkey_b = derive_tenant_key(master, tenant_b, key_version);
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="macro">assert_ne!</span>(
-<a href=#613 id=613 data-nosnippet>613</a>            subkey_a, subkey_b,
-<a href=#614 id=614 data-nosnippet>614</a>            <span class="string">"different tenants must derive different subkeys"
-<a href=#615 id=615 data-nosnippet>615</a>        </span>);
-<a href=#616 id=616 data-nosnippet>616</a>
-<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>payload = <span class="string">b"{\"tenant_id\":\"a\",\"action\":\"read\"}"</span>;
-<a href=#618 id=618 data-nosnippet>618</a>        <span class="kw">let </span>sig = sign_payload(<span class="kw-2">&amp;</span>subkey_a, payload);
-<a href=#619 id=619 data-nosnippet>619</a>
-<a href=#620 id=620 data-nosnippet>620</a>        <span class="macro">assert!</span>(
-<a href=#621 id=621 data-nosnippet>621</a>            verify_payload(<span class="kw-2">&amp;</span>subkey_a, payload, <span class="kw-2">&amp;</span>sig),
-<a href=#622 id=622 data-nosnippet>622</a>            <span class="string">"tenant A's own signature must verify under tenant A's subkey"
-<a href=#623 id=623 data-nosnippet>623</a>        </span>);
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="macro">assert!</span>(
-<a href=#625 id=625 data-nosnippet>625</a>            !verify_payload(<span class="kw-2">&amp;</span>subkey_b, payload, <span class="kw-2">&amp;</span>sig),
-<a href=#626 id=626 data-nosnippet>626</a>            <span class="string">"tenant A's signature must NOT verify under tenant B's subkey (T-25-19)"
-<a href=#627 id=627 data-nosnippet>627</a>        </span>);
+<a href=#610 id=610 data-nosnippet>610</a>    <span class="comment">// SECHRD-08 / T-25-19 (SC #5a): a tenant-A signature must not validate
+<a href=#611 id=611 data-nosnippet>611</a>    // under tenant-B's derived subkey, even from the same master key.
+<a href=#612 id=612 data-nosnippet>612</a>    </span><span class="attr">#[test]
+<a href=#613 id=613 data-nosnippet>613</a>    </span><span class="kw">fn </span>per_tenant_signature_cross_tenant_rejected() {
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
+<a href=#615 id=615 data-nosnippet>615</a>        <span class="kw">let </span>tenant_a = Uuid::new_v4();
+<a href=#616 id=616 data-nosnippet>616</a>        <span class="kw">let </span>tenant_b = Uuid::new_v4();
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>key_version = <span class="number">1</span>;
+<a href=#618 id=618 data-nosnippet>618</a>
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">let </span>subkey_a = derive_tenant_key(master, tenant_a, key_version);
+<a href=#620 id=620 data-nosnippet>620</a>        <span class="kw">let </span>subkey_b = derive_tenant_key(master, tenant_b, key_version);
+<a href=#621 id=621 data-nosnippet>621</a>        <span class="macro">assert_ne!</span>(
+<a href=#622 id=622 data-nosnippet>622</a>            subkey_a, subkey_b,
+<a href=#623 id=623 data-nosnippet>623</a>            <span class="string">"different tenants must derive different subkeys"
+<a href=#624 id=624 data-nosnippet>624</a>        </span>);
+<a href=#625 id=625 data-nosnippet>625</a>
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">let </span>payload = <span class="string">b"{\"tenant_id\":\"a\",\"action\":\"read\"}"</span>;
+<a href=#627 id=627 data-nosnippet>627</a>        <span class="kw">let </span>sig = sign_payload(<span class="kw-2">&amp;</span>subkey_a, payload);
 <a href=#628 id=628 data-nosnippet>628</a>
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="comment">// Exercise via the consumer-facing wrapper too.
-<a href=#630 id=630 data-nosnippet>630</a>        </span><span class="macro">assert!</span>(verify_tenant_signature(
-<a href=#631 id=631 data-nosnippet>631</a>            master,
-<a href=#632 id=632 data-nosnippet>632</a>            tenant_a,
-<a href=#633 id=633 data-nosnippet>633</a>            key_version,
-<a href=#634 id=634 data-nosnippet>634</a>            payload,
-<a href=#635 id=635 data-nosnippet>635</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)
-<a href=#636 id=636 data-nosnippet>636</a>        ));
-<a href=#637 id=637 data-nosnippet>637</a>        <span class="macro">assert!</span>(!verify_tenant_signature(
-<a href=#638 id=638 data-nosnippet>638</a>            master,
-<a href=#639 id=639 data-nosnippet>639</a>            tenant_b,
-<a href=#640 id=640 data-nosnippet>640</a>            key_version,
-<a href=#641 id=641 data-nosnippet>641</a>            payload,
-<a href=#642 id=642 data-nosnippet>642</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)
-<a href=#643 id=643 data-nosnippet>643</a>        ));
-<a href=#644 id=644 data-nosnippet>644</a>    }
-<a href=#645 id=645 data-nosnippet>645</a>
-<a href=#646 id=646 data-nosnippet>646</a>    <span class="comment">// SECHRD-08 / T-25-20: unsigned messages must be rejected — no fail-open
-<a href=#647 id=647 data-nosnippet>647</a>    // "accept when absent" branch.
-<a href=#648 id=648 data-nosnippet>648</a>    </span><span class="attr">#[test]
-<a href=#649 id=649 data-nosnippet>649</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_unsigned_message() {
-<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
-<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span>payload = <span class="string">b"unsigned-audit-event"</span>;
-<a href=#653 id=653 data-nosnippet>653</a>
-<a href=#654 id=654 data-nosnippet>654</a>        <span class="macro">assert!</span>(
-<a href=#655 id=655 data-nosnippet>655</a>            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, payload, <span class="prelude-val">None</span>),
-<a href=#656 id=656 data-nosnippet>656</a>            <span class="string">"absent signature must be rejected — no fail-open path (SECHRD-08 / T-25-20)"
-<a href=#657 id=657 data-nosnippet>657</a>        </span>);
-<a href=#658 id=658 data-nosnippet>658</a>    }
-<a href=#659 id=659 data-nosnippet>659</a>
-<a href=#660 id=660 data-nosnippet>660</a>    <span class="attr">#[test]
-<a href=#661 id=661 data-nosnippet>661</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_tampered_payload() {
-<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
-<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>payload = <span class="string">b"original-authz-request"</span>;
-<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>tampered = <span class="string">b"tampered-authz-request"</span>;
-<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">let </span>subkey = derive_tenant_key(master, tenant, CURRENT_KEY_VERSION);
-<a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">let </span>sig = sign_payload(<span class="kw-2">&amp;</span>subkey, payload);
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">assert!</span>(
+<a href=#630 id=630 data-nosnippet>630</a>            verify_payload(<span class="kw-2">&amp;</span>subkey_a, payload, <span class="kw-2">&amp;</span>sig),
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="string">"tenant A's own signature must verify under tenant A's subkey"
+<a href=#632 id=632 data-nosnippet>632</a>        </span>);
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="macro">assert!</span>(
+<a href=#634 id=634 data-nosnippet>634</a>            !verify_payload(<span class="kw-2">&amp;</span>subkey_b, payload, <span class="kw-2">&amp;</span>sig),
+<a href=#635 id=635 data-nosnippet>635</a>            <span class="string">"tenant A's signature must NOT verify under tenant B's subkey (T-25-19)"
+<a href=#636 id=636 data-nosnippet>636</a>        </span>);
+<a href=#637 id=637 data-nosnippet>637</a>
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="comment">// Exercise via the consumer-facing wrapper too.
+<a href=#639 id=639 data-nosnippet>639</a>        </span><span class="macro">assert!</span>(verify_tenant_signature(
+<a href=#640 id=640 data-nosnippet>640</a>            master,
+<a href=#641 id=641 data-nosnippet>641</a>            tenant_a,
+<a href=#642 id=642 data-nosnippet>642</a>            key_version,
+<a href=#643 id=643 data-nosnippet>643</a>            payload,
+<a href=#644 id=644 data-nosnippet>644</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)
+<a href=#645 id=645 data-nosnippet>645</a>        ));
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="macro">assert!</span>(!verify_tenant_signature(
+<a href=#647 id=647 data-nosnippet>647</a>            master,
+<a href=#648 id=648 data-nosnippet>648</a>            tenant_b,
+<a href=#649 id=649 data-nosnippet>649</a>            key_version,
+<a href=#650 id=650 data-nosnippet>650</a>            payload,
+<a href=#651 id=651 data-nosnippet>651</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)
+<a href=#652 id=652 data-nosnippet>652</a>        ));
+<a href=#653 id=653 data-nosnippet>653</a>    }
+<a href=#654 id=654 data-nosnippet>654</a>
+<a href=#655 id=655 data-nosnippet>655</a>    <span class="comment">// SECHRD-08 / T-25-20: unsigned messages must be rejected — no fail-open
+<a href=#656 id=656 data-nosnippet>656</a>    // "accept when absent" branch.
+<a href=#657 id=657 data-nosnippet>657</a>    </span><span class="attr">#[test]
+<a href=#658 id=658 data-nosnippet>658</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_unsigned_message() {
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>payload = <span class="string">b"unsigned-audit-event"</span>;
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="macro">assert!</span>(
+<a href=#664 id=664 data-nosnippet>664</a>            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, payload, <span class="prelude-val">None</span>),
+<a href=#665 id=665 data-nosnippet>665</a>            <span class="string">"absent signature must be rejected — no fail-open path (SECHRD-08 / T-25-20)"
+<a href=#666 id=666 data-nosnippet>666</a>        </span>);
+<a href=#667 id=667 data-nosnippet>667</a>    }
 <a href=#668 id=668 data-nosnippet>668</a>
-<a href=#669 id=669 data-nosnippet>669</a>        <span class="macro">assert!</span>(
-<a href=#670 id=670 data-nosnippet>670</a>            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, tampered, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)),
-<a href=#671 id=671 data-nosnippet>671</a>            <span class="string">"tampered payload must not verify"
-<a href=#672 id=672 data-nosnippet>672</a>        </span>);
-<a href=#673 id=673 data-nosnippet>673</a>    }
-<a href=#674 id=674 data-nosnippet>674</a>
-<a href=#675 id=675 data-nosnippet>675</a>    <span class="attr">#[test]
-<a href=#676 id=676 data-nosnippet>676</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_invalid_hex_signature() {
-<a href=#677 id=677 data-nosnippet>677</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
-<a href=#678 id=678 data-nosnippet>678</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#679 id=679 data-nosnippet>679</a>        <span class="kw">let </span>payload = <span class="string">b"some-audit-event"</span>;
-<a href=#680 id=680 data-nosnippet>680</a>
-<a href=#681 id=681 data-nosnippet>681</a>        <span class="macro">assert!</span>(
-<a href=#682 id=682 data-nosnippet>682</a>            !verify_tenant_signature(
-<a href=#683 id=683 data-nosnippet>683</a>                master,
-<a href=#684 id=684 data-nosnippet>684</a>                tenant,
-<a href=#685 id=685 data-nosnippet>685</a>                CURRENT_KEY_VERSION,
-<a href=#686 id=686 data-nosnippet>686</a>                payload,
-<a href=#687 id=687 data-nosnippet>687</a>                <span class="prelude-val">Some</span>(<span class="string">"not-valid-hex!!"</span>)
-<a href=#688 id=688 data-nosnippet>688</a>            ),
-<a href=#689 id=689 data-nosnippet>689</a>            <span class="string">"malformed signature hex must not verify"
-<a href=#690 id=690 data-nosnippet>690</a>        </span>);
-<a href=#691 id=691 data-nosnippet>691</a>    }
-<a href=#692 id=692 data-nosnippet>692</a>}
+<a href=#669 id=669 data-nosnippet>669</a>    <span class="attr">#[test]
+<a href=#670 id=670 data-nosnippet>670</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_tampered_payload() {
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#673 id=673 data-nosnippet>673</a>        <span class="kw">let </span>payload = <span class="string">b"original-authz-request"</span>;
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>tampered = <span class="string">b"tampered-authz-request"</span>;
+<a href=#675 id=675 data-nosnippet>675</a>        <span class="kw">let </span>subkey = derive_tenant_key(master, tenant, CURRENT_KEY_VERSION);
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="kw">let </span>sig = sign_payload(<span class="kw-2">&amp;</span>subkey, payload);
+<a href=#677 id=677 data-nosnippet>677</a>
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="macro">assert!</span>(
+<a href=#679 id=679 data-nosnippet>679</a>            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, tampered, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>sig)),
+<a href=#680 id=680 data-nosnippet>680</a>            <span class="string">"tampered payload must not verify"
+<a href=#681 id=681 data-nosnippet>681</a>        </span>);
+<a href=#682 id=682 data-nosnippet>682</a>    }
+<a href=#683 id=683 data-nosnippet>683</a>
+<a href=#684 id=684 data-nosnippet>684</a>    <span class="attr">#[test]
+<a href=#685 id=685 data-nosnippet>685</a>    </span><span class="kw">fn </span>verify_tenant_signature_rejects_invalid_hex_signature() {
+<a href=#686 id=686 data-nosnippet>686</a>        <span class="kw">let </span>master = <span class="string">b"shared-amqp-master-key"</span>;
+<a href=#687 id=687 data-nosnippet>687</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="kw">let </span>payload = <span class="string">b"some-audit-event"</span>;
+<a href=#689 id=689 data-nosnippet>689</a>
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="macro">assert!</span>(
+<a href=#691 id=691 data-nosnippet>691</a>            !verify_tenant_signature(
+<a href=#692 id=692 data-nosnippet>692</a>                master,
+<a href=#693 id=693 data-nosnippet>693</a>                tenant,
+<a href=#694 id=694 data-nosnippet>694</a>                CURRENT_KEY_VERSION,
+<a href=#695 id=695 data-nosnippet>695</a>                payload,
+<a href=#696 id=696 data-nosnippet>696</a>                <span class="prelude-val">Some</span>(<span class="string">"not-valid-hex!!"</span>)
+<a href=#697 id=697 data-nosnippet>697</a>            ),
+<a href=#698 id=698 data-nosnippet>698</a>            <span class="string">"malformed signature hex must not verify"
+<a href=#699 id=699 data-nosnippet>699</a>        </span>);
+<a href=#700 id=700 data-nosnippet>700</a>    }
+<a href=#701 id=701 data-nosnippet>701</a>}
 </code></pre></div></section></main></body></html>

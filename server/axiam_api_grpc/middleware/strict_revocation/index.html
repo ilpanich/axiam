@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Opt-in per-request session-revocation enforcement for the gRPC data plane (A4/J10)."><title>axiam_api_grpc::middleware::strict_revocation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module strict_revocation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_grpc/index.html">axiam_<wbr>api_<wbr>grpc</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module strict_<wbr>revocation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-posture-this-makes-explicit" title="The posture this makes explicit">The posture this makes explicit</a></li><li><a href="#why-a-towerlayer-and-not-the-interceptor" title="Why a `tower::Layer` and not the interceptor">Why a <code>tower::Layer</code> and not the interceptor</a></li><li><a href="#why-deciding-on-unverified-claims-is-sound-here" title="Why deciding on unverified claims is sound here">Why deciding on unverified claims is sound here</a></li><li><a href="#cost" title="Cost">Cost</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>grpc::<wbr>middleware</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_grpc</a>::<wbr><a href="../index.html">middleware</a></div><h1>Module <span>strict_<wbr>revocation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_grpc/middleware/strict_revocation.rs.html#1-316">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Opt-in per-request session-revocation enforcement for the gRPC data plane
+(A4/J10).</p>
+<h2 id="the-posture-this-makes-explicit"><a class="doc-anchor" href="#the-posture-this-makes-explicit">§</a>The posture this makes explicit</h2>
+<p>REST and gRPC have never agreed about revocation, and until now that
+disagreement was implicit — visible only by reading
+<code>middleware::auth::AuthInterceptor</code> and noticing what it does <em>not</em> do:</p>
+<div><table><thead><tr><th></th><th>REST</th><th>gRPC (default)</th><th>gRPC (<code>strict</code>)</th></tr></thead><tbody>
+<tr><td>token signature/expiry</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>session revoked since issue?</td><td>✅ per request</td><td>❌ <strong>not checked</strong></td><td>✅ per request</td></tr>
+<tr><td>revocation takes effect after</td><td>immediately (or cache TTL)</td><td><strong>token expiry — up to 15 min</strong></td><td>immediately (or cache TTL)</td></tr>
+</tbody></table>
+</div>
+<p>The default is a deliberate trade, not an oversight: gRPC is the
+low-latency service-mesh check surface, and skipping a datastore read per
+request is a meaningful part of why it measures where it does. But a trade
+nobody wrote down is indistinguishable from a bug, and “logged-out user
+keeps passing mesh authorization for 15 minutes” is not a property an
+operator should discover from a benchmark analysis. So: the default keeps
+its speed, the posture is documented, and an operator who needs REST’s
+revocation semantics on gRPC can now have them with one flag.</p>
+<h2 id="why-a-towerlayer-and-not-the-interceptor"><a class="doc-anchor" href="#why-a-towerlayer-and-not-the-interceptor">§</a>Why a <code>tower::Layer</code> and not the interceptor</h2>
+<p><code>tonic::service::Interceptor::call</code> is <strong>synchronous</strong>. A revocation check
+that can miss its cache needs a datastore read, which needs an <code>await</code>, so
+it cannot live there — the only way to fit it into the interceptor would be
+<code>block_on</code>, which would park a runtime worker on every cache miss. This is
+the same reason the shared rate-limit pre-check is a layer rather than a
+<code>governor::StateStore</code> (see <code>middleware::rate_limit</code>’s Pitfall 1 note).</p>
+<h2 id="why-deciding-on-unverified-claims-is-sound-here"><a class="doc-anchor" href="#why-deciding-on-unverified-claims-is-sound-here">§</a>Why deciding on <em>unverified</em> claims is sound here</h2>
+<p>This layer runs before tonic routes, so it runs before the interceptor that
+verifies the token. Rather than verify the signature a second time — an
+extra Ed25519 verify on a path that sustains ~12 700 reads/s — it decodes
+the claims without verifying and uses them only to look up a session.</p>
+<p>That is safe because of a strict asymmetry: <strong>this layer can only ever
+deny.</strong> It never admits anything; a request it lets pass still faces the
+full verifying interceptor immediately afterwards. So the worst a forged
+token can achieve here is to be allowed through this layer and then
+rejected by the next one. There is no path by which unverified claims grant
+access.</p>
+<p>Concretely, a request is denied if and only if its claims decode to a
+<code>(tenant_id, jti)</code> pair naming a session that is <strong>known to be gone</strong>. An
+undecodable token, a malformed claim, or a datastore error all fall
+through to the interceptor, which is stricter than this layer, not weaker.</p>
+<h2 id="cost"><a class="doc-anchor" href="#cost">§</a>Cost</h2>
+<p>One session-validity check per request. With the session-validation cache
+enabled (<code>AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS</code>) that is a hash
+lookup on the hot path and a datastore read only on a miss; the cache
+instance is the SAME one the REST path uses, so every REST-side
+invalidation hook — logout, password change, MFA reset, refresh rotation —
+already serves gRPC, and event-path revocation is immediate in strict mode
+too. Without the cache it is one datastore read per request, which is
+REST’s un-cached profile and should be expected to measure like it.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GrpcStrictRevocationLayer.html" title="struct axiam_api_grpc::middleware::strict_revocation::GrpcStrictRevocationLayer">Grpc<wbr>Strict<wbr>Revocation<wbr>Layer</a></dt><dd><code>tower::Layer</code> enforcing per-request session revocation on gRPC.</dd><dt><a class="struct" href="struct.GrpcStrictRevocationService.html" title="struct axiam_api_grpc::middleware::strict_revocation::GrpcStrictRevocationService">Grpc<wbr>Strict<wbr>Revocation<wbr>Service</a></dt><dd>Inner service produced by <a href="struct.GrpcStrictRevocationLayer.html" title="struct axiam_api_grpc::middleware::strict_revocation::GrpcStrictRevocationLayer"><code>GrpcStrictRevocationLayer</code></a>.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.SessionRevocationCheck.html" title="trait axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck">Session<wbr>Revocation<wbr>Check</a></dt><dd>Async session-revocation check, implemented by the session repository.</dd></dl></section></div></main></body></html>

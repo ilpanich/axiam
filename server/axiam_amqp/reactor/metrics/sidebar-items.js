@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["budget_exhaustions","chain_duration_ms_total","denials","dispatches","failure_kind","failures","gate_patch_rejections","mutations","overloads","registry_errors","registry_stale_serves","rejections","snapshot","step_ups","timeouts","transport_failures"]};

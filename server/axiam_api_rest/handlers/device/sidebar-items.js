@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["decide","verify"],"struct":["DecideRequest","DecideResponse","VerifyQuery","VerifyResponse"]};

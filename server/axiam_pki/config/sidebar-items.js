@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["PkiConfig"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MDS_BLOB_URL","DEFAULT_MDS_LEAF_DNS","DEFAULT_MDS_REFRESH_INTERVAL_SECS"],"struct":["PkiConfig"]};

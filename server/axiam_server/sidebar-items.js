@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["cleanup","tls"]};
+window.SIDEBAR_ITEMS = {"mod":["cleanup","mds_job","tls"]};

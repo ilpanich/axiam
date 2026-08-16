@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_EXPIRES_IN_SECS","DEFAULT_INTERVAL_SECS","USER_CODE_CHARSET","USER_CODE_LEN"],"fn":["brute_force_attempts_required","generate_device_code","generate_user_code","hash_device_code","normalize_user_code"]};

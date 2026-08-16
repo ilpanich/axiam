@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEVICE_CODE_GRANT_TYPE"],"struct":["DeviceAuthorizationRequest","DeviceAuthorizationResponse","DeviceAuthorizationService"]};

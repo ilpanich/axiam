@@ -255,223 +255,257 @@
 <a href=#255 id=255 data-nosnippet>255</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">let </span>req = body.into_inner();
 <a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">let </span>target_user = req.user_id;
-<a href=#258 id=258 data-nosnippet>258</a>    state
-<a href=#259 id=259 data-nosnippet>259</a>        .role_repo
-<a href=#260 id=260 data-nosnippet>260</a>        .assign_to_user(
-<a href=#261 id=261 data-nosnippet>261</a>            user.tenant_id,
-<a href=#262 id=262 data-nosnippet>262</a>            req.user_id,
-<a href=#263 id=263 data-nosnippet>263</a>            path.into_inner(),
-<a href=#264 id=264 data-nosnippet>264</a>            req.resource_id,
-<a href=#265 id=265 data-nosnippet>265</a>        )
-<a href=#266 id=266 data-nosnippet>266</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#267 id=267 data-nosnippet>267</a>    <span class="comment">// D7: only this subject's effective permissions change — targeted flush.
-<a href=#268 id=268 data-nosnippet>268</a>    // (Assignment widens access, the safe direction, but we invalidate anyway
-<a href=#269 id=269 data-nosnippet>269</a>    // so the new grant is visible immediately rather than after the TTL.)
-<a href=#270 id=270 data-nosnippet>270</a>    </span>authz
-<a href=#271 id=271 data-nosnippet>271</a>        .get_ref()
-<a href=#272 id=272 data-nosnippet>272</a>        .as_ref()
-<a href=#273 id=273 data-nosnippet>273</a>        .invalidate_subject(user.tenant_id, target_user)
-<a href=#274 id=274 data-nosnippet>274</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#275 id=275 data-nosnippet>275</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#276 id=276 data-nosnippet>276</a>}
+<a href=#258 id=258 data-nosnippet>258</a>    <span class="kw">let </span>role_id = path.into_inner();
+<a href=#259 id=259 data-nosnippet>259</a>
+<a href=#260 id=260 data-nosnippet>260</a>    <span class="comment">// X1 `grant.pre_assign` — the four-eyes hook, veto-only. Before the write:
+<a href=#261 id=261 data-nosnippet>261</a>    // an approval workflow that ran after the grant existed would be reviewing
+<a href=#262 id=262 data-nosnippet>262</a>    // access the subject already has.
+<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">crate</span>::reactor_hooks::grant_pre_assign(
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw-2">&amp;</span>state.reactor_gate,
+<a href=#265 id=265 data-nosnippet>265</a>        user.tenant_id,
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="macro">serde_json::json!</span>({
+<a href=#267 id=267 data-nosnippet>267</a>            <span class="string">"grantee_kind"</span>: <span class="string">"user"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="string">"user_id"</span>: target_user,
+<a href=#269 id=269 data-nosnippet>269</a>            <span class="string">"role_id"</span>: role_id,
+<a href=#270 id=270 data-nosnippet>270</a>            <span class="string">"resource_id"</span>: req.resource_id,
+<a href=#271 id=271 data-nosnippet>271</a>            <span class="string">"tenant_id"</span>: user.tenant_id,
+<a href=#272 id=272 data-nosnippet>272</a>            <span class="comment">// Who is asking — the half a four-eyes rule is actually about.
+<a href=#273 id=273 data-nosnippet>273</a>            </span><span class="string">"actor_id"</span>: user.user_id,
+<a href=#274 id=274 data-nosnippet>274</a>        }),
+<a href=#275 id=275 data-nosnippet>275</a>    )
+<a href=#276 id=276 data-nosnippet>276</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#277 id=277 data-nosnippet>277</a>
-<a href=#278 id=278 data-nosnippet>278</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/users/{user_id}`
-<a href=#279 id=279 data-nosnippet>279</a></span><span class="attr">#[utoipa::path(
-<a href=#280 id=280 data-nosnippet>280</a>    delete,
-<a href=#281 id=281 data-nosnippet>281</a>    path = <span class="string">"/api/v1/roles/{role_id}/users/{user_id}"</span>,
-<a href=#282 id=282 data-nosnippet>282</a>    tag = <span class="string">"roles"</span>,
-<a href=#283 id=283 data-nosnippet>283</a>    params(
-<a href=#284 id=284 data-nosnippet>284</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
-<a href=#285 id=285 data-nosnippet>285</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"User ID"</span>),
-<a href=#286 id=286 data-nosnippet>286</a>        UnassignQuery,
-<a href=#287 id=287 data-nosnippet>287</a>    ),
-<a href=#288 id=288 data-nosnippet>288</a>    responses(
-<a href=#289 id=289 data-nosnippet>289</a>        (status = <span class="number">204</span>, description = <span class="string">"Role unassigned from user"</span>),
-<a href=#290 id=290 data-nosnippet>290</a>    ),
-<a href=#291 id=291 data-nosnippet>291</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#292 id=292 data-nosnippet>292</a>)]
-<a href=#293 id=293 data-nosnippet>293</a><span class="kw">pub async fn </span>unassign_from_user&lt;C: Connection + Clone&gt;(
-<a href=#294 id=294 data-nosnippet>294</a>    user: AuthenticatedUser,
-<a href=#295 id=295 data-nosnippet>295</a>    authz: AuthzData,
-<a href=#296 id=296 data-nosnippet>296</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#297 id=297 data-nosnippet>297</a>    path: web::Path&lt;RoleUserPath&gt;,
-<a href=#298 id=298 data-nosnippet>298</a>    query: web::Query&lt;UnassignQuery&gt;,
-<a href=#299 id=299 data-nosnippet>299</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#300 id=300 data-nosnippet>300</a>    RequirePermission::new(<span class="string">"roles:unassign"</span>, Uuid::nil())
-<a href=#301 id=301 data-nosnippet>301</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#302 id=302 data-nosnippet>302</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#303 id=303 data-nosnippet>303</a>    <span class="kw">let </span>p = path.into_inner();
-<a href=#304 id=304 data-nosnippet>304</a>    state
-<a href=#305 id=305 data-nosnippet>305</a>        .role_repo
-<a href=#306 id=306 data-nosnippet>306</a>        .unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
-<a href=#307 id=307 data-nosnippet>307</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#308 id=308 data-nosnippet>308</a>    <span class="comment">// D7 (REVOCATION — security critical): unassigning a role removes access
-<a href=#309 id=309 data-nosnippet>309</a>    // for exactly this subject. Invalidate immediately so a cached allow cannot
-<a href=#310 id=310 data-nosnippet>310</a>    // survive; the additive allow-wins model makes this stale-allow the only
-<a href=#311 id=311 data-nosnippet>311</a>    // dangerous staleness direction.
-<a href=#312 id=312 data-nosnippet>312</a>    </span>authz
-<a href=#313 id=313 data-nosnippet>313</a>        .get_ref()
-<a href=#314 id=314 data-nosnippet>314</a>        .as_ref()
-<a href=#315 id=315 data-nosnippet>315</a>        .invalidate_subject(user.tenant_id, p.user_id)
-<a href=#316 id=316 data-nosnippet>316</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#317 id=317 data-nosnippet>317</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#318 id=318 data-nosnippet>318</a>}
-<a href=#319 id=319 data-nosnippet>319</a>
-<a href=#320 id=320 data-nosnippet>320</a><span class="comment">// -----------------------------------------------------------------------
-<a href=#321 id=321 data-nosnippet>321</a>// Handlers — Role ↔ Group assignment
-<a href=#322 id=322 data-nosnippet>322</a>// -----------------------------------------------------------------------
-<a href=#323 id=323 data-nosnippet>323</a>
-<a href=#324 id=324 data-nosnippet>324</a></span><span class="doccomment">/// `POST /api/v1/roles/{role_id}/groups`
-<a href=#325 id=325 data-nosnippet>325</a></span><span class="attr">#[utoipa::path(
-<a href=#326 id=326 data-nosnippet>326</a>    post,
-<a href=#327 id=327 data-nosnippet>327</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups"</span>,
-<a href=#328 id=328 data-nosnippet>328</a>    tag = <span class="string">"roles"</span>,
-<a href=#329 id=329 data-nosnippet>329</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
-<a href=#330 id=330 data-nosnippet>330</a>    request_body = AssignRoleToGroupRequest,
-<a href=#331 id=331 data-nosnippet>331</a>    responses(
-<a href=#332 id=332 data-nosnippet>332</a>        (status = <span class="number">204</span>, description = <span class="string">"Role assigned to group"</span>),
-<a href=#333 id=333 data-nosnippet>333</a>    ),
-<a href=#334 id=334 data-nosnippet>334</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#335 id=335 data-nosnippet>335</a>)]
-<a href=#336 id=336 data-nosnippet>336</a><span class="kw">pub async fn </span>assign_to_group&lt;C: Connection + Clone&gt;(
-<a href=#337 id=337 data-nosnippet>337</a>    user: AuthenticatedUser,
-<a href=#338 id=338 data-nosnippet>338</a>    authz: AuthzData,
-<a href=#339 id=339 data-nosnippet>339</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#340 id=340 data-nosnippet>340</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#341 id=341 data-nosnippet>341</a>    body: web::Json&lt;AssignRoleToGroupRequest&gt;,
-<a href=#342 id=342 data-nosnippet>342</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#343 id=343 data-nosnippet>343</a>    RequirePermission::new(<span class="string">"roles:assign"</span>, Uuid::nil())
-<a href=#344 id=344 data-nosnippet>344</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#345 id=345 data-nosnippet>345</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#346 id=346 data-nosnippet>346</a>    <span class="kw">let </span>req = body.into_inner();
-<a href=#347 id=347 data-nosnippet>347</a>    state
-<a href=#348 id=348 data-nosnippet>348</a>        .role_repo
-<a href=#349 id=349 data-nosnippet>349</a>        .assign_to_group(
-<a href=#350 id=350 data-nosnippet>350</a>            user.tenant_id,
-<a href=#351 id=351 data-nosnippet>351</a>            req.group_id,
-<a href=#352 id=352 data-nosnippet>352</a>            path.into_inner(),
-<a href=#353 id=353 data-nosnippet>353</a>            req.resource_id,
-<a href=#354 id=354 data-nosnippet>354</a>        )
-<a href=#355 id=355 data-nosnippet>355</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#356 id=356 data-nosnippet>356</a>    <span class="comment">// D7: the affected subjects are every member of the group (set unknown
-<a href=#357 id=357 data-nosnippet>357</a>    // without a query) — conservative per-tenant flush.
-<a href=#358 id=358 data-nosnippet>358</a>    </span>authz
-<a href=#359 id=359 data-nosnippet>359</a>        .get_ref()
-<a href=#360 id=360 data-nosnippet>360</a>        .as_ref()
-<a href=#361 id=361 data-nosnippet>361</a>        .invalidate_tenant(user.tenant_id)
-<a href=#362 id=362 data-nosnippet>362</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#363 id=363 data-nosnippet>363</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#364 id=364 data-nosnippet>364</a>}
-<a href=#365 id=365 data-nosnippet>365</a>
-<a href=#366 id=366 data-nosnippet>366</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/groups/{group_id}`
-<a href=#367 id=367 data-nosnippet>367</a></span><span class="attr">#[utoipa::path(
-<a href=#368 id=368 data-nosnippet>368</a>    delete,
-<a href=#369 id=369 data-nosnippet>369</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups/{group_id}"</span>,
-<a href=#370 id=370 data-nosnippet>370</a>    tag = <span class="string">"roles"</span>,
-<a href=#371 id=371 data-nosnippet>371</a>    params(
-<a href=#372 id=372 data-nosnippet>372</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
-<a href=#373 id=373 data-nosnippet>373</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
-<a href=#374 id=374 data-nosnippet>374</a>        UnassignQuery,
-<a href=#375 id=375 data-nosnippet>375</a>    ),
-<a href=#376 id=376 data-nosnippet>376</a>    responses(
-<a href=#377 id=377 data-nosnippet>377</a>        (status = <span class="number">204</span>, description = <span class="string">"Role unassigned from group"</span>),
-<a href=#378 id=378 data-nosnippet>378</a>    ),
-<a href=#379 id=379 data-nosnippet>379</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#380 id=380 data-nosnippet>380</a>)]
-<a href=#381 id=381 data-nosnippet>381</a><span class="kw">pub async fn </span>unassign_from_group&lt;C: Connection + Clone&gt;(
-<a href=#382 id=382 data-nosnippet>382</a>    user: AuthenticatedUser,
-<a href=#383 id=383 data-nosnippet>383</a>    authz: AuthzData,
-<a href=#384 id=384 data-nosnippet>384</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#385 id=385 data-nosnippet>385</a>    path: web::Path&lt;RoleGroupPath&gt;,
-<a href=#386 id=386 data-nosnippet>386</a>    query: web::Query&lt;UnassignQuery&gt;,
-<a href=#387 id=387 data-nosnippet>387</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#388 id=388 data-nosnippet>388</a>    RequirePermission::new(<span class="string">"roles:unassign"</span>, Uuid::nil())
-<a href=#389 id=389 data-nosnippet>389</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#390 id=390 data-nosnippet>390</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#391 id=391 data-nosnippet>391</a>    <span class="kw">let </span>p = path.into_inner();
-<a href=#392 id=392 data-nosnippet>392</a>    state
-<a href=#393 id=393 data-nosnippet>393</a>        .role_repo
-<a href=#394 id=394 data-nosnippet>394</a>        .unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
-<a href=#395 id=395 data-nosnippet>395</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#396 id=396 data-nosnippet>396</a>    <span class="comment">// D7 (REVOCATION — security critical): unassigning a role from a group
-<a href=#397 id=397 data-nosnippet>397</a>    // revokes it from every member. The member set isn't known here without a
-<a href=#398 id=398 data-nosnippet>398</a>    // query, so flush the whole tenant — this must never leave a stale allow.
-<a href=#399 id=399 data-nosnippet>399</a>    </span>authz
-<a href=#400 id=400 data-nosnippet>400</a>        .get_ref()
-<a href=#401 id=401 data-nosnippet>401</a>        .as_ref()
-<a href=#402 id=402 data-nosnippet>402</a>        .invalidate_tenant(user.tenant_id)
-<a href=#403 id=403 data-nosnippet>403</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#404 id=404 data-nosnippet>404</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#405 id=405 data-nosnippet>405</a>}
-<a href=#406 id=406 data-nosnippet>406</a>
-<a href=#407 id=407 data-nosnippet>407</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/users`
-<a href=#408 id=408 data-nosnippet>408</a>///
-<a href=#409 id=409 data-nosnippet>409</a>/// Lists the users directly assigned this role (the inverse of
-<a href=#410 id=410 data-nosnippet>410</a>/// `GET /users/{id}/roles`). Used by the role detail page's members panel.
-<a href=#411 id=411 data-nosnippet>411</a></span><span class="attr">#[utoipa::path(
-<a href=#412 id=412 data-nosnippet>412</a>    get,
-<a href=#413 id=413 data-nosnippet>413</a>    path = <span class="string">"/api/v1/roles/{role_id}/users"</span>,
-<a href=#414 id=414 data-nosnippet>414</a>    tag = <span class="string">"roles"</span>,
-<a href=#415 id=415 data-nosnippet>415</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
-<a href=#416 id=416 data-nosnippet>416</a>    responses(
-<a href=#417 id=417 data-nosnippet>417</a>        (status = <span class="number">200</span>, description = <span class="string">"Users assigned this role"</span>, body = [UserResponse]</span>),
-<a href=#418 id=418 data-nosnippet>418</a>    ),
-<a href=#419 id=419 data-nosnippet>419</a>    security((<span class="string">"bearer" </span>= []))
-<a href=#420 id=420 data-nosnippet>420</a>)]
-<a href=#421 id=421 data-nosnippet>421</a><span class="kw">pub async fn </span>list_users&lt;C: Connection + Clone&gt;(
-<a href=#422 id=422 data-nosnippet>422</a>    user: AuthenticatedUser,
-<a href=#423 id=423 data-nosnippet>423</a>    authz: AuthzData,
-<a href=#424 id=424 data-nosnippet>424</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#425 id=425 data-nosnippet>425</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#426 id=426 data-nosnippet>426</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#427 id=427 data-nosnippet>427</a>    RequirePermission::new(<span class="string">"roles:get"</span>, Uuid::nil())
-<a href=#428 id=428 data-nosnippet>428</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#278 id=278 data-nosnippet>278</a>    state
+<a href=#279 id=279 data-nosnippet>279</a>        .role_repo
+<a href=#280 id=280 data-nosnippet>280</a>        .assign_to_user(user.tenant_id, req.user_id, role_id, req.resource_id)
+<a href=#281 id=281 data-nosnippet>281</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#282 id=282 data-nosnippet>282</a>    <span class="comment">// D7: only this subject's effective permissions change — targeted flush.
+<a href=#283 id=283 data-nosnippet>283</a>    // (Assignment widens access, the safe direction, but we invalidate anyway
+<a href=#284 id=284 data-nosnippet>284</a>    // so the new grant is visible immediately rather than after the TTL.)
+<a href=#285 id=285 data-nosnippet>285</a>    </span>authz
+<a href=#286 id=286 data-nosnippet>286</a>        .get_ref()
+<a href=#287 id=287 data-nosnippet>287</a>        .as_ref()
+<a href=#288 id=288 data-nosnippet>288</a>        .invalidate_subject(user.tenant_id, target_user)
+<a href=#289 id=289 data-nosnippet>289</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#290 id=290 data-nosnippet>290</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#291 id=291 data-nosnippet>291</a>}
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/users/{user_id}`
+<a href=#294 id=294 data-nosnippet>294</a></span><span class="attr">#[utoipa::path(
+<a href=#295 id=295 data-nosnippet>295</a>    delete,
+<a href=#296 id=296 data-nosnippet>296</a>    path = <span class="string">"/api/v1/roles/{role_id}/users/{user_id}"</span>,
+<a href=#297 id=297 data-nosnippet>297</a>    tag = <span class="string">"roles"</span>,
+<a href=#298 id=298 data-nosnippet>298</a>    params(
+<a href=#299 id=299 data-nosnippet>299</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
+<a href=#300 id=300 data-nosnippet>300</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"User ID"</span>),
+<a href=#301 id=301 data-nosnippet>301</a>        UnassignQuery,
+<a href=#302 id=302 data-nosnippet>302</a>    ),
+<a href=#303 id=303 data-nosnippet>303</a>    responses(
+<a href=#304 id=304 data-nosnippet>304</a>        (status = <span class="number">204</span>, description = <span class="string">"Role unassigned from user"</span>),
+<a href=#305 id=305 data-nosnippet>305</a>    ),
+<a href=#306 id=306 data-nosnippet>306</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#307 id=307 data-nosnippet>307</a>)]
+<a href=#308 id=308 data-nosnippet>308</a><span class="kw">pub async fn </span>unassign_from_user&lt;C: Connection + Clone&gt;(
+<a href=#309 id=309 data-nosnippet>309</a>    user: AuthenticatedUser,
+<a href=#310 id=310 data-nosnippet>310</a>    authz: AuthzData,
+<a href=#311 id=311 data-nosnippet>311</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#312 id=312 data-nosnippet>312</a>    path: web::Path&lt;RoleUserPath&gt;,
+<a href=#313 id=313 data-nosnippet>313</a>    query: web::Query&lt;UnassignQuery&gt;,
+<a href=#314 id=314 data-nosnippet>314</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#315 id=315 data-nosnippet>315</a>    RequirePermission::new(<span class="string">"roles:unassign"</span>, Uuid::nil())
+<a href=#316 id=316 data-nosnippet>316</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#317 id=317 data-nosnippet>317</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="kw">let </span>p = path.into_inner();
+<a href=#319 id=319 data-nosnippet>319</a>    state
+<a href=#320 id=320 data-nosnippet>320</a>        .role_repo
+<a href=#321 id=321 data-nosnippet>321</a>        .unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
+<a href=#322 id=322 data-nosnippet>322</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#323 id=323 data-nosnippet>323</a>    <span class="comment">// D7 (REVOCATION — security critical): unassigning a role removes access
+<a href=#324 id=324 data-nosnippet>324</a>    // for exactly this subject. Invalidate immediately so a cached allow cannot
+<a href=#325 id=325 data-nosnippet>325</a>    // survive — a stale allow is the dangerous staleness direction, because a
+<a href=#326 id=326 data-nosnippet>326</a>    // deny is the restrictive outcome and costs only a redundant re-check.
+<a href=#327 id=327 data-nosnippet>327</a>    //
+<a href=#328 id=328 data-nosnippet>328</a>    // (Pre-B1 this was justified by the engine being allow-wins. Under
+<a href=#329 id=329 data-nosnippet>329</a>    // deny-override that premise no longer holds, but the conclusion does:
+<a href=#330 id=330 data-nosnippet>330</a>    // see the decision_cache module docs for why, and for the addition that
+<a href=#331 id=331 data-nosnippet>331</a>    // *can* narrow.)
+<a href=#332 id=332 data-nosnippet>332</a>    </span>authz
+<a href=#333 id=333 data-nosnippet>333</a>        .get_ref()
+<a href=#334 id=334 data-nosnippet>334</a>        .as_ref()
+<a href=#335 id=335 data-nosnippet>335</a>        .invalidate_subject(user.tenant_id, p.user_id)
+<a href=#336 id=336 data-nosnippet>336</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#338 id=338 data-nosnippet>338</a>}
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a><span class="comment">// -----------------------------------------------------------------------
+<a href=#341 id=341 data-nosnippet>341</a>// Handlers — Role ↔ Group assignment
+<a href=#342 id=342 data-nosnippet>342</a>// -----------------------------------------------------------------------
+<a href=#343 id=343 data-nosnippet>343</a>
+<a href=#344 id=344 data-nosnippet>344</a></span><span class="doccomment">/// `POST /api/v1/roles/{role_id}/groups`
+<a href=#345 id=345 data-nosnippet>345</a></span><span class="attr">#[utoipa::path(
+<a href=#346 id=346 data-nosnippet>346</a>    post,
+<a href=#347 id=347 data-nosnippet>347</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups"</span>,
+<a href=#348 id=348 data-nosnippet>348</a>    tag = <span class="string">"roles"</span>,
+<a href=#349 id=349 data-nosnippet>349</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
+<a href=#350 id=350 data-nosnippet>350</a>    request_body = AssignRoleToGroupRequest,
+<a href=#351 id=351 data-nosnippet>351</a>    responses(
+<a href=#352 id=352 data-nosnippet>352</a>        (status = <span class="number">204</span>, description = <span class="string">"Role assigned to group"</span>),
+<a href=#353 id=353 data-nosnippet>353</a>    ),
+<a href=#354 id=354 data-nosnippet>354</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#355 id=355 data-nosnippet>355</a>)]
+<a href=#356 id=356 data-nosnippet>356</a><span class="kw">pub async fn </span>assign_to_group&lt;C: Connection + Clone&gt;(
+<a href=#357 id=357 data-nosnippet>357</a>    user: AuthenticatedUser,
+<a href=#358 id=358 data-nosnippet>358</a>    authz: AuthzData,
+<a href=#359 id=359 data-nosnippet>359</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#360 id=360 data-nosnippet>360</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#361 id=361 data-nosnippet>361</a>    body: web::Json&lt;AssignRoleToGroupRequest&gt;,
+<a href=#362 id=362 data-nosnippet>362</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#363 id=363 data-nosnippet>363</a>    RequirePermission::new(<span class="string">"roles:assign"</span>, Uuid::nil())
+<a href=#364 id=364 data-nosnippet>364</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#365 id=365 data-nosnippet>365</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="kw">let </span>req = body.into_inner();
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="kw">let </span>role_id = path.into_inner();
+<a href=#368 id=368 data-nosnippet>368</a>
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="comment">// X1 `grant.pre_assign` — the group half. A role assigned to a group is
+<a href=#370 id=370 data-nosnippet>370</a>    // inherited by every member, so it is the *wider* of the two assignment
+<a href=#371 id=371 data-nosnippet>371</a>    // paths and the one a four-eyes rule most needs to see.
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">crate</span>::reactor_hooks::grant_pre_assign(
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw-2">&amp;</span>state.reactor_gate,
+<a href=#374 id=374 data-nosnippet>374</a>        user.tenant_id,
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="macro">serde_json::json!</span>({
+<a href=#376 id=376 data-nosnippet>376</a>            <span class="string">"grantee_kind"</span>: <span class="string">"group"</span>,
+<a href=#377 id=377 data-nosnippet>377</a>            <span class="string">"group_id"</span>: req.group_id,
+<a href=#378 id=378 data-nosnippet>378</a>            <span class="string">"role_id"</span>: role_id,
+<a href=#379 id=379 data-nosnippet>379</a>            <span class="string">"resource_id"</span>: req.resource_id,
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="string">"tenant_id"</span>: user.tenant_id,
+<a href=#381 id=381 data-nosnippet>381</a>            <span class="string">"actor_id"</span>: user.user_id,
+<a href=#382 id=382 data-nosnippet>382</a>        }),
+<a href=#383 id=383 data-nosnippet>383</a>    )
+<a href=#384 id=384 data-nosnippet>384</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>    state
+<a href=#387 id=387 data-nosnippet>387</a>        .role_repo
+<a href=#388 id=388 data-nosnippet>388</a>        .assign_to_group(user.tenant_id, req.group_id, role_id, req.resource_id)
+<a href=#389 id=389 data-nosnippet>389</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="comment">// D7: the affected subjects are every member of the group (set unknown
+<a href=#391 id=391 data-nosnippet>391</a>    // without a query) — conservative per-tenant flush.
+<a href=#392 id=392 data-nosnippet>392</a>    </span>authz
+<a href=#393 id=393 data-nosnippet>393</a>        .get_ref()
+<a href=#394 id=394 data-nosnippet>394</a>        .as_ref()
+<a href=#395 id=395 data-nosnippet>395</a>        .invalidate_tenant(user.tenant_id)
+<a href=#396 id=396 data-nosnippet>396</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#398 id=398 data-nosnippet>398</a>}
+<a href=#399 id=399 data-nosnippet>399</a>
+<a href=#400 id=400 data-nosnippet>400</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/groups/{group_id}`
+<a href=#401 id=401 data-nosnippet>401</a></span><span class="attr">#[utoipa::path(
+<a href=#402 id=402 data-nosnippet>402</a>    delete,
+<a href=#403 id=403 data-nosnippet>403</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups/{group_id}"</span>,
+<a href=#404 id=404 data-nosnippet>404</a>    tag = <span class="string">"roles"</span>,
+<a href=#405 id=405 data-nosnippet>405</a>    params(
+<a href=#406 id=406 data-nosnippet>406</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
+<a href=#407 id=407 data-nosnippet>407</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
+<a href=#408 id=408 data-nosnippet>408</a>        UnassignQuery,
+<a href=#409 id=409 data-nosnippet>409</a>    ),
+<a href=#410 id=410 data-nosnippet>410</a>    responses(
+<a href=#411 id=411 data-nosnippet>411</a>        (status = <span class="number">204</span>, description = <span class="string">"Role unassigned from group"</span>),
+<a href=#412 id=412 data-nosnippet>412</a>    ),
+<a href=#413 id=413 data-nosnippet>413</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#414 id=414 data-nosnippet>414</a>)]
+<a href=#415 id=415 data-nosnippet>415</a><span class="kw">pub async fn </span>unassign_from_group&lt;C: Connection + Clone&gt;(
+<a href=#416 id=416 data-nosnippet>416</a>    user: AuthenticatedUser,
+<a href=#417 id=417 data-nosnippet>417</a>    authz: AuthzData,
+<a href=#418 id=418 data-nosnippet>418</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#419 id=419 data-nosnippet>419</a>    path: web::Path&lt;RoleGroupPath&gt;,
+<a href=#420 id=420 data-nosnippet>420</a>    query: web::Query&lt;UnassignQuery&gt;,
+<a href=#421 id=421 data-nosnippet>421</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#422 id=422 data-nosnippet>422</a>    RequirePermission::new(<span class="string">"roles:unassign"</span>, Uuid::nil())
+<a href=#423 id=423 data-nosnippet>423</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#424 id=424 data-nosnippet>424</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#425 id=425 data-nosnippet>425</a>    <span class="kw">let </span>p = path.into_inner();
+<a href=#426 id=426 data-nosnippet>426</a>    state
+<a href=#427 id=427 data-nosnippet>427</a>        .role_repo
+<a href=#428 id=428 data-nosnippet>428</a>        .unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
 <a href=#429 id=429 data-nosnippet>429</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#430 id=430 data-nosnippet>430</a>    <span class="kw">let </span>role_id = path.into_inner();
-<a href=#431 id=431 data-nosnippet>431</a>    <span class="kw">let </span>ids = state
-<a href=#432 id=432 data-nosnippet>432</a>        .role_repo
-<a href=#433 id=433 data-nosnippet>433</a>        .get_role_user_ids(user.tenant_id, role_id)
-<a href=#434 id=434 data-nosnippet>434</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#435 id=435 data-nosnippet>435</a>    <span class="kw">let </span><span class="kw-2">mut </span>users = Vec::with_capacity(ids.len());
-<a href=#436 id=436 data-nosnippet>436</a>    <span class="kw">for </span>id <span class="kw">in </span>ids {
-<a href=#437 id=437 data-nosnippet>437</a>        users.push(UserResponse::from(
-<a href=#438 id=438 data-nosnippet>438</a>            state.user_repo.get_by_id(user.tenant_id, id).<span class="kw">await</span><span class="question-mark">?</span>,
-<a href=#439 id=439 data-nosnippet>439</a>        ));
-<a href=#440 id=440 data-nosnippet>440</a>    }
-<a href=#441 id=441 data-nosnippet>441</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(users))
-<a href=#442 id=442 data-nosnippet>442</a>}
-<a href=#443 id=443 data-nosnippet>443</a>
-<a href=#444 id=444 data-nosnippet>444</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/groups`
-<a href=#445 id=445 data-nosnippet>445</a>///
-<a href=#446 id=446 data-nosnippet>446</a>/// Lists the groups directly assigned this role.
-<a href=#447 id=447 data-nosnippet>447</a></span><span class="attr">#[utoipa::path(
-<a href=#448 id=448 data-nosnippet>448</a>    get,
-<a href=#449 id=449 data-nosnippet>449</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups"</span>,
-<a href=#450 id=450 data-nosnippet>450</a>    tag = <span class="string">"roles"</span>,
-<a href=#451 id=451 data-nosnippet>451</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
-<a href=#452 id=452 data-nosnippet>452</a>    responses(
-<a href=#453 id=453 data-nosnippet>453</a>        (status = <span class="number">200</span>, description = <span class="string">"Groups assigned this role"</span>, body = [Group]</span>),
-<a href=#454 id=454 data-nosnippet>454</a>    ),
-<a href=#455 id=455 data-nosnippet>455</a>    security((<span class="string">"bearer" </span>= []))
-<a href=#456 id=456 data-nosnippet>456</a>)]
-<a href=#457 id=457 data-nosnippet>457</a><span class="kw">pub async fn </span>list_groups&lt;C: Connection + Clone&gt;(
-<a href=#458 id=458 data-nosnippet>458</a>    user: AuthenticatedUser,
-<a href=#459 id=459 data-nosnippet>459</a>    authz: AuthzData,
-<a href=#460 id=460 data-nosnippet>460</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#461 id=461 data-nosnippet>461</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#462 id=462 data-nosnippet>462</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#463 id=463 data-nosnippet>463</a>    RequirePermission::new(<span class="string">"roles:get"</span>, Uuid::nil())
-<a href=#464 id=464 data-nosnippet>464</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#465 id=465 data-nosnippet>465</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#466 id=466 data-nosnippet>466</a>    <span class="kw">let </span>role_id = path.into_inner();
-<a href=#467 id=467 data-nosnippet>467</a>    <span class="kw">let </span>ids = state
-<a href=#468 id=468 data-nosnippet>468</a>        .role_repo
-<a href=#469 id=469 data-nosnippet>469</a>        .get_role_group_ids(user.tenant_id, role_id)
-<a href=#470 id=470 data-nosnippet>470</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#471 id=471 data-nosnippet>471</a>    <span class="kw">let </span><span class="kw-2">mut </span>groups: Vec&lt;Group&gt; = Vec::with_capacity(ids.len());
-<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw">for </span>id <span class="kw">in </span>ids {
-<a href=#473 id=473 data-nosnippet>473</a>        groups.push(state.group_repo.get_by_id(user.tenant_id, id).<span class="kw">await</span><span class="question-mark">?</span>);
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="comment">// D7 (REVOCATION — security critical): unassigning a role from a group
+<a href=#431 id=431 data-nosnippet>431</a>    // revokes it from every member. The member set isn't known here without a
+<a href=#432 id=432 data-nosnippet>432</a>    // query, so flush the whole tenant — this must never leave a stale allow.
+<a href=#433 id=433 data-nosnippet>433</a>    </span>authz
+<a href=#434 id=434 data-nosnippet>434</a>        .get_ref()
+<a href=#435 id=435 data-nosnippet>435</a>        .as_ref()
+<a href=#436 id=436 data-nosnippet>436</a>        .invalidate_tenant(user.tenant_id)
+<a href=#437 id=437 data-nosnippet>437</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#438 id=438 data-nosnippet>438</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#439 id=439 data-nosnippet>439</a>}
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/users`
+<a href=#442 id=442 data-nosnippet>442</a>///
+<a href=#443 id=443 data-nosnippet>443</a>/// Lists the users directly assigned this role (the inverse of
+<a href=#444 id=444 data-nosnippet>444</a>/// `GET /users/{id}/roles`). Used by the role detail page's members panel.
+<a href=#445 id=445 data-nosnippet>445</a></span><span class="attr">#[utoipa::path(
+<a href=#446 id=446 data-nosnippet>446</a>    get,
+<a href=#447 id=447 data-nosnippet>447</a>    path = <span class="string">"/api/v1/roles/{role_id}/users"</span>,
+<a href=#448 id=448 data-nosnippet>448</a>    tag = <span class="string">"roles"</span>,
+<a href=#449 id=449 data-nosnippet>449</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
+<a href=#450 id=450 data-nosnippet>450</a>    responses(
+<a href=#451 id=451 data-nosnippet>451</a>        (status = <span class="number">200</span>, description = <span class="string">"Users assigned this role"</span>, body = [UserResponse]</span>),
+<a href=#452 id=452 data-nosnippet>452</a>    ),
+<a href=#453 id=453 data-nosnippet>453</a>    security((<span class="string">"bearer" </span>= []))
+<a href=#454 id=454 data-nosnippet>454</a>)]
+<a href=#455 id=455 data-nosnippet>455</a><span class="kw">pub async fn </span>list_users&lt;C: Connection + Clone&gt;(
+<a href=#456 id=456 data-nosnippet>456</a>    user: AuthenticatedUser,
+<a href=#457 id=457 data-nosnippet>457</a>    authz: AuthzData,
+<a href=#458 id=458 data-nosnippet>458</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#459 id=459 data-nosnippet>459</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#460 id=460 data-nosnippet>460</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#461 id=461 data-nosnippet>461</a>    RequirePermission::new(<span class="string">"roles:get"</span>, Uuid::nil())
+<a href=#462 id=462 data-nosnippet>462</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#463 id=463 data-nosnippet>463</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#464 id=464 data-nosnippet>464</a>    <span class="kw">let </span>role_id = path.into_inner();
+<a href=#465 id=465 data-nosnippet>465</a>    <span class="kw">let </span>ids = state
+<a href=#466 id=466 data-nosnippet>466</a>        .role_repo
+<a href=#467 id=467 data-nosnippet>467</a>        .get_role_user_ids(user.tenant_id, role_id)
+<a href=#468 id=468 data-nosnippet>468</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#469 id=469 data-nosnippet>469</a>    <span class="kw">let </span><span class="kw-2">mut </span>users = Vec::with_capacity(ids.len());
+<a href=#470 id=470 data-nosnippet>470</a>    <span class="kw">for </span>id <span class="kw">in </span>ids {
+<a href=#471 id=471 data-nosnippet>471</a>        users.push(UserResponse::from(
+<a href=#472 id=472 data-nosnippet>472</a>            state.user_repo.get_by_id(user.tenant_id, id).<span class="kw">await</span><span class="question-mark">?</span>,
+<a href=#473 id=473 data-nosnippet>473</a>        ));
 <a href=#474 id=474 data-nosnippet>474</a>    }
-<a href=#475 id=475 data-nosnippet>475</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(groups))
+<a href=#475 id=475 data-nosnippet>475</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(users))
 <a href=#476 id=476 data-nosnippet>476</a>}
+<a href=#477 id=477 data-nosnippet>477</a>
+<a href=#478 id=478 data-nosnippet>478</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/groups`
+<a href=#479 id=479 data-nosnippet>479</a>///
+<a href=#480 id=480 data-nosnippet>480</a>/// Lists the groups directly assigned this role.
+<a href=#481 id=481 data-nosnippet>481</a></span><span class="attr">#[utoipa::path(
+<a href=#482 id=482 data-nosnippet>482</a>    get,
+<a href=#483 id=483 data-nosnippet>483</a>    path = <span class="string">"/api/v1/roles/{role_id}/groups"</span>,
+<a href=#484 id=484 data-nosnippet>484</a>    tag = <span class="string">"roles"</span>,
+<a href=#485 id=485 data-nosnippet>485</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
+<a href=#486 id=486 data-nosnippet>486</a>    responses(
+<a href=#487 id=487 data-nosnippet>487</a>        (status = <span class="number">200</span>, description = <span class="string">"Groups assigned this role"</span>, body = [Group]</span>),
+<a href=#488 id=488 data-nosnippet>488</a>    ),
+<a href=#489 id=489 data-nosnippet>489</a>    security((<span class="string">"bearer" </span>= []))
+<a href=#490 id=490 data-nosnippet>490</a>)]
+<a href=#491 id=491 data-nosnippet>491</a><span class="kw">pub async fn </span>list_groups&lt;C: Connection + Clone&gt;(
+<a href=#492 id=492 data-nosnippet>492</a>    user: AuthenticatedUser,
+<a href=#493 id=493 data-nosnippet>493</a>    authz: AuthzData,
+<a href=#494 id=494 data-nosnippet>494</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#495 id=495 data-nosnippet>495</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#496 id=496 data-nosnippet>496</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#497 id=497 data-nosnippet>497</a>    RequirePermission::new(<span class="string">"roles:get"</span>, Uuid::nil())
+<a href=#498 id=498 data-nosnippet>498</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#499 id=499 data-nosnippet>499</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#500 id=500 data-nosnippet>500</a>    <span class="kw">let </span>role_id = path.into_inner();
+<a href=#501 id=501 data-nosnippet>501</a>    <span class="kw">let </span>ids = state
+<a href=#502 id=502 data-nosnippet>502</a>        .role_repo
+<a href=#503 id=503 data-nosnippet>503</a>        .get_role_group_ids(user.tenant_id, role_id)
+<a href=#504 id=504 data-nosnippet>504</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#505 id=505 data-nosnippet>505</a>    <span class="kw">let </span><span class="kw-2">mut </span>groups: Vec&lt;Group&gt; = Vec::with_capacity(ids.len());
+<a href=#506 id=506 data-nosnippet>506</a>    <span class="kw">for </span>id <span class="kw">in </span>ids {
+<a href=#507 id=507 data-nosnippet>507</a>        groups.push(state.group_repo.get_by_id(user.tenant_id, id).<span class="kw">await</span><span class="question-mark">?</span>);
+<a href=#508 id=508 data-nosnippet>508</a>    }
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(groups))
+<a href=#510 id=510 data-nosnippet>510</a>}
 </code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GROUP_SCHEMA","SCIM_LIST_RESPONSE_SCHEMA","USER_SCHEMA"],"fn":["resource_type","resource_types","schema_by_id","schemas","service_provider_config"]};

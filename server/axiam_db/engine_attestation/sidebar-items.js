@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALLOW_MEMORY_ENGINE_ENV"],"enum":["Attestation","EngineIdentity","NotAttestable"],"fn":["attest_storage_engine","classify","decide","memory_engine_override_enabled","probe_reported_engine"],"struct":["MemoryEngineRefused"]};

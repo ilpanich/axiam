@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SCIM_PROVISION_PERMISSION"],"fn":["require_scim_provision"]};

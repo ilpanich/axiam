@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["authorize","discovery","introspect","jwks","revoke","token","userinfo"],"struct":["AuthorizeQuery","OAuth2ErrorResponse","TenantQuery"]};
+window.SIDEBAR_ITEMS = {"fn":["authorize","device_authorization","discovery","end_session","introspect","jwks","pushed_authorization_request","revoke","token","userinfo"],"struct":["AuthorizeQuery","EndSessionQuery","OAuth2ErrorResponse","PushedAuthorizationRequest","PushedAuthorizationResponse","TenantQuery"]};

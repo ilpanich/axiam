@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["scim_routes","scim_routes_with_rate_limits"]};

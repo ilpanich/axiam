@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_IN_FLIGHT","MAX_CHAIN_BUDGET_MS","REACTOR_TRANSPORT_UNAVAILABLE"],"enum":["DispatchFailure"],"fn":["resolve_failure","run_chain"],"struct":["ChainResult","InFlightLimiter","NoopReactorGate","UnavailableReactorTransport"],"trait":["ReactorTransport"]};

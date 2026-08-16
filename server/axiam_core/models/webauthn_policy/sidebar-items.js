@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AttestationDecision","AttestationDenyReason","AttestationMode","UnknownAaguidAction"],"fn":["evaluate","validate_attestation_policy"],"struct":["AttestationCandidate","WebauthnAttestationPolicy"]};

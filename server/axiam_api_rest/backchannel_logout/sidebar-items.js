@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["deliver_all","deliver_one","select_targets"],"struct":["LogoutDelivery"]};

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["FederationProtocol"],"struct":["CreateFederationConfig","CreateFederationLink","FederationConfig","FederationLink","UpdateFederationConfig"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_TOKEN_AGE_SECS","MAX_ACCEPTED_AUDIENCES","MAX_SCOPE_MAP_ENTRIES","MAX_TOKEN_AGE_CEILING_SECS"],"enum":["FederationProtocol","SubjectMapping","TrustConfigError"],"struct":["CreateFederationConfig","CreateFederationLink","FederationConfig","FederationLink","TokenExchangeTrust","UpdateFederationConfig"]};

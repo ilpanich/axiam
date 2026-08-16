@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PATCH_OP_SCHEMA"],"enum":["MemberAction"],"fn":["parse_group_patch","parse_user_patch"],"struct":["GroupPatchDelta","PatchOp","PatchRequest","UserPatchDelta"]};

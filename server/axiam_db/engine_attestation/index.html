@@ -1,0 +1,80 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Startup attestation of the SurrealDB storage engine (X6, ilpanich/axiam#302)."><title>axiam_db::engine_attestation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module engine_attestation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_db/index.html">axiam_<wbr>db</a><span class="version">1.0.0-alpha25</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module engine_<wbr>attestation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-is-for" title="What this is for">What this is for</a></li><li><a href="#finding-the-engine-is-not-detectable-over-the-wire-surrealdb-324" title="Finding: the engine is NOT detectable over the wire (SurrealDB 3.2.4)">Finding: the engine is NOT detectable over the wire (SurrealDB 3.2.4)</a></li><li><a href="#so-what-this-module-actually-does" title="So what this module actually does">So what this module actually does</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_db</a></div><h1>Module <span>engine_<wbr>attestation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_db/engine_attestation.rs.html#1-486">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Startup attestation of the SurrealDB storage engine (X6, ilpanich/axiam#302).</p>
+<h2 id="what-this-is-for"><a class="doc-anchor" href="#what-this-is-for">§</a>What this is for</h2>
+<p>The three single-use consume paths — <code>permission_ticket.consume</code>,
+<code>device_grant.redeem</code>, <code>pushed_auth_request.consume</code> — are single-use
+<em>conditional on running a persistent storage engine</em>. That condition is
+measured, not assumed: <code>tools/surreal-race-probe</code> records 0 double
+redemptions in 40 000 contended attempts on <code>surrealkv</code> and 0 in 9 600 on
+<code>rocksdb</code>, against 23 in 1 200 on <code>kv-mem</code>, which arbitrates at the same
+54% rate as the persistent engines and then silently misses.</p>
+<p>Before X6 that condition was enforced nowhere. <code>docker-compose*.yml</code> and the
+k8s StatefulSet pin <code>surrealkv:</code>, but nothing stopped an operator pointing
+<code>AXIAM__DB__URL</code> at a <code>surreal start memory</code> instance and getting a server
+that boots cleanly and mints two RPTs from one authorization decision at
+roughly 1 in 640. This module is where “never run <code>memory</code> in a real
+deployment” stops being a code comment and becomes a control.</p>
+<h2 id="finding-the-engine-is-not-detectable-over-the-wire-surrealdb-324"><a class="doc-anchor" href="#finding-the-engine-is-not-detectable-over-the-wire-surrealdb-324">§</a>Finding: the engine is NOT detectable over the wire (SurrealDB 3.2.4)</h2>
+<p><code>axiam-server</code> reaches SurrealDB over HTTP, so the question X6 had to settle
+first was whether a client can even see which datastore it is talking to.
+It cannot. Every wire-reachable surface of <code>surrealdb-core</code> 3.2.4 was
+enumerated:</p>
+<ul>
+<li><code>/version</code> and the RPC <code>version</code> method — a semver string
+(<code>surrealdb-3.2.4</code>), no datastore identity.</li>
+<li><code>INFO FOR ROOT</code> — <code>accesses</code>, <code>defaults</code>, <code>namespaces</code>, <code>nodes</code>,
+<code>system</code>, <code>users</code>, <code>config</code>. <code>system</code> is CPU/memory/core utilisation
+(<code>expr/statements/info.rs::system()</code>); <code>nodes</code> is node ids and
+heartbeats; <code>config</code> is the query timeout. None name the datastore.</li>
+<li><code>INFO FOR NS</code> / <code>DB</code> / <code>TABLE</code> — schema only.</li>
+<li>The <code>session::*</code> function namespace — <code>ac</code>, <code>db</code>, <code>id</code>, <code>ip</code>, <code>ns</code>,
+<code>origin</code>, <code>rd</code>, <code>token</code>. There is no <code>sys::</code> namespace.</li>
+<li><code>/health</code> — a bare liveness answer.</li>
+</ul>
+<p>The engine name <em>exists</em> in the process: <code>Transactable::kind()</code> returns
+<code>"memory"</code> / <code>"surrealkv"</code> / <code>"rocksdb"</code>, and <code>Display for DatastoreFlavor</code>
+renders the same strings. Both are <code>pub(super)</code>/internal and are never
+serialised into a response — the only in-crate use of the <code>Display</code> impl is
+one assertion in <code>kvs/ds/builder.rs</code>.</p>
+<p>Behavioural fingerprinting was considered and rejected. The one differential
+that looked promising — versioned/temporal queries being unsupported on
+<code>kv-mem</code> — turns out to be a per-datastore <em>config</em> flag
+(<code>kvs/mem/mod.rs</code>’s <code>versioned</code>, set from <code>?versioned=true</code>), so it
+identifies a configuration option rather than an engine, and would
+misclassify a rocksdb deployment. A guess that reads like evidence is worse
+than an honest “unknown”.</p>
+<h2 id="so-what-this-module-actually-does"><a class="doc-anchor" href="#so-what-this-module-actually-does">§</a>So what this module actually does</h2>
+<p>It asks anyway, and it is honest about the answer.</p>
+<p><a href="fn.probe_reported_engine.html" title="fn axiam_db::engine_attestation::probe_reported_engine"><code>probe_reported_engine</code></a> runs a total, defensive query that yields the
+engine name if any future SurrealDB release starts publishing one under a
+plausible key, and <code>None</code> otherwise. On 3.2.4 it always returns <code>None</code>, and
+<code>probe_reports_nothing_on_this_surrealdb</code> pins that as an executable fact —
+if a bump starts exposing the engine, that test fails and the hard guard
+below becomes live without a code change.</p>
+<p><a href="fn.classify.html" title="fn axiam_db::engine_attestation::classify"><code>classify</code></a> and <a href="fn.decide.html" title="fn axiam_db::engine_attestation::decide"><code>decide</code></a> are pure functions over that answer, so the
+whole policy is unit-testable without a datastore:</p>
+<div><table><thead><tr><th>reported</th><th><code>allow_memory</code></th><th>outcome</th></tr></thead><tbody>
+<tr><td><code>surrealkv</code>, …</td><td>either</td><td>attested, <code>INFO</code></td></tr>
+<tr><td><code>memory</code></td><td><code>false</code></td><td><strong>refused</strong> — startup fails, naming #302</td></tr>
+<tr><td><code>memory</code></td><td><code>true</code></td><td><code>WARN</code>, dev-only override acknowledged</td></tr>
+<tr><td>an unknown name</td><td>either</td><td><code>WARN</code> — cannot attest</td></tr>
+<tr><td>nothing (today)</td><td>either</td><td><code>WARN</code> — cannot attest</td></tr>
+</tbody></table>
+</div>
+<p>Because today’s answer is always the last row, enforcement for a real
+deployment rests on the deployment layer, where compose and the k8s
+StatefulSet already pin <code>surrealkv:</code> — plus the MUST-level operator
+requirement in <code>docs/deployment/README.md</code>. The WARN exists so that
+requirement is visible in the boot log of every server, not only in a
+document nobody reads twice.</p>
+<p>Attestation never fails startup by itself. A datastore that refuses
+<code>INFO FOR ROOT</code>, or a future one that renames it, produces the same
+“cannot attest” WARN as today’s silence — a monitoring gap is not a reason
+to take a working deployment down. The only hard failure is a <em>positive</em>
+identification of a memory datastore without the override.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.MemoryEngineRefused.html" title="struct axiam_db::engine_attestation::MemoryEngineRefused">Memory<wbr>Engine<wbr>Refused</a></dt><dd>A positively-identified memory datastore with no override — startup must
+stop. Its <code>Display</code> is the refusal message, and it names #302 so the reason
+is one search away from the operator reading the log.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Attestation.html" title="enum axiam_db::engine_attestation::Attestation">Attestation</a></dt><dd>The startup decision, for the caller to log-and-continue on.</dd><dt><a class="enum" href="enum.EngineIdentity.html" title="enum axiam_db::engine_attestation::EngineIdentity">Engine<wbr>Identity</a></dt><dd>What the datastore said about itself, classified.</dd><dt><a class="enum" href="enum.NotAttestable.html" title="enum axiam_db::engine_attestation::NotAttestable">NotAttestable</a></dt><dd>Why attestation could not reach a verdict.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ALLOW_MEMORY_ENGINE_ENV.html" title="constant axiam_db::engine_attestation::ALLOW_MEMORY_ENGINE_ENV">ALLOW_<wbr>MEMORY_<wbr>ENGINE_<wbr>ENV</a></dt><dd>Environment variable that lets a developer run against a <code>memory</code> datastore
+on purpose. Deliberately not a config-file key: it exists for <code>just dev-up</code>
+and for someone reproducing #302, and a value that only lives in one
+operator’s shell is harder to leave switched on in production than a line in
+a checked-in TOML file.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.attest_storage_engine.html" title="fn axiam_db::engine_attestation::attest_storage_engine">attest_<wbr>storage_<wbr>engine</a></dt><dd>Attest the storage engine at startup and log the outcome.</dd><dt><a class="fn" href="fn.classify.html" title="fn axiam_db::engine_attestation::classify">classify</a></dt><dd>Classify a reported engine name. Pure — no datastore needed.</dd><dt><a class="fn" href="fn.decide.html" title="fn axiam_db::engine_attestation::decide">decide</a></dt><dd>Apply the startup policy to a classification. Pure — no datastore needed.</dd><dt><a class="fn" href="fn.memory_engine_override_enabled.html" title="fn axiam_db::engine_attestation::memory_engine_override_enabled">memory_<wbr>engine_<wbr>override_<wbr>enabled</a></dt><dd>Whether <a href="constant.ALLOW_MEMORY_ENGINE_ENV.html" title="constant axiam_db::engine_attestation::ALLOW_MEMORY_ENGINE_ENV"><code>ALLOW_MEMORY_ENGINE_ENV</code></a> is set to an affirmative value.</dd><dt><a class="fn" href="fn.probe_reported_engine.html" title="fn axiam_db::engine_attestation::probe_reported_engine">probe_<wbr>reported_<wbr>engine</a></dt><dd>Ask the datastore which storage engine it runs.</dd></dl></section></div></main></body></html>

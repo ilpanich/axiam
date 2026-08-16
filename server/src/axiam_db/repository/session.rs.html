@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/repository/session.rs`."><title>session.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/repository/</div>session.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SurrealDB implementation of [`SessionRepository`].
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/repository/session.rs`."><title>session.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/repository/</div>session.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SurrealDB implementation of [`SessionRepository`].
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>axiam_core::error::AxiamResult;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>axiam_core::id::new_id;
@@ -323,497 +323,698 @@
 <a href=#323 id=323 data-nosnippet>323</a>        <span class="prelude-val">Ok</span>(!deleted.is_empty())
 <a href=#324 id=324 data-nosnippet>324</a>    }
 <a href=#325 id=325 data-nosnippet>325</a>
-<a href=#326 id=326 data-nosnippet>326</a>    <span class="kw">async fn </span>invalidate_user_sessions(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;()&gt; {
-<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#328 id=328 data-nosnippet>328</a>            </span>.db
-<a href=#329 id=329 data-nosnippet>329</a>            .current()
-<a href=#330 id=330 data-nosnippet>330</a>            .query(<span class="string">"DELETE session WHERE tenant_id = $tenant_id AND user_id = $user_id"</span>)
-<a href=#331 id=331 data-nosnippet>331</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#332 id=332 data-nosnippet>332</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
-<a href=#333 id=333 data-nosnippet>333</a>            .<span class="kw">await
-<a href=#334 id=334 data-nosnippet>334</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#335 id=335 data-nosnippet>335</a>
-<a href=#336 id=336 data-nosnippet>336</a>        <span class="comment">// I6: every session of this user just disappeared.
-<a href=#337 id=337 data-nosnippet>337</a>        //
-<a href=#338 id=338 data-nosnippet>338</a>        // ORDERING: above `.check()` for the same reason as `invalidate` —
-<a href=#339 id=339 data-nosnippet>339</a>        // see the note there (residual 2).
-<a href=#340 id=340 data-nosnippet>340</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
-<a href=#341 id=341 data-nosnippet>341</a>            cache.invalidate_user(tenant_id, user_id, <span class="prelude-val">None</span>);
-<a href=#342 id=342 data-nosnippet>342</a>        }
-<a href=#343 id=343 data-nosnippet>343</a>
-<a href=#344 id=344 data-nosnippet>344</a>        <span class="comment">// OBS-3: propagate a statement-level DELETE failure instead of
-<a href=#345 id=345 data-nosnippet>345</a>        // reporting a revocation that may not have happened.
-<a href=#346 id=346 data-nosnippet>346</a>        </span>result
-<a href=#347 id=347 data-nosnippet>347</a>            .check()
-<a href=#348 id=348 data-nosnippet>348</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#349 id=349 data-nosnippet>349</a>
-<a href=#350 id=350 data-nosnippet>350</a>        <span class="prelude-val">Ok</span>(())
-<a href=#351 id=351 data-nosnippet>351</a>    }
-<a href=#352 id=352 data-nosnippet>352</a>
-<a href=#353 id=353 data-nosnippet>353</a>    <span class="kw">async fn </span>invalidate_user_sessions_except(
-<a href=#354 id=354 data-nosnippet>354</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#355 id=355 data-nosnippet>355</a>        tenant_id: Uuid,
-<a href=#356 id=356 data-nosnippet>356</a>        user_id: Uuid,
-<a href=#357 id=357 data-nosnippet>357</a>        current_session_id: Uuid,
-<a href=#358 id=358 data-nosnippet>358</a>    ) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#359 id=359 data-nosnippet>359</a>        <span class="comment">// DELETE all sessions for this user in this tenant EXCEPT the
-<a href=#360 id=360 data-nosnippet>360</a>        // current one (identified by its record ID). RETURN BEFORE gives us
-<a href=#361 id=361 data-nosnippet>361</a>        // the deleted rows so we can count them.
-<a href=#362 id=362 data-nosnippet>362</a>        </span><span class="kw">let </span>result = <span class="self">self
-<a href=#363 id=363 data-nosnippet>363</a>            </span>.db
-<a href=#364 id=364 data-nosnippet>364</a>            .current()
-<a href=#365 id=365 data-nosnippet>365</a>            .query(
-<a href=#366 id=366 data-nosnippet>366</a>                <span class="string">"DELETE session \
-<a href=#367 id=367 data-nosnippet>367</a>                 WHERE tenant_id = $tenant_id \
-<a href=#368 id=368 data-nosnippet>368</a>                   AND user_id = $user_id \
-<a href=#369 id=369 data-nosnippet>369</a>                   AND id != type::record('session', $current_session_id) \
-<a href=#370 id=370 data-nosnippet>370</a>                 RETURN BEFORE"</span>,
-<a href=#371 id=371 data-nosnippet>371</a>            )
-<a href=#372 id=372 data-nosnippet>372</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#373 id=373 data-nosnippet>373</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
-<a href=#374 id=374 data-nosnippet>374</a>            .bind((<span class="string">"current_session_id"</span>, current_session_id.to_string()))
-<a href=#375 id=375 data-nosnippet>375</a>            .<span class="kw">await
-<a href=#376 id=376 data-nosnippet>376</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#326 id=326 data-nosnippet>326</a>    <span class="kw">async fn </span>consume_by_token_hash(
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#328 id=328 data-nosnippet>328</a>        tenant_id: Uuid,
+<a href=#329 id=329 data-nosnippet>329</a>        token_hash: <span class="kw-2">&amp;</span>str,
+<a href=#330 id=330 data-nosnippet>330</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;Session&gt;&gt; {
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="comment">// A2/J2: the SELECT-then-DELETE pair collapsed into one statement.
+<a href=#332 id=332 data-nosnippet>332</a>        // Same `RETURN BEFORE` single-use gate as `consume` (SurrealDB
+<a href=#333 id=333 data-nosnippet>333</a>        // serializes concurrent DELETEs touching the same row, so exactly one
+<a href=#334 id=334 data-nosnippet>334</a>        // caller receives a non-empty before-image), except that the row is
+<a href=#335 id=335 data-nosnippet>335</a>        // also *found* by this statement — so there is no window between
+<a href=#336 id=336 data-nosnippet>336</a>        // finding it and removing it, and the rotation path pays one round
+<a href=#337 id=337 data-nosnippet>337</a>        // trip here instead of two.
+<a href=#338 id=338 data-nosnippet>338</a>        //
+<a href=#339 id=339 data-nosnippet>339</a>        // Two statements, ONE round trip. `RETURN BEFORE` does not accept a
+<a href=#340 id=340 data-nosnippet>340</a>        // projection list, and the caller needs `session.id`, so the
+<a href=#341 id=341 data-nosnippet>341</a>        // before-image is captured into `$before` and projected by a second
+<a href=#342 id=342 data-nosnippet>342</a>        // statement in the same query — `meta::id(id) AS record_id`, the same
+<a href=#343 id=343 data-nosnippet>343</a>        // shape `get_by_token_hash` produces and `SessionRowWithId` expects.
+<a href=#344 id=344 data-nosnippet>344</a>        //
+<a href=#345 id=345 data-nosnippet>345</a>        // Atomicity is unaffected by the split: the DELETE alone decides who
+<a href=#346 id=346 data-nosnippet>346</a>        // wins, and `$before` is that decision's own output, not a re-read.
+<a href=#347 id=347 data-nosnippet>347</a>        </span><span class="kw">let </span>result = <span class="self">self
+<a href=#348 id=348 data-nosnippet>348</a>            </span>.db
+<a href=#349 id=349 data-nosnippet>349</a>            .current()
+<a href=#350 id=350 data-nosnippet>350</a>            .query(
+<a href=#351 id=351 data-nosnippet>351</a>                <span class="string">"LET $before = (DELETE session \
+<a href=#352 id=352 data-nosnippet>352</a>                     WHERE tenant_id = $tenant_id AND token_hash = $token_hash \
+<a href=#353 id=353 data-nosnippet>353</a>                     RETURN BEFORE); \
+<a href=#354 id=354 data-nosnippet>354</a>                 SELECT meta::id(id) AS record_id, * FROM $before"</span>,
+<a href=#355 id=355 data-nosnippet>355</a>            )
+<a href=#356 id=356 data-nosnippet>356</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#357 id=357 data-nosnippet>357</a>            .bind((<span class="string">"token_hash"</span>, token_hash.to_string()))
+<a href=#358 id=358 data-nosnippet>358</a>            .<span class="kw">await
+<a href=#359 id=359 data-nosnippet>359</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#360 id=360 data-nosnippet>360</a>
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="comment">// OBS-3 / residual 2 ordering, same as `consume`: `.check()` the
+<a href=#362 id=362 data-nosnippet>362</a>        // statement before deserializing, and drop any cached validity entry
+<a href=#363 id=363 data-nosnippet>363</a>        // before an error can short-circuit us past it. The row id is only
+<a href=#364 id=364 data-nosnippet>364</a>        // known after deserialization here, so the cache drop moves below —
+<a href=#365 id=365 data-nosnippet>365</a>        // which is sound because a *failed* deserialization of a committed
+<a href=#366 id=366 data-nosnippet>366</a>        // DELETE is exactly the case the unconditional `invalidate` below
+<a href=#367 id=367 data-nosnippet>367</a>        // handles, and there is no id to invalidate before that point.
+<a href=#368 id=368 data-nosnippet>368</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#369 id=369 data-nosnippet>369</a>            .check()
+<a href=#370 id=370 data-nosnippet>370</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="comment">// Statement index 1: the projected SELECT (index 0 is the `LET`).
+<a href=#373 id=373 data-nosnippet>373</a>        </span><span class="kw">let </span>rows: Vec&lt;SessionRowWithId&gt; = result.take(<span class="number">1</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(row) = rows.into_iter().next() <span class="kw">else </span>{
+<a href=#375 id=375 data-nosnippet>375</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#376 id=376 data-nosnippet>376</a>        };
 <a href=#377 id=377 data-nosnippet>377</a>
-<a href=#378 id=378 data-nosnippet>378</a>        <span class="comment">// I6: same set, minus the session the caller deliberately kept.
-<a href=#379 id=379 data-nosnippet>379</a>        //
-<a href=#380 id=380 data-nosnippet>380</a>        // Ordered before `take(0)` for the same reason as `consume` — the
-<a href=#381 id=381 data-nosnippet>381</a>        // DELETE is already committed once the `.await` returns, so a
-<a href=#382 id=382 data-nosnippet>382</a>        // deserialize failure of the BEFORE image must not be able to strand a
-<a href=#383 id=383 data-nosnippet>383</a>        // positive cache entry for a session that no longer exists
-<a href=#384 id=384 data-nosnippet>384</a>        // (residual 2).
-<a href=#385 id=385 data-nosnippet>385</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
-<a href=#386 id=386 data-nosnippet>386</a>            cache.invalidate_user(tenant_id, user_id, <span class="prelude-val">Some</span>(current_session_id));
-<a href=#387 id=387 data-nosnippet>387</a>        }
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="kw">let </span>session: Session = row.try_into_session()<span class="question-mark">?</span>;
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="comment">// I6: the row is gone, so no cached "still valid" answer may outlive
+<a href=#381 id=381 data-nosnippet>381</a>        // it on this replica.
+<a href=#382 id=382 data-nosnippet>382</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
+<a href=#383 id=383 data-nosnippet>383</a>            cache.invalidate(tenant_id, session.id);
+<a href=#384 id=384 data-nosnippet>384</a>        }
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(session))
+<a href=#387 id=387 data-nosnippet>387</a>    }
 <a href=#388 id=388 data-nosnippet>388</a>
-<a href=#389 id=389 data-nosnippet>389</a>        <span class="comment">// OBS-3: uniform with the other four delete paths — a statement-level
-<a href=#390 id=390 data-nosnippet>390</a>        // failure must never be reported as "0 sessions deleted".
-<a href=#391 id=391 data-nosnippet>391</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = result
-<a href=#392 id=392 data-nosnippet>392</a>            .check()
-<a href=#393 id=393 data-nosnippet>393</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#394 id=394 data-nosnippet>394</a>
-<a href=#395 id=395 data-nosnippet>395</a>        <span class="kw">let </span>deleted: Vec&lt;SessionRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#396 id=396 data-nosnippet>396</a>        <span class="prelude-val">Ok</span>(deleted.len() <span class="kw">as </span>u64)
-<a href=#397 id=397 data-nosnippet>397</a>    }
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="kw">async fn </span>invalidate_user_sessions(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;()&gt; {
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#391 id=391 data-nosnippet>391</a>            </span>.db
+<a href=#392 id=392 data-nosnippet>392</a>            .current()
+<a href=#393 id=393 data-nosnippet>393</a>            .query(<span class="string">"DELETE session WHERE tenant_id = $tenant_id AND user_id = $user_id"</span>)
+<a href=#394 id=394 data-nosnippet>394</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#395 id=395 data-nosnippet>395</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
+<a href=#396 id=396 data-nosnippet>396</a>            .<span class="kw">await
+<a href=#397 id=397 data-nosnippet>397</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#398 id=398 data-nosnippet>398</a>
-<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">async fn </span>list_by_user(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Session&gt;&gt; {
-<a href=#400 id=400 data-nosnippet>400</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#401 id=401 data-nosnippet>401</a>            </span>.db
-<a href=#402 id=402 data-nosnippet>402</a>            .current()
-<a href=#403 id=403 data-nosnippet>403</a>            .query(
-<a href=#404 id=404 data-nosnippet>404</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM session \
-<a href=#405 id=405 data-nosnippet>405</a>                 WHERE tenant_id = $tenant_id AND user_id = $user_id"</span>,
-<a href=#406 id=406 data-nosnippet>406</a>            )
-<a href=#407 id=407 data-nosnippet>407</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#408 id=408 data-nosnippet>408</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
-<a href=#409 id=409 data-nosnippet>409</a>            .<span class="kw">await
-<a href=#410 id=410 data-nosnippet>410</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#411 id=411 data-nosnippet>411</a>
-<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">let </span>rows: Vec&lt;SessionRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#413 id=413 data-nosnippet>413</a>        rows.into_iter()
-<a href=#414 id=414 data-nosnippet>414</a>            .map(|r| r.try_into_session().map_err(Into::into))
-<a href=#415 id=415 data-nosnippet>415</a>            .collect()
-<a href=#416 id=416 data-nosnippet>416</a>    }
-<a href=#417 id=417 data-nosnippet>417</a>
-<a href=#418 id=418 data-nosnippet>418</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#419 id=419 data-nosnippet>419</a>        <span class="comment">// Count expired sessions first, then delete.
-<a href=#420 id=420 data-nosnippet>420</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
-<a href=#421 id=421 data-nosnippet>421</a>            </span>.db
-<a href=#422 id=422 data-nosnippet>422</a>            .current()
-<a href=#423 id=423 data-nosnippet>423</a>            .query(
-<a href=#424 id=424 data-nosnippet>424</a>                <span class="string">"SELECT count() AS total FROM session \
-<a href=#425 id=425 data-nosnippet>425</a>                 WHERE tenant_id = $tenant_id AND expires_at &lt; time::now() \
-<a href=#426 id=426 data-nosnippet>426</a>                 GROUP ALL"</span>,
-<a href=#427 id=427 data-nosnippet>427</a>            )
-<a href=#428 id=428 data-nosnippet>428</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#429 id=429 data-nosnippet>429</a>            .<span class="kw">await
-<a href=#430 id=430 data-nosnippet>430</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#432 id=432 data-nosnippet>432</a>        <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
-<a href=#433 id=433 data-nosnippet>433</a>
-<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#435 id=435 data-nosnippet>435</a>            </span>.db
-<a href=#436 id=436 data-nosnippet>436</a>            .current()
-<a href=#437 id=437 data-nosnippet>437</a>            .query(<span class="string">"DELETE session WHERE tenant_id = $tenant_id AND expires_at &lt; time::now()"</span>)
-<a href=#438 id=438 data-nosnippet>438</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#439 id=439 data-nosnippet>439</a>            .<span class="kw">await
-<a href=#440 id=440 data-nosnippet>440</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#441 id=441 data-nosnippet>441</a>
-<a href=#442 id=442 data-nosnippet>442</a>        <span class="comment">// I6: this deletes by predicate, not by id, so the cache cannot know
-<a href=#443 id=443 data-nosnippet>443</a>        // which entries went. Dropping the whole tenant is the conservative
-<a href=#444 id=444 data-nosnippet>444</a>        // choice; entries for expired sessions could not have been served
-<a href=#445 id=445 data-nosnippet>445</a>        // anyway (`get` re-checks `expires_at`), so this only costs a few
-<a href=#446 id=446 data-nosnippet>446</a>        // avoidable re-reads on a periodic janitor run.
-<a href=#447 id=447 data-nosnippet>447</a>        //
-<a href=#448 id=448 data-nosnippet>448</a>        // ORDERING: above `.check()`, per residual 2.
-<a href=#449 id=449 data-nosnippet>449</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
-<a href=#450 id=450 data-nosnippet>450</a>            cache.invalidate_tenant(tenant_id);
-<a href=#451 id=451 data-nosnippet>451</a>        }
-<a href=#452 id=452 data-nosnippet>452</a>
-<a href=#453 id=453 data-nosnippet>453</a>        <span class="comment">// OBS-3: the janitor must not log "N sessions reaped" when the DELETE
-<a href=#454 id=454 data-nosnippet>454</a>        // statement failed. `total` is a pre-delete count, so returning it
-<a href=#455 id=455 data-nosnippet>455</a>        // after a failed DELETE would be doubly misleading.
-<a href=#456 id=456 data-nosnippet>456</a>        </span>result
-<a href=#457 id=457 data-nosnippet>457</a>            .check()
-<a href=#458 id=458 data-nosnippet>458</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#459 id=459 data-nosnippet>459</a>
-<a href=#460 id=460 data-nosnippet>460</a>        <span class="prelude-val">Ok</span>(total)
-<a href=#461 id=461 data-nosnippet>461</a>    }
-<a href=#462 id=462 data-nosnippet>462</a>}
-<a href=#463 id=463 data-nosnippet>463</a>
-<a href=#464 id=464 data-nosnippet>464</a><span class="attr">#[cfg(test)]
-<a href=#465 id=465 data-nosnippet>465</a></span><span class="kw">mod </span>tests {
-<a href=#466 id=466 data-nosnippet>466</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#467 id=467 data-nosnippet>467</a>    <span class="kw">use </span>axiam_core::models::session::CreateSession;
-<a href=#468 id=468 data-nosnippet>468</a>    <span class="kw">use </span>chrono::Duration;
-<a href=#469 id=469 data-nosnippet>469</a>    <span class="kw">use </span>surrealdb::Surreal;
-<a href=#470 id=470 data-nosnippet>470</a>    <span class="kw">use </span>surrealdb::engine::local::Mem;
-<a href=#471 id=471 data-nosnippet>471</a>
-<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw">async fn </span>setup_db() -&gt; Surreal&lt;surrealdb::engine::local::Db&gt; {
-<a href=#473 id=473 data-nosnippet>473</a>        <span class="kw">let </span>db = Surreal::new::&lt;Mem&gt;(()).<span class="kw">await</span>.unwrap();
-<a href=#474 id=474 data-nosnippet>474</a>        db.use_ns(<span class="string">"test"</span>).use_db(<span class="string">"test"</span>).<span class="kw">await</span>.unwrap();
-<a href=#475 id=475 data-nosnippet>475</a>        <span class="kw">crate</span>::schema::run_migrations(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>.unwrap();
-<a href=#476 id=476 data-nosnippet>476</a>        db
-<a href=#477 id=477 data-nosnippet>477</a>    }
-<a href=#478 id=478 data-nosnippet>478</a>
-<a href=#479 id=479 data-nosnippet>479</a>    <span class="attr">#[tokio::test]
-<a href=#480 id=480 data-nosnippet>480</a>    </span><span class="kw">async fn </span>list_by_user_returns_only_target_users_sessions() {
-<a href=#481 id=481 data-nosnippet>481</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
-<a href=#483 id=483 data-nosnippet>483</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
-<a href=#484 id=484 data-nosnippet>484</a>        <span class="kw">let </span>other_tenant_id = Uuid::new_v4();
-<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">let </span>target_user_id = Uuid::new_v4();
-<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span>other_user_id = Uuid::new_v4();
-<a href=#487 id=487 data-nosnippet>487</a>
-<a href=#488 id=488 data-nosnippet>488</a>        <span class="kw">let </span>expires = Utc::now() + Duration::hours(<span class="number">1</span>);
-<a href=#489 id=489 data-nosnippet>489</a>
-<a href=#490 id=490 data-nosnippet>490</a>        <span class="comment">// 2 sessions for the target user in the target tenant.
-<a href=#491 id=491 data-nosnippet>491</a>        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">2 </span>{
-<a href=#492 id=492 data-nosnippet>492</a>            repo.create(CreateSession {
-<a href=#493 id=493 data-nosnippet>493</a>                tenant_id,
-<a href=#494 id=494 data-nosnippet>494</a>                user_id: target_user_id,
-<a href=#495 id=495 data-nosnippet>495</a>                token_hash: <span class="macro">format!</span>(<span class="string">"target-token-hash-{i}"</span>),
-<a href=#496 id=496 data-nosnippet>496</a>                ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
-<a href=#497 id=497 data-nosnippet>497</a>                user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
-<a href=#498 id=498 data-nosnippet>498</a>                expires_at: expires,
-<a href=#499 id=499 data-nosnippet>499</a>            })
-<a href=#500 id=500 data-nosnippet>500</a>            .<span class="kw">await
-<a href=#501 id=501 data-nosnippet>501</a>            </span>.unwrap();
-<a href=#502 id=502 data-nosnippet>502</a>        }
-<a href=#503 id=503 data-nosnippet>503</a>
-<a href=#504 id=504 data-nosnippet>504</a>        <span class="comment">// 1 session for a different user in the same tenant.
-<a href=#505 id=505 data-nosnippet>505</a>        </span>repo.create(CreateSession {
-<a href=#506 id=506 data-nosnippet>506</a>            tenant_id,
-<a href=#507 id=507 data-nosnippet>507</a>            user_id: other_user_id,
-<a href=#508 id=508 data-nosnippet>508</a>            token_hash: <span class="string">"other-user-token-hash"</span>.into(),
-<a href=#509 id=509 data-nosnippet>509</a>            ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
-<a href=#510 id=510 data-nosnippet>510</a>            user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
-<a href=#511 id=511 data-nosnippet>511</a>            expires_at: expires,
-<a href=#512 id=512 data-nosnippet>512</a>        })
-<a href=#513 id=513 data-nosnippet>513</a>        .<span class="kw">await
-<a href=#514 id=514 data-nosnippet>514</a>        </span>.unwrap();
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="comment">// I6: every session of this user just disappeared.
+<a href=#400 id=400 data-nosnippet>400</a>        //
+<a href=#401 id=401 data-nosnippet>401</a>        // ORDERING: above `.check()` for the same reason as `invalidate` —
+<a href=#402 id=402 data-nosnippet>402</a>        // see the note there (residual 2).
+<a href=#403 id=403 data-nosnippet>403</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
+<a href=#404 id=404 data-nosnippet>404</a>            cache.invalidate_user(tenant_id, user_id, <span class="prelude-val">None</span>);
+<a href=#405 id=405 data-nosnippet>405</a>        }
+<a href=#406 id=406 data-nosnippet>406</a>
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="comment">// OBS-3: propagate a statement-level DELETE failure instead of
+<a href=#408 id=408 data-nosnippet>408</a>        // reporting a revocation that may not have happened.
+<a href=#409 id=409 data-nosnippet>409</a>        </span>result
+<a href=#410 id=410 data-nosnippet>410</a>            .check()
+<a href=#411 id=411 data-nosnippet>411</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#412 id=412 data-nosnippet>412</a>
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="prelude-val">Ok</span>(())
+<a href=#414 id=414 data-nosnippet>414</a>    }
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="kw">async fn </span>invalidate_user_sessions_except(
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#418 id=418 data-nosnippet>418</a>        tenant_id: Uuid,
+<a href=#419 id=419 data-nosnippet>419</a>        user_id: Uuid,
+<a href=#420 id=420 data-nosnippet>420</a>        current_session_id: Uuid,
+<a href=#421 id=421 data-nosnippet>421</a>    ) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="comment">// DELETE all sessions for this user in this tenant EXCEPT the
+<a href=#423 id=423 data-nosnippet>423</a>        // current one (identified by its record ID). RETURN BEFORE gives us
+<a href=#424 id=424 data-nosnippet>424</a>        // the deleted rows so we can count them.
+<a href=#425 id=425 data-nosnippet>425</a>        </span><span class="kw">let </span>result = <span class="self">self
+<a href=#426 id=426 data-nosnippet>426</a>            </span>.db
+<a href=#427 id=427 data-nosnippet>427</a>            .current()
+<a href=#428 id=428 data-nosnippet>428</a>            .query(
+<a href=#429 id=429 data-nosnippet>429</a>                <span class="string">"DELETE session \
+<a href=#430 id=430 data-nosnippet>430</a>                 WHERE tenant_id = $tenant_id \
+<a href=#431 id=431 data-nosnippet>431</a>                   AND user_id = $user_id \
+<a href=#432 id=432 data-nosnippet>432</a>                   AND id != type::record('session', $current_session_id) \
+<a href=#433 id=433 data-nosnippet>433</a>                 RETURN BEFORE"</span>,
+<a href=#434 id=434 data-nosnippet>434</a>            )
+<a href=#435 id=435 data-nosnippet>435</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#436 id=436 data-nosnippet>436</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
+<a href=#437 id=437 data-nosnippet>437</a>            .bind((<span class="string">"current_session_id"</span>, current_session_id.to_string()))
+<a href=#438 id=438 data-nosnippet>438</a>            .<span class="kw">await
+<a href=#439 id=439 data-nosnippet>439</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="comment">// I6: same set, minus the session the caller deliberately kept.
+<a href=#442 id=442 data-nosnippet>442</a>        //
+<a href=#443 id=443 data-nosnippet>443</a>        // Ordered before `take(0)` for the same reason as `consume` — the
+<a href=#444 id=444 data-nosnippet>444</a>        // DELETE is already committed once the `.await` returns, so a
+<a href=#445 id=445 data-nosnippet>445</a>        // deserialize failure of the BEFORE image must not be able to strand a
+<a href=#446 id=446 data-nosnippet>446</a>        // positive cache entry for a session that no longer exists
+<a href=#447 id=447 data-nosnippet>447</a>        // (residual 2).
+<a href=#448 id=448 data-nosnippet>448</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
+<a href=#449 id=449 data-nosnippet>449</a>            cache.invalidate_user(tenant_id, user_id, <span class="prelude-val">Some</span>(current_session_id));
+<a href=#450 id=450 data-nosnippet>450</a>        }
+<a href=#451 id=451 data-nosnippet>451</a>
+<a href=#452 id=452 data-nosnippet>452</a>        <span class="comment">// OBS-3: uniform with the other four delete paths — a statement-level
+<a href=#453 id=453 data-nosnippet>453</a>        // failure must never be reported as "0 sessions deleted".
+<a href=#454 id=454 data-nosnippet>454</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#455 id=455 data-nosnippet>455</a>            .check()
+<a href=#456 id=456 data-nosnippet>456</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">let </span>deleted: Vec&lt;SessionRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="prelude-val">Ok</span>(deleted.len() <span class="kw">as </span>u64)
+<a href=#460 id=460 data-nosnippet>460</a>    }
+<a href=#461 id=461 data-nosnippet>461</a>
+<a href=#462 id=462 data-nosnippet>462</a>    <span class="kw">async fn </span>list_by_user(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Session&gt;&gt; {
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#464 id=464 data-nosnippet>464</a>            </span>.db
+<a href=#465 id=465 data-nosnippet>465</a>            .current()
+<a href=#466 id=466 data-nosnippet>466</a>            .query(
+<a href=#467 id=467 data-nosnippet>467</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM session \
+<a href=#468 id=468 data-nosnippet>468</a>                 WHERE tenant_id = $tenant_id AND user_id = $user_id"</span>,
+<a href=#469 id=469 data-nosnippet>469</a>            )
+<a href=#470 id=470 data-nosnippet>470</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#471 id=471 data-nosnippet>471</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
+<a href=#472 id=472 data-nosnippet>472</a>            .<span class="kw">await
+<a href=#473 id=473 data-nosnippet>473</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#474 id=474 data-nosnippet>474</a>
+<a href=#475 id=475 data-nosnippet>475</a>        <span class="kw">let </span>rows: Vec&lt;SessionRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#476 id=476 data-nosnippet>476</a>        rows.into_iter()
+<a href=#477 id=477 data-nosnippet>477</a>            .map(|r| r.try_into_session().map_err(Into::into))
+<a href=#478 id=478 data-nosnippet>478</a>            .collect()
+<a href=#479 id=479 data-nosnippet>479</a>    }
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="comment">// Count expired sessions first, then delete.
+<a href=#483 id=483 data-nosnippet>483</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
+<a href=#484 id=484 data-nosnippet>484</a>            </span>.db
+<a href=#485 id=485 data-nosnippet>485</a>            .current()
+<a href=#486 id=486 data-nosnippet>486</a>            .query(
+<a href=#487 id=487 data-nosnippet>487</a>                <span class="string">"SELECT count() AS total FROM session \
+<a href=#488 id=488 data-nosnippet>488</a>                 WHERE tenant_id = $tenant_id AND expires_at &lt; time::now() \
+<a href=#489 id=489 data-nosnippet>489</a>                 GROUP ALL"</span>,
+<a href=#490 id=490 data-nosnippet>490</a>            )
+<a href=#491 id=491 data-nosnippet>491</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#492 id=492 data-nosnippet>492</a>            .<span class="kw">await
+<a href=#493 id=493 data-nosnippet>493</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#494 id=494 data-nosnippet>494</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
+<a href=#496 id=496 data-nosnippet>496</a>
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#498 id=498 data-nosnippet>498</a>            </span>.db
+<a href=#499 id=499 data-nosnippet>499</a>            .current()
+<a href=#500 id=500 data-nosnippet>500</a>            .query(<span class="string">"DELETE session WHERE tenant_id = $tenant_id AND expires_at &lt; time::now()"</span>)
+<a href=#501 id=501 data-nosnippet>501</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#502 id=502 data-nosnippet>502</a>            .<span class="kw">await
+<a href=#503 id=503 data-nosnippet>503</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#504 id=504 data-nosnippet>504</a>
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="comment">// I6: this deletes by predicate, not by id, so the cache cannot know
+<a href=#506 id=506 data-nosnippet>506</a>        // which entries went. Dropping the whole tenant is the conservative
+<a href=#507 id=507 data-nosnippet>507</a>        // choice; entries for expired sessions could not have been served
+<a href=#508 id=508 data-nosnippet>508</a>        // anyway (`get` re-checks `expires_at`), so this only costs a few
+<a href=#509 id=509 data-nosnippet>509</a>        // avoidable re-reads on a periodic janitor run.
+<a href=#510 id=510 data-nosnippet>510</a>        //
+<a href=#511 id=511 data-nosnippet>511</a>        // ORDERING: above `.check()`, per residual 2.
+<a href=#512 id=512 data-nosnippet>512</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cache) = <span class="kw-2">&amp;</span><span class="self">self</span>.validation_cache {
+<a href=#513 id=513 data-nosnippet>513</a>            cache.invalidate_tenant(tenant_id);
+<a href=#514 id=514 data-nosnippet>514</a>        }
 <a href=#515 id=515 data-nosnippet>515</a>
-<a href=#516 id=516 data-nosnippet>516</a>        <span class="comment">// 1 session for the target user but in a DIFFERENT tenant — must be
-<a href=#517 id=517 data-nosnippet>517</a>        // excluded (tenant isolation).
-<a href=#518 id=518 data-nosnippet>518</a>        </span>repo.create(CreateSession {
-<a href=#519 id=519 data-nosnippet>519</a>            tenant_id: other_tenant_id,
-<a href=#520 id=520 data-nosnippet>520</a>            user_id: target_user_id,
-<a href=#521 id=521 data-nosnippet>521</a>            token_hash: <span class="string">"cross-tenant-token-hash"</span>.into(),
-<a href=#522 id=522 data-nosnippet>522</a>            ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
-<a href=#523 id=523 data-nosnippet>523</a>            user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
-<a href=#524 id=524 data-nosnippet>524</a>            expires_at: expires,
-<a href=#525 id=525 data-nosnippet>525</a>        })
-<a href=#526 id=526 data-nosnippet>526</a>        .<span class="kw">await
-<a href=#527 id=527 data-nosnippet>527</a>        </span>.unwrap();
-<a href=#528 id=528 data-nosnippet>528</a>
-<a href=#529 id=529 data-nosnippet>529</a>        <span class="kw">let </span>sessions = repo.list_by_user(tenant_id, target_user_id).<span class="kw">await</span>.unwrap();
-<a href=#530 id=530 data-nosnippet>530</a>        <span class="macro">assert_eq!</span>(
-<a href=#531 id=531 data-nosnippet>531</a>            sessions.len(),
-<a href=#532 id=532 data-nosnippet>532</a>            <span class="number">2</span>,
-<a href=#533 id=533 data-nosnippet>533</a>            <span class="string">"expected exactly the target user's 2 sessions"
-<a href=#534 id=534 data-nosnippet>534</a>        </span>);
-<a href=#535 id=535 data-nosnippet>535</a>        <span class="kw">for </span>session <span class="kw">in </span><span class="kw-2">&amp;</span>sessions {
-<a href=#536 id=536 data-nosnippet>536</a>            <span class="macro">assert_eq!</span>(session.tenant_id, tenant_id);
-<a href=#537 id=537 data-nosnippet>537</a>            <span class="macro">assert_eq!</span>(session.user_id, target_user_id);
-<a href=#538 id=538 data-nosnippet>538</a>        }
-<a href=#539 id=539 data-nosnippet>539</a>    }
-<a href=#540 id=540 data-nosnippet>540</a>
-<a href=#541 id=541 data-nosnippet>541</a>    <span class="comment">// ------------------------------------------------------------------
-<a href=#542 id=542 data-nosnippet>542</a>    // OBS-3 — statement-level DELETE failures must propagate
-<a href=#543 id=543 data-nosnippet>543</a>    // (security-analysis-2026-08-02 §11.3)
-<a href=#544 id=544 data-nosnippet>544</a>    // ------------------------------------------------------------------
-<a href=#545 id=545 data-nosnippet>545</a>
-<a href=#546 id=546 data-nosnippet>546</a>    </span><span class="doccomment">/// Forces every `DELETE session` in this database to fail at the
-<a href=#547 id=547 data-nosnippet>547</a>    /// **statement** level, which is the exact failure mode OBS-3 is about:
-<a href=#548 id=548 data-nosnippet>548</a>    /// the `.await` still returns `Ok(Response)`, and only `.check()` (or a
-<a href=#549 id=549 data-nosnippet>549</a>    /// `take()`) surfaces the error.
-<a href=#550 id=550 data-nosnippet>550</a>    ///
-<a href=#551 id=551 data-nosnippet>551</a>    /// §10.7/residual 2 recorded that "the repository takes a concrete
-<a href=#552 id=552 data-nosnippet>552</a>    /// `Surreal&lt;C&gt;` rather than a mockable trait, so there is no seam". That
-<a href=#553 id=553 data-nosnippet>553</a>    /// is true of the *connection*, but SurrealDB provides one inside the
-<a href=#554 id=554 data-nosnippet>554</a>    /// database: a `DEFINE EVENT … THEN THROW` on the DELETE event makes the
-<a href=#555 id=555 data-nosnippet>555</a>    /// server itself fail the statement. No mock, no fake — the real embedded
-<a href=#556 id=556 data-nosnippet>556</a>    /// engine returns the real error shape.
-<a href=#557 id=557 data-nosnippet>557</a>    </span><span class="kw">async fn </span>poison_session_deletes(db: <span class="kw-2">&amp;</span>Surreal&lt;surrealdb::engine::local::Db&gt;) {
-<a href=#558 id=558 data-nosnippet>558</a>        db.query(
-<a href=#559 id=559 data-nosnippet>559</a>            <span class="string">"DEFINE EVENT session_delete_poison ON TABLE session \
-<a href=#560 id=560 data-nosnippet>560</a>             WHEN $event = 'DELETE' THEN { THROW 'poisoned delete' }"</span>,
-<a href=#561 id=561 data-nosnippet>561</a>        )
-<a href=#562 id=562 data-nosnippet>562</a>        .<span class="kw">await
-<a href=#563 id=563 data-nosnippet>563</a>        </span>.expect(<span class="string">"define poison event"</span>)
-<a href=#564 id=564 data-nosnippet>564</a>        .check()
-<a href=#565 id=565 data-nosnippet>565</a>        .expect(<span class="string">"poison event definition must itself succeed"</span>);
-<a href=#566 id=566 data-nosnippet>566</a>    }
-<a href=#567 id=567 data-nosnippet>567</a>
-<a href=#568 id=568 data-nosnippet>568</a>    <span class="kw">async fn </span>seed_session(
-<a href=#569 id=569 data-nosnippet>569</a>        repo: <span class="kw-2">&amp;</span>SurrealSessionRepository&lt;surrealdb::engine::local::Db&gt;,
-<a href=#570 id=570 data-nosnippet>570</a>        tenant_id: Uuid,
-<a href=#571 id=571 data-nosnippet>571</a>        user_id: Uuid,
-<a href=#572 id=572 data-nosnippet>572</a>        suffix: <span class="kw-2">&amp;</span>str,
-<a href=#573 id=573 data-nosnippet>573</a>    ) -&gt; Session {
-<a href=#574 id=574 data-nosnippet>574</a>        repo.create(CreateSession {
-<a href=#575 id=575 data-nosnippet>575</a>            tenant_id,
-<a href=#576 id=576 data-nosnippet>576</a>            user_id,
-<a href=#577 id=577 data-nosnippet>577</a>            token_hash: <span class="macro">format!</span>(<span class="string">"hash-{suffix}"</span>),
-<a href=#578 id=578 data-nosnippet>578</a>            ip_address: <span class="prelude-val">None</span>,
-<a href=#579 id=579 data-nosnippet>579</a>            user_agent: <span class="prelude-val">None</span>,
-<a href=#580 id=580 data-nosnippet>580</a>            expires_at: Utc::now() + Duration::hours(<span class="number">1</span>),
-<a href=#581 id=581 data-nosnippet>581</a>        })
-<a href=#582 id=582 data-nosnippet>582</a>        .<span class="kw">await
-<a href=#583 id=583 data-nosnippet>583</a>        </span>.unwrap()
-<a href=#584 id=584 data-nosnippet>584</a>    }
-<a href=#585 id=585 data-nosnippet>585</a>
-<a href=#586 id=586 data-nosnippet>586</a>    <span class="doccomment">/// OBS-3: all five session-deleting methods must return `Err` when the
-<a href=#587 id=587 data-nosnippet>587</a>    /// DELETE statement fails, instead of reporting a revocation that never
-<a href=#588 id=588 data-nosnippet>588</a>    /// happened. Before the fix, `invalidate`, `invalidate_user_sessions` and
-<a href=#589 id=589 data-nosnippet>589</a>    /// `cleanup_expired` returned `Ok` here.
-<a href=#590 id=590 data-nosnippet>590</a>    </span><span class="attr">#[tokio::test]
-<a href=#591 id=591 data-nosnippet>591</a>    </span><span class="kw">async fn </span>every_delete_path_propagates_a_statement_level_failure() {
-<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
-<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
-<a href=#594 id=594 data-nosnippet>594</a>
-<a href=#595 id=595 data-nosnippet>595</a>        <span class="comment">// `invalidate`
-<a href=#596 id=596 data-nosnippet>596</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
-<a href=#598 id=598 data-nosnippet>598</a>        <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"a"</span>).<span class="kw">await</span>;
-<a href=#599 id=599 data-nosnippet>599</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#600 id=600 data-nosnippet>600</a>        <span class="macro">assert!</span>(
-<a href=#601 id=601 data-nosnippet>601</a>            repo.invalidate(tenant_id, s.id).<span class="kw">await</span>.is_err(),
-<a href=#602 id=602 data-nosnippet>602</a>            <span class="string">"invalidate must not report success when the DELETE statement failed"
-<a href=#603 id=603 data-nosnippet>603</a>        </span>);
-<a href=#604 id=604 data-nosnippet>604</a>
-<a href=#605 id=605 data-nosnippet>605</a>        <span class="comment">// `consume`
-<a href=#606 id=606 data-nosnippet>606</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
-<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"b"</span>).<span class="kw">await</span>;
-<a href=#609 id=609 data-nosnippet>609</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#610 id=610 data-nosnippet>610</a>        <span class="macro">assert!</span>(
-<a href=#611 id=611 data-nosnippet>611</a>            repo.consume(tenant_id, s.id).<span class="kw">await</span>.is_err(),
-<a href=#612 id=612 data-nosnippet>612</a>            <span class="string">"consume must not report `false` (lost the race) for a failed statement"
-<a href=#613 id=613 data-nosnippet>613</a>        </span>);
-<a href=#614 id=614 data-nosnippet>614</a>
-<a href=#615 id=615 data-nosnippet>615</a>        <span class="comment">// `invalidate_user_sessions`
-<a href=#616 id=616 data-nosnippet>616</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
-<a href=#618 id=618 data-nosnippet>618</a>        seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"c"</span>).<span class="kw">await</span>;
-<a href=#619 id=619 data-nosnippet>619</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#620 id=620 data-nosnippet>620</a>        <span class="macro">assert!</span>(
-<a href=#621 id=621 data-nosnippet>621</a>            repo.invalidate_user_sessions(tenant_id, user_id)
-<a href=#622 id=622 data-nosnippet>622</a>                .<span class="kw">await
-<a href=#623 id=623 data-nosnippet>623</a>                </span>.is_err(),
-<a href=#624 id=624 data-nosnippet>624</a>            <span class="string">"invalidate_user_sessions must not report success when the DELETE failed"
-<a href=#625 id=625 data-nosnippet>625</a>        </span>);
-<a href=#626 id=626 data-nosnippet>626</a>
-<a href=#627 id=627 data-nosnippet>627</a>        <span class="comment">// `invalidate_user_sessions_except`
-<a href=#628 id=628 data-nosnippet>628</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">let </span>keep = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"d"</span>).<span class="kw">await</span>;
-<a href=#631 id=631 data-nosnippet>631</a>        seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"e"</span>).<span class="kw">await</span>;
-<a href=#632 id=632 data-nosnippet>632</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#633 id=633 data-nosnippet>633</a>        <span class="macro">assert!</span>(
-<a href=#634 id=634 data-nosnippet>634</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, keep.id)
-<a href=#635 id=635 data-nosnippet>635</a>                .<span class="kw">await
-<a href=#636 id=636 data-nosnippet>636</a>                </span>.is_err(),
-<a href=#637 id=637 data-nosnippet>637</a>            <span class="string">"invalidate_user_sessions_except must not report `0 deleted` for a failed statement"
-<a href=#638 id=638 data-nosnippet>638</a>        </span>);
-<a href=#639 id=639 data-nosnippet>639</a>
-<a href=#640 id=640 data-nosnippet>640</a>        <span class="comment">// `cleanup_expired`
-<a href=#641 id=641 data-nosnippet>641</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
-<a href=#643 id=643 data-nosnippet>643</a>        repo.create(CreateSession {
-<a href=#644 id=644 data-nosnippet>644</a>            tenant_id,
-<a href=#645 id=645 data-nosnippet>645</a>            user_id,
-<a href=#646 id=646 data-nosnippet>646</a>            token_hash: <span class="string">"hash-expired"</span>.into(),
-<a href=#647 id=647 data-nosnippet>647</a>            ip_address: <span class="prelude-val">None</span>,
-<a href=#648 id=648 data-nosnippet>648</a>            user_agent: <span class="prelude-val">None</span>,
-<a href=#649 id=649 data-nosnippet>649</a>            expires_at: Utc::now() - Duration::hours(<span class="number">1</span>),
-<a href=#650 id=650 data-nosnippet>650</a>        })
-<a href=#651 id=651 data-nosnippet>651</a>        .<span class="kw">await
-<a href=#652 id=652 data-nosnippet>652</a>        </span>.unwrap();
-<a href=#653 id=653 data-nosnippet>653</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#654 id=654 data-nosnippet>654</a>        <span class="macro">assert!</span>(
-<a href=#655 id=655 data-nosnippet>655</a>            repo.cleanup_expired(tenant_id).<span class="kw">await</span>.is_err(),
-<a href=#656 id=656 data-nosnippet>656</a>            <span class="string">"cleanup_expired must not return a pre-delete count when the DELETE failed"
-<a href=#657 id=657 data-nosnippet>657</a>        </span>);
-<a href=#658 id=658 data-nosnippet>658</a>    }
-<a href=#659 id=659 data-nosnippet>659</a>
-<a href=#660 id=660 data-nosnippet>660</a>    <span class="doccomment">/// Residual 2 (cache-invalidation ordering) must survive OBS-3 making
-<a href=#661 id=661 data-nosnippet>661</a>    /// these paths fallible: the cache entry is dropped **before** the newly
-<a href=#662 id=662 data-nosnippet>662</a>    /// added `.check()`, so an erroring DELETE can never leave a positive
-<a href=#663 id=663 data-nosnippet>663</a>    /// "still valid" entry behind.
-<a href=#664 id=664 data-nosnippet>664</a>    ///
-<a href=#665 id=665 data-nosnippet>665</a>    /// This is the regression test §10.7 could not write — the poison event
-<a href=#666 id=666 data-nosnippet>666</a>    /// above supplies the failing step that did not previously exist.
-<a href=#667 id=667 data-nosnippet>667</a>    </span><span class="attr">#[tokio::test]
-<a href=#668 id=668 data-nosnippet>668</a>    </span><span class="kw">async fn </span>cache_is_invalidated_before_the_fallible_step_on_every_path() {
-<a href=#669 id=669 data-nosnippet>669</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
-<a href=#670 id=670 data-nosnippet>670</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
-<a href=#671 id=671 data-nosnippet>671</a>
-<a href=#672 id=672 data-nosnippet>672</a>        <span class="doccomment">/// Builds a repo whose cache holds a live positive entry for each of
-<a href=#673 id=673 data-nosnippet>673</a>        /// `n` fresh sessions, optionally adds `expired` already-expired rows
-<a href=#674 id=674 data-nosnippet>674</a>        /// (which `cleanup_expired` needs in order to delete anything at all,
-<a href=#675 id=675 data-nosnippet>675</a>        /// and which are never cached because the cache is positive-only),
-<a href=#676 id=676 data-nosnippet>676</a>        /// then poisons DELETE.
-<a href=#677 id=677 data-nosnippet>677</a>        </span><span class="kw">async fn </span>armed(
-<a href=#678 id=678 data-nosnippet>678</a>            tenant_id: Uuid,
-<a href=#679 id=679 data-nosnippet>679</a>            user_id: Uuid,
-<a href=#680 id=680 data-nosnippet>680</a>            n: usize,
-<a href=#681 id=681 data-nosnippet>681</a>            expired: usize,
-<a href=#682 id=682 data-nosnippet>682</a>        ) -&gt; (
-<a href=#683 id=683 data-nosnippet>683</a>            SurrealSessionRepository&lt;surrealdb::engine::local::Db&gt;,
-<a href=#684 id=684 data-nosnippet>684</a>            Arc&lt;SessionValidationCache&gt;,
-<a href=#685 id=685 data-nosnippet>685</a>            Vec&lt;Session&gt;,
-<a href=#686 id=686 data-nosnippet>686</a>        ) {
-<a href=#687 id=687 data-nosnippet>687</a>            <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#688 id=688 data-nosnippet>688</a>            <span class="kw">let </span>cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
-<a href=#689 id=689 data-nosnippet>689</a>                <span class="number">300</span>,
-<a href=#690 id=690 data-nosnippet>690</a>            )));
-<a href=#691 id=691 data-nosnippet>691</a>            <span class="kw">let </span>repo =
-<a href=#692 id=692 data-nosnippet>692</a>                SurrealSessionRepository::new(db.clone()).with_validation_cache(cache.clone());
-<a href=#693 id=693 data-nosnippet>693</a>            <span class="kw">let </span><span class="kw-2">mut </span>sessions = Vec::new();
-<a href=#694 id=694 data-nosnippet>694</a>            <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..n {
-<a href=#695 id=695 data-nosnippet>695</a>                <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{i}"</span>)).<span class="kw">await</span>;
-<a href=#696 id=696 data-nosnippet>696</a>                <span class="macro">assert!</span>(
-<a href=#697 id=697 data-nosnippet>697</a>                    repo.is_session_active_checked(tenant_id, s.id).<span class="kw">await</span>,
-<a href=#698 id=698 data-nosnippet>698</a>                    <span class="string">"session must warm the cache before the delete path runs"
-<a href=#699 id=699 data-nosnippet>699</a>                </span>);
-<a href=#700 id=700 data-nosnippet>700</a>                sessions.push(s);
-<a href=#701 id=701 data-nosnippet>701</a>            }
-<a href=#702 id=702 data-nosnippet>702</a>            <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..expired {
-<a href=#703 id=703 data-nosnippet>703</a>                repo.create(CreateSession {
-<a href=#704 id=704 data-nosnippet>704</a>                    tenant_id,
-<a href=#705 id=705 data-nosnippet>705</a>                    user_id,
-<a href=#706 id=706 data-nosnippet>706</a>                    token_hash: <span class="macro">format!</span>(<span class="string">"hash-expired-{i}"</span>),
-<a href=#707 id=707 data-nosnippet>707</a>                    ip_address: <span class="prelude-val">None</span>,
-<a href=#708 id=708 data-nosnippet>708</a>                    user_agent: <span class="prelude-val">None</span>,
-<a href=#709 id=709 data-nosnippet>709</a>                    expires_at: Utc::now() - Duration::hours(<span class="number">1</span>),
-<a href=#710 id=710 data-nosnippet>710</a>                })
-<a href=#711 id=711 data-nosnippet>711</a>                .<span class="kw">await
-<a href=#712 id=712 data-nosnippet>712</a>                </span>.unwrap();
-<a href=#713 id=713 data-nosnippet>713</a>            }
-<a href=#714 id=714 data-nosnippet>714</a>            <span class="macro">assert_eq!</span>(cache.len(), n, <span class="string">"cache must be warm"</span>);
-<a href=#715 id=715 data-nosnippet>715</a>            poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
-<a href=#716 id=716 data-nosnippet>716</a>            (repo, cache, sessions)
-<a href=#717 id=717 data-nosnippet>717</a>        }
-<a href=#718 id=718 data-nosnippet>718</a>
-<a href=#719 id=719 data-nosnippet>719</a>        <span class="comment">// `invalidate`
-<a href=#720 id=720 data-nosnippet>720</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">1</span>, <span class="number">0</span>).<span class="kw">await</span>;
-<a href=#721 id=721 data-nosnippet>721</a>        <span class="macro">assert!</span>(repo.invalidate(tenant_id, sessions[<span class="number">0</span>].id).<span class="kw">await</span>.is_err());
-<a href=#722 id=722 data-nosnippet>722</a>        <span class="macro">assert_eq!</span>(
-<a href=#723 id=723 data-nosnippet>723</a>            cache.len(),
-<a href=#724 id=724 data-nosnippet>724</a>            <span class="number">0</span>,
-<a href=#725 id=725 data-nosnippet>725</a>            <span class="string">"invalidate: cache entry must be dropped even though the DELETE failed"
-<a href=#726 id=726 data-nosnippet>726</a>        </span>);
-<a href=#727 id=727 data-nosnippet>727</a>
-<a href=#728 id=728 data-nosnippet>728</a>        <span class="comment">// `consume`
-<a href=#729 id=729 data-nosnippet>729</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">1</span>, <span class="number">0</span>).<span class="kw">await</span>;
-<a href=#730 id=730 data-nosnippet>730</a>        <span class="macro">assert!</span>(repo.consume(tenant_id, sessions[<span class="number">0</span>].id).<span class="kw">await</span>.is_err());
-<a href=#731 id=731 data-nosnippet>731</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">0</span>, <span class="string">"consume: cache entry must be dropped"</span>);
-<a href=#732 id=732 data-nosnippet>732</a>
-<a href=#733 id=733 data-nosnippet>733</a>        <span class="comment">// `invalidate_user_sessions`
-<a href=#734 id=734 data-nosnippet>734</a>        </span><span class="kw">let </span>(repo, cache, <span class="kw">_</span>) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">0</span>).<span class="kw">await</span>;
-<a href=#735 id=735 data-nosnippet>735</a>        <span class="macro">assert!</span>(
-<a href=#736 id=736 data-nosnippet>736</a>            repo.invalidate_user_sessions(tenant_id, user_id)
-<a href=#737 id=737 data-nosnippet>737</a>                .<span class="kw">await
-<a href=#738 id=738 data-nosnippet>738</a>                </span>.is_err()
-<a href=#739 id=739 data-nosnippet>739</a>        );
-<a href=#740 id=740 data-nosnippet>740</a>        <span class="macro">assert_eq!</span>(
-<a href=#741 id=741 data-nosnippet>741</a>            cache.len(),
-<a href=#742 id=742 data-nosnippet>742</a>            <span class="number">0</span>,
-<a href=#743 id=743 data-nosnippet>743</a>            <span class="string">"invalidate_user_sessions: all of the user's entries must be dropped"
-<a href=#744 id=744 data-nosnippet>744</a>        </span>);
-<a href=#745 id=745 data-nosnippet>745</a>
-<a href=#746 id=746 data-nosnippet>746</a>        <span class="comment">// `invalidate_user_sessions_except` — the kept session stays cached by
-<a href=#747 id=747 data-nosnippet>747</a>        // design; every other entry must go.
-<a href=#748 id=748 data-nosnippet>748</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">0</span>).<span class="kw">await</span>;
-<a href=#749 id=749 data-nosnippet>749</a>        <span class="macro">assert!</span>(
-<a href=#750 id=750 data-nosnippet>750</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, sessions[<span class="number">0</span>].id)
-<a href=#751 id=751 data-nosnippet>751</a>                .<span class="kw">await
-<a href=#752 id=752 data-nosnippet>752</a>                </span>.is_err()
-<a href=#753 id=753 data-nosnippet>753</a>        );
-<a href=#754 id=754 data-nosnippet>754</a>        <span class="macro">assert_eq!</span>(
-<a href=#755 id=755 data-nosnippet>755</a>            cache.len(),
-<a href=#756 id=756 data-nosnippet>756</a>            <span class="number">1</span>,
-<a href=#757 id=757 data-nosnippet>757</a>            <span class="string">"invalidate_user_sessions_except: only the deliberately kept session may remain"
-<a href=#758 id=758 data-nosnippet>758</a>        </span>);
-<a href=#759 id=759 data-nosnippet>759</a>
-<a href=#760 id=760 data-nosnippet>760</a>        <span class="comment">// `cleanup_expired`
-<a href=#761 id=761 data-nosnippet>761</a>        </span><span class="kw">let </span>(repo, cache, <span class="kw">_</span>) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">1</span>).<span class="kw">await</span>;
-<a href=#762 id=762 data-nosnippet>762</a>        <span class="macro">assert!</span>(repo.cleanup_expired(tenant_id).<span class="kw">await</span>.is_err());
-<a href=#763 id=763 data-nosnippet>763</a>        <span class="macro">assert_eq!</span>(
-<a href=#764 id=764 data-nosnippet>764</a>            cache.len(),
-<a href=#765 id=765 data-nosnippet>765</a>            <span class="number">0</span>,
-<a href=#766 id=766 data-nosnippet>766</a>            <span class="string">"cleanup_expired: the tenant's entries must be dropped"
-<a href=#767 id=767 data-nosnippet>767</a>        </span>);
-<a href=#768 id=768 data-nosnippet>768</a>    }
-<a href=#769 id=769 data-nosnippet>769</a>
-<a href=#770 id=770 data-nosnippet>770</a>    <span class="doccomment">/// The happy path is unchanged by OBS-3: every delete path still returns
-<a href=#771 id=771 data-nosnippet>771</a>    /// `Ok`, still removes the rows, and still clears the cache. Guards
-<a href=#772 id=772 data-nosnippet>772</a>    /// against a `.check()` that rejects an ordinary successful DELETE.
-<a href=#773 id=773 data-nosnippet>773</a>    </span><span class="attr">#[tokio::test]
-<a href=#774 id=774 data-nosnippet>774</a>    </span><span class="kw">async fn </span>delete_paths_still_succeed_and_clear_the_cache() {
-<a href=#775 id=775 data-nosnippet>775</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
-<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#778 id=778 data-nosnippet>778</a>        <span class="kw">let </span>cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
-<a href=#779 id=779 data-nosnippet>779</a>            <span class="number">300</span>,
-<a href=#780 id=780 data-nosnippet>780</a>        )));
-<a href=#781 id=781 data-nosnippet>781</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db).with_validation_cache(cache.clone());
-<a href=#782 id=782 data-nosnippet>782</a>
-<a href=#783 id=783 data-nosnippet>783</a>        <span class="kw">let </span>a = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"1"</span>).<span class="kw">await</span>;
-<a href=#784 id=784 data-nosnippet>784</a>        <span class="kw">let </span>b = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"2"</span>).<span class="kw">await</span>;
-<a href=#785 id=785 data-nosnippet>785</a>        <span class="kw">let </span>c = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"3"</span>).<span class="kw">await</span>;
-<a href=#786 id=786 data-nosnippet>786</a>        <span class="kw">for </span>s <span class="kw">in </span>[<span class="kw-2">&amp;</span>a, <span class="kw-2">&amp;</span>b, <span class="kw-2">&amp;</span>c] {
-<a href=#787 id=787 data-nosnippet>787</a>            <span class="macro">assert!</span>(repo.is_session_active_checked(tenant_id, s.id).<span class="kw">await</span>);
-<a href=#788 id=788 data-nosnippet>788</a>        }
-<a href=#789 id=789 data-nosnippet>789</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">3</span>);
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="comment">// OBS-3: the janitor must not log "N sessions reaped" when the DELETE
+<a href=#517 id=517 data-nosnippet>517</a>        // statement failed. `total` is a pre-delete count, so returning it
+<a href=#518 id=518 data-nosnippet>518</a>        // after a failed DELETE would be doubly misleading.
+<a href=#519 id=519 data-nosnippet>519</a>        </span>result
+<a href=#520 id=520 data-nosnippet>520</a>            .check()
+<a href=#521 id=521 data-nosnippet>521</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="prelude-val">Ok</span>(total)
+<a href=#524 id=524 data-nosnippet>524</a>    }
+<a href=#525 id=525 data-nosnippet>525</a>}
+<a href=#526 id=526 data-nosnippet>526</a>
+<a href=#527 id=527 data-nosnippet>527</a><span class="attr">#[cfg(test)]
+<a href=#528 id=528 data-nosnippet>528</a></span><span class="kw">mod </span>tests {
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#530 id=530 data-nosnippet>530</a>    <span class="kw">use </span>axiam_core::models::session::CreateSession;
+<a href=#531 id=531 data-nosnippet>531</a>    <span class="kw">use </span>chrono::Duration;
+<a href=#532 id=532 data-nosnippet>532</a>    <span class="kw">use </span>surrealdb::Surreal;
+<a href=#533 id=533 data-nosnippet>533</a>    <span class="kw">use </span>surrealdb::engine::local::Mem;
+<a href=#534 id=534 data-nosnippet>534</a>
+<a href=#535 id=535 data-nosnippet>535</a>    <span class="kw">async fn </span>setup_db() -&gt; Surreal&lt;surrealdb::engine::local::Db&gt; {
+<a href=#536 id=536 data-nosnippet>536</a>        <span class="kw">let </span>db = Surreal::new::&lt;Mem&gt;(()).<span class="kw">await</span>.unwrap();
+<a href=#537 id=537 data-nosnippet>537</a>        db.use_ns(<span class="string">"test"</span>).use_db(<span class="string">"test"</span>).<span class="kw">await</span>.unwrap();
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="kw">crate</span>::schema::run_migrations(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>.unwrap();
+<a href=#539 id=539 data-nosnippet>539</a>        db
+<a href=#540 id=540 data-nosnippet>540</a>    }
+<a href=#541 id=541 data-nosnippet>541</a>
+<a href=#542 id=542 data-nosnippet>542</a>    <span class="attr">#[tokio::test]
+<a href=#543 id=543 data-nosnippet>543</a>    </span><span class="kw">async fn </span>list_by_user_returns_only_target_users_sessions() {
+<a href=#544 id=544 data-nosnippet>544</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#545 id=545 data-nosnippet>545</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#547 id=547 data-nosnippet>547</a>        <span class="kw">let </span>other_tenant_id = Uuid::new_v4();
+<a href=#548 id=548 data-nosnippet>548</a>        <span class="kw">let </span>target_user_id = Uuid::new_v4();
+<a href=#549 id=549 data-nosnippet>549</a>        <span class="kw">let </span>other_user_id = Uuid::new_v4();
+<a href=#550 id=550 data-nosnippet>550</a>
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">let </span>expires = Utc::now() + Duration::hours(<span class="number">1</span>);
+<a href=#552 id=552 data-nosnippet>552</a>
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="comment">// 2 sessions for the target user in the target tenant.
+<a href=#554 id=554 data-nosnippet>554</a>        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">2 </span>{
+<a href=#555 id=555 data-nosnippet>555</a>            repo.create(CreateSession {
+<a href=#556 id=556 data-nosnippet>556</a>                tenant_id,
+<a href=#557 id=557 data-nosnippet>557</a>                user_id: target_user_id,
+<a href=#558 id=558 data-nosnippet>558</a>                token_hash: <span class="macro">format!</span>(<span class="string">"target-token-hash-{i}"</span>),
+<a href=#559 id=559 data-nosnippet>559</a>                ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
+<a href=#560 id=560 data-nosnippet>560</a>                user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
+<a href=#561 id=561 data-nosnippet>561</a>                expires_at: expires,
+<a href=#562 id=562 data-nosnippet>562</a>            })
+<a href=#563 id=563 data-nosnippet>563</a>            .<span class="kw">await
+<a href=#564 id=564 data-nosnippet>564</a>            </span>.unwrap();
+<a href=#565 id=565 data-nosnippet>565</a>        }
+<a href=#566 id=566 data-nosnippet>566</a>
+<a href=#567 id=567 data-nosnippet>567</a>        <span class="comment">// 1 session for a different user in the same tenant.
+<a href=#568 id=568 data-nosnippet>568</a>        </span>repo.create(CreateSession {
+<a href=#569 id=569 data-nosnippet>569</a>            tenant_id,
+<a href=#570 id=570 data-nosnippet>570</a>            user_id: other_user_id,
+<a href=#571 id=571 data-nosnippet>571</a>            token_hash: <span class="string">"other-user-token-hash"</span>.into(),
+<a href=#572 id=572 data-nosnippet>572</a>            ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
+<a href=#573 id=573 data-nosnippet>573</a>            user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
+<a href=#574 id=574 data-nosnippet>574</a>            expires_at: expires,
+<a href=#575 id=575 data-nosnippet>575</a>        })
+<a href=#576 id=576 data-nosnippet>576</a>        .<span class="kw">await
+<a href=#577 id=577 data-nosnippet>577</a>        </span>.unwrap();
+<a href=#578 id=578 data-nosnippet>578</a>
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="comment">// 1 session for the target user but in a DIFFERENT tenant — must be
+<a href=#580 id=580 data-nosnippet>580</a>        // excluded (tenant isolation).
+<a href=#581 id=581 data-nosnippet>581</a>        </span>repo.create(CreateSession {
+<a href=#582 id=582 data-nosnippet>582</a>            tenant_id: other_tenant_id,
+<a href=#583 id=583 data-nosnippet>583</a>            user_id: target_user_id,
+<a href=#584 id=584 data-nosnippet>584</a>            token_hash: <span class="string">"cross-tenant-token-hash"</span>.into(),
+<a href=#585 id=585 data-nosnippet>585</a>            ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
+<a href=#586 id=586 data-nosnippet>586</a>            user_agent: <span class="prelude-val">Some</span>(<span class="string">"test-agent"</span>.into()),
+<a href=#587 id=587 data-nosnippet>587</a>            expires_at: expires,
+<a href=#588 id=588 data-nosnippet>588</a>        })
+<a href=#589 id=589 data-nosnippet>589</a>        .<span class="kw">await
+<a href=#590 id=590 data-nosnippet>590</a>        </span>.unwrap();
+<a href=#591 id=591 data-nosnippet>591</a>
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">let </span>sessions = repo.list_by_user(tenant_id, target_user_id).<span class="kw">await</span>.unwrap();
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="macro">assert_eq!</span>(
+<a href=#594 id=594 data-nosnippet>594</a>            sessions.len(),
+<a href=#595 id=595 data-nosnippet>595</a>            <span class="number">2</span>,
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="string">"expected exactly the target user's 2 sessions"
+<a href=#597 id=597 data-nosnippet>597</a>        </span>);
+<a href=#598 id=598 data-nosnippet>598</a>        <span class="kw">for </span>session <span class="kw">in </span><span class="kw-2">&amp;</span>sessions {
+<a href=#599 id=599 data-nosnippet>599</a>            <span class="macro">assert_eq!</span>(session.tenant_id, tenant_id);
+<a href=#600 id=600 data-nosnippet>600</a>            <span class="macro">assert_eq!</span>(session.user_id, target_user_id);
+<a href=#601 id=601 data-nosnippet>601</a>        }
+<a href=#602 id=602 data-nosnippet>602</a>    }
+<a href=#603 id=603 data-nosnippet>603</a>
+<a href=#604 id=604 data-nosnippet>604</a>    <span class="comment">// ------------------------------------------------------------------
+<a href=#605 id=605 data-nosnippet>605</a>    // OBS-3 — statement-level DELETE failures must propagate
+<a href=#606 id=606 data-nosnippet>606</a>    // (security-analysis-2026-08-02 §11.3)
+<a href=#607 id=607 data-nosnippet>607</a>    // ------------------------------------------------------------------
+<a href=#608 id=608 data-nosnippet>608</a>
+<a href=#609 id=609 data-nosnippet>609</a>    </span><span class="doccomment">/// Forces every `DELETE session` in this database to fail at the
+<a href=#610 id=610 data-nosnippet>610</a>    /// **statement** level, which is the exact failure mode OBS-3 is about:
+<a href=#611 id=611 data-nosnippet>611</a>    /// the `.await` still returns `Ok(Response)`, and only `.check()` (or a
+<a href=#612 id=612 data-nosnippet>612</a>    /// `take()`) surfaces the error.
+<a href=#613 id=613 data-nosnippet>613</a>    ///
+<a href=#614 id=614 data-nosnippet>614</a>    /// §10.7/residual 2 recorded that "the repository takes a concrete
+<a href=#615 id=615 data-nosnippet>615</a>    /// `Surreal&lt;C&gt;` rather than a mockable trait, so there is no seam". That
+<a href=#616 id=616 data-nosnippet>616</a>    /// is true of the *connection*, but SurrealDB provides one inside the
+<a href=#617 id=617 data-nosnippet>617</a>    /// database: a `DEFINE EVENT … THEN THROW` on the DELETE event makes the
+<a href=#618 id=618 data-nosnippet>618</a>    /// server itself fail the statement. No mock, no fake — the real embedded
+<a href=#619 id=619 data-nosnippet>619</a>    /// engine returns the real error shape.
+<a href=#620 id=620 data-nosnippet>620</a>    </span><span class="kw">async fn </span>poison_session_deletes(db: <span class="kw-2">&amp;</span>Surreal&lt;surrealdb::engine::local::Db&gt;) {
+<a href=#621 id=621 data-nosnippet>621</a>        db.query(
+<a href=#622 id=622 data-nosnippet>622</a>            <span class="string">"DEFINE EVENT session_delete_poison ON TABLE session \
+<a href=#623 id=623 data-nosnippet>623</a>             WHEN $event = 'DELETE' THEN { THROW 'poisoned delete' }"</span>,
+<a href=#624 id=624 data-nosnippet>624</a>        )
+<a href=#625 id=625 data-nosnippet>625</a>        .<span class="kw">await
+<a href=#626 id=626 data-nosnippet>626</a>        </span>.expect(<span class="string">"define poison event"</span>)
+<a href=#627 id=627 data-nosnippet>627</a>        .check()
+<a href=#628 id=628 data-nosnippet>628</a>        .expect(<span class="string">"poison event definition must itself succeed"</span>);
+<a href=#629 id=629 data-nosnippet>629</a>    }
+<a href=#630 id=630 data-nosnippet>630</a>
+<a href=#631 id=631 data-nosnippet>631</a>    <span class="kw">async fn </span>seed_session(
+<a href=#632 id=632 data-nosnippet>632</a>        repo: <span class="kw-2">&amp;</span>SurrealSessionRepository&lt;surrealdb::engine::local::Db&gt;,
+<a href=#633 id=633 data-nosnippet>633</a>        tenant_id: Uuid,
+<a href=#634 id=634 data-nosnippet>634</a>        user_id: Uuid,
+<a href=#635 id=635 data-nosnippet>635</a>        suffix: <span class="kw-2">&amp;</span>str,
+<a href=#636 id=636 data-nosnippet>636</a>    ) -&gt; Session {
+<a href=#637 id=637 data-nosnippet>637</a>        repo.create(CreateSession {
+<a href=#638 id=638 data-nosnippet>638</a>            tenant_id,
+<a href=#639 id=639 data-nosnippet>639</a>            user_id,
+<a href=#640 id=640 data-nosnippet>640</a>            token_hash: <span class="macro">format!</span>(<span class="string">"hash-{suffix}"</span>),
+<a href=#641 id=641 data-nosnippet>641</a>            ip_address: <span class="prelude-val">None</span>,
+<a href=#642 id=642 data-nosnippet>642</a>            user_agent: <span class="prelude-val">None</span>,
+<a href=#643 id=643 data-nosnippet>643</a>            expires_at: Utc::now() + Duration::hours(<span class="number">1</span>),
+<a href=#644 id=644 data-nosnippet>644</a>        })
+<a href=#645 id=645 data-nosnippet>645</a>        .<span class="kw">await
+<a href=#646 id=646 data-nosnippet>646</a>        </span>.unwrap()
+<a href=#647 id=647 data-nosnippet>647</a>    }
+<a href=#648 id=648 data-nosnippet>648</a>
+<a href=#649 id=649 data-nosnippet>649</a>    <span class="doccomment">/// OBS-3: all five session-deleting methods must return `Err` when the
+<a href=#650 id=650 data-nosnippet>650</a>    /// DELETE statement fails, instead of reporting a revocation that never
+<a href=#651 id=651 data-nosnippet>651</a>    /// happened. Before the fix, `invalidate`, `invalidate_user_sessions` and
+<a href=#652 id=652 data-nosnippet>652</a>    /// `cleanup_expired` returned `Ok` here.
+<a href=#653 id=653 data-nosnippet>653</a>    </span><span class="attr">#[tokio::test]
+<a href=#654 id=654 data-nosnippet>654</a>    </span><span class="kw">async fn </span>every_delete_path_propagates_a_statement_level_failure() {
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#656 id=656 data-nosnippet>656</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
+<a href=#657 id=657 data-nosnippet>657</a>
+<a href=#658 id=658 data-nosnippet>658</a>        <span class="comment">// `invalidate`
+<a href=#659 id=659 data-nosnippet>659</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"a"</span>).<span class="kw">await</span>;
+<a href=#662 id=662 data-nosnippet>662</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="macro">assert!</span>(
+<a href=#664 id=664 data-nosnippet>664</a>            repo.invalidate(tenant_id, s.id).<span class="kw">await</span>.is_err(),
+<a href=#665 id=665 data-nosnippet>665</a>            <span class="string">"invalidate must not report success when the DELETE statement failed"
+<a href=#666 id=666 data-nosnippet>666</a>        </span>);
+<a href=#667 id=667 data-nosnippet>667</a>
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="comment">// `consume`
+<a href=#669 id=669 data-nosnippet>669</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#670 id=670 data-nosnippet>670</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"b"</span>).<span class="kw">await</span>;
+<a href=#672 id=672 data-nosnippet>672</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#673 id=673 data-nosnippet>673</a>        <span class="macro">assert!</span>(
+<a href=#674 id=674 data-nosnippet>674</a>            repo.consume(tenant_id, s.id).<span class="kw">await</span>.is_err(),
+<a href=#675 id=675 data-nosnippet>675</a>            <span class="string">"consume must not report `false` (lost the race) for a failed statement"
+<a href=#676 id=676 data-nosnippet>676</a>        </span>);
+<a href=#677 id=677 data-nosnippet>677</a>
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="comment">// `invalidate_user_sessions`
+<a href=#679 id=679 data-nosnippet>679</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#680 id=680 data-nosnippet>680</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
+<a href=#681 id=681 data-nosnippet>681</a>        seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"c"</span>).<span class="kw">await</span>;
+<a href=#682 id=682 data-nosnippet>682</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="macro">assert!</span>(
+<a href=#684 id=684 data-nosnippet>684</a>            repo.invalidate_user_sessions(tenant_id, user_id)
+<a href=#685 id=685 data-nosnippet>685</a>                .<span class="kw">await
+<a href=#686 id=686 data-nosnippet>686</a>                </span>.is_err(),
+<a href=#687 id=687 data-nosnippet>687</a>            <span class="string">"invalidate_user_sessions must not report success when the DELETE failed"
+<a href=#688 id=688 data-nosnippet>688</a>        </span>);
+<a href=#689 id=689 data-nosnippet>689</a>
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="comment">// `invalidate_user_sessions_except`
+<a href=#691 id=691 data-nosnippet>691</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#692 id=692 data-nosnippet>692</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="kw">let </span>keep = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"d"</span>).<span class="kw">await</span>;
+<a href=#694 id=694 data-nosnippet>694</a>        seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"e"</span>).<span class="kw">await</span>;
+<a href=#695 id=695 data-nosnippet>695</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#696 id=696 data-nosnippet>696</a>        <span class="macro">assert!</span>(
+<a href=#697 id=697 data-nosnippet>697</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, keep.id)
+<a href=#698 id=698 data-nosnippet>698</a>                .<span class="kw">await
+<a href=#699 id=699 data-nosnippet>699</a>                </span>.is_err(),
+<a href=#700 id=700 data-nosnippet>700</a>            <span class="string">"invalidate_user_sessions_except must not report `0 deleted` for a failed statement"
+<a href=#701 id=701 data-nosnippet>701</a>        </span>);
+<a href=#702 id=702 data-nosnippet>702</a>
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="comment">// `cleanup_expired`
+<a href=#704 id=704 data-nosnippet>704</a>        </span><span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#705 id=705 data-nosnippet>705</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db.clone());
+<a href=#706 id=706 data-nosnippet>706</a>        repo.create(CreateSession {
+<a href=#707 id=707 data-nosnippet>707</a>            tenant_id,
+<a href=#708 id=708 data-nosnippet>708</a>            user_id,
+<a href=#709 id=709 data-nosnippet>709</a>            token_hash: <span class="string">"hash-expired"</span>.into(),
+<a href=#710 id=710 data-nosnippet>710</a>            ip_address: <span class="prelude-val">None</span>,
+<a href=#711 id=711 data-nosnippet>711</a>            user_agent: <span class="prelude-val">None</span>,
+<a href=#712 id=712 data-nosnippet>712</a>            expires_at: Utc::now() - Duration::hours(<span class="number">1</span>),
+<a href=#713 id=713 data-nosnippet>713</a>        })
+<a href=#714 id=714 data-nosnippet>714</a>        .<span class="kw">await
+<a href=#715 id=715 data-nosnippet>715</a>        </span>.unwrap();
+<a href=#716 id=716 data-nosnippet>716</a>        poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#717 id=717 data-nosnippet>717</a>        <span class="macro">assert!</span>(
+<a href=#718 id=718 data-nosnippet>718</a>            repo.cleanup_expired(tenant_id).<span class="kw">await</span>.is_err(),
+<a href=#719 id=719 data-nosnippet>719</a>            <span class="string">"cleanup_expired must not return a pre-delete count when the DELETE failed"
+<a href=#720 id=720 data-nosnippet>720</a>        </span>);
+<a href=#721 id=721 data-nosnippet>721</a>    }
+<a href=#722 id=722 data-nosnippet>722</a>
+<a href=#723 id=723 data-nosnippet>723</a>    <span class="doccomment">/// Residual 2 (cache-invalidation ordering) must survive OBS-3 making
+<a href=#724 id=724 data-nosnippet>724</a>    /// these paths fallible: the cache entry is dropped **before** the newly
+<a href=#725 id=725 data-nosnippet>725</a>    /// added `.check()`, so an erroring DELETE can never leave a positive
+<a href=#726 id=726 data-nosnippet>726</a>    /// "still valid" entry behind.
+<a href=#727 id=727 data-nosnippet>727</a>    ///
+<a href=#728 id=728 data-nosnippet>728</a>    /// This is the regression test §10.7 could not write — the poison event
+<a href=#729 id=729 data-nosnippet>729</a>    /// above supplies the failing step that did not previously exist.
+<a href=#730 id=730 data-nosnippet>730</a>    </span><span class="attr">#[tokio::test]
+<a href=#731 id=731 data-nosnippet>731</a>    </span><span class="kw">async fn </span>cache_is_invalidated_before_the_fallible_step_on_every_path() {
+<a href=#732 id=732 data-nosnippet>732</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#733 id=733 data-nosnippet>733</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
+<a href=#734 id=734 data-nosnippet>734</a>
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="doccomment">/// Builds a repo whose cache holds a live positive entry for each of
+<a href=#736 id=736 data-nosnippet>736</a>        /// `n` fresh sessions, optionally adds `expired` already-expired rows
+<a href=#737 id=737 data-nosnippet>737</a>        /// (which `cleanup_expired` needs in order to delete anything at all,
+<a href=#738 id=738 data-nosnippet>738</a>        /// and which are never cached because the cache is positive-only),
+<a href=#739 id=739 data-nosnippet>739</a>        /// then poisons DELETE.
+<a href=#740 id=740 data-nosnippet>740</a>        </span><span class="kw">async fn </span>armed(
+<a href=#741 id=741 data-nosnippet>741</a>            tenant_id: Uuid,
+<a href=#742 id=742 data-nosnippet>742</a>            user_id: Uuid,
+<a href=#743 id=743 data-nosnippet>743</a>            n: usize,
+<a href=#744 id=744 data-nosnippet>744</a>            expired: usize,
+<a href=#745 id=745 data-nosnippet>745</a>        ) -&gt; (
+<a href=#746 id=746 data-nosnippet>746</a>            SurrealSessionRepository&lt;surrealdb::engine::local::Db&gt;,
+<a href=#747 id=747 data-nosnippet>747</a>            Arc&lt;SessionValidationCache&gt;,
+<a href=#748 id=748 data-nosnippet>748</a>            Vec&lt;Session&gt;,
+<a href=#749 id=749 data-nosnippet>749</a>        ) {
+<a href=#750 id=750 data-nosnippet>750</a>            <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#751 id=751 data-nosnippet>751</a>            <span class="kw">let </span>cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
+<a href=#752 id=752 data-nosnippet>752</a>                <span class="number">300</span>,
+<a href=#753 id=753 data-nosnippet>753</a>            )));
+<a href=#754 id=754 data-nosnippet>754</a>            <span class="kw">let </span>repo =
+<a href=#755 id=755 data-nosnippet>755</a>                SurrealSessionRepository::new(db.clone()).with_validation_cache(cache.clone());
+<a href=#756 id=756 data-nosnippet>756</a>            <span class="kw">let </span><span class="kw-2">mut </span>sessions = Vec::new();
+<a href=#757 id=757 data-nosnippet>757</a>            <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..n {
+<a href=#758 id=758 data-nosnippet>758</a>                <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{i}"</span>)).<span class="kw">await</span>;
+<a href=#759 id=759 data-nosnippet>759</a>                <span class="macro">assert!</span>(
+<a href=#760 id=760 data-nosnippet>760</a>                    repo.is_session_active_checked(tenant_id, s.id).<span class="kw">await</span>,
+<a href=#761 id=761 data-nosnippet>761</a>                    <span class="string">"session must warm the cache before the delete path runs"
+<a href=#762 id=762 data-nosnippet>762</a>                </span>);
+<a href=#763 id=763 data-nosnippet>763</a>                sessions.push(s);
+<a href=#764 id=764 data-nosnippet>764</a>            }
+<a href=#765 id=765 data-nosnippet>765</a>            <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..expired {
+<a href=#766 id=766 data-nosnippet>766</a>                repo.create(CreateSession {
+<a href=#767 id=767 data-nosnippet>767</a>                    tenant_id,
+<a href=#768 id=768 data-nosnippet>768</a>                    user_id,
+<a href=#769 id=769 data-nosnippet>769</a>                    token_hash: <span class="macro">format!</span>(<span class="string">"hash-expired-{i}"</span>),
+<a href=#770 id=770 data-nosnippet>770</a>                    ip_address: <span class="prelude-val">None</span>,
+<a href=#771 id=771 data-nosnippet>771</a>                    user_agent: <span class="prelude-val">None</span>,
+<a href=#772 id=772 data-nosnippet>772</a>                    expires_at: Utc::now() - Duration::hours(<span class="number">1</span>),
+<a href=#773 id=773 data-nosnippet>773</a>                })
+<a href=#774 id=774 data-nosnippet>774</a>                .<span class="kw">await
+<a href=#775 id=775 data-nosnippet>775</a>                </span>.unwrap();
+<a href=#776 id=776 data-nosnippet>776</a>            }
+<a href=#777 id=777 data-nosnippet>777</a>            <span class="macro">assert_eq!</span>(cache.len(), n, <span class="string">"cache must be warm"</span>);
+<a href=#778 id=778 data-nosnippet>778</a>            poison_session_deletes(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>;
+<a href=#779 id=779 data-nosnippet>779</a>            (repo, cache, sessions)
+<a href=#780 id=780 data-nosnippet>780</a>        }
+<a href=#781 id=781 data-nosnippet>781</a>
+<a href=#782 id=782 data-nosnippet>782</a>        <span class="comment">// `invalidate`
+<a href=#783 id=783 data-nosnippet>783</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">1</span>, <span class="number">0</span>).<span class="kw">await</span>;
+<a href=#784 id=784 data-nosnippet>784</a>        <span class="macro">assert!</span>(repo.invalidate(tenant_id, sessions[<span class="number">0</span>].id).<span class="kw">await</span>.is_err());
+<a href=#785 id=785 data-nosnippet>785</a>        <span class="macro">assert_eq!</span>(
+<a href=#786 id=786 data-nosnippet>786</a>            cache.len(),
+<a href=#787 id=787 data-nosnippet>787</a>            <span class="number">0</span>,
+<a href=#788 id=788 data-nosnippet>788</a>            <span class="string">"invalidate: cache entry must be dropped even though the DELETE failed"
+<a href=#789 id=789 data-nosnippet>789</a>        </span>);
 <a href=#790 id=790 data-nosnippet>790</a>
-<a href=#791 id=791 data-nosnippet>791</a>        repo.invalidate(tenant_id, a.id).<span class="kw">await</span>.unwrap();
-<a href=#792 id=792 data-nosnippet>792</a>        <span class="macro">assert!</span>(repo.get_by_id(tenant_id, a.id).<span class="kw">await</span>.is_err());
-<a href=#793 id=793 data-nosnippet>793</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">2</span>);
-<a href=#794 id=794 data-nosnippet>794</a>
-<a href=#795 id=795 data-nosnippet>795</a>        <span class="macro">assert!</span>(repo.consume(tenant_id, b.id).<span class="kw">await</span>.unwrap());
-<a href=#796 id=796 data-nosnippet>796</a>        <span class="macro">assert!</span>(
-<a href=#797 id=797 data-nosnippet>797</a>            !repo.consume(tenant_id, b.id).<span class="kw">await</span>.unwrap(),
-<a href=#798 id=798 data-nosnippet>798</a>            <span class="string">"second consume of the same session must lose the single-use race"
-<a href=#799 id=799 data-nosnippet>799</a>        </span>);
-<a href=#800 id=800 data-nosnippet>800</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>);
-<a href=#801 id=801 data-nosnippet>801</a>
-<a href=#802 id=802 data-nosnippet>802</a>        <span class="macro">assert_eq!</span>(
-<a href=#803 id=803 data-nosnippet>803</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, c.id)
-<a href=#804 id=804 data-nosnippet>804</a>                .<span class="kw">await
-<a href=#805 id=805 data-nosnippet>805</a>                </span>.unwrap(),
-<a href=#806 id=806 data-nosnippet>806</a>            <span class="number">0</span>,
-<a href=#807 id=807 data-nosnippet>807</a>            <span class="string">"c is the only session left and it is the one being kept"
-<a href=#808 id=808 data-nosnippet>808</a>        </span>);
-<a href=#809 id=809 data-nosnippet>809</a>        repo.invalidate_user_sessions(tenant_id, user_id)
-<a href=#810 id=810 data-nosnippet>810</a>            .<span class="kw">await
-<a href=#811 id=811 data-nosnippet>811</a>            </span>.unwrap();
-<a href=#812 id=812 data-nosnippet>812</a>        <span class="macro">assert!</span>(repo.get_by_id(tenant_id, c.id).<span class="kw">await</span>.is_err());
-<a href=#813 id=813 data-nosnippet>813</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">0</span>);
-<a href=#814 id=814 data-nosnippet>814</a>
-<a href=#815 id=815 data-nosnippet>815</a>        <span class="comment">// `cleanup_expired` over an empty/all-fresh table still succeeds.
-<a href=#816 id=816 data-nosnippet>816</a>        </span><span class="macro">assert_eq!</span>(repo.cleanup_expired(tenant_id).<span class="kw">await</span>.unwrap(), <span class="number">0</span>);
-<a href=#817 id=817 data-nosnippet>817</a>    }
-<a href=#818 id=818 data-nosnippet>818</a>}
+<a href=#791 id=791 data-nosnippet>791</a>        <span class="comment">// `consume`
+<a href=#792 id=792 data-nosnippet>792</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">1</span>, <span class="number">0</span>).<span class="kw">await</span>;
+<a href=#793 id=793 data-nosnippet>793</a>        <span class="macro">assert!</span>(repo.consume(tenant_id, sessions[<span class="number">0</span>].id).<span class="kw">await</span>.is_err());
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">0</span>, <span class="string">"consume: cache entry must be dropped"</span>);
+<a href=#795 id=795 data-nosnippet>795</a>
+<a href=#796 id=796 data-nosnippet>796</a>        <span class="comment">// `invalidate_user_sessions`
+<a href=#797 id=797 data-nosnippet>797</a>        </span><span class="kw">let </span>(repo, cache, <span class="kw">_</span>) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">0</span>).<span class="kw">await</span>;
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="macro">assert!</span>(
+<a href=#799 id=799 data-nosnippet>799</a>            repo.invalidate_user_sessions(tenant_id, user_id)
+<a href=#800 id=800 data-nosnippet>800</a>                .<span class="kw">await
+<a href=#801 id=801 data-nosnippet>801</a>                </span>.is_err()
+<a href=#802 id=802 data-nosnippet>802</a>        );
+<a href=#803 id=803 data-nosnippet>803</a>        <span class="macro">assert_eq!</span>(
+<a href=#804 id=804 data-nosnippet>804</a>            cache.len(),
+<a href=#805 id=805 data-nosnippet>805</a>            <span class="number">0</span>,
+<a href=#806 id=806 data-nosnippet>806</a>            <span class="string">"invalidate_user_sessions: all of the user's entries must be dropped"
+<a href=#807 id=807 data-nosnippet>807</a>        </span>);
+<a href=#808 id=808 data-nosnippet>808</a>
+<a href=#809 id=809 data-nosnippet>809</a>        <span class="comment">// `invalidate_user_sessions_except` — the kept session stays cached by
+<a href=#810 id=810 data-nosnippet>810</a>        // design; every other entry must go.
+<a href=#811 id=811 data-nosnippet>811</a>        </span><span class="kw">let </span>(repo, cache, sessions) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">0</span>).<span class="kw">await</span>;
+<a href=#812 id=812 data-nosnippet>812</a>        <span class="macro">assert!</span>(
+<a href=#813 id=813 data-nosnippet>813</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, sessions[<span class="number">0</span>].id)
+<a href=#814 id=814 data-nosnippet>814</a>                .<span class="kw">await
+<a href=#815 id=815 data-nosnippet>815</a>                </span>.is_err()
+<a href=#816 id=816 data-nosnippet>816</a>        );
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="macro">assert_eq!</span>(
+<a href=#818 id=818 data-nosnippet>818</a>            cache.len(),
+<a href=#819 id=819 data-nosnippet>819</a>            <span class="number">1</span>,
+<a href=#820 id=820 data-nosnippet>820</a>            <span class="string">"invalidate_user_sessions_except: only the deliberately kept session may remain"
+<a href=#821 id=821 data-nosnippet>821</a>        </span>);
+<a href=#822 id=822 data-nosnippet>822</a>
+<a href=#823 id=823 data-nosnippet>823</a>        <span class="comment">// `cleanup_expired`
+<a href=#824 id=824 data-nosnippet>824</a>        </span><span class="kw">let </span>(repo, cache, <span class="kw">_</span>) = armed(tenant_id, user_id, <span class="number">2</span>, <span class="number">1</span>).<span class="kw">await</span>;
+<a href=#825 id=825 data-nosnippet>825</a>        <span class="macro">assert!</span>(repo.cleanup_expired(tenant_id).<span class="kw">await</span>.is_err());
+<a href=#826 id=826 data-nosnippet>826</a>        <span class="macro">assert_eq!</span>(
+<a href=#827 id=827 data-nosnippet>827</a>            cache.len(),
+<a href=#828 id=828 data-nosnippet>828</a>            <span class="number">0</span>,
+<a href=#829 id=829 data-nosnippet>829</a>            <span class="string">"cleanup_expired: the tenant's entries must be dropped"
+<a href=#830 id=830 data-nosnippet>830</a>        </span>);
+<a href=#831 id=831 data-nosnippet>831</a>    }
+<a href=#832 id=832 data-nosnippet>832</a>
+<a href=#833 id=833 data-nosnippet>833</a>    <span class="doccomment">/// A2/J2: `consume_by_token_hash` must return the session it removed,
+<a href=#834 id=834 data-nosnippet>834</a>    /// remove it, and refuse to remove it twice — the single-use gate, with
+<a href=#835 id=835 data-nosnippet>835</a>    /// the read-then-delete window gone.
+<a href=#836 id=836 data-nosnippet>836</a>    </span><span class="attr">#[tokio::test]
+<a href=#837 id=837 data-nosnippet>837</a>    </span><span class="kw">async fn </span>consume_by_token_hash_returns_the_row_and_is_single_use() {
+<a href=#838 id=838 data-nosnippet>838</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#839 id=839 data-nosnippet>839</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
+<a href=#840 id=840 data-nosnippet>840</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#841 id=841 data-nosnippet>841</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
+<a href=#842 id=842 data-nosnippet>842</a>
+<a href=#843 id=843 data-nosnippet>843</a>        <span class="kw">let </span>seeded = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"rotate"</span>).<span class="kw">await</span>;
+<a href=#844 id=844 data-nosnippet>844</a>
+<a href=#845 id=845 data-nosnippet>845</a>        <span class="kw">let </span>consumed = repo
+<a href=#846 id=846 data-nosnippet>846</a>            .consume_by_token_hash(tenant_id, <span class="string">"hash-rotate"</span>)
+<a href=#847 id=847 data-nosnippet>847</a>            .<span class="kw">await
+<a href=#848 id=848 data-nosnippet>848</a>            </span>.unwrap()
+<a href=#849 id=849 data-nosnippet>849</a>            .expect(<span class="string">"the live session must be returned"</span>);
+<a href=#850 id=850 data-nosnippet>850</a>        <span class="macro">assert_eq!</span>(consumed.id, seeded.id, <span class="string">"the before-image is the session"</span>);
+<a href=#851 id=851 data-nosnippet>851</a>        <span class="macro">assert_eq!</span>(consumed.user_id, user_id, <span class="string">"…with its fields intact"</span>);
+<a href=#852 id=852 data-nosnippet>852</a>
+<a href=#853 id=853 data-nosnippet>853</a>        <span class="macro">assert!</span>(
+<a href=#854 id=854 data-nosnippet>854</a>            repo.consume_by_token_hash(tenant_id, <span class="string">"hash-rotate"</span>)
+<a href=#855 id=855 data-nosnippet>855</a>                .<span class="kw">await
+<a href=#856 id=856 data-nosnippet>856</a>                </span>.unwrap()
+<a href=#857 id=857 data-nosnippet>857</a>                .is_none(),
+<a href=#858 id=858 data-nosnippet>858</a>            <span class="string">"a second consume of the same token must find nothing — this is \
+<a href=#859 id=859 data-nosnippet>859</a>             the single-use rotation guarantee"
+<a href=#860 id=860 data-nosnippet>860</a>        </span>);
+<a href=#861 id=861 data-nosnippet>861</a>        <span class="macro">assert!</span>(
+<a href=#862 id=862 data-nosnippet>862</a>            repo.get_by_id(tenant_id, seeded.id).<span class="kw">await</span>.is_err(),
+<a href=#863 id=863 data-nosnippet>863</a>            <span class="string">"the row is gone"
+<a href=#864 id=864 data-nosnippet>864</a>        </span>);
+<a href=#865 id=865 data-nosnippet>865</a>    }
+<a href=#866 id=866 data-nosnippet>866</a>
+<a href=#867 id=867 data-nosnippet>867</a>    <span class="doccomment">/// An unknown token is `None`, not an error — the caller maps both to the
+<a href=#868 id=868 data-nosnippet>868</a>    /// same generic auth failure, and an error here would be indistinguishable
+<a href=#869 id=869 data-nosnippet>869</a>    /// from a datastore fault.
+<a href=#870 id=870 data-nosnippet>870</a>    </span><span class="attr">#[tokio::test]
+<a href=#871 id=871 data-nosnippet>871</a>    </span><span class="kw">async fn </span>consume_by_token_hash_misses_cleanly() {
+<a href=#872 id=872 data-nosnippet>872</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#873 id=873 data-nosnippet>873</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
+<a href=#874 id=874 data-nosnippet>874</a>
+<a href=#875 id=875 data-nosnippet>875</a>        <span class="macro">assert!</span>(
+<a href=#876 id=876 data-nosnippet>876</a>            repo.consume_by_token_hash(Uuid::new_v4(), <span class="string">"never-issued"</span>)
+<a href=#877 id=877 data-nosnippet>877</a>                .<span class="kw">await
+<a href=#878 id=878 data-nosnippet>878</a>                </span>.unwrap()
+<a href=#879 id=879 data-nosnippet>879</a>                .is_none()
+<a href=#880 id=880 data-nosnippet>880</a>        );
+<a href=#881 id=881 data-nosnippet>881</a>    }
+<a href=#882 id=882 data-nosnippet>882</a>
+<a href=#883 id=883 data-nosnippet>883</a>    <span class="doccomment">/// Tenant isolation: the token hash alone must never be enough. A
+<a href=#884 id=884 data-nosnippet>884</a>    /// same-hash collision across tenants must not let tenant B consume
+<a href=#885 id=885 data-nosnippet>885</a>    /// tenant A's session.
+<a href=#886 id=886 data-nosnippet>886</a>    </span><span class="attr">#[tokio::test]
+<a href=#887 id=887 data-nosnippet>887</a>    </span><span class="kw">async fn </span>consume_by_token_hash_is_tenant_scoped() {
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="kw">let </span>tenant_a = Uuid::new_v4();
+<a href=#889 id=889 data-nosnippet>889</a>        <span class="kw">let </span>tenant_b = Uuid::new_v4();
+<a href=#890 id=890 data-nosnippet>890</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#891 id=891 data-nosnippet>891</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
+<a href=#892 id=892 data-nosnippet>892</a>
+<a href=#893 id=893 data-nosnippet>893</a>        <span class="kw">let </span>a = seed_session(<span class="kw-2">&amp;</span>repo, tenant_a, Uuid::new_v4(), <span class="string">"shared"</span>).<span class="kw">await</span>;
+<a href=#894 id=894 data-nosnippet>894</a>
+<a href=#895 id=895 data-nosnippet>895</a>        <span class="macro">assert!</span>(
+<a href=#896 id=896 data-nosnippet>896</a>            repo.consume_by_token_hash(tenant_b, <span class="string">"hash-shared"</span>)
+<a href=#897 id=897 data-nosnippet>897</a>                .<span class="kw">await
+<a href=#898 id=898 data-nosnippet>898</a>                </span>.unwrap()
+<a href=#899 id=899 data-nosnippet>899</a>                .is_none(),
+<a href=#900 id=900 data-nosnippet>900</a>            <span class="string">"another tenant must not consume this session"
+<a href=#901 id=901 data-nosnippet>901</a>        </span>);
+<a href=#902 id=902 data-nosnippet>902</a>        <span class="macro">assert!</span>(
+<a href=#903 id=903 data-nosnippet>903</a>            repo.get_by_id(tenant_a, a.id).<span class="kw">await</span>.is_ok(),
+<a href=#904 id=904 data-nosnippet>904</a>            <span class="string">"…and must not have deleted it either"
+<a href=#905 id=905 data-nosnippet>905</a>        </span>);
+<a href=#906 id=906 data-nosnippet>906</a>    }
+<a href=#907 id=907 data-nosnippet>907</a>
+<a href=#908 id=908 data-nosnippet>908</a>    <span class="doccomment">/// I6: consuming a session drops its cached validity entry, so a
+<a href=#909 id=909 data-nosnippet>909</a>    /// rotated-away session cannot keep validating for the cache TTL.
+<a href=#910 id=910 data-nosnippet>910</a>    </span><span class="attr">#[tokio::test]
+<a href=#911 id=911 data-nosnippet>911</a>    </span><span class="kw">async fn </span>consume_by_token_hash_invalidates_the_validation_cache() {
+<a href=#912 id=912 data-nosnippet>912</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#913 id=913 data-nosnippet>913</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#914 id=914 data-nosnippet>914</a>        <span class="kw">let </span>cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
+<a href=#915 id=915 data-nosnippet>915</a>            <span class="number">300</span>,
+<a href=#916 id=916 data-nosnippet>916</a>        )));
+<a href=#917 id=917 data-nosnippet>917</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db).with_validation_cache(cache.clone());
+<a href=#918 id=918 data-nosnippet>918</a>
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="kw">let </span>s = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, Uuid::new_v4(), <span class="string">"cached"</span>).<span class="kw">await</span>;
+<a href=#920 id=920 data-nosnippet>920</a>        <span class="macro">assert!</span>(repo.is_session_active_checked(tenant_id, s.id).<span class="kw">await</span>);
+<a href=#921 id=921 data-nosnippet>921</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>, <span class="string">"the positive answer is cached"</span>);
+<a href=#922 id=922 data-nosnippet>922</a>
+<a href=#923 id=923 data-nosnippet>923</a>        repo.consume_by_token_hash(tenant_id, <span class="string">"hash-cached"</span>)
+<a href=#924 id=924 data-nosnippet>924</a>            .<span class="kw">await
+<a href=#925 id=925 data-nosnippet>925</a>            </span>.unwrap()
+<a href=#926 id=926 data-nosnippet>926</a>            .expect(<span class="string">"consumed"</span>);
+<a href=#927 id=927 data-nosnippet>927</a>
+<a href=#928 id=928 data-nosnippet>928</a>        <span class="macro">assert_eq!</span>(
+<a href=#929 id=929 data-nosnippet>929</a>            cache.len(),
+<a href=#930 id=930 data-nosnippet>930</a>            <span class="number">0</span>,
+<a href=#931 id=931 data-nosnippet>931</a>            <span class="string">"the cached 'still valid' answer must not outlive the row"
+<a href=#932 id=932 data-nosnippet>932</a>        </span>);
+<a href=#933 id=933 data-nosnippet>933</a>    }
+<a href=#934 id=934 data-nosnippet>934</a>
+<a href=#935 id=935 data-nosnippet>935</a>    <span class="doccomment">/// Expiry is NOT filtered by the statement: an expired token must still be
+<a href=#936 id=936 data-nosnippet>936</a>    /// consumed (leaving it behind would let it be replayed until cleanup
+<a href=#937 id=937 data-nosnippet>937</a>    /// ran), with the caller rejecting it on the returned `expires_at`.
+<a href=#938 id=938 data-nosnippet>938</a>    </span><span class="attr">#[tokio::test]
+<a href=#939 id=939 data-nosnippet>939</a>    </span><span class="kw">async fn </span>consume_by_token_hash_also_consumes_an_expired_session() {
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#941 id=941 data-nosnippet>941</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#942 id=942 data-nosnippet>942</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db);
+<a href=#943 id=943 data-nosnippet>943</a>
+<a href=#944 id=944 data-nosnippet>944</a>        <span class="kw">let </span>expired = repo
+<a href=#945 id=945 data-nosnippet>945</a>            .create(CreateSession {
+<a href=#946 id=946 data-nosnippet>946</a>                tenant_id,
+<a href=#947 id=947 data-nosnippet>947</a>                user_id: Uuid::new_v4(),
+<a href=#948 id=948 data-nosnippet>948</a>                token_hash: <span class="string">"hash-expired"</span>.into(),
+<a href=#949 id=949 data-nosnippet>949</a>                ip_address: <span class="prelude-val">None</span>,
+<a href=#950 id=950 data-nosnippet>950</a>                user_agent: <span class="prelude-val">None</span>,
+<a href=#951 id=951 data-nosnippet>951</a>                expires_at: Utc::now() - Duration::hours(<span class="number">1</span>),
+<a href=#952 id=952 data-nosnippet>952</a>            })
+<a href=#953 id=953 data-nosnippet>953</a>            .<span class="kw">await
+<a href=#954 id=954 data-nosnippet>954</a>            </span>.unwrap();
+<a href=#955 id=955 data-nosnippet>955</a>
+<a href=#956 id=956 data-nosnippet>956</a>        <span class="kw">let </span>consumed = repo
+<a href=#957 id=957 data-nosnippet>957</a>            .consume_by_token_hash(tenant_id, <span class="string">"hash-expired"</span>)
+<a href=#958 id=958 data-nosnippet>958</a>            .<span class="kw">await
+<a href=#959 id=959 data-nosnippet>959</a>            </span>.unwrap()
+<a href=#960 id=960 data-nosnippet>960</a>            .expect(<span class="string">"an expired session is still returned…"</span>);
+<a href=#961 id=961 data-nosnippet>961</a>        <span class="macro">assert!</span>(
+<a href=#962 id=962 data-nosnippet>962</a>            consumed.expires_at &lt; Utc::now(),
+<a href=#963 id=963 data-nosnippet>963</a>            <span class="string">"…carrying the expiry the caller rejects it on"
+<a href=#964 id=964 data-nosnippet>964</a>        </span>);
+<a href=#965 id=965 data-nosnippet>965</a>        <span class="macro">assert!</span>(
+<a href=#966 id=966 data-nosnippet>966</a>            repo.get_by_id(tenant_id, expired.id).<span class="kw">await</span>.is_err(),
+<a href=#967 id=967 data-nosnippet>967</a>            <span class="string">"…and is removed, not left replayable"
+<a href=#968 id=968 data-nosnippet>968</a>        </span>);
+<a href=#969 id=969 data-nosnippet>969</a>    }
+<a href=#970 id=970 data-nosnippet>970</a>
+<a href=#971 id=971 data-nosnippet>971</a>    <span class="doccomment">/// The happy path is unchanged by OBS-3: every delete path still returns
+<a href=#972 id=972 data-nosnippet>972</a>    /// `Ok`, still removes the rows, and still clears the cache. Guards
+<a href=#973 id=973 data-nosnippet>973</a>    /// against a `.check()` that rejects an ordinary successful DELETE.
+<a href=#974 id=974 data-nosnippet>974</a>    </span><span class="attr">#[tokio::test]
+<a href=#975 id=975 data-nosnippet>975</a>    </span><span class="kw">async fn </span>delete_paths_still_succeed_and_clear_the_cache() {
+<a href=#976 id=976 data-nosnippet>976</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#977 id=977 data-nosnippet>977</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
+<a href=#978 id=978 data-nosnippet>978</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#979 id=979 data-nosnippet>979</a>        <span class="kw">let </span>cache = Arc::new(SessionValidationCache::new(std::time::Duration::from_secs(
+<a href=#980 id=980 data-nosnippet>980</a>            <span class="number">300</span>,
+<a href=#981 id=981 data-nosnippet>981</a>        )));
+<a href=#982 id=982 data-nosnippet>982</a>        <span class="kw">let </span>repo = SurrealSessionRepository::new(db).with_validation_cache(cache.clone());
+<a href=#983 id=983 data-nosnippet>983</a>
+<a href=#984 id=984 data-nosnippet>984</a>        <span class="kw">let </span>a = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"1"</span>).<span class="kw">await</span>;
+<a href=#985 id=985 data-nosnippet>985</a>        <span class="kw">let </span>b = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"2"</span>).<span class="kw">await</span>;
+<a href=#986 id=986 data-nosnippet>986</a>        <span class="kw">let </span>c = seed_session(<span class="kw-2">&amp;</span>repo, tenant_id, user_id, <span class="string">"3"</span>).<span class="kw">await</span>;
+<a href=#987 id=987 data-nosnippet>987</a>        <span class="kw">for </span>s <span class="kw">in </span>[<span class="kw-2">&amp;</span>a, <span class="kw-2">&amp;</span>b, <span class="kw-2">&amp;</span>c] {
+<a href=#988 id=988 data-nosnippet>988</a>            <span class="macro">assert!</span>(repo.is_session_active_checked(tenant_id, s.id).<span class="kw">await</span>);
+<a href=#989 id=989 data-nosnippet>989</a>        }
+<a href=#990 id=990 data-nosnippet>990</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">3</span>);
+<a href=#991 id=991 data-nosnippet>991</a>
+<a href=#992 id=992 data-nosnippet>992</a>        repo.invalidate(tenant_id, a.id).<span class="kw">await</span>.unwrap();
+<a href=#993 id=993 data-nosnippet>993</a>        <span class="macro">assert!</span>(repo.get_by_id(tenant_id, a.id).<span class="kw">await</span>.is_err());
+<a href=#994 id=994 data-nosnippet>994</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">2</span>);
+<a href=#995 id=995 data-nosnippet>995</a>
+<a href=#996 id=996 data-nosnippet>996</a>        <span class="macro">assert!</span>(repo.consume(tenant_id, b.id).<span class="kw">await</span>.unwrap());
+<a href=#997 id=997 data-nosnippet>997</a>        <span class="macro">assert!</span>(
+<a href=#998 id=998 data-nosnippet>998</a>            !repo.consume(tenant_id, b.id).<span class="kw">await</span>.unwrap(),
+<a href=#999 id=999 data-nosnippet>999</a>            <span class="string">"second consume of the same session must lose the single-use race"
+<a href=#1000 id=1000 data-nosnippet>1000</a>        </span>);
+<a href=#1001 id=1001 data-nosnippet>1001</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>);
+<a href=#1002 id=1002 data-nosnippet>1002</a>
+<a href=#1003 id=1003 data-nosnippet>1003</a>        <span class="macro">assert_eq!</span>(
+<a href=#1004 id=1004 data-nosnippet>1004</a>            repo.invalidate_user_sessions_except(tenant_id, user_id, c.id)
+<a href=#1005 id=1005 data-nosnippet>1005</a>                .<span class="kw">await
+<a href=#1006 id=1006 data-nosnippet>1006</a>                </span>.unwrap(),
+<a href=#1007 id=1007 data-nosnippet>1007</a>            <span class="number">0</span>,
+<a href=#1008 id=1008 data-nosnippet>1008</a>            <span class="string">"c is the only session left and it is the one being kept"
+<a href=#1009 id=1009 data-nosnippet>1009</a>        </span>);
+<a href=#1010 id=1010 data-nosnippet>1010</a>        repo.invalidate_user_sessions(tenant_id, user_id)
+<a href=#1011 id=1011 data-nosnippet>1011</a>            .<span class="kw">await
+<a href=#1012 id=1012 data-nosnippet>1012</a>            </span>.unwrap();
+<a href=#1013 id=1013 data-nosnippet>1013</a>        <span class="macro">assert!</span>(repo.get_by_id(tenant_id, c.id).<span class="kw">await</span>.is_err());
+<a href=#1014 id=1014 data-nosnippet>1014</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">0</span>);
+<a href=#1015 id=1015 data-nosnippet>1015</a>
+<a href=#1016 id=1016 data-nosnippet>1016</a>        <span class="comment">// `cleanup_expired` over an empty/all-fresh table still succeeds.
+<a href=#1017 id=1017 data-nosnippet>1017</a>        </span><span class="macro">assert_eq!</span>(repo.cleanup_expired(tenant_id).<span class="kw">await</span>.unwrap(), <span class="number">0</span>);
+<a href=#1018 id=1018 data-nosnippet>1018</a>    }
+<a href=#1019 id=1019 data-nosnippet>1019</a>}
 </code></pre></div></section></main></body></html>

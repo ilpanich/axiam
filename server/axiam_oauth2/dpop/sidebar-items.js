@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PROOF_MAX_AGE_SECS","DPOP_TYP","TOKEN_TYPE_BEARER","TOKEN_TYPE_DPOP"],"enum":["DpopError"],"fn":["is_dpop_scheme","new_nonce","token_type_for","verify_dpop_proof"],"struct":["DpopExpectation","VerifiedDpopProof"]};

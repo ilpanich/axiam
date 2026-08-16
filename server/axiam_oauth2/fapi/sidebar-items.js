@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FapiRegistrationError"],"fn":["enforce_authorization_request","enforce_token_request","validate_registration","wants_certificate_binding","wants_dpop_binding"],"struct":["RegistrationView","TokenRequestEvidence"]};

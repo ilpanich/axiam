@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["authenticate_mtls_client","thumbprint_s256"],"struct":["CertificateIdentity","PresentedCertificate"]};

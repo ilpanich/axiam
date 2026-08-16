@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BACKCHANNEL_LOGOUT_EVENT","LOGOUT_TOKEN_LIFETIME_SECS"],"enum":["LogoutOutcome"],"fn":["decode_id_token_hint","issue_logout_token","resolve_post_logout_redirect"],"struct":["IdTokenHint","LogoutTokenClaims"]};

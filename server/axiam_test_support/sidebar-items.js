@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["other_password","test_password"]};

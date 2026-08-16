@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["MailType"],"mod":["audit_consumer","authz_consumer","cache_invalidation","config","connection","error","mail_consumer","mail_publisher","messages","notification_publisher","webhook_publisher"],"struct":["OutboundMailMessage"]};
+window.SIDEBAR_ITEMS = {"enum":["MailType"],"mod":["audit_consumer","authz_consumer","cache_invalidation","config","connection","error","mail_consumer","mail_publisher","messages","notification_publisher","reactor","webhook_publisher"],"struct":["NoopReactorGate","OutboundMailMessage"]};

@@ -595,694 +595,724 @@
 <a href=#595 id=595 data-nosnippet>595</a>
 <a href=#596 id=596 data-nosnippet>596</a><span class="doccomment">/// Truncates `now` down to the start of the current fixed
 <a href=#597 id=597 data-nosnippet>597</a>/// [`WINDOW_SECS`]-second window.
-<a href=#598 id=598 data-nosnippet>598</a></span><span class="kw">fn </span>window_start(now: DateTime&lt;Utc&gt;) -&gt; DateTime&lt;Utc&gt; {
-<a href=#599 id=599 data-nosnippet>599</a>    <span class="kw">let </span>epoch = now.timestamp();
-<a href=#600 id=600 data-nosnippet>600</a>    <span class="kw">let </span>start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
-<a href=#601 id=601 data-nosnippet>601</a>    DateTime::&lt;Utc&gt;::from_timestamp(start_epoch, <span class="number">0</span>).unwrap_or(now)
-<a href=#602 id=602 data-nosnippet>602</a>}
-<a href=#603 id=603 data-nosnippet>603</a>
-<a href=#604 id=604 data-nosnippet>604</a><span class="doccomment">/// Builds a gRPC `RESOURCE_EXHAUSTED` response — the same status the
-<a href=#605 id=605 data-nosnippet>605</a>/// in-memory `GovernorLayer` returns for `GovernorError::TooManyRequests`
-<a href=#606 id=606 data-nosnippet>606</a>/// (see `tower_governor::errors::GovernorError`'s `Response&lt;tonic::body::Body&gt;`
-<a href=#607 id=607 data-nosnippet>607</a>/// conversion) — so clients see one consistent rate-limit contract
-<a href=#608 id=608 data-nosnippet>608</a>/// regardless of which layer rejected the request.
-<a href=#609 id=609 data-nosnippet>609</a></span><span class="kw">fn </span>too_many_requests_response() -&gt; Response&lt;tonic::body::Body&gt; {
-<a href=#610 id=610 data-nosnippet>610</a>    tonic::Status::resource_exhausted(<span class="string">"rate limit exceeded"</span>).into_http()
-<a href=#611 id=611 data-nosnippet>611</a>}
-<a href=#612 id=612 data-nosnippet>612</a>
-<a href=#613 id=613 data-nosnippet>613</a><span class="doccomment">/// Shared (cross-replica) rate-limit pre-check `tower::Layer` for the gRPC
-<a href=#614 id=614 data-nosnippet>614</a>/// path (SECHRD-03 / D-01a, D-01b, D-01c, D-01d).
-<a href=#615 id=615 data-nosnippet>615</a>///
-<a href=#616 id=616 data-nosnippet>616</a>/// Consults the process-wide write-behind [`SharedRateLimitCounter`]
-<a href=#617 id=617 data-nosnippet>617</a>/// (`axiam-db::rate_limit_counter`) — the SAME counter type and the SAME env
-<a href=#618 id=618 data-nosnippet>618</a>/// knobs the REST `RateLimitShared` middleware uses, so both listeners behave
-<a href=#619 id=619 data-nosnippet>619</a>/// identically. There is no reimplemented counter here. Wire this layer BEFORE
-<a href=#620 id=620 data-nosnippet>620</a>/// (i.e. `.layer()` it FIRST — tower's `ServiceBuilder`/`Server::builder()`
-<a href=#621 id=621 data-nosnippet>621</a>/// executes the FIRST-added layer with the request FIRST, the opposite of
-<a href=#622 id=622 data-nosnippet>622</a>/// actix's last-`.wrap()`-is-outermost rule) the existing
-<a href=#623 id=623 data-nosnippet>623</a>/// [`build_grpc_governor_layer`] `GovernorLayer` on the same
-<a href=#624 id=624 data-nosnippet>624</a>/// `Server::builder()`, e.g.:
-<a href=#625 id=625 data-nosnippet>625</a>///
-<a href=#626 id=626 data-nosnippet>626</a>/// ```ignore
-<a href=#627 id=627 data-nosnippet>627</a>/// Server::builder()
-<a href=#628 id=628 data-nosnippet>628</a>///     .layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops))
-<a href=#629 id=629 data-nosnippet>629</a>///     .layer(build_grpc_governor_layer(grpc_config.grpc_authz_per_sec))
-<a href=#630 id=630 data-nosnippet>630</a>///     .add_service(authz_svc)
-<a href=#631 id=631 data-nosnippet>631</a>/// ```
-<a href=#632 id=632 data-nosnippet>632</a>///
-<a href=#633 id=633 data-nosnippet>633</a>/// # No synchronous datastore write on the request path (H2 fix)
-<a href=#634 id=634 data-nosnippet>634</a>///
-<a href=#635 id=635 data-nosnippet>635</a>/// This layer used to `await` one SurrealDB `UPSERT` per call. Because it is a
-<a href=#636 id=636 data-nosnippet>636</a>/// **server-wide** layer on the tonic listener, EVERY gRPC call paid that
-<a href=#637 id=637 data-nosnippet>637</a>/// write — measured at ~39–46 ms of datastore-attributed latency, pinning the
-<a href=#638 id=638 data-nosnippet>638</a>/// listener at ~20 ops/s regardless of concurrency
-<a href=#639 id=639 data-nosnippet>639</a>/// (`claude_dev/postseed-transient-investigation.md` §1, §2, §7). It now pays
-<a href=#640 id=640 data-nosnippet>640</a>/// only an in-memory sharded-map increment
-<a href=#641 id=641 data-nosnippet>641</a>/// ([`SharedRateLimitCounter::check`], fully synchronous), while a single
-<a href=#642 id=642 data-nosnippet>642</a>/// background flusher coalesces the increments into one datastore write per
-<a href=#643 id=643 data-nosnippet>643</a>/// bucket per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS`. Cross-replica enforcement
-<a href=#644 id=644 data-nosnippet>644</a>/// is therefore eventual, with the overshoot bound stated precisely in the
-<a href=#645 id=645 data-nosnippet>645</a>/// [`axiam_db::rate_limit_counter`] module docs; the in-memory governor still
-<a href=#646 id=646 data-nosnippet>646</a>/// makes a full per-replica decision on the same traffic.
-<a href=#647 id=647 data-nosnippet>647</a>///
-<a href=#648 id=648 data-nosnippet>648</a>/// Everything else is unchanged: the same `{endpoint}:{ip}` bucket key, the
-<a href=#649 id=649 data-nosnippet>649</a>/// same `GrpcTrustedHopsKeyExtractor` key derivation (D-01d), and the same
-<a href=#650 id=650 data-nosnippet>650</a>/// `RESOURCE_EXHAUSTED` rejection.
-<a href=#651 id=651 data-nosnippet>651</a>///
-<a href=#652 id=652 data-nosnippet>652</a>/// **Fail-open (D-01b, T-24-73 accepted risk):** when no client IP can be
-<a href=#653 id=653 data-nosnippet>653</a>/// extracted, or the shared layer is disabled via
-<a href=#654 id=654 data-nosnippet>654</a>/// `AXIAM__RATE_LIMIT__SHARED=off`, this layer forwards the request unchanged
-<a href=#655 id=655 data-nosnippet>655</a>/// so the existing in-memory governor makes the decision instead. Store
-<a href=#656 id=656 data-nosnippet>656</a>/// outages are surfaced by the counter's flusher (a `warn` alarm that never
-<a href=#657 id=657 data-nosnippet>657</a>/// includes the raw key) while decisions keep being served from local counts —
-<a href=#658 id=658 data-nosnippet>658</a>/// a counter-store outage must never hard-block gRPC authz traffic.
-<a href=#659 id=659 data-nosnippet>659</a>///
-<a href=#660 id=660 data-nosnippet>660</a>/// **CRITICAL (RESEARCH Pitfall 1):** `governor::StateStore::measure_and_replace`
-<a href=#661 id=661 data-nosnippet>661</a>/// is a *synchronous* trait method. This layer is deliberately NOT a
-<a href=#662 id=662 data-nosnippet>662</a>/// `StateStore` implementation and never calls `block_on`.
-<a href=#663 id=663 data-nosnippet>663</a>///
-<a href=#664 id=664 data-nosnippet>664</a>/// No longer generic over the SurrealDB connection type: it holds a
-<a href=#665 id=665 data-nosnippet>665</a>/// non-generic [`SharedRateLimitCounter`] (which owns the boxed store), which
-<a href=#666 id=666 data-nosnippet>666</a>/// is why the SurrealDB handle only appears in [`Self::new`]'s signature.
-<a href=#667 id=667 data-nosnippet>667</a></span><span class="attr">#[derive(Clone)]
-<a href=#668 id=668 data-nosnippet>668</a></span><span class="kw">pub struct </span>GrpcSharedRateLimitLayer {
-<a href=#669 id=669 data-nosnippet>669</a>    counter: SharedRateLimitCounter,
-<a href=#670 id=670 data-nosnippet>670</a>    scope: SharedScope,
-<a href=#671 id=671 data-nosnippet>671</a>    trusted_hops: usize,
-<a href=#672 id=672 data-nosnippet>672</a>}
-<a href=#673 id=673 data-nosnippet>673</a>
-<a href=#674 id=674 data-nosnippet>674</a><span class="doccomment">/// How a [`GrpcSharedRateLimitLayer`] derives `(bucket endpoint, window
-<a href=#675 id=675 data-nosnippet>675</a>/// limit)` for a request.
-<a href=#676 id=676 data-nosnippet>676</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-<a href=#677 id=677 data-nosnippet>677</a></span><span class="kw">enum </span>SharedScope {
-<a href=#678 id=678 data-nosnippet>678</a>    <span class="doccomment">/// One bucket for every request, whatever the method — the pre-I2 shape.
-<a href=#679 id=679 data-nosnippet>679</a>    /// `limit` is already expressed in the 60-second window.
-<a href=#680 id=680 data-nosnippet>680</a>    </span>Uniform { endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, limit: u32 },
-<a href=#681 id=681 data-nosnippet>681</a>    <span class="doccomment">/// One bucket per [`GrpcMethodFamily`] (I2), sized from per-second
-<a href=#682 id=682 data-nosnippet>682</a>    /// ceilings and converted with [`per_sec_to_window_limit`].
-<a href=#683 id=683 data-nosnippet>683</a>    </span>PerFamily(GrpcRateLimits),
-<a href=#684 id=684 data-nosnippet>684</a>}
-<a href=#685 id=685 data-nosnippet>685</a>
-<a href=#686 id=686 data-nosnippet>686</a><span class="kw">impl </span>SharedScope {
-<a href=#687 id=687 data-nosnippet>687</a>    <span class="doccomment">/// `(endpoint, window limit)` for `path`.
-<a href=#688 id=688 data-nosnippet>688</a>    ///
-<a href=#689 id=689 data-nosnippet>689</a>    /// Every path resolves to a bucket — since residual 4 there is no family
-<a href=#690 id=690 data-nosnippet>690</a>    /// that skips the shared counter.
-<a href=#691 id=691 data-nosnippet>691</a>    </span><span class="kw">fn </span>resolve(<span class="self">self</span>, path: <span class="kw-2">&amp;</span>str) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
-<a href=#692 id=692 data-nosnippet>692</a>        <span class="kw">match </span><span class="self">self </span>{
-<a href=#693 id=693 data-nosnippet>693</a>            <span class="self">Self</span>::Uniform { endpoint, limit } =&gt; (endpoint, limit),
-<a href=#694 id=694 data-nosnippet>694</a>            <span class="self">Self</span>::PerFamily(limits) =&gt; {
-<a href=#695 id=695 data-nosnippet>695</a>                <span class="kw">let </span>family = GrpcMethodFamily::classify(path);
-<a href=#696 id=696 data-nosnippet>696</a>                (family.shared_endpoint(), limits.window_limit(family))
-<a href=#697 id=697 data-nosnippet>697</a>            }
-<a href=#698 id=698 data-nosnippet>698</a>        }
-<a href=#699 id=699 data-nosnippet>699</a>    }
-<a href=#700 id=700 data-nosnippet>700</a>}
-<a href=#701 id=701 data-nosnippet>701</a>
-<a href=#702 id=702 data-nosnippet>702</a><span class="kw">impl </span>GrpcSharedRateLimitLayer {
-<a href=#703 id=703 data-nosnippet>703</a>    <span class="doccomment">/// Builds the layer and its process-wide write-behind counter from a
-<a href=#704 id=704 data-nosnippet>704</a>    /// SurrealDB handle, reading `AXIAM__RATE_LIMIT__SHARED` /
-<a href=#705 id=705 data-nosnippet>705</a>    /// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` via
-<a href=#706 id=706 data-nosnippet>706</a>    /// [`axiam_db::SharedRateLimitConfig::from_env`].
-<a href=#707 id=707 data-nosnippet>707</a>    ///
-<a href=#708 id=708 data-nosnippet>708</a>    /// Call this ONCE per process (as `start_grpc_server` does): the counter's
-<a href=#709 id=709 data-nosnippet>709</a>    /// local counts live in the instance it creates, so building several would
-<a href=#710 id=710 data-nosnippet>710</a>    /// fragment them. Use [`Self::with_counter`] to share one counter
-<a href=#711 id=711 data-nosnippet>711</a>    /// explicitly.
-<a href=#712 id=712 data-nosnippet>712</a>    ///
-<a href=#713 id=713 data-nosnippet>713</a>    /// `endpoint` MUST be unique per rate-limited gRPC surface so the shared
-<a href=#714 id=714 data-nosnippet>714</a>    /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
-<a href=#715 id=715 data-nosnippet>715</a>    /// never collapse distinct surfaces into one global bucket.
-<a href=#716 id=716 data-nosnippet>716</a>    ///
-<a href=#717 id=717 data-nosnippet>717</a>    /// **Units:** `limit` is the budget for one [`WINDOW_SECS`]-second window,
-<a href=#718 id=718 data-nosnippet>718</a>    /// NOT a per-second rate. Prefer [`Self::new_method_scoped`], whose
-<a href=#719 id=719 data-nosnippet>719</a>    /// parameter type ([`GrpcRateLimits`]) is per-second at the boundary and
-<a href=#720 id=720 data-nosnippet>720</a>    /// does the conversion itself — that is the shape that makes the I1 units
-<a href=#721 id=721 data-nosnippet>721</a>    /// bug unrepresentable.
-<a href=#722 id=722 data-nosnippet>722</a>    </span><span class="kw">pub fn </span>new&lt;C: Connection&gt;(
-<a href=#723 id=723 data-nosnippet>723</a>        db: <span class="kw">impl </span>Into&lt;axiam_db::DbHandle&lt;C&gt;&gt;,
-<a href=#724 id=724 data-nosnippet>724</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
-<a href=#725 id=725 data-nosnippet>725</a>        limit: u32,
-<a href=#726 id=726 data-nosnippet>726</a>        trusted_hops: usize,
-<a href=#727 id=727 data-nosnippet>727</a>    ) -&gt; <span class="self">Self </span>{
-<a href=#728 id=728 data-nosnippet>728</a>        <span class="self">Self</span>::with_counter(
-<a href=#729 id=729 data-nosnippet>729</a>            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
-<a href=#730 id=730 data-nosnippet>730</a>            endpoint,
-<a href=#731 id=731 data-nosnippet>731</a>            limit,
-<a href=#732 id=732 data-nosnippet>732</a>            trusted_hops,
-<a href=#733 id=733 data-nosnippet>733</a>        )
-<a href=#734 id=734 data-nosnippet>734</a>    }
-<a href=#735 id=735 data-nosnippet>735</a>
-<a href=#736 id=736 data-nosnippet>736</a>    <span class="doccomment">/// Builds the layer over an EXISTING counter — for tests, and for any
-<a href=#737 id=737 data-nosnippet>737</a>    /// deployment that wants the gRPC listener and something else to share one
-<a href=#738 id=738 data-nosnippet>738</a>    /// counter instance.
-<a href=#739 id=739 data-nosnippet>739</a>    ///
-<a href=#740 id=740 data-nosnippet>740</a>    /// `limit` is per [`WINDOW_SECS`]-second window — see [`Self::new`].
-<a href=#741 id=741 data-nosnippet>741</a>    </span><span class="kw">pub fn </span>with_counter(
-<a href=#742 id=742 data-nosnippet>742</a>        counter: SharedRateLimitCounter,
-<a href=#743 id=743 data-nosnippet>743</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
-<a href=#744 id=744 data-nosnippet>744</a>        limit: u32,
-<a href=#745 id=745 data-nosnippet>745</a>        trusted_hops: usize,
-<a href=#746 id=746 data-nosnippet>746</a>    ) -&gt; <span class="self">Self </span>{
-<a href=#747 id=747 data-nosnippet>747</a>        <span class="self">Self </span>{
-<a href=#748 id=748 data-nosnippet>748</a>            counter,
-<a href=#749 id=749 data-nosnippet>749</a>            scope: SharedScope::Uniform { endpoint, limit },
-<a href=#750 id=750 data-nosnippet>750</a>            trusted_hops,
-<a href=#751 id=751 data-nosnippet>751</a>        }
-<a href=#752 id=752 data-nosnippet>752</a>    }
-<a href=#753 id=753 data-nosnippet>753</a>
-<a href=#754 id=754 data-nosnippet>754</a>    <span class="doccomment">/// **The production constructor (I1 + I2).** Builds the layer and its
-<a href=#755 id=755 data-nosnippet>755</a>    /// process-wide write-behind counter with one shared bucket per
-<a href=#756 id=756 data-nosnippet>756</a>    /// [`GrpcMethodFamily`], sized from **per-second** ceilings.
-<a href=#757 id=757 data-nosnippet>757</a>    ///
-<a href=#758 id=758 data-nosnippet>758</a>    /// The per-second → per-window conversion happens here, once, via
-<a href=#759 id=759 data-nosnippet>759</a>    /// [`per_sec_to_window_limit`] — a caller cannot get the units wrong
-<a href=#760 id=760 data-nosnippet>760</a>    /// because it never sees the window.
-<a href=#761 id=761 data-nosnippet>761</a>    </span><span class="kw">pub fn </span>new_method_scoped&lt;C: Connection&gt;(
-<a href=#762 id=762 data-nosnippet>762</a>        db: <span class="kw">impl </span>Into&lt;axiam_db::DbHandle&lt;C&gt;&gt;,
-<a href=#763 id=763 data-nosnippet>763</a>        limits: GrpcRateLimits,
-<a href=#764 id=764 data-nosnippet>764</a>        trusted_hops: usize,
-<a href=#765 id=765 data-nosnippet>765</a>    ) -&gt; <span class="self">Self </span>{
-<a href=#766 id=766 data-nosnippet>766</a>        <span class="self">Self</span>::with_counter_method_scoped(
-<a href=#767 id=767 data-nosnippet>767</a>            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
-<a href=#768 id=768 data-nosnippet>768</a>            limits,
-<a href=#769 id=769 data-nosnippet>769</a>            trusted_hops,
-<a href=#770 id=770 data-nosnippet>770</a>        )
-<a href=#771 id=771 data-nosnippet>771</a>    }
-<a href=#772 id=772 data-nosnippet>772</a>
-<a href=#773 id=773 data-nosnippet>773</a>    <span class="doccomment">/// [`Self::new_method_scoped`] over an EXISTING counter — for tests and
-<a href=#774 id=774 data-nosnippet>774</a>    /// for sharing one counter instance across listeners.
-<a href=#775 id=775 data-nosnippet>775</a>    </span><span class="kw">pub fn </span>with_counter_method_scoped(
-<a href=#776 id=776 data-nosnippet>776</a>        counter: SharedRateLimitCounter,
-<a href=#777 id=777 data-nosnippet>777</a>        limits: GrpcRateLimits,
-<a href=#778 id=778 data-nosnippet>778</a>        trusted_hops: usize,
-<a href=#779 id=779 data-nosnippet>779</a>    ) -&gt; <span class="self">Self </span>{
-<a href=#780 id=780 data-nosnippet>780</a>        <span class="self">Self </span>{
-<a href=#781 id=781 data-nosnippet>781</a>            counter,
-<a href=#782 id=782 data-nosnippet>782</a>            scope: SharedScope::PerFamily(limits),
-<a href=#783 id=783 data-nosnippet>783</a>            trusted_hops,
-<a href=#784 id=784 data-nosnippet>784</a>        }
-<a href=#785 id=785 data-nosnippet>785</a>    }
-<a href=#786 id=786 data-nosnippet>786</a>
-<a href=#787 id=787 data-nosnippet>787</a>    <span class="doccomment">/// The `(bucket endpoint, window limit)` this layer applies to `path`.
-<a href=#788 id=788 data-nosnippet>788</a>    ///
-<a href=#789 id=789 data-nosnippet>789</a>    /// Exposed so the units at the composition root can be asserted directly
-<a href=#790 id=790 data-nosnippet>790</a>    /// by a test instead of by reading the call site (I1 acceptance).
-<a href=#791 id=791 data-nosnippet>791</a>    </span><span class="kw">pub fn </span>resolve_for_path(<span class="kw-2">&amp;</span><span class="self">self</span>, path: <span class="kw-2">&amp;</span>str) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
-<a href=#792 id=792 data-nosnippet>792</a>        <span class="self">self</span>.scope.resolve(path)
-<a href=#793 id=793 data-nosnippet>793</a>    }
-<a href=#794 id=794 data-nosnippet>794</a>}
-<a href=#795 id=795 data-nosnippet>795</a>
-<a href=#796 id=796 data-nosnippet>796</a><span class="kw">impl</span>&lt;S&gt; Layer&lt;S&gt; <span class="kw">for </span>GrpcSharedRateLimitLayer {
-<a href=#797 id=797 data-nosnippet>797</a>    <span class="kw">type </span>Service = GrpcSharedRateLimitService&lt;S&gt;;
-<a href=#798 id=798 data-nosnippet>798</a>
-<a href=#799 id=799 data-nosnippet>799</a>    <span class="kw">fn </span>layer(<span class="kw-2">&amp;</span><span class="self">self</span>, inner: S) -&gt; <span class="self">Self</span>::Service {
-<a href=#800 id=800 data-nosnippet>800</a>        GrpcSharedRateLimitService {
-<a href=#801 id=801 data-nosnippet>801</a>            inner,
-<a href=#802 id=802 data-nosnippet>802</a>            counter: <span class="self">self</span>.counter.clone(),
-<a href=#803 id=803 data-nosnippet>803</a>            scope: <span class="self">self</span>.scope,
-<a href=#804 id=804 data-nosnippet>804</a>            trusted_hops: <span class="self">self</span>.trusted_hops,
-<a href=#805 id=805 data-nosnippet>805</a>        }
-<a href=#806 id=806 data-nosnippet>806</a>    }
-<a href=#807 id=807 data-nosnippet>807</a>}
-<a href=#808 id=808 data-nosnippet>808</a>
-<a href=#809 id=809 data-nosnippet>809</a><span class="doccomment">/// Inner `tower::Service` produced by [`GrpcSharedRateLimitLayer`].
-<a href=#810 id=810 data-nosnippet>810</a>///
-<a href=#811 id=811 data-nosnippet>811</a>/// `Clone` requires only `S: Clone` — [`SharedRateLimitCounter`] is an
-<a href=#812 id=812 data-nosnippet>812</a>/// `Arc`-backed handle, so every clone (one per request, via tonic's
-<a href=#813 id=813 data-nosnippet>813</a>/// clone-and-swap) shares the SAME counter state.
-<a href=#814 id=814 data-nosnippet>814</a></span><span class="attr">#[derive(Clone)]
-<a href=#815 id=815 data-nosnippet>815</a></span><span class="kw">pub struct </span>GrpcSharedRateLimitService&lt;S&gt; {
-<a href=#816 id=816 data-nosnippet>816</a>    inner: S,
-<a href=#817 id=817 data-nosnippet>817</a>    counter: SharedRateLimitCounter,
-<a href=#818 id=818 data-nosnippet>818</a>    scope: SharedScope,
-<a href=#819 id=819 data-nosnippet>819</a>    trusted_hops: usize,
-<a href=#820 id=820 data-nosnippet>820</a>}
-<a href=#821 id=821 data-nosnippet>821</a>
-<a href=#822 id=822 data-nosnippet>822</a><span class="kw">impl</span>&lt;S&gt; Service&lt;Request&lt;tonic::body::Body&gt;&gt; <span class="kw">for </span>GrpcSharedRateLimitService&lt;S&gt;
-<a href=#823 id=823 data-nosnippet>823</a><span class="kw">where
-<a href=#824 id=824 data-nosnippet>824</a>    </span>S: Service&lt;Request&lt;tonic::body::Body&gt;, Response = Response&lt;tonic::body::Body&gt;&gt;
-<a href=#825 id=825 data-nosnippet>825</a>        + Clone
-<a href=#826 id=826 data-nosnippet>826</a>        + Send
-<a href=#827 id=827 data-nosnippet>827</a>        + <span class="lifetime">'static</span>,
-<a href=#828 id=828 data-nosnippet>828</a>    S::Future: Send + <span class="lifetime">'static</span>,
-<a href=#829 id=829 data-nosnippet>829</a>    S::Error: Send + <span class="lifetime">'static</span>,
-<a href=#830 id=830 data-nosnippet>830</a>{
-<a href=#831 id=831 data-nosnippet>831</a>    <span class="kw">type </span>Response = Response&lt;tonic::body::Body&gt;;
-<a href=#832 id=832 data-nosnippet>832</a>    <span class="kw">type </span>Error = S::Error;
-<a href=#833 id=833 data-nosnippet>833</a>    <span class="kw">type </span>Future = Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Response, <span class="self">Self</span>::Error&gt;&gt; + Send&gt;&gt;;
-<a href=#834 id=834 data-nosnippet>834</a>
-<a href=#835 id=835 data-nosnippet>835</a>    <span class="kw">fn </span>poll_ready(<span class="kw-2">&amp;mut </span><span class="self">self</span>, cx: <span class="kw-2">&amp;mut </span>Context&lt;<span class="lifetime">'_</span>&gt;) -&gt; Poll&lt;<span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;&gt; {
-<a href=#836 id=836 data-nosnippet>836</a>        <span class="self">self</span>.inner.poll_ready(cx)
-<a href=#837 id=837 data-nosnippet>837</a>    }
-<a href=#838 id=838 data-nosnippet>838</a>
-<a href=#839 id=839 data-nosnippet>839</a>    <span class="kw">fn </span>call(<span class="kw-2">&amp;mut </span><span class="self">self</span>, req: Request&lt;tonic::body::Body&gt;) -&gt; <span class="self">Self</span>::Future {
-<a href=#840 id=840 data-nosnippet>840</a>        <span class="comment">// Standard clone-and-swap so the returned future owns an
-<a href=#841 id=841 data-nosnippet>841</a>        // independent, ready-to-call copy of the inner service (mirrors
-<a href=#842 id=842 data-nosnippet>842</a>        // tower-http's convention for async-wrapping middlewares).
-<a href=#843 id=843 data-nosnippet>843</a>        </span><span class="kw">let </span>clone = <span class="self">self</span>.inner.clone();
-<a href=#844 id=844 data-nosnippet>844</a>        <span class="kw">let </span><span class="kw-2">mut </span>inner = std::mem::replace(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inner, clone);
-<a href=#845 id=845 data-nosnippet>845</a>
-<a href=#846 id=846 data-nosnippet>846</a>        <span class="comment">// Cheap `Arc` clone — every request shares the ONE process-wide
-<a href=#847 id=847 data-nosnippet>847</a>        // counter, never a fresh one (a per-request counter would count
-<a href=#848 id=848 data-nosnippet>848</a>        // nothing).
-<a href=#849 id=849 data-nosnippet>849</a>        </span><span class="kw">let </span>counter = <span class="self">self</span>.counter.clone();
-<a href=#850 id=850 data-nosnippet>850</a>        <span class="comment">// I2: the bucket (and its ceiling) depend on which method family the
-<a href=#851 id=851 data-nosnippet>851</a>        // request belongs to. Every family resolves to a bucket — reflection
-<a href=#852 id=852 data-nosnippet>852</a>        // and health are counted too, against a generous one (residual 4).
-<a href=#853 id=853 data-nosnippet>853</a>        </span><span class="kw">let </span>(endpoint, limit) = <span class="self">self</span>.scope.resolve(req.uri().path());
-<a href=#854 id=854 data-nosnippet>854</a>        <span class="kw">let </span>key_extractor = GrpcTrustedHopsKeyExtractor::new(<span class="self">self</span>.trusted_hops);
-<a href=#855 id=855 data-nosnippet>855</a>
-<a href=#856 id=856 data-nosnippet>856</a>        <span class="comment">// The rate-limit decision itself is now synchronous and taken BEFORE
-<a href=#857 id=857 data-nosnippet>857</a>        // the future is even created — no datastore round trip on the path of
-<a href=#858 id=858 data-nosnippet>858</a>        // this (server-wide!) layer. The returned future only awaits the inner
-<a href=#859 id=859 data-nosnippet>859</a>        // service.
-<a href=#860 id=860 data-nosnippet>860</a>        </span><span class="kw">let </span>ip = key_extractor.extract(<span class="kw-2">&amp;</span>req).ok();
-<a href=#861 id=861 data-nosnippet>861</a>        <span class="kw">let </span>allow = <span class="kw">match </span>ip {
-<a href=#862 id=862 data-nosnippet>862</a>            <span class="prelude-val">Some</span>(ip) =&gt; {
-<a href=#863 id=863 data-nosnippet>863</a>                <span class="comment">// Same bucket key shape as before — `{endpoint}:{ip}` — and
-<a href=#864 id=864 data-nosnippet>864</a>                // the authz family keeps the `grpc_authz` endpoint name, so an
-<a href=#865 id=865 data-nosnippet>865</a>                // in-flight upgrade keeps counting against the same
-<a href=#866 id=866 data-nosnippet>866</a>                // `rate_limit_bucket` records.
-<a href=#867 id=867 data-nosnippet>867</a>                </span><span class="kw">let </span>key = <span class="macro">format!</span>(<span class="string">"{endpoint}:{ip}"</span>);
-<a href=#868 id=868 data-nosnippet>868</a>                counter.check(<span class="kw-2">&amp;</span>key, window_start(Utc::now()), limit)
-<a href=#869 id=869 data-nosnippet>869</a>            }
-<a href=#870 id=870 data-nosnippet>870</a>            <span class="comment">// No client-IP key available — fail open; the in-memory governor
-<a href=#871 id=871 data-nosnippet>871</a>            // still makes the real decision. (A counter built with
-<a href=#872 id=872 data-nosnippet>872</a>            // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from inside
-<a href=#873 id=873 data-nosnippet>873</a>            // `check`.)
-<a href=#874 id=874 data-nosnippet>874</a>            </span><span class="prelude-val">None </span>=&gt; <span class="bool-val">true</span>,
-<a href=#875 id=875 data-nosnippet>875</a>        };
-<a href=#876 id=876 data-nosnippet>876</a>
-<a href=#877 id=877 data-nosnippet>877</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#878 id=878 data-nosnippet>878</a>            <span class="kw">if </span>allow {
-<a href=#879 id=879 data-nosnippet>879</a>                inner.call(req).<span class="kw">await
-<a href=#880 id=880 data-nosnippet>880</a>            </span>} <span class="kw">else </span>{
-<a href=#881 id=881 data-nosnippet>881</a>                <span class="prelude-val">Ok</span>(too_many_requests_response())
-<a href=#882 id=882 data-nosnippet>882</a>            }
-<a href=#883 id=883 data-nosnippet>883</a>        })
-<a href=#884 id=884 data-nosnippet>884</a>    }
-<a href=#885 id=885 data-nosnippet>885</a>}
-<a href=#886 id=886 data-nosnippet>886</a>
-<a href=#887 id=887 data-nosnippet>887</a><span class="attr">#[cfg(test)]
-<a href=#888 id=888 data-nosnippet>888</a></span><span class="kw">mod </span>tests {
-<a href=#889 id=889 data-nosnippet>889</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#890 id=890 data-nosnippet>890</a>
-<a href=#891 id=891 data-nosnippet>891</a>    <span class="kw">fn </span>req_with_xff(xff: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;) -&gt; Request&lt;()&gt; {
-<a href=#892 id=892 data-nosnippet>892</a>        <span class="kw">let </span><span class="kw-2">mut </span>builder = Request::builder();
-<a href=#893 id=893 data-nosnippet>893</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(xff) = xff {
-<a href=#894 id=894 data-nosnippet>894</a>            builder = builder.header(<span class="string">"x-forwarded-for"</span>, xff);
-<a href=#895 id=895 data-nosnippet>895</a>        }
-<a href=#896 id=896 data-nosnippet>896</a>        builder.body(()).unwrap()
-<a href=#897 id=897 data-nosnippet>897</a>    }
-<a href=#898 id=898 data-nosnippet>898</a>
-<a href=#899 id=899 data-nosnippet>899</a>    <span class="kw">fn </span>req_with_xff_and_peer(xff: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, peer: SocketAddr) -&gt; Request&lt;()&gt; {
-<a href=#900 id=900 data-nosnippet>900</a>        <span class="kw">let </span><span class="kw-2">mut </span>req = req_with_xff(xff);
-<a href=#901 id=901 data-nosnippet>901</a>        req.extensions_mut().insert(TcpConnectInfo {
-<a href=#902 id=902 data-nosnippet>902</a>            local_addr: <span class="prelude-val">None</span>,
-<a href=#903 id=903 data-nosnippet>903</a>            remote_addr: <span class="prelude-val">Some</span>(peer),
-<a href=#904 id=904 data-nosnippet>904</a>        });
-<a href=#905 id=905 data-nosnippet>905</a>        req
-<a href=#906 id=906 data-nosnippet>906</a>    }
-<a href=#907 id=907 data-nosnippet>907</a>
-<a href=#908 id=908 data-nosnippet>908</a>    <span class="attr">#[test]
-<a href=#909 id=909 data-nosnippet>909</a>    </span><span class="kw">fn </span>uses_rightmost_trusted_xff_hop_when_enough_hops_present() {
-<a href=#910 id=910 data-nosnippet>910</a>        <span class="comment">// trusted_hops=1, 3 hops present -&gt; index = 3 - 1 - 1 = 1
-<a href=#911 id=911 data-nosnippet>911</a>        </span><span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">1</span>);
-<a href=#912 id=912 data-nosnippet>912</a>        <span class="kw">let </span>req = req_with_xff(<span class="prelude-val">Some</span>(<span class="string">"203.0.113.9, 198.51.100.7, 192.0.2.1"</span>));
-<a href=#913 id=913 data-nosnippet>913</a>
-<a href=#914 id=914 data-nosnippet>914</a>        <span class="kw">let </span>key = extractor.extract(<span class="kw-2">&amp;</span>req).unwrap();
-<a href=#915 id=915 data-nosnippet>915</a>        <span class="macro">assert_eq!</span>(key, <span class="string">"198.51.100.7"</span>.parse::&lt;IpAddr&gt;().unwrap());
-<a href=#916 id=916 data-nosnippet>916</a>    }
-<a href=#917 id=917 data-nosnippet>917</a>
-<a href=#918 id=918 data-nosnippet>918</a>    <span class="attr">#[test]
-<a href=#919 id=919 data-nosnippet>919</a>    </span><span class="kw">fn </span>falls_back_to_peer_addr_when_trusted_hops_exceeds_hop_count() {
-<a href=#920 id=920 data-nosnippet>920</a>        <span class="comment">// SECHRD-03/D-01d: trusted_hops(1) &gt;= hops.len()(1) =&gt; XFF is
-<a href=#921 id=921 data-nosnippet>921</a>        // completely untrusted; a rotating single-hop XFF must NOT be used
-<a href=#922 id=922 data-nosnippet>922</a>        // (never `hops[0]`) — fall through to the verified peer address.
-<a href=#923 id=923 data-nosnippet>923</a>        </span><span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">1</span>);
-<a href=#924 id=924 data-nosnippet>924</a>        <span class="kw">let </span>peer: SocketAddr = <span class="string">"203.0.113.42:1234"</span>.parse().unwrap();
-<a href=#925 id=925 data-nosnippet>925</a>
-<a href=#926 id=926 data-nosnippet>926</a>        <span class="kw">let </span>req1 = req_with_xff_and_peer(<span class="prelude-val">Some</span>(<span class="string">"198.51.100.1"</span>), peer);
-<a href=#927 id=927 data-nosnippet>927</a>        <span class="kw">let </span>req2 = req_with_xff_and_peer(<span class="prelude-val">Some</span>(<span class="string">"6.6.6.6"</span>), peer);
+<a href=#598 id=598 data-nosnippet>598</a>///
+<a href=#599 id=599 data-nosnippet>599</a>/// No longer on the request path — [`GrpcSharedRateLimitService::call`] hands
+<a href=#600 id=600 data-nosnippet>600</a>/// the raw `now` to [`axiam_db::SharedRateLimitCounter::check_at`] instead
+<a href=#601 id=601 data-nosnippet>601</a>/// (run-5 J1). Kept, and asserted by a test, because [`WINDOW_SECS`] must
+<a href=#602 id=602 data-nosnippet>602</a>/// keep agreeing with the counter's configured window.
+<a href=#603 id=603 data-nosnippet>603</a></span><span class="attr">#[cfg_attr(not(test), allow(dead_code))]
+<a href=#604 id=604 data-nosnippet>604</a></span><span class="kw">fn </span>window_start(now: DateTime&lt;Utc&gt;) -&gt; DateTime&lt;Utc&gt; {
+<a href=#605 id=605 data-nosnippet>605</a>    <span class="kw">let </span>epoch = now.timestamp();
+<a href=#606 id=606 data-nosnippet>606</a>    <span class="kw">let </span>start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
+<a href=#607 id=607 data-nosnippet>607</a>    DateTime::&lt;Utc&gt;::from_timestamp(start_epoch, <span class="number">0</span>).unwrap_or(now)
+<a href=#608 id=608 data-nosnippet>608</a>}
+<a href=#609 id=609 data-nosnippet>609</a>
+<a href=#610 id=610 data-nosnippet>610</a><span class="doccomment">/// Builds a gRPC `RESOURCE_EXHAUSTED` response — the same status the
+<a href=#611 id=611 data-nosnippet>611</a>/// in-memory `GovernorLayer` returns for `GovernorError::TooManyRequests`
+<a href=#612 id=612 data-nosnippet>612</a>/// (see `tower_governor::errors::GovernorError`'s `Response&lt;tonic::body::Body&gt;`
+<a href=#613 id=613 data-nosnippet>613</a>/// conversion) — so clients see one consistent rate-limit contract
+<a href=#614 id=614 data-nosnippet>614</a>/// regardless of which layer rejected the request.
+<a href=#615 id=615 data-nosnippet>615</a></span><span class="kw">fn </span>too_many_requests_response() -&gt; Response&lt;tonic::body::Body&gt; {
+<a href=#616 id=616 data-nosnippet>616</a>    tonic::Status::resource_exhausted(<span class="string">"rate limit exceeded"</span>).into_http()
+<a href=#617 id=617 data-nosnippet>617</a>}
+<a href=#618 id=618 data-nosnippet>618</a>
+<a href=#619 id=619 data-nosnippet>619</a><span class="doccomment">/// Shared (cross-replica) rate-limit pre-check `tower::Layer` for the gRPC
+<a href=#620 id=620 data-nosnippet>620</a>/// path (SECHRD-03 / D-01a, D-01b, D-01c, D-01d).
+<a href=#621 id=621 data-nosnippet>621</a>///
+<a href=#622 id=622 data-nosnippet>622</a>/// Consults the process-wide write-behind [`SharedRateLimitCounter`]
+<a href=#623 id=623 data-nosnippet>623</a>/// (`axiam-db::rate_limit_counter`) — the SAME counter type and the SAME env
+<a href=#624 id=624 data-nosnippet>624</a>/// knobs the REST `RateLimitShared` middleware uses, so both listeners behave
+<a href=#625 id=625 data-nosnippet>625</a>/// identically. There is no reimplemented counter here. Wire this layer BEFORE
+<a href=#626 id=626 data-nosnippet>626</a>/// (i.e. `.layer()` it FIRST — tower's `ServiceBuilder`/`Server::builder()`
+<a href=#627 id=627 data-nosnippet>627</a>/// executes the FIRST-added layer with the request FIRST, the opposite of
+<a href=#628 id=628 data-nosnippet>628</a>/// actix's last-`.wrap()`-is-outermost rule) the existing
+<a href=#629 id=629 data-nosnippet>629</a>/// [`build_grpc_governor_layer`] `GovernorLayer` on the same
+<a href=#630 id=630 data-nosnippet>630</a>/// `Server::builder()`, e.g.:
+<a href=#631 id=631 data-nosnippet>631</a>///
+<a href=#632 id=632 data-nosnippet>632</a>/// ```ignore
+<a href=#633 id=633 data-nosnippet>633</a>/// Server::builder()
+<a href=#634 id=634 data-nosnippet>634</a>///     .layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops))
+<a href=#635 id=635 data-nosnippet>635</a>///     .layer(build_grpc_governor_layer(grpc_config.grpc_authz_per_sec))
+<a href=#636 id=636 data-nosnippet>636</a>///     .add_service(authz_svc)
+<a href=#637 id=637 data-nosnippet>637</a>/// ```
+<a href=#638 id=638 data-nosnippet>638</a>///
+<a href=#639 id=639 data-nosnippet>639</a>/// # No synchronous datastore write on the request path (H2 fix)
+<a href=#640 id=640 data-nosnippet>640</a>///
+<a href=#641 id=641 data-nosnippet>641</a>/// This layer used to `await` one SurrealDB `UPSERT` per call. Because it is a
+<a href=#642 id=642 data-nosnippet>642</a>/// **server-wide** layer on the tonic listener, EVERY gRPC call paid that
+<a href=#643 id=643 data-nosnippet>643</a>/// write — measured at ~39–46 ms of datastore-attributed latency, pinning the
+<a href=#644 id=644 data-nosnippet>644</a>/// listener at ~20 ops/s regardless of concurrency
+<a href=#645 id=645 data-nosnippet>645</a>/// (`claude_dev/postseed-transient-investigation.md` §1, §2, §7). It now pays
+<a href=#646 id=646 data-nosnippet>646</a>/// only an in-memory sharded-map increment
+<a href=#647 id=647 data-nosnippet>647</a>/// ([`SharedRateLimitCounter::check`], fully synchronous), while a single
+<a href=#648 id=648 data-nosnippet>648</a>/// background flusher coalesces the increments into one datastore write per
+<a href=#649 id=649 data-nosnippet>649</a>/// bucket per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS`. Cross-replica enforcement
+<a href=#650 id=650 data-nosnippet>650</a>/// is therefore eventual, with the overshoot bound stated precisely in the
+<a href=#651 id=651 data-nosnippet>651</a>/// [`axiam_db::rate_limit_counter`] module docs; the in-memory governor still
+<a href=#652 id=652 data-nosnippet>652</a>/// makes a full per-replica decision on the same traffic.
+<a href=#653 id=653 data-nosnippet>653</a>///
+<a href=#654 id=654 data-nosnippet>654</a>/// Everything else is unchanged: the same `{endpoint}:{ip}` bucket key, the
+<a href=#655 id=655 data-nosnippet>655</a>/// same `GrpcTrustedHopsKeyExtractor` key derivation (D-01d), and the same
+<a href=#656 id=656 data-nosnippet>656</a>/// `RESOURCE_EXHAUSTED` rejection.
+<a href=#657 id=657 data-nosnippet>657</a>///
+<a href=#658 id=658 data-nosnippet>658</a>/// **Fail-open (D-01b, T-24-73 accepted risk):** when no client IP can be
+<a href=#659 id=659 data-nosnippet>659</a>/// extracted, or the shared layer is disabled via
+<a href=#660 id=660 data-nosnippet>660</a>/// `AXIAM__RATE_LIMIT__SHARED=off`, this layer forwards the request unchanged
+<a href=#661 id=661 data-nosnippet>661</a>/// so the existing in-memory governor makes the decision instead. Store
+<a href=#662 id=662 data-nosnippet>662</a>/// outages are surfaced by the counter's flusher (a `warn` alarm that never
+<a href=#663 id=663 data-nosnippet>663</a>/// includes the raw key) while decisions keep being served from local counts —
+<a href=#664 id=664 data-nosnippet>664</a>/// a counter-store outage must never hard-block gRPC authz traffic.
+<a href=#665 id=665 data-nosnippet>665</a>///
+<a href=#666 id=666 data-nosnippet>666</a>/// **CRITICAL (RESEARCH Pitfall 1):** `governor::StateStore::measure_and_replace`
+<a href=#667 id=667 data-nosnippet>667</a>/// is a *synchronous* trait method. This layer is deliberately NOT a
+<a href=#668 id=668 data-nosnippet>668</a>/// `StateStore` implementation and never calls `block_on`.
+<a href=#669 id=669 data-nosnippet>669</a>///
+<a href=#670 id=670 data-nosnippet>670</a>/// No longer generic over the SurrealDB connection type: it holds a
+<a href=#671 id=671 data-nosnippet>671</a>/// non-generic [`SharedRateLimitCounter`] (which owns the boxed store), which
+<a href=#672 id=672 data-nosnippet>672</a>/// is why the SurrealDB handle only appears in [`Self::new`]'s signature.
+<a href=#673 id=673 data-nosnippet>673</a></span><span class="attr">#[derive(Clone)]
+<a href=#674 id=674 data-nosnippet>674</a></span><span class="kw">pub struct </span>GrpcSharedRateLimitLayer {
+<a href=#675 id=675 data-nosnippet>675</a>    counter: SharedRateLimitCounter,
+<a href=#676 id=676 data-nosnippet>676</a>    scope: SharedScope,
+<a href=#677 id=677 data-nosnippet>677</a>    trusted_hops: usize,
+<a href=#678 id=678 data-nosnippet>678</a>}
+<a href=#679 id=679 data-nosnippet>679</a>
+<a href=#680 id=680 data-nosnippet>680</a><span class="doccomment">/// How a [`GrpcSharedRateLimitLayer`] derives `(bucket endpoint, window
+<a href=#681 id=681 data-nosnippet>681</a>/// limit)` for a request.
+<a href=#682 id=682 data-nosnippet>682</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#683 id=683 data-nosnippet>683</a></span><span class="kw">enum </span>SharedScope {
+<a href=#684 id=684 data-nosnippet>684</a>    <span class="doccomment">/// One bucket for every request, whatever the method — the pre-I2 shape.
+<a href=#685 id=685 data-nosnippet>685</a>    /// `limit` is already expressed in the 60-second window.
+<a href=#686 id=686 data-nosnippet>686</a>    </span>Uniform { endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, limit: u32 },
+<a href=#687 id=687 data-nosnippet>687</a>    <span class="doccomment">/// One bucket per [`GrpcMethodFamily`] (I2), sized from per-second
+<a href=#688 id=688 data-nosnippet>688</a>    /// ceilings and converted with [`per_sec_to_window_limit`].
+<a href=#689 id=689 data-nosnippet>689</a>    </span>PerFamily(GrpcRateLimits),
+<a href=#690 id=690 data-nosnippet>690</a>}
+<a href=#691 id=691 data-nosnippet>691</a>
+<a href=#692 id=692 data-nosnippet>692</a><span class="kw">impl </span>SharedScope {
+<a href=#693 id=693 data-nosnippet>693</a>    <span class="doccomment">/// `(endpoint, window limit)` for `path`.
+<a href=#694 id=694 data-nosnippet>694</a>    ///
+<a href=#695 id=695 data-nosnippet>695</a>    /// Every path resolves to a bucket — since residual 4 there is no family
+<a href=#696 id=696 data-nosnippet>696</a>    /// that skips the shared counter.
+<a href=#697 id=697 data-nosnippet>697</a>    </span><span class="kw">fn </span>resolve(<span class="self">self</span>, path: <span class="kw-2">&amp;</span>str) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#699 id=699 data-nosnippet>699</a>            <span class="self">Self</span>::Uniform { endpoint, limit } =&gt; (endpoint, limit),
+<a href=#700 id=700 data-nosnippet>700</a>            <span class="self">Self</span>::PerFamily(limits) =&gt; {
+<a href=#701 id=701 data-nosnippet>701</a>                <span class="kw">let </span>family = GrpcMethodFamily::classify(path);
+<a href=#702 id=702 data-nosnippet>702</a>                (family.shared_endpoint(), limits.window_limit(family))
+<a href=#703 id=703 data-nosnippet>703</a>            }
+<a href=#704 id=704 data-nosnippet>704</a>        }
+<a href=#705 id=705 data-nosnippet>705</a>    }
+<a href=#706 id=706 data-nosnippet>706</a>}
+<a href=#707 id=707 data-nosnippet>707</a>
+<a href=#708 id=708 data-nosnippet>708</a><span class="kw">impl </span>GrpcSharedRateLimitLayer {
+<a href=#709 id=709 data-nosnippet>709</a>    <span class="doccomment">/// Builds the layer and its process-wide write-behind counter from a
+<a href=#710 id=710 data-nosnippet>710</a>    /// SurrealDB handle, reading `AXIAM__RATE_LIMIT__SHARED` /
+<a href=#711 id=711 data-nosnippet>711</a>    /// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` via
+<a href=#712 id=712 data-nosnippet>712</a>    /// [`axiam_db::SharedRateLimitConfig::from_env`].
+<a href=#713 id=713 data-nosnippet>713</a>    ///
+<a href=#714 id=714 data-nosnippet>714</a>    /// Call this ONCE per process (as `start_grpc_server` does): the counter's
+<a href=#715 id=715 data-nosnippet>715</a>    /// local counts live in the instance it creates, so building several would
+<a href=#716 id=716 data-nosnippet>716</a>    /// fragment them. Use [`Self::with_counter`] to share one counter
+<a href=#717 id=717 data-nosnippet>717</a>    /// explicitly.
+<a href=#718 id=718 data-nosnippet>718</a>    ///
+<a href=#719 id=719 data-nosnippet>719</a>    /// `endpoint` MUST be unique per rate-limited gRPC surface so the shared
+<a href=#720 id=720 data-nosnippet>720</a>    /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
+<a href=#721 id=721 data-nosnippet>721</a>    /// never collapse distinct surfaces into one global bucket.
+<a href=#722 id=722 data-nosnippet>722</a>    ///
+<a href=#723 id=723 data-nosnippet>723</a>    /// **Units:** `limit` is the budget for one [`WINDOW_SECS`]-second window,
+<a href=#724 id=724 data-nosnippet>724</a>    /// NOT a per-second rate. Prefer [`Self::new_method_scoped`], whose
+<a href=#725 id=725 data-nosnippet>725</a>    /// parameter type ([`GrpcRateLimits`]) is per-second at the boundary and
+<a href=#726 id=726 data-nosnippet>726</a>    /// does the conversion itself — that is the shape that makes the I1 units
+<a href=#727 id=727 data-nosnippet>727</a>    /// bug unrepresentable.
+<a href=#728 id=728 data-nosnippet>728</a>    </span><span class="kw">pub fn </span>new&lt;C: Connection&gt;(
+<a href=#729 id=729 data-nosnippet>729</a>        db: <span class="kw">impl </span>Into&lt;axiam_db::DbHandle&lt;C&gt;&gt;,
+<a href=#730 id=730 data-nosnippet>730</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#731 id=731 data-nosnippet>731</a>        limit: u32,
+<a href=#732 id=732 data-nosnippet>732</a>        trusted_hops: usize,
+<a href=#733 id=733 data-nosnippet>733</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="self">Self</span>::with_counter(
+<a href=#735 id=735 data-nosnippet>735</a>            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
+<a href=#736 id=736 data-nosnippet>736</a>            endpoint,
+<a href=#737 id=737 data-nosnippet>737</a>            limit,
+<a href=#738 id=738 data-nosnippet>738</a>            trusted_hops,
+<a href=#739 id=739 data-nosnippet>739</a>        )
+<a href=#740 id=740 data-nosnippet>740</a>    }
+<a href=#741 id=741 data-nosnippet>741</a>
+<a href=#742 id=742 data-nosnippet>742</a>    <span class="doccomment">/// Builds the layer over an EXISTING counter — for tests, and for any
+<a href=#743 id=743 data-nosnippet>743</a>    /// deployment that wants the gRPC listener and something else to share one
+<a href=#744 id=744 data-nosnippet>744</a>    /// counter instance.
+<a href=#745 id=745 data-nosnippet>745</a>    ///
+<a href=#746 id=746 data-nosnippet>746</a>    /// `limit` is per [`WINDOW_SECS`]-second window — see [`Self::new`].
+<a href=#747 id=747 data-nosnippet>747</a>    </span><span class="kw">pub fn </span>with_counter(
+<a href=#748 id=748 data-nosnippet>748</a>        counter: SharedRateLimitCounter,
+<a href=#749 id=749 data-nosnippet>749</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#750 id=750 data-nosnippet>750</a>        limit: u32,
+<a href=#751 id=751 data-nosnippet>751</a>        trusted_hops: usize,
+<a href=#752 id=752 data-nosnippet>752</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#753 id=753 data-nosnippet>753</a>        <span class="self">Self </span>{
+<a href=#754 id=754 data-nosnippet>754</a>            counter,
+<a href=#755 id=755 data-nosnippet>755</a>            scope: SharedScope::Uniform { endpoint, limit },
+<a href=#756 id=756 data-nosnippet>756</a>            trusted_hops,
+<a href=#757 id=757 data-nosnippet>757</a>        }
+<a href=#758 id=758 data-nosnippet>758</a>    }
+<a href=#759 id=759 data-nosnippet>759</a>
+<a href=#760 id=760 data-nosnippet>760</a>    <span class="doccomment">/// **The production constructor (I1 + I2).** Builds the layer and its
+<a href=#761 id=761 data-nosnippet>761</a>    /// process-wide write-behind counter with one shared bucket per
+<a href=#762 id=762 data-nosnippet>762</a>    /// [`GrpcMethodFamily`], sized from **per-second** ceilings.
+<a href=#763 id=763 data-nosnippet>763</a>    ///
+<a href=#764 id=764 data-nosnippet>764</a>    /// The per-second → per-window conversion happens here, once, via
+<a href=#765 id=765 data-nosnippet>765</a>    /// [`per_sec_to_window_limit`] — a caller cannot get the units wrong
+<a href=#766 id=766 data-nosnippet>766</a>    /// because it never sees the window.
+<a href=#767 id=767 data-nosnippet>767</a>    </span><span class="kw">pub fn </span>new_method_scoped&lt;C: Connection&gt;(
+<a href=#768 id=768 data-nosnippet>768</a>        db: <span class="kw">impl </span>Into&lt;axiam_db::DbHandle&lt;C&gt;&gt;,
+<a href=#769 id=769 data-nosnippet>769</a>        limits: GrpcRateLimits,
+<a href=#770 id=770 data-nosnippet>770</a>        trusted_hops: usize,
+<a href=#771 id=771 data-nosnippet>771</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#772 id=772 data-nosnippet>772</a>        <span class="self">Self</span>::with_counter_method_scoped(
+<a href=#773 id=773 data-nosnippet>773</a>            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
+<a href=#774 id=774 data-nosnippet>774</a>            limits,
+<a href=#775 id=775 data-nosnippet>775</a>            trusted_hops,
+<a href=#776 id=776 data-nosnippet>776</a>        )
+<a href=#777 id=777 data-nosnippet>777</a>    }
+<a href=#778 id=778 data-nosnippet>778</a>
+<a href=#779 id=779 data-nosnippet>779</a>    <span class="doccomment">/// [`Self::new_method_scoped`] over an EXISTING counter — for tests and
+<a href=#780 id=780 data-nosnippet>780</a>    /// for sharing one counter instance across listeners.
+<a href=#781 id=781 data-nosnippet>781</a>    </span><span class="kw">pub fn </span>with_counter_method_scoped(
+<a href=#782 id=782 data-nosnippet>782</a>        counter: SharedRateLimitCounter,
+<a href=#783 id=783 data-nosnippet>783</a>        limits: GrpcRateLimits,
+<a href=#784 id=784 data-nosnippet>784</a>        trusted_hops: usize,
+<a href=#785 id=785 data-nosnippet>785</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="self">Self </span>{
+<a href=#787 id=787 data-nosnippet>787</a>            counter,
+<a href=#788 id=788 data-nosnippet>788</a>            scope: SharedScope::PerFamily(limits),
+<a href=#789 id=789 data-nosnippet>789</a>            trusted_hops,
+<a href=#790 id=790 data-nosnippet>790</a>        }
+<a href=#791 id=791 data-nosnippet>791</a>    }
+<a href=#792 id=792 data-nosnippet>792</a>
+<a href=#793 id=793 data-nosnippet>793</a>    <span class="doccomment">/// The `(bucket endpoint, window limit)` this layer applies to `path`.
+<a href=#794 id=794 data-nosnippet>794</a>    ///
+<a href=#795 id=795 data-nosnippet>795</a>    /// Exposed so the units at the composition root can be asserted directly
+<a href=#796 id=796 data-nosnippet>796</a>    /// by a test instead of by reading the call site (I1 acceptance).
+<a href=#797 id=797 data-nosnippet>797</a>    </span><span class="kw">pub fn </span>resolve_for_path(<span class="kw-2">&amp;</span><span class="self">self</span>, path: <span class="kw-2">&amp;</span>str) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="self">self</span>.scope.resolve(path)
+<a href=#799 id=799 data-nosnippet>799</a>    }
+<a href=#800 id=800 data-nosnippet>800</a>}
+<a href=#801 id=801 data-nosnippet>801</a>
+<a href=#802 id=802 data-nosnippet>802</a><span class="kw">impl</span>&lt;S&gt; Layer&lt;S&gt; <span class="kw">for </span>GrpcSharedRateLimitLayer {
+<a href=#803 id=803 data-nosnippet>803</a>    <span class="kw">type </span>Service = GrpcSharedRateLimitService&lt;S&gt;;
+<a href=#804 id=804 data-nosnippet>804</a>
+<a href=#805 id=805 data-nosnippet>805</a>    <span class="kw">fn </span>layer(<span class="kw-2">&amp;</span><span class="self">self</span>, inner: S) -&gt; <span class="self">Self</span>::Service {
+<a href=#806 id=806 data-nosnippet>806</a>        GrpcSharedRateLimitService {
+<a href=#807 id=807 data-nosnippet>807</a>            inner,
+<a href=#808 id=808 data-nosnippet>808</a>            counter: <span class="self">self</span>.counter.clone(),
+<a href=#809 id=809 data-nosnippet>809</a>            scope: <span class="self">self</span>.scope,
+<a href=#810 id=810 data-nosnippet>810</a>            trusted_hops: <span class="self">self</span>.trusted_hops,
+<a href=#811 id=811 data-nosnippet>811</a>        }
+<a href=#812 id=812 data-nosnippet>812</a>    }
+<a href=#813 id=813 data-nosnippet>813</a>}
+<a href=#814 id=814 data-nosnippet>814</a>
+<a href=#815 id=815 data-nosnippet>815</a><span class="doccomment">/// Inner `tower::Service` produced by [`GrpcSharedRateLimitLayer`].
+<a href=#816 id=816 data-nosnippet>816</a>///
+<a href=#817 id=817 data-nosnippet>817</a>/// `Clone` requires only `S: Clone` — [`SharedRateLimitCounter`] is an
+<a href=#818 id=818 data-nosnippet>818</a>/// `Arc`-backed handle, so every clone (one per request, via tonic's
+<a href=#819 id=819 data-nosnippet>819</a>/// clone-and-swap) shares the SAME counter state.
+<a href=#820 id=820 data-nosnippet>820</a></span><span class="attr">#[derive(Clone)]
+<a href=#821 id=821 data-nosnippet>821</a></span><span class="kw">pub struct </span>GrpcSharedRateLimitService&lt;S&gt; {
+<a href=#822 id=822 data-nosnippet>822</a>    inner: S,
+<a href=#823 id=823 data-nosnippet>823</a>    counter: SharedRateLimitCounter,
+<a href=#824 id=824 data-nosnippet>824</a>    scope: SharedScope,
+<a href=#825 id=825 data-nosnippet>825</a>    trusted_hops: usize,
+<a href=#826 id=826 data-nosnippet>826</a>}
+<a href=#827 id=827 data-nosnippet>827</a>
+<a href=#828 id=828 data-nosnippet>828</a><span class="kw">impl</span>&lt;S&gt; Service&lt;Request&lt;tonic::body::Body&gt;&gt; <span class="kw">for </span>GrpcSharedRateLimitService&lt;S&gt;
+<a href=#829 id=829 data-nosnippet>829</a><span class="kw">where
+<a href=#830 id=830 data-nosnippet>830</a>    </span>S: Service&lt;Request&lt;tonic::body::Body&gt;, Response = Response&lt;tonic::body::Body&gt;&gt;
+<a href=#831 id=831 data-nosnippet>831</a>        + Clone
+<a href=#832 id=832 data-nosnippet>832</a>        + Send
+<a href=#833 id=833 data-nosnippet>833</a>        + <span class="lifetime">'static</span>,
+<a href=#834 id=834 data-nosnippet>834</a>    S::Future: Send + <span class="lifetime">'static</span>,
+<a href=#835 id=835 data-nosnippet>835</a>    S::Error: Send + <span class="lifetime">'static</span>,
+<a href=#836 id=836 data-nosnippet>836</a>{
+<a href=#837 id=837 data-nosnippet>837</a>    <span class="kw">type </span>Response = Response&lt;tonic::body::Body&gt;;
+<a href=#838 id=838 data-nosnippet>838</a>    <span class="kw">type </span>Error = S::Error;
+<a href=#839 id=839 data-nosnippet>839</a>    <span class="kw">type </span>Future = Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Response, <span class="self">Self</span>::Error&gt;&gt; + Send&gt;&gt;;
+<a href=#840 id=840 data-nosnippet>840</a>
+<a href=#841 id=841 data-nosnippet>841</a>    <span class="kw">fn </span>poll_ready(<span class="kw-2">&amp;mut </span><span class="self">self</span>, cx: <span class="kw-2">&amp;mut </span>Context&lt;<span class="lifetime">'_</span>&gt;) -&gt; Poll&lt;<span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;&gt; {
+<a href=#842 id=842 data-nosnippet>842</a>        <span class="self">self</span>.inner.poll_ready(cx)
+<a href=#843 id=843 data-nosnippet>843</a>    }
+<a href=#844 id=844 data-nosnippet>844</a>
+<a href=#845 id=845 data-nosnippet>845</a>    <span class="kw">fn </span>call(<span class="kw-2">&amp;mut </span><span class="self">self</span>, req: Request&lt;tonic::body::Body&gt;) -&gt; <span class="self">Self</span>::Future {
+<a href=#846 id=846 data-nosnippet>846</a>        <span class="comment">// Standard clone-and-swap so the returned future owns an
+<a href=#847 id=847 data-nosnippet>847</a>        // independent, ready-to-call copy of the inner service (mirrors
+<a href=#848 id=848 data-nosnippet>848</a>        // tower-http's convention for async-wrapping middlewares).
+<a href=#849 id=849 data-nosnippet>849</a>        </span><span class="kw">let </span>clone = <span class="self">self</span>.inner.clone();
+<a href=#850 id=850 data-nosnippet>850</a>        <span class="kw">let </span><span class="kw-2">mut </span>inner = std::mem::replace(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inner, clone);
+<a href=#851 id=851 data-nosnippet>851</a>
+<a href=#852 id=852 data-nosnippet>852</a>        <span class="comment">// Cheap `Arc` clone — every request shares the ONE process-wide
+<a href=#853 id=853 data-nosnippet>853</a>        // counter, never a fresh one (a per-request counter would count
+<a href=#854 id=854 data-nosnippet>854</a>        // nothing).
+<a href=#855 id=855 data-nosnippet>855</a>        </span><span class="kw">let </span>counter = <span class="self">self</span>.counter.clone();
+<a href=#856 id=856 data-nosnippet>856</a>        <span class="comment">// I2: the bucket (and its ceiling) depend on which method family the
+<a href=#857 id=857 data-nosnippet>857</a>        // request belongs to. Every family resolves to a bucket — reflection
+<a href=#858 id=858 data-nosnippet>858</a>        // and health are counted too, against a generous one (residual 4).
+<a href=#859 id=859 data-nosnippet>859</a>        </span><span class="kw">let </span>(endpoint, limit) = <span class="self">self</span>.scope.resolve(req.uri().path());
+<a href=#860 id=860 data-nosnippet>860</a>        <span class="kw">let </span>key_extractor = GrpcTrustedHopsKeyExtractor::new(<span class="self">self</span>.trusted_hops);
+<a href=#861 id=861 data-nosnippet>861</a>
+<a href=#862 id=862 data-nosnippet>862</a>        <span class="comment">// The rate-limit decision itself is now synchronous and taken BEFORE
+<a href=#863 id=863 data-nosnippet>863</a>        // the future is even created — no datastore round trip on the path of
+<a href=#864 id=864 data-nosnippet>864</a>        // this (server-wide!) layer. The returned future only awaits the inner
+<a href=#865 id=865 data-nosnippet>865</a>        // service.
+<a href=#866 id=866 data-nosnippet>866</a>        </span><span class="kw">let </span>ip = key_extractor.extract(<span class="kw-2">&amp;</span>req).ok();
+<a href=#867 id=867 data-nosnippet>867</a>        <span class="kw">let </span>allow = <span class="kw">match </span>ip {
+<a href=#868 id=868 data-nosnippet>868</a>            <span class="prelude-val">Some</span>(ip) =&gt; {
+<a href=#869 id=869 data-nosnippet>869</a>                <span class="comment">// Same bucket key shape as before — `{endpoint}:{ip}` — and
+<a href=#870 id=870 data-nosnippet>870</a>                // the authz family keeps the `grpc_authz` endpoint name, so an
+<a href=#871 id=871 data-nosnippet>871</a>                // in-flight upgrade keeps counting against the same
+<a href=#872 id=872 data-nosnippet>872</a>                // `rate_limit_bucket` records.
+<a href=#873 id=873 data-nosnippet>873</a>                </span><span class="kw">let </span>key = <span class="macro">format!</span>(<span class="string">"{endpoint}:{ip}"</span>);
+<a href=#874 id=874 data-nosnippet>874</a>                <span class="comment">// `check_at` (not `check`): the counter derives the window
+<a href=#875 id=875 data-nosnippet>875</a>                // itself AND sees the offset into it, which is what its
+<a href=#876 id=876 data-nosnippet>876</a>                // sliding-window mode needs to bound every rolling minute
+<a href=#877 id=877 data-nosnippet>877</a>                // rather than only the aligned ones (run-5 J1,
+<a href=#878 id=878 data-nosnippet>878</a>                // `axiam_db::rate_limit_counter::WindowMode`).
+<a href=#879 id=879 data-nosnippet>879</a>                </span>counter.check_at(<span class="kw-2">&amp;</span>key, Utc::now(), limit)
+<a href=#880 id=880 data-nosnippet>880</a>            }
+<a href=#881 id=881 data-nosnippet>881</a>            <span class="comment">// No client-IP key available — fail open; the in-memory governor
+<a href=#882 id=882 data-nosnippet>882</a>            // still makes the real decision. (A counter built with
+<a href=#883 id=883 data-nosnippet>883</a>            // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from inside
+<a href=#884 id=884 data-nosnippet>884</a>            // `check`.)
+<a href=#885 id=885 data-nosnippet>885</a>            </span><span class="prelude-val">None </span>=&gt; <span class="bool-val">true</span>,
+<a href=#886 id=886 data-nosnippet>886</a>        };
+<a href=#887 id=887 data-nosnippet>887</a>
+<a href=#888 id=888 data-nosnippet>888</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#889 id=889 data-nosnippet>889</a>            <span class="kw">if </span>allow {
+<a href=#890 id=890 data-nosnippet>890</a>                inner.call(req).<span class="kw">await
+<a href=#891 id=891 data-nosnippet>891</a>            </span>} <span class="kw">else </span>{
+<a href=#892 id=892 data-nosnippet>892</a>                <span class="prelude-val">Ok</span>(too_many_requests_response())
+<a href=#893 id=893 data-nosnippet>893</a>            }
+<a href=#894 id=894 data-nosnippet>894</a>        })
+<a href=#895 id=895 data-nosnippet>895</a>    }
+<a href=#896 id=896 data-nosnippet>896</a>}
+<a href=#897 id=897 data-nosnippet>897</a>
+<a href=#898 id=898 data-nosnippet>898</a><span class="attr">#[cfg(test)]
+<a href=#899 id=899 data-nosnippet>899</a></span><span class="kw">mod </span>tests {
+<a href=#900 id=900 data-nosnippet>900</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#901 id=901 data-nosnippet>901</a>
+<a href=#902 id=902 data-nosnippet>902</a>    <span class="kw">fn </span>req_with_xff(xff: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;) -&gt; Request&lt;()&gt; {
+<a href=#903 id=903 data-nosnippet>903</a>        <span class="kw">let </span><span class="kw-2">mut </span>builder = Request::builder();
+<a href=#904 id=904 data-nosnippet>904</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(xff) = xff {
+<a href=#905 id=905 data-nosnippet>905</a>            builder = builder.header(<span class="string">"x-forwarded-for"</span>, xff);
+<a href=#906 id=906 data-nosnippet>906</a>        }
+<a href=#907 id=907 data-nosnippet>907</a>        builder.body(()).unwrap()
+<a href=#908 id=908 data-nosnippet>908</a>    }
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a>    <span class="kw">fn </span>req_with_xff_and_peer(xff: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, peer: SocketAddr) -&gt; Request&lt;()&gt; {
+<a href=#911 id=911 data-nosnippet>911</a>        <span class="kw">let </span><span class="kw-2">mut </span>req = req_with_xff(xff);
+<a href=#912 id=912 data-nosnippet>912</a>        req.extensions_mut().insert(TcpConnectInfo {
+<a href=#913 id=913 data-nosnippet>913</a>            local_addr: <span class="prelude-val">None</span>,
+<a href=#914 id=914 data-nosnippet>914</a>            remote_addr: <span class="prelude-val">Some</span>(peer),
+<a href=#915 id=915 data-nosnippet>915</a>        });
+<a href=#916 id=916 data-nosnippet>916</a>        req
+<a href=#917 id=917 data-nosnippet>917</a>    }
+<a href=#918 id=918 data-nosnippet>918</a>
+<a href=#919 id=919 data-nosnippet>919</a>    <span class="doccomment">/// [`WINDOW_SECS`] and the shared counter's configured window are one
+<a href=#920 id=920 data-nosnippet>920</a>    /// contract split across two crates — `call` hands the counter a raw
+<a href=#921 id=921 data-nosnippet>921</a>    /// `now` and lets it derive the window, so a disagreement here would
+<a href=#922 id=922 data-nosnippet>922</a>    /// silently size the gRPC buckets against a window nobody enforces.
+<a href=#923 id=923 data-nosnippet>923</a>    </span><span class="attr">#[test]
+<a href=#924 id=924 data-nosnippet>924</a>    </span><span class="kw">fn </span>window_secs_matches_the_shared_counters_window() {
+<a href=#925 id=925 data-nosnippet>925</a>        <span class="kw">let </span>counter_window = axiam_db::SharedRateLimitConfig::default().window;
+<a href=#926 id=926 data-nosnippet>926</a>        <span class="macro">assert_eq!</span>(counter_window.as_secs() <span class="kw">as </span>i64, WINDOW_SECS);
+<a href=#927 id=927 data-nosnippet>927</a>    }
 <a href=#928 id=928 data-nosnippet>928</a>
-<a href=#929 id=929 data-nosnippet>929</a>        <span class="kw">let </span>key1 = extractor.extract(<span class="kw-2">&amp;</span>req1).unwrap();
-<a href=#930 id=930 data-nosnippet>930</a>        <span class="kw">let </span>key2 = extractor.extract(<span class="kw-2">&amp;</span>req2).unwrap();
-<a href=#931 id=931 data-nosnippet>931</a>
-<a href=#932 id=932 data-nosnippet>932</a>        <span class="macro">assert_eq!</span>(key1, peer.ip());
-<a href=#933 id=933 data-nosnippet>933</a>        <span class="macro">assert_eq!</span>(key2, peer.ip());
-<a href=#934 id=934 data-nosnippet>934</a>        <span class="macro">assert_eq!</span>(key1, key2, <span class="string">"rotating XFF must not yield a fresh key"</span>);
-<a href=#935 id=935 data-nosnippet>935</a>    }
-<a href=#936 id=936 data-nosnippet>936</a>
-<a href=#937 id=937 data-nosnippet>937</a>    <span class="comment">// -----------------------------------------------------------------
-<a href=#938 id=938 data-nosnippet>938</a>    // CORR-01/D-02: sustained-throughput + monotonicity regression test
-<a href=#939 id=939 data-nosnippet>939</a>    // -----------------------------------------------------------------
-<a href=#940 id=940 data-nosnippet>940</a>    //
-<a href=#941 id=941 data-nosnippet>941</a>    // Drives sustained load against the SAME `governor::Quota::per_second`
-<a href=#942 id=942 data-nosnippet>942</a>    // construction `build_grpc_governor_layer` uses (see the production
-<a href=#943 id=943 data-nosnippet>943</a>    // function above) via a `FakeRelativeClock`, and asserts the permitted
-<a href=#944 id=944 data-nosnippet>944</a>    // count over a simulated window approximates the configured rate — the
-<a href=#945 id=945 data-nosnippet>945</a>    // only reliable way to distinguish a correctly-throttling governor from
-<a href=#946 id=946 data-nosnippet>946</a>    // one that is inverted (RESEARCH Pitfall 1: a naive "does the first
-<a href=#947 id=947 data-nosnippet>947</a>    // burst get through" smoke test looks identical either way).
-<a href=#948 id=948 data-nosnippet>948</a>    //
-<a href=#949 id=949 data-nosnippet>949</a>    // This test would FAIL against the old, inverted construction: with
-<a href=#950 id=950 data-nosnippet>950</a>    // `tower_governor`'s `.per_second(n)` treated as "n tokens/sec" (the
-<a href=#951 id=951 data-nosnippet>951</a>    // CQ-B44 bug), the replenish period becomes `n` SECONDS, so over a
-<a href=#952 id=952 data-nosnippet>952</a>    // 1-second simulated window virtually no additional tokens regenerate
-<a href=#953 id=953 data-nosnippet>953</a>    // past the initial burst — the sustained (post-burst) count would be
-<a href=#954 id=954 data-nosnippet>954</a>    // ~0, not approximately `n`.
-<a href=#955 id=955 data-nosnippet>955</a>    </span><span class="kw">fn </span>permitted_over_window(rate: u32, window: std::time::Duration) -&gt; u64 {
-<a href=#956 id=956 data-nosnippet>956</a>        <span class="kw">use </span>governor::RateLimiter;
-<a href=#957 id=957 data-nosnippet>957</a>        <span class="kw">use </span>governor::clock::FakeRelativeClock;
+<a href=#929 id=929 data-nosnippet>929</a>    <span class="attr">#[test]
+<a href=#930 id=930 data-nosnippet>930</a>    </span><span class="kw">fn </span>window_start_truncates_to_the_window_boundary() {
+<a href=#931 id=931 data-nosnippet>931</a>        <span class="kw">let </span>now = DateTime::&lt;Utc&gt;::from_timestamp(<span class="number">1_800_000_045</span>, <span class="number">0</span>).expect(<span class="string">"valid epoch"</span>);
+<a href=#932 id=932 data-nosnippet>932</a>        <span class="kw">let </span>start = window_start(now);
+<a href=#933 id=933 data-nosnippet>933</a>
+<a href=#934 id=934 data-nosnippet>934</a>        <span class="macro">assert_eq!</span>(start.timestamp() % WINDOW_SECS, <span class="number">0</span>);
+<a href=#935 id=935 data-nosnippet>935</a>        <span class="macro">assert!</span>(start &lt;= now &amp;&amp; now.timestamp() - start.timestamp() &lt; WINDOW_SECS);
+<a href=#936 id=936 data-nosnippet>936</a>    }
+<a href=#937 id=937 data-nosnippet>937</a>
+<a href=#938 id=938 data-nosnippet>938</a>    <span class="attr">#[test]
+<a href=#939 id=939 data-nosnippet>939</a>    </span><span class="kw">fn </span>uses_rightmost_trusted_xff_hop_when_enough_hops_present() {
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="comment">// trusted_hops=1, 3 hops present -&gt; index = 3 - 1 - 1 = 1
+<a href=#941 id=941 data-nosnippet>941</a>        </span><span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">1</span>);
+<a href=#942 id=942 data-nosnippet>942</a>        <span class="kw">let </span>req = req_with_xff(<span class="prelude-val">Some</span>(<span class="string">"203.0.113.9, 198.51.100.7, 192.0.2.1"</span>));
+<a href=#943 id=943 data-nosnippet>943</a>
+<a href=#944 id=944 data-nosnippet>944</a>        <span class="kw">let </span>key = extractor.extract(<span class="kw-2">&amp;</span>req).unwrap();
+<a href=#945 id=945 data-nosnippet>945</a>        <span class="macro">assert_eq!</span>(key, <span class="string">"198.51.100.7"</span>.parse::&lt;IpAddr&gt;().unwrap());
+<a href=#946 id=946 data-nosnippet>946</a>    }
+<a href=#947 id=947 data-nosnippet>947</a>
+<a href=#948 id=948 data-nosnippet>948</a>    <span class="attr">#[test]
+<a href=#949 id=949 data-nosnippet>949</a>    </span><span class="kw">fn </span>falls_back_to_peer_addr_when_trusted_hops_exceeds_hop_count() {
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="comment">// SECHRD-03/D-01d: trusted_hops(1) &gt;= hops.len()(1) =&gt; XFF is
+<a href=#951 id=951 data-nosnippet>951</a>        // completely untrusted; a rotating single-hop XFF must NOT be used
+<a href=#952 id=952 data-nosnippet>952</a>        // (never `hops[0]`) — fall through to the verified peer address.
+<a href=#953 id=953 data-nosnippet>953</a>        </span><span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">1</span>);
+<a href=#954 id=954 data-nosnippet>954</a>        <span class="kw">let </span>peer: SocketAddr = <span class="string">"203.0.113.42:1234"</span>.parse().unwrap();
+<a href=#955 id=955 data-nosnippet>955</a>
+<a href=#956 id=956 data-nosnippet>956</a>        <span class="kw">let </span>req1 = req_with_xff_and_peer(<span class="prelude-val">Some</span>(<span class="string">"198.51.100.1"</span>), peer);
+<a href=#957 id=957 data-nosnippet>957</a>        <span class="kw">let </span>req2 = req_with_xff_and_peer(<span class="prelude-val">Some</span>(<span class="string">"6.6.6.6"</span>), peer);
 <a href=#958 id=958 data-nosnippet>958</a>
-<a href=#959 id=959 data-nosnippet>959</a>        <span class="kw">let </span>burst = NonZeroU32::new(rate).expect(<span class="string">"rate &gt;= 1"</span>);
-<a href=#960 id=960 data-nosnippet>960</a>        <span class="kw">let </span>quota = Quota::per_second(burst);
-<a href=#961 id=961 data-nosnippet>961</a>        <span class="kw">let </span>clock = FakeRelativeClock::default();
-<a href=#962 id=962 data-nosnippet>962</a>        <span class="kw">let </span>limiter = RateLimiter::direct_with_clock(quota, clock.clone());
-<a href=#963 id=963 data-nosnippet>963</a>
-<a href=#964 id=964 data-nosnippet>964</a>        <span class="comment">// Drain the initial burst (the bucket starts full) — burst capacity
-<a href=#965 id=965 data-nosnippet>965</a>        // is a separate, already-asserted property (D-01: burst ==
-<a href=#966 id=966 data-nosnippet>966</a>        // authz_per_sec); it must NOT be counted as "sustained" throughput,
-<a href=#967 id=967 data-nosnippet>967</a>        // or a fully-inverted governor with a large burst could still look
-<a href=#968 id=968 data-nosnippet>968</a>        // like it's passing this test on the first drain alone.
-<a href=#969 id=969 data-nosnippet>969</a>        </span><span class="kw">while </span>limiter.check().is_ok() {}
-<a href=#970 id=970 data-nosnippet>970</a>
-<a href=#971 id=971 data-nosnippet>971</a>        <span class="comment">// Now simulate sustained load: advance the fake clock in small
-<a href=#972 id=972 data-nosnippet>972</a>        // steps across the window, greedily draining whatever new tokens
-<a href=#973 id=973 data-nosnippet>973</a>        // have accumulated at each step — this proves tokens keep
-<a href=#974 id=974 data-nosnippet>974</a>        // replenishing throughout the window (sustained throughput), not
-<a href=#975 id=975 data-nosnippet>975</a>        // just once at t=0.
-<a href=#976 id=976 data-nosnippet>976</a>        </span><span class="kw">let </span>step = std::time::Duration::from_millis(<span class="number">5</span>);
-<a href=#977 id=977 data-nosnippet>977</a>        <span class="kw">let </span><span class="kw-2">mut </span>elapsed = std::time::Duration::ZERO;
-<a href=#978 id=978 data-nosnippet>978</a>        <span class="kw">let </span><span class="kw-2">mut </span>permitted: u64 = <span class="number">0</span>;
-<a href=#979 id=979 data-nosnippet>979</a>        <span class="kw">while </span>elapsed &lt; window {
-<a href=#980 id=980 data-nosnippet>980</a>            clock.advance(step);
-<a href=#981 id=981 data-nosnippet>981</a>            elapsed += step;
-<a href=#982 id=982 data-nosnippet>982</a>            <span class="kw">while </span>limiter.check().is_ok() {
-<a href=#983 id=983 data-nosnippet>983</a>                permitted += <span class="number">1</span>;
-<a href=#984 id=984 data-nosnippet>984</a>            }
-<a href=#985 id=985 data-nosnippet>985</a>        }
-<a href=#986 id=986 data-nosnippet>986</a>        permitted
-<a href=#987 id=987 data-nosnippet>987</a>    }
+<a href=#959 id=959 data-nosnippet>959</a>        <span class="kw">let </span>key1 = extractor.extract(<span class="kw-2">&amp;</span>req1).unwrap();
+<a href=#960 id=960 data-nosnippet>960</a>        <span class="kw">let </span>key2 = extractor.extract(<span class="kw-2">&amp;</span>req2).unwrap();
+<a href=#961 id=961 data-nosnippet>961</a>
+<a href=#962 id=962 data-nosnippet>962</a>        <span class="macro">assert_eq!</span>(key1, peer.ip());
+<a href=#963 id=963 data-nosnippet>963</a>        <span class="macro">assert_eq!</span>(key2, peer.ip());
+<a href=#964 id=964 data-nosnippet>964</a>        <span class="macro">assert_eq!</span>(key1, key2, <span class="string">"rotating XFF must not yield a fresh key"</span>);
+<a href=#965 id=965 data-nosnippet>965</a>    }
+<a href=#966 id=966 data-nosnippet>966</a>
+<a href=#967 id=967 data-nosnippet>967</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#968 id=968 data-nosnippet>968</a>    // CORR-01/D-02: sustained-throughput + monotonicity regression test
+<a href=#969 id=969 data-nosnippet>969</a>    // -----------------------------------------------------------------
+<a href=#970 id=970 data-nosnippet>970</a>    //
+<a href=#971 id=971 data-nosnippet>971</a>    // Drives sustained load against the SAME `governor::Quota::per_second`
+<a href=#972 id=972 data-nosnippet>972</a>    // construction `build_grpc_governor_layer` uses (see the production
+<a href=#973 id=973 data-nosnippet>973</a>    // function above) via a `FakeRelativeClock`, and asserts the permitted
+<a href=#974 id=974 data-nosnippet>974</a>    // count over a simulated window approximates the configured rate — the
+<a href=#975 id=975 data-nosnippet>975</a>    // only reliable way to distinguish a correctly-throttling governor from
+<a href=#976 id=976 data-nosnippet>976</a>    // one that is inverted (RESEARCH Pitfall 1: a naive "does the first
+<a href=#977 id=977 data-nosnippet>977</a>    // burst get through" smoke test looks identical either way).
+<a href=#978 id=978 data-nosnippet>978</a>    //
+<a href=#979 id=979 data-nosnippet>979</a>    // This test would FAIL against the old, inverted construction: with
+<a href=#980 id=980 data-nosnippet>980</a>    // `tower_governor`'s `.per_second(n)` treated as "n tokens/sec" (the
+<a href=#981 id=981 data-nosnippet>981</a>    // CQ-B44 bug), the replenish period becomes `n` SECONDS, so over a
+<a href=#982 id=982 data-nosnippet>982</a>    // 1-second simulated window virtually no additional tokens regenerate
+<a href=#983 id=983 data-nosnippet>983</a>    // past the initial burst — the sustained (post-burst) count would be
+<a href=#984 id=984 data-nosnippet>984</a>    // ~0, not approximately `n`.
+<a href=#985 id=985 data-nosnippet>985</a>    </span><span class="kw">fn </span>permitted_over_window(rate: u32, window: std::time::Duration) -&gt; u64 {
+<a href=#986 id=986 data-nosnippet>986</a>        <span class="kw">use </span>governor::RateLimiter;
+<a href=#987 id=987 data-nosnippet>987</a>        <span class="kw">use </span>governor::clock::FakeRelativeClock;
 <a href=#988 id=988 data-nosnippet>988</a>
-<a href=#989 id=989 data-nosnippet>989</a>    <span class="attr">#[test]
-<a href=#990 id=990 data-nosnippet>990</a>    </span><span class="kw">fn </span>governor_sustained_throughput_matches_configured_rate() {
-<a href=#991 id=991 data-nosnippet>991</a>        <span class="kw">let </span>window = std::time::Duration::from_secs(<span class="number">1</span>);
-<a href=#992 id=992 data-nosnippet>992</a>        <span class="kw">let </span>rate = <span class="number">50u32</span>;
+<a href=#989 id=989 data-nosnippet>989</a>        <span class="kw">let </span>burst = NonZeroU32::new(rate).expect(<span class="string">"rate &gt;= 1"</span>);
+<a href=#990 id=990 data-nosnippet>990</a>        <span class="kw">let </span>quota = Quota::per_second(burst);
+<a href=#991 id=991 data-nosnippet>991</a>        <span class="kw">let </span>clock = FakeRelativeClock::default();
+<a href=#992 id=992 data-nosnippet>992</a>        <span class="kw">let </span>limiter = RateLimiter::direct_with_clock(quota, clock.clone());
 <a href=#993 id=993 data-nosnippet>993</a>
-<a href=#994 id=994 data-nosnippet>994</a>        <span class="kw">let </span>permitted = permitted_over_window(rate, window);
-<a href=#995 id=995 data-nosnippet>995</a>
-<a href=#996 id=996 data-nosnippet>996</a>        <span class="comment">// Tolerance band accounts for the fake clock's discrete 5ms step
-<a href=#997 id=997 data-nosnippet>997</a>        // granularity relative to the token replenish interval; well
-<a href=#998 id=998 data-nosnippet>998</a>        // outside this band would mean the governor is not throttling at
-<a href=#999 id=999 data-nosnippet>999</a>        // approximately the configured rate (CORR-01's ~1/100s inversion
-<a href=#1000 id=1000 data-nosnippet>1000</a>        // would put this number at ~0, nowhere close to 50).
-<a href=#1001 id=1001 data-nosnippet>1001</a>        </span><span class="kw">let </span>lower = (rate <span class="kw">as </span>f64 * <span class="number">0.7</span>) <span class="kw">as </span>u64;
-<a href=#1002 id=1002 data-nosnippet>1002</a>        <span class="kw">let </span>upper = (rate <span class="kw">as </span>f64 * <span class="number">1.3</span>) <span class="kw">as </span>u64;
-<a href=#1003 id=1003 data-nosnippet>1003</a>        <span class="macro">assert!</span>(
-<a href=#1004 id=1004 data-nosnippet>1004</a>            permitted &gt;= lower &amp;&amp; permitted &lt;= upper,
-<a href=#1005 id=1005 data-nosnippet>1005</a>            <span class="string">"expected sustained throughput approximately {rate} req/s over a \
-<a href=#1006 id=1006 data-nosnippet>1006</a>             1s window (allowed range {lower}..={upper}), got {permitted} — \
-<a href=#1007 id=1007 data-nosnippet>1007</a>             the governor quota construction may be inverted again (CORR-01)"
-<a href=#1008 id=1008 data-nosnippet>1008</a>        </span>);
-<a href=#1009 id=1009 data-nosnippet>1009</a>        <span class="macro">assert!</span>(
-<a href=#1010 id=1010 data-nosnippet>1010</a>            permitted &gt; <span class="number">1</span>,
-<a href=#1011 id=1011 data-nosnippet>1011</a>            <span class="string">"sustained throughput of {permitted} over 1s is consistent with \
-<a href=#1012 id=1012 data-nosnippet>1012</a>             the ~1-token/100s inversion bug this test guards against"
-<a href=#1013 id=1013 data-nosnippet>1013</a>        </span>);
-<a href=#1014 id=1014 data-nosnippet>1014</a>    }
-<a href=#1015 id=1015 data-nosnippet>1015</a>
-<a href=#1016 id=1016 data-nosnippet>1016</a>    <span class="attr">#[test]
-<a href=#1017 id=1017 data-nosnippet>1017</a>    </span><span class="kw">fn </span>governor_higher_configured_rate_permits_strictly_more_requests() {
-<a href=#1018 id=1018 data-nosnippet>1018</a>        <span class="comment">// Monotonicity guard: a higher `authz_per_sec` must yield strictly
-<a href=#1019 id=1019 data-nosnippet>1019</a>        // more permitted requests than a lower one over the SAME simulated
-<a href=#1020 id=1020 data-nosnippet>1020</a>        // window. An inverted construction (period, not rate) would make
-<a href=#1021 id=1021 data-nosnippet>1021</a>        // this relationship backwards (raising the configured rate makes
-<a href=#1022 id=1022 data-nosnippet>1022</a>        // the governor SLOWER) or flat (both effectively ~0).
-<a href=#1023 id=1023 data-nosnippet>1023</a>        </span><span class="kw">let </span>window = std::time::Duration::from_secs(<span class="number">1</span>);
-<a href=#1024 id=1024 data-nosnippet>1024</a>
-<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="kw">let </span>low = permitted_over_window(<span class="number">10</span>, window);
-<a href=#1026 id=1026 data-nosnippet>1026</a>        <span class="kw">let </span>high = permitted_over_window(<span class="number">100</span>, window);
-<a href=#1027 id=1027 data-nosnippet>1027</a>
-<a href=#1028 id=1028 data-nosnippet>1028</a>        <span class="macro">assert!</span>(
-<a href=#1029 id=1029 data-nosnippet>1029</a>            high &gt; low,
-<a href=#1030 id=1030 data-nosnippet>1030</a>            <span class="string">"expected a higher configured rate (100/s) to permit strictly \
-<a href=#1031 id=1031 data-nosnippet>1031</a>             more sustained requests than a lower rate (10/s) over the same \
-<a href=#1032 id=1032 data-nosnippet>1032</a>             1s window, got low={low} high={high} — the quota construction \
-<a href=#1033 id=1033 data-nosnippet>1033</a>             may be inverted (CORR-01)"
-<a href=#1034 id=1034 data-nosnippet>1034</a>        </span>);
-<a href=#1035 id=1035 data-nosnippet>1035</a>    }
-<a href=#1036 id=1036 data-nosnippet>1036</a>
-<a href=#1037 id=1037 data-nosnippet>1037</a>    <span class="comment">// -----------------------------------------------------------------
-<a href=#1038 id=1038 data-nosnippet>1038</a>    // I1 — the shared-window units, pinned at the boundary
-<a href=#1039 id=1039 data-nosnippet>1039</a>    // -----------------------------------------------------------------
-<a href=#1040 id=1040 data-nosnippet>1040</a>
-<a href=#1041 id=1041 data-nosnippet>1041</a>    </span><span class="doccomment">/// The shared bucket's window is 60 s and the gRPC ceilings are per
-<a href=#1042 id=1042 data-nosnippet>1042</a>    /// second. If this ever stops being true, `per_sec_to_window_limit` is
-<a href=#1043 id=1043 data-nosnippet>1043</a>    /// wrong and the ×60 units bug is back.
-<a href=#1044 id=1044 data-nosnippet>1044</a>    </span><span class="attr">#[test]
-<a href=#1045 id=1045 data-nosnippet>1045</a>    </span><span class="kw">fn </span>shared_window_is_sixty_seconds() {
-<a href=#1046 id=1046 data-nosnippet>1046</a>        <span class="macro">assert_eq!</span>(WINDOW_SECS, <span class="number">60</span>);
-<a href=#1047 id=1047 data-nosnippet>1047</a>    }
-<a href=#1048 id=1048 data-nosnippet>1048</a>
-<a href=#1049 id=1049 data-nosnippet>1049</a>    <span class="attr">#[test]
-<a href=#1050 id=1050 data-nosnippet>1050</a>    </span><span class="kw">fn </span>per_sec_converts_to_a_sixty_second_window_budget() {
-<a href=#1051 id=1051 data-nosnippet>1051</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">1</span>), <span class="number">60</span>);
-<a href=#1052 id=1052 data-nosnippet>1052</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">100</span>), <span class="number">6_000</span>);
-<a href=#1053 id=1053 data-nosnippet>1053</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">1_000</span>), <span class="number">60_000</span>);
-<a href=#1054 id=1054 data-nosnippet>1054</a>        <span class="comment">// Saturating, never wrapping: a wrapped multiply would produce a
-<a href=#1055 id=1055 data-nosnippet>1055</a>        // TINY budget from a huge configured rate — the opposite of what the
-<a href=#1056 id=1056 data-nosnippet>1056</a>        // operator asked for, and silently.
-<a href=#1057 id=1057 data-nosnippet>1057</a>        </span><span class="macro">assert_eq!</span>(per_sec_to_window_limit(u32::MAX), u32::MAX);
-<a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(u32::MAX / <span class="number">2</span>), u32::MAX);
-<a href=#1059 id=1059 data-nosnippet>1059</a>    }
-<a href=#1060 id=1060 data-nosnippet>1060</a>
-<a href=#1061 id=1061 data-nosnippet>1061</a>    <span class="doccomment">/// **The I1 call-site pin.** The layer the composition root builds
-<a href=#1062 id=1062 data-nosnippet>1062</a>    /// (`server.rs::start_grpc_server` → `new_method_scoped`) must enforce
-<a href=#1063 id=1063 data-nosnippet>1063</a>    /// `configured_per_sec × 60` against its 60-second window — NOT the
-<a href=#1064 id=1064 data-nosnippet>1064</a>    /// per-second number verbatim, which is what made the effective ceiling
-<a href=#1065 id=1065 data-nosnippet>1065</a>    /// 1/60th of the configured one.
-<a href=#1066 id=1066 data-nosnippet>1066</a>    </span><span class="attr">#[test]
-<a href=#1067 id=1067 data-nosnippet>1067</a>    </span><span class="kw">fn </span>method_scoped_shared_layer_enforces_per_sec_times_sixty() {
-<a href=#1068 id=1068 data-nosnippet>1068</a>        <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>);
-<a href=#1069 id=1069 data-nosnippet>1069</a>        <span class="kw">let </span>layer = GrpcSharedRateLimitLayer::with_counter_method_scoped(
-<a href=#1070 id=1070 data-nosnippet>1070</a>            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
-<a href=#1071 id=1071 data-nosnippet>1071</a>            limits,
-<a href=#1072 id=1072 data-nosnippet>1072</a>            <span class="number">0</span>,
-<a href=#1073 id=1073 data-nosnippet>1073</a>        );
-<a href=#1074 id=1074 data-nosnippet>1074</a>
-<a href=#1075 id=1075 data-nosnippet>1075</a>        <span class="kw">let </span>(endpoint, limit) =
-<a href=#1076 id=1076 data-nosnippet>1076</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>);
-<a href=#1077 id=1077 data-nosnippet>1077</a>        <span class="macro">assert_eq!</span>(endpoint, <span class="string">"grpc_authz"</span>, <span class="string">"bucket key must not change (I1)"</span>);
-<a href=#1078 id=1078 data-nosnippet>1078</a>        <span class="macro">assert_eq!</span>(
-<a href=#1079 id=1079 data-nosnippet>1079</a>            limit, <span class="number">6_000</span>,
-<a href=#1080 id=1080 data-nosnippet>1080</a>            <span class="string">"the 60-second shared window must budget 100/s × 60 = 6 000; a bare 100 \
-<a href=#1081 id=1081 data-nosnippet>1081</a>             here is the ×60 units bug (I1)"
-<a href=#1082 id=1082 data-nosnippet>1082</a>        </span>);
-<a href=#1083 id=1083 data-nosnippet>1083</a>
-<a href=#1084 id=1084 data-nosnippet>1084</a>        <span class="comment">// The same conversion applies to every family.
-<a href=#1085 id=1085 data-nosnippet>1085</a>        </span><span class="macro">assert_eq!</span>(
-<a href=#1086 id=1086 data-nosnippet>1086</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>),
-<a href=#1087 id=1087 data-nosnippet>1087</a>            (<span class="string">"grpc_identity"</span>, <span class="number">100 </span>* IDENTITY_PER_SEC_MULTIPLE * <span class="number">60</span>)
-<a href=#1088 id=1088 data-nosnippet>1088</a>        );
-<a href=#1089 id=1089 data-nosnippet>1089</a>        <span class="macro">assert_eq!</span>(
-<a href=#1090 id=1090 data-nosnippet>1090</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.UserService/GetUser"</span>),
-<a href=#1091 id=1091 data-nosnippet>1091</a>            (<span class="string">"grpc_admin"</span>, ADMIN_PER_SEC_DEFAULT * <span class="number">60</span>)
-<a href=#1092 id=1092 data-nosnippet>1092</a>        );
-<a href=#1093 id=1093 data-nosnippet>1093</a>        <span class="macro">assert_eq!</span>(
-<a href=#1094 id=1094 data-nosnippet>1094</a>            layer.resolve_for_path(<span class="string">"/grpc.health.v1.Health/Check"</span>),
-<a href=#1095 id=1095 data-nosnippet>1095</a>            (<span class="string">"grpc_infra"</span>, INFRA_PER_SEC * <span class="number">60</span>),
-<a href=#1096 id=1096 data-nosnippet>1096</a>            <span class="string">"the infrastructure family is bucketed, not skipped (residual 4)"
-<a href=#1097 id=1097 data-nosnippet>1097</a>        </span>);
-<a href=#1098 id=1098 data-nosnippet>1098</a>    }
-<a href=#1099 id=1099 data-nosnippet>1099</a>
-<a href=#1100 id=1100 data-nosnippet>1100</a>    <span class="doccomment">/// The legacy uniform constructor is unchanged: its `limit` is already a
-<a href=#1101 id=1101 data-nosnippet>1101</a>    /// window budget and is applied to every path, whatever the method.
-<a href=#1102 id=1102 data-nosnippet>1102</a>    </span><span class="attr">#[test]
-<a href=#1103 id=1103 data-nosnippet>1103</a>    </span><span class="kw">fn </span>uniform_scope_applies_one_bucket_to_every_path() {
-<a href=#1104 id=1104 data-nosnippet>1104</a>        <span class="kw">let </span>layer = GrpcSharedRateLimitLayer::with_counter(
-<a href=#1105 id=1105 data-nosnippet>1105</a>            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
-<a href=#1106 id=1106 data-nosnippet>1106</a>            <span class="string">"grpc_authz"</span>,
-<a href=#1107 id=1107 data-nosnippet>1107</a>            <span class="number">42</span>,
-<a href=#1108 id=1108 data-nosnippet>1108</a>            <span class="number">0</span>,
-<a href=#1109 id=1109 data-nosnippet>1109</a>        );
-<a href=#1110 id=1110 data-nosnippet>1110</a>        <span class="kw">for </span>path <span class="kw">in </span>[
-<a href=#1111 id=1111 data-nosnippet>1111</a>            <span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>,
-<a href=#1112 id=1112 data-nosnippet>1112</a>            <span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>,
-<a href=#1113 id=1113 data-nosnippet>1113</a>            <span class="string">"/grpc.health.v1.Health/Check"</span>,
-<a href=#1114 id=1114 data-nosnippet>1114</a>            <span class="string">"/"</span>,
-<a href=#1115 id=1115 data-nosnippet>1115</a>        ] {
-<a href=#1116 id=1116 data-nosnippet>1116</a>            <span class="macro">assert_eq!</span>(layer.resolve_for_path(path), (<span class="string">"grpc_authz"</span>, <span class="number">42</span>));
-<a href=#1117 id=1117 data-nosnippet>1117</a>        }
-<a href=#1118 id=1118 data-nosnippet>1118</a>    }
-<a href=#1119 id=1119 data-nosnippet>1119</a>
-<a href=#1120 id=1120 data-nosnippet>1120</a>    <span class="comment">// -----------------------------------------------------------------
-<a href=#1121 id=1121 data-nosnippet>1121</a>    // I2 — per-method-family scoping
-<a href=#1122 id=1122 data-nosnippet>1122</a>    // -----------------------------------------------------------------
-<a href=#1123 id=1123 data-nosnippet>1123</a>
-<a href=#1124 id=1124 data-nosnippet>1124</a>    </span><span class="attr">#[test]
-<a href=#1125 id=1125 data-nosnippet>1125</a>    </span><span class="kw">fn </span>classifies_each_service_into_its_family() {
-<a href=#1126 id=1126 data-nosnippet>1126</a>        <span class="kw">use </span>GrpcMethodFamily::<span class="kw-2">*</span>;
-<a href=#1127 id=1127 data-nosnippet>1127</a>        <span class="kw">for </span>(path, expected) <span class="kw">in </span>[
-<a href=#1128 id=1128 data-nosnippet>1128</a>            (<span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>, AuthzCheck),
-<a href=#1129 id=1129 data-nosnippet>1129</a>            (
-<a href=#1130 id=1130 data-nosnippet>1130</a>                <span class="string">"/axiam.v1.AuthorizationService/BatchCheckAccess"</span>,
-<a href=#1131 id=1131 data-nosnippet>1131</a>                AuthzCheck,
-<a href=#1132 id=1132 data-nosnippet>1132</a>            ),
-<a href=#1133 id=1133 data-nosnippet>1133</a>            (<span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>, IdentityRead),
-<a href=#1134 id=1134 data-nosnippet>1134</a>            (<span class="string">"/axiam.v1.TokenService/ValidateToken"</span>, IdentityRead),
-<a href=#1135 id=1135 data-nosnippet>1135</a>            (<span class="string">"/axiam.v1.TokenService/IntrospectToken"</span>, IdentityRead),
-<a href=#1136 id=1136 data-nosnippet>1136</a>            (<span class="string">"/axiam.v1.UserService/GetUser"</span>, Admin),
-<a href=#1137 id=1137 data-nosnippet>1137</a>            (<span class="string">"/axiam.v1.UserService/ValidateCredentials"</span>, Admin),
-<a href=#1138 id=1138 data-nosnippet>1138</a>            (<span class="string">"/grpc.health.v1.Health/Check"</span>, Infra),
-<a href=#1139 id=1139 data-nosnippet>1139</a>            (<span class="string">"/grpc.health.v1.Health/Watch"</span>, Infra),
-<a href=#1140 id=1140 data-nosnippet>1140</a>            (
-<a href=#1141 id=1141 data-nosnippet>1141</a>                <span class="string">"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"</span>,
-<a href=#1142 id=1142 data-nosnippet>1142</a>                Infra,
-<a href=#1143 id=1143 data-nosnippet>1143</a>            ),
-<a href=#1144 id=1144 data-nosnippet>1144</a>            (
-<a href=#1145 id=1145 data-nosnippet>1145</a>                <span class="string">"/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"</span>,
-<a href=#1146 id=1146 data-nosnippet>1146</a>                Infra,
-<a href=#1147 id=1147 data-nosnippet>1147</a>            ),
-<a href=#1148 id=1148 data-nosnippet>1148</a>        ] {
-<a href=#1149 id=1149 data-nosnippet>1149</a>            <span class="macro">assert_eq!</span>(GrpcMethodFamily::classify(path), expected, <span class="string">"{path}"</span>);
-<a href=#1150 id=1150 data-nosnippet>1150</a>        }
-<a href=#1151 id=1151 data-nosnippet>1151</a>    }
-<a href=#1152 id=1152 data-nosnippet>1152</a>
-<a href=#1153 id=1153 data-nosnippet>1153</a>    <span class="doccomment">/// Fail-safe default: an unrecognized path lands in the STRICTEST limited
-<a href=#1154 id=1154 data-nosnippet>1154</a>    /// family, never in the most generous one. Adding a service without
-<a href=#1155 id=1155 data-nosnippet>1155</a>    /// updating `classify` must not silently create a loosely-limited gRPC
-<a href=#1156 id=1156 data-nosnippet>1156</a>    /// surface.
-<a href=#1157 id=1157 data-nosnippet>1157</a>    </span><span class="attr">#[test]
-<a href=#1158 id=1158 data-nosnippet>1158</a>    </span><span class="kw">fn </span>unknown_paths_fall_back_to_the_strictest_family() {
-<a href=#1159 id=1159 data-nosnippet>1159</a>        <span class="kw">for </span>path <span class="kw">in </span>[
-<a href=#1160 id=1160 data-nosnippet>1160</a>            <span class="string">"/"</span>,
-<a href=#1161 id=1161 data-nosnippet>1161</a>            <span class="string">"/nonsense"</span>,
-<a href=#1162 id=1162 data-nosnippet>1162</a>            <span class="string">"/some.other.Service/Method"</span>,
-<a href=#1163 id=1163 data-nosnippet>1163</a>            <span class="string">"/axiam.v1.FutureService/Whatever"</span>,
-<a href=#1164 id=1164 data-nosnippet>1164</a>        ] {
-<a href=#1165 id=1165 data-nosnippet>1165</a>            <span class="macro">assert_eq!</span>(
-<a href=#1166 id=1166 data-nosnippet>1166</a>                GrpcMethodFamily::classify(path),
-<a href=#1167 id=1167 data-nosnippet>1167</a>                GrpcMethodFamily::AuthzCheck,
-<a href=#1168 id=1168 data-nosnippet>1168</a>                <span class="string">"{path} must fail safe into the authz bucket"
-<a href=#1169 id=1169 data-nosnippet>1169</a>            </span>);
-<a href=#1170 id=1170 data-nosnippet>1170</a>        }
-<a href=#1171 id=1171 data-nosnippet>1171</a>    }
-<a href=#1172 id=1172 data-nosnippet>1172</a>
-<a href=#1173 id=1173 data-nosnippet>1173</a>    <span class="doccomment">/// I2's core claim: an identity read is no longer throttled by the authz
-<a href=#1174 id=1174 data-nosnippet>1174</a>    /// ceiling, and the three limited families use three distinct buckets.
-<a href=#1175 id=1175 data-nosnippet>1175</a>    </span><span class="attr">#[test]
-<a href=#1176 id=1176 data-nosnippet>1176</a>    </span><span class="kw">fn </span>families_get_distinct_buckets_and_distinct_ceilings() {
-<a href=#1177 id=1177 data-nosnippet>1177</a>        <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>);
-<a href=#1178 id=1178 data-nosnippet>1178</a>        <span class="macro">assert_eq!</span>(limits.authz_per_sec, <span class="number">100</span>);
-<a href=#1179 id=1179 data-nosnippet>1179</a>        <span class="macro">assert_eq!</span>(limits.identity_per_sec, <span class="number">500</span>);
-<a href=#1180 id=1180 data-nosnippet>1180</a>        <span class="macro">assert_eq!</span>(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
-<a href=#1181 id=1181 data-nosnippet>1181</a>        <span class="macro">assert!</span>(
-<a href=#1182 id=1182 data-nosnippet>1182</a>            limits.identity_per_sec &gt; limits.authz_per_sec,
-<a href=#1183 id=1183 data-nosnippet>1183</a>            <span class="string">"identity reads measured ~14x an authz check; their ceiling must not \
-<a href=#1184 id=1184 data-nosnippet>1184</a>             be the authz ceiling (I2)"
-<a href=#1185 id=1185 data-nosnippet>1185</a>        </span>);
-<a href=#1186 id=1186 data-nosnippet>1186</a>
-<a href=#1187 id=1187 data-nosnippet>1187</a>        <span class="kw">let </span>endpoints: Vec&lt;<span class="kw">_</span>&gt; = [
-<a href=#1188 id=1188 data-nosnippet>1188</a>            GrpcMethodFamily::AuthzCheck,
-<a href=#1189 id=1189 data-nosnippet>1189</a>            GrpcMethodFamily::IdentityRead,
-<a href=#1190 id=1190 data-nosnippet>1190</a>            GrpcMethodFamily::Admin,
-<a href=#1191 id=1191 data-nosnippet>1191</a>            GrpcMethodFamily::Infra,
-<a href=#1192 id=1192 data-nosnippet>1192</a>        ]
-<a href=#1193 id=1193 data-nosnippet>1193</a>        .iter()
-<a href=#1194 id=1194 data-nosnippet>1194</a>        .map(|f| f.shared_endpoint())
-<a href=#1195 id=1195 data-nosnippet>1195</a>        .collect();
-<a href=#1196 id=1196 data-nosnippet>1196</a>        <span class="macro">assert_eq!</span>(
-<a href=#1197 id=1197 data-nosnippet>1197</a>            endpoints,
-<a href=#1198 id=1198 data-nosnippet>1198</a>            <span class="macro">vec!</span>[<span class="string">"grpc_authz"</span>, <span class="string">"grpc_identity"</span>, <span class="string">"grpc_admin"</span>, <span class="string">"grpc_infra"</span>]
-<a href=#1199 id=1199 data-nosnippet>1199</a>        );
-<a href=#1200 id=1200 data-nosnippet>1200</a>    }
-<a href=#1201 id=1201 data-nosnippet>1201</a>
-<a href=#1202 id=1202 data-nosnippet>1202</a>    <span class="doccomment">/// **SEC-079.** The admin ceiling is a CPU guard on an Argon2id RPC and
-<a href=#1203 id=1203 data-nosnippet>1203</a>    /// must NOT scale with the read-sized authz base — otherwise a
-<a href=#1204 id=1204 data-nosnippet>1204</a>    /// `gateway`/`mesh` posture (or any operator raising the authz ceiling for
-<a href=#1205 id=1205 data-nosnippet>1205</a>    /// service-mesh throughput) silently widens online password guessing.
-<a href=#1206 id=1206 data-nosnippet>1206</a>    </span><span class="attr">#[test]
-<a href=#1207 id=1207 data-nosnippet>1207</a>    </span><span class="kw">fn </span>admin_ceiling_never_derives_from_the_authz_ceiling() {
-<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">1</span>, <span class="number">100</span>, <span class="number">1_000</span>, <span class="number">5_000</span>, <span class="number">60_000</span>, u32::MAX] {
-<a href=#1209 id=1209 data-nosnippet>1209</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
-<a href=#1210 id=1210 data-nosnippet>1210</a>            <span class="macro">assert_eq!</span>(
-<a href=#1211 id=1211 data-nosnippet>1211</a>                limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT,
-<a href=#1212 id=1212 data-nosnippet>1212</a>                <span class="string">"authz={authz}: the admin ceiling must stay at the absolute default \
-<a href=#1213 id=1213 data-nosnippet>1213</a>                 ({ADMIN_PER_SEC_DEFAULT}/s); deriving it from a read-sized base is SEC-079"
-<a href=#1214 id=1214 data-nosnippet>1214</a>            </span>);
-<a href=#1215 id=1215 data-nosnippet>1215</a>            <span class="macro">assert_eq!</span>(
-<a href=#1216 id=1216 data-nosnippet>1216</a>                limits.per_sec(GrpcMethodFamily::Admin),
-<a href=#1217 id=1217 data-nosnippet>1217</a>                ADMIN_PER_SEC_DEFAULT
-<a href=#1218 id=1218 data-nosnippet>1218</a>            );
-<a href=#1219 id=1219 data-nosnippet>1219</a>        }
-<a href=#1220 id=1220 data-nosnippet>1220</a>
-<a href=#1221 id=1221 data-nosnippet>1221</a>        <span class="comment">// And the absolute value is the CPU-appropriate one: 10/s = 600/min
-<a href=#1222 id=1222 data-nosnippet>1222</a>        // per IP through the 60-second shared window.
-<a href=#1223 id=1223 data-nosnippet>1223</a>        </span><span class="macro">assert_eq!</span>(ADMIN_PER_SEC_DEFAULT, <span class="number">10</span>);
-<a href=#1224 id=1224 data-nosnippet>1224</a>        <span class="macro">assert_eq!</span>(
-<a href=#1225 id=1225 data-nosnippet>1225</a>            GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>).window_limit(GrpcMethodFamily::Admin),
-<a href=#1226 id=1226 data-nosnippet>1226</a>            <span class="number">600</span>,
-<a href=#1227 id=1227 data-nosnippet>1227</a>            <span class="string">"600 credential checks per minute per IP — not the 6 000 the units fix \
-<a href=#1228 id=1228 data-nosnippet>1228</a>             would have produced from the read-sized base"
-<a href=#1229 id=1229 data-nosnippet>1229</a>        </span>);
+<a href=#994 id=994 data-nosnippet>994</a>        <span class="comment">// Drain the initial burst (the bucket starts full) — burst capacity
+<a href=#995 id=995 data-nosnippet>995</a>        // is a separate, already-asserted property (D-01: burst ==
+<a href=#996 id=996 data-nosnippet>996</a>        // authz_per_sec); it must NOT be counted as "sustained" throughput,
+<a href=#997 id=997 data-nosnippet>997</a>        // or a fully-inverted governor with a large burst could still look
+<a href=#998 id=998 data-nosnippet>998</a>        // like it's passing this test on the first drain alone.
+<a href=#999 id=999 data-nosnippet>999</a>        </span><span class="kw">while </span>limiter.check().is_ok() {}
+<a href=#1000 id=1000 data-nosnippet>1000</a>
+<a href=#1001 id=1001 data-nosnippet>1001</a>        <span class="comment">// Now simulate sustained load: advance the fake clock in small
+<a href=#1002 id=1002 data-nosnippet>1002</a>        // steps across the window, greedily draining whatever new tokens
+<a href=#1003 id=1003 data-nosnippet>1003</a>        // have accumulated at each step — this proves tokens keep
+<a href=#1004 id=1004 data-nosnippet>1004</a>        // replenishing throughout the window (sustained throughput), not
+<a href=#1005 id=1005 data-nosnippet>1005</a>        // just once at t=0.
+<a href=#1006 id=1006 data-nosnippet>1006</a>        </span><span class="kw">let </span>step = std::time::Duration::from_millis(<span class="number">5</span>);
+<a href=#1007 id=1007 data-nosnippet>1007</a>        <span class="kw">let </span><span class="kw-2">mut </span>elapsed = std::time::Duration::ZERO;
+<a href=#1008 id=1008 data-nosnippet>1008</a>        <span class="kw">let </span><span class="kw-2">mut </span>permitted: u64 = <span class="number">0</span>;
+<a href=#1009 id=1009 data-nosnippet>1009</a>        <span class="kw">while </span>elapsed &lt; window {
+<a href=#1010 id=1010 data-nosnippet>1010</a>            clock.advance(step);
+<a href=#1011 id=1011 data-nosnippet>1011</a>            elapsed += step;
+<a href=#1012 id=1012 data-nosnippet>1012</a>            <span class="kw">while </span>limiter.check().is_ok() {
+<a href=#1013 id=1013 data-nosnippet>1013</a>                permitted += <span class="number">1</span>;
+<a href=#1014 id=1014 data-nosnippet>1014</a>            }
+<a href=#1015 id=1015 data-nosnippet>1015</a>        }
+<a href=#1016 id=1016 data-nosnippet>1016</a>        permitted
+<a href=#1017 id=1017 data-nosnippet>1017</a>    }
+<a href=#1018 id=1018 data-nosnippet>1018</a>
+<a href=#1019 id=1019 data-nosnippet>1019</a>    <span class="attr">#[test]
+<a href=#1020 id=1020 data-nosnippet>1020</a>    </span><span class="kw">fn </span>governor_sustained_throughput_matches_configured_rate() {
+<a href=#1021 id=1021 data-nosnippet>1021</a>        <span class="kw">let </span>window = std::time::Duration::from_secs(<span class="number">1</span>);
+<a href=#1022 id=1022 data-nosnippet>1022</a>        <span class="kw">let </span>rate = <span class="number">50u32</span>;
+<a href=#1023 id=1023 data-nosnippet>1023</a>
+<a href=#1024 id=1024 data-nosnippet>1024</a>        <span class="kw">let </span>permitted = permitted_over_window(rate, window);
+<a href=#1025 id=1025 data-nosnippet>1025</a>
+<a href=#1026 id=1026 data-nosnippet>1026</a>        <span class="comment">// Tolerance band accounts for the fake clock's discrete 5ms step
+<a href=#1027 id=1027 data-nosnippet>1027</a>        // granularity relative to the token replenish interval; well
+<a href=#1028 id=1028 data-nosnippet>1028</a>        // outside this band would mean the governor is not throttling at
+<a href=#1029 id=1029 data-nosnippet>1029</a>        // approximately the configured rate (CORR-01's ~1/100s inversion
+<a href=#1030 id=1030 data-nosnippet>1030</a>        // would put this number at ~0, nowhere close to 50).
+<a href=#1031 id=1031 data-nosnippet>1031</a>        </span><span class="kw">let </span>lower = (rate <span class="kw">as </span>f64 * <span class="number">0.7</span>) <span class="kw">as </span>u64;
+<a href=#1032 id=1032 data-nosnippet>1032</a>        <span class="kw">let </span>upper = (rate <span class="kw">as </span>f64 * <span class="number">1.3</span>) <span class="kw">as </span>u64;
+<a href=#1033 id=1033 data-nosnippet>1033</a>        <span class="macro">assert!</span>(
+<a href=#1034 id=1034 data-nosnippet>1034</a>            permitted &gt;= lower &amp;&amp; permitted &lt;= upper,
+<a href=#1035 id=1035 data-nosnippet>1035</a>            <span class="string">"expected sustained throughput approximately {rate} req/s over a \
+<a href=#1036 id=1036 data-nosnippet>1036</a>             1s window (allowed range {lower}..={upper}), got {permitted} — \
+<a href=#1037 id=1037 data-nosnippet>1037</a>             the governor quota construction may be inverted again (CORR-01)"
+<a href=#1038 id=1038 data-nosnippet>1038</a>        </span>);
+<a href=#1039 id=1039 data-nosnippet>1039</a>        <span class="macro">assert!</span>(
+<a href=#1040 id=1040 data-nosnippet>1040</a>            permitted &gt; <span class="number">1</span>,
+<a href=#1041 id=1041 data-nosnippet>1041</a>            <span class="string">"sustained throughput of {permitted} over 1s is consistent with \
+<a href=#1042 id=1042 data-nosnippet>1042</a>             the ~1-token/100s inversion bug this test guards against"
+<a href=#1043 id=1043 data-nosnippet>1043</a>        </span>);
+<a href=#1044 id=1044 data-nosnippet>1044</a>    }
+<a href=#1045 id=1045 data-nosnippet>1045</a>
+<a href=#1046 id=1046 data-nosnippet>1046</a>    <span class="attr">#[test]
+<a href=#1047 id=1047 data-nosnippet>1047</a>    </span><span class="kw">fn </span>governor_higher_configured_rate_permits_strictly_more_requests() {
+<a href=#1048 id=1048 data-nosnippet>1048</a>        <span class="comment">// Monotonicity guard: a higher `authz_per_sec` must yield strictly
+<a href=#1049 id=1049 data-nosnippet>1049</a>        // more permitted requests than a lower one over the SAME simulated
+<a href=#1050 id=1050 data-nosnippet>1050</a>        // window. An inverted construction (period, not rate) would make
+<a href=#1051 id=1051 data-nosnippet>1051</a>        // this relationship backwards (raising the configured rate makes
+<a href=#1052 id=1052 data-nosnippet>1052</a>        // the governor SLOWER) or flat (both effectively ~0).
+<a href=#1053 id=1053 data-nosnippet>1053</a>        </span><span class="kw">let </span>window = std::time::Duration::from_secs(<span class="number">1</span>);
+<a href=#1054 id=1054 data-nosnippet>1054</a>
+<a href=#1055 id=1055 data-nosnippet>1055</a>        <span class="kw">let </span>low = permitted_over_window(<span class="number">10</span>, window);
+<a href=#1056 id=1056 data-nosnippet>1056</a>        <span class="kw">let </span>high = permitted_over_window(<span class="number">100</span>, window);
+<a href=#1057 id=1057 data-nosnippet>1057</a>
+<a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="macro">assert!</span>(
+<a href=#1059 id=1059 data-nosnippet>1059</a>            high &gt; low,
+<a href=#1060 id=1060 data-nosnippet>1060</a>            <span class="string">"expected a higher configured rate (100/s) to permit strictly \
+<a href=#1061 id=1061 data-nosnippet>1061</a>             more sustained requests than a lower rate (10/s) over the same \
+<a href=#1062 id=1062 data-nosnippet>1062</a>             1s window, got low={low} high={high} — the quota construction \
+<a href=#1063 id=1063 data-nosnippet>1063</a>             may be inverted (CORR-01)"
+<a href=#1064 id=1064 data-nosnippet>1064</a>        </span>);
+<a href=#1065 id=1065 data-nosnippet>1065</a>    }
+<a href=#1066 id=1066 data-nosnippet>1066</a>
+<a href=#1067 id=1067 data-nosnippet>1067</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#1068 id=1068 data-nosnippet>1068</a>    // I1 — the shared-window units, pinned at the boundary
+<a href=#1069 id=1069 data-nosnippet>1069</a>    // -----------------------------------------------------------------
+<a href=#1070 id=1070 data-nosnippet>1070</a>
+<a href=#1071 id=1071 data-nosnippet>1071</a>    </span><span class="doccomment">/// The shared bucket's window is 60 s and the gRPC ceilings are per
+<a href=#1072 id=1072 data-nosnippet>1072</a>    /// second. If this ever stops being true, `per_sec_to_window_limit` is
+<a href=#1073 id=1073 data-nosnippet>1073</a>    /// wrong and the ×60 units bug is back.
+<a href=#1074 id=1074 data-nosnippet>1074</a>    </span><span class="attr">#[test]
+<a href=#1075 id=1075 data-nosnippet>1075</a>    </span><span class="kw">fn </span>shared_window_is_sixty_seconds() {
+<a href=#1076 id=1076 data-nosnippet>1076</a>        <span class="macro">assert_eq!</span>(WINDOW_SECS, <span class="number">60</span>);
+<a href=#1077 id=1077 data-nosnippet>1077</a>    }
+<a href=#1078 id=1078 data-nosnippet>1078</a>
+<a href=#1079 id=1079 data-nosnippet>1079</a>    <span class="attr">#[test]
+<a href=#1080 id=1080 data-nosnippet>1080</a>    </span><span class="kw">fn </span>per_sec_converts_to_a_sixty_second_window_budget() {
+<a href=#1081 id=1081 data-nosnippet>1081</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">1</span>), <span class="number">60</span>);
+<a href=#1082 id=1082 data-nosnippet>1082</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">100</span>), <span class="number">6_000</span>);
+<a href=#1083 id=1083 data-nosnippet>1083</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(<span class="number">1_000</span>), <span class="number">60_000</span>);
+<a href=#1084 id=1084 data-nosnippet>1084</a>        <span class="comment">// Saturating, never wrapping: a wrapped multiply would produce a
+<a href=#1085 id=1085 data-nosnippet>1085</a>        // TINY budget from a huge configured rate — the opposite of what the
+<a href=#1086 id=1086 data-nosnippet>1086</a>        // operator asked for, and silently.
+<a href=#1087 id=1087 data-nosnippet>1087</a>        </span><span class="macro">assert_eq!</span>(per_sec_to_window_limit(u32::MAX), u32::MAX);
+<a href=#1088 id=1088 data-nosnippet>1088</a>        <span class="macro">assert_eq!</span>(per_sec_to_window_limit(u32::MAX / <span class="number">2</span>), u32::MAX);
+<a href=#1089 id=1089 data-nosnippet>1089</a>    }
+<a href=#1090 id=1090 data-nosnippet>1090</a>
+<a href=#1091 id=1091 data-nosnippet>1091</a>    <span class="doccomment">/// **The I1 call-site pin.** The layer the composition root builds
+<a href=#1092 id=1092 data-nosnippet>1092</a>    /// (`server.rs::start_grpc_server` → `new_method_scoped`) must enforce
+<a href=#1093 id=1093 data-nosnippet>1093</a>    /// `configured_per_sec × 60` against its 60-second window — NOT the
+<a href=#1094 id=1094 data-nosnippet>1094</a>    /// per-second number verbatim, which is what made the effective ceiling
+<a href=#1095 id=1095 data-nosnippet>1095</a>    /// 1/60th of the configured one.
+<a href=#1096 id=1096 data-nosnippet>1096</a>    </span><span class="attr">#[test]
+<a href=#1097 id=1097 data-nosnippet>1097</a>    </span><span class="kw">fn </span>method_scoped_shared_layer_enforces_per_sec_times_sixty() {
+<a href=#1098 id=1098 data-nosnippet>1098</a>        <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>);
+<a href=#1099 id=1099 data-nosnippet>1099</a>        <span class="kw">let </span>layer = GrpcSharedRateLimitLayer::with_counter_method_scoped(
+<a href=#1100 id=1100 data-nosnippet>1100</a>            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
+<a href=#1101 id=1101 data-nosnippet>1101</a>            limits,
+<a href=#1102 id=1102 data-nosnippet>1102</a>            <span class="number">0</span>,
+<a href=#1103 id=1103 data-nosnippet>1103</a>        );
+<a href=#1104 id=1104 data-nosnippet>1104</a>
+<a href=#1105 id=1105 data-nosnippet>1105</a>        <span class="kw">let </span>(endpoint, limit) =
+<a href=#1106 id=1106 data-nosnippet>1106</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>);
+<a href=#1107 id=1107 data-nosnippet>1107</a>        <span class="macro">assert_eq!</span>(endpoint, <span class="string">"grpc_authz"</span>, <span class="string">"bucket key must not change (I1)"</span>);
+<a href=#1108 id=1108 data-nosnippet>1108</a>        <span class="macro">assert_eq!</span>(
+<a href=#1109 id=1109 data-nosnippet>1109</a>            limit, <span class="number">6_000</span>,
+<a href=#1110 id=1110 data-nosnippet>1110</a>            <span class="string">"the 60-second shared window must budget 100/s × 60 = 6 000; a bare 100 \
+<a href=#1111 id=1111 data-nosnippet>1111</a>             here is the ×60 units bug (I1)"
+<a href=#1112 id=1112 data-nosnippet>1112</a>        </span>);
+<a href=#1113 id=1113 data-nosnippet>1113</a>
+<a href=#1114 id=1114 data-nosnippet>1114</a>        <span class="comment">// The same conversion applies to every family.
+<a href=#1115 id=1115 data-nosnippet>1115</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#1116 id=1116 data-nosnippet>1116</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>),
+<a href=#1117 id=1117 data-nosnippet>1117</a>            (<span class="string">"grpc_identity"</span>, <span class="number">100 </span>* IDENTITY_PER_SEC_MULTIPLE * <span class="number">60</span>)
+<a href=#1118 id=1118 data-nosnippet>1118</a>        );
+<a href=#1119 id=1119 data-nosnippet>1119</a>        <span class="macro">assert_eq!</span>(
+<a href=#1120 id=1120 data-nosnippet>1120</a>            layer.resolve_for_path(<span class="string">"/axiam.v1.UserService/GetUser"</span>),
+<a href=#1121 id=1121 data-nosnippet>1121</a>            (<span class="string">"grpc_admin"</span>, ADMIN_PER_SEC_DEFAULT * <span class="number">60</span>)
+<a href=#1122 id=1122 data-nosnippet>1122</a>        );
+<a href=#1123 id=1123 data-nosnippet>1123</a>        <span class="macro">assert_eq!</span>(
+<a href=#1124 id=1124 data-nosnippet>1124</a>            layer.resolve_for_path(<span class="string">"/grpc.health.v1.Health/Check"</span>),
+<a href=#1125 id=1125 data-nosnippet>1125</a>            (<span class="string">"grpc_infra"</span>, INFRA_PER_SEC * <span class="number">60</span>),
+<a href=#1126 id=1126 data-nosnippet>1126</a>            <span class="string">"the infrastructure family is bucketed, not skipped (residual 4)"
+<a href=#1127 id=1127 data-nosnippet>1127</a>        </span>);
+<a href=#1128 id=1128 data-nosnippet>1128</a>    }
+<a href=#1129 id=1129 data-nosnippet>1129</a>
+<a href=#1130 id=1130 data-nosnippet>1130</a>    <span class="doccomment">/// The legacy uniform constructor is unchanged: its `limit` is already a
+<a href=#1131 id=1131 data-nosnippet>1131</a>    /// window budget and is applied to every path, whatever the method.
+<a href=#1132 id=1132 data-nosnippet>1132</a>    </span><span class="attr">#[test]
+<a href=#1133 id=1133 data-nosnippet>1133</a>    </span><span class="kw">fn </span>uniform_scope_applies_one_bucket_to_every_path() {
+<a href=#1134 id=1134 data-nosnippet>1134</a>        <span class="kw">let </span>layer = GrpcSharedRateLimitLayer::with_counter(
+<a href=#1135 id=1135 data-nosnippet>1135</a>            SharedRateLimitCounter::disabled(axiam_db::SharedRateLimitConfig::default()),
+<a href=#1136 id=1136 data-nosnippet>1136</a>            <span class="string">"grpc_authz"</span>,
+<a href=#1137 id=1137 data-nosnippet>1137</a>            <span class="number">42</span>,
+<a href=#1138 id=1138 data-nosnippet>1138</a>            <span class="number">0</span>,
+<a href=#1139 id=1139 data-nosnippet>1139</a>        );
+<a href=#1140 id=1140 data-nosnippet>1140</a>        <span class="kw">for </span>path <span class="kw">in </span>[
+<a href=#1141 id=1141 data-nosnippet>1141</a>            <span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>,
+<a href=#1142 id=1142 data-nosnippet>1142</a>            <span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>,
+<a href=#1143 id=1143 data-nosnippet>1143</a>            <span class="string">"/grpc.health.v1.Health/Check"</span>,
+<a href=#1144 id=1144 data-nosnippet>1144</a>            <span class="string">"/"</span>,
+<a href=#1145 id=1145 data-nosnippet>1145</a>        ] {
+<a href=#1146 id=1146 data-nosnippet>1146</a>            <span class="macro">assert_eq!</span>(layer.resolve_for_path(path), (<span class="string">"grpc_authz"</span>, <span class="number">42</span>));
+<a href=#1147 id=1147 data-nosnippet>1147</a>        }
+<a href=#1148 id=1148 data-nosnippet>1148</a>    }
+<a href=#1149 id=1149 data-nosnippet>1149</a>
+<a href=#1150 id=1150 data-nosnippet>1150</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#1151 id=1151 data-nosnippet>1151</a>    // I2 — per-method-family scoping
+<a href=#1152 id=1152 data-nosnippet>1152</a>    // -----------------------------------------------------------------
+<a href=#1153 id=1153 data-nosnippet>1153</a>
+<a href=#1154 id=1154 data-nosnippet>1154</a>    </span><span class="attr">#[test]
+<a href=#1155 id=1155 data-nosnippet>1155</a>    </span><span class="kw">fn </span>classifies_each_service_into_its_family() {
+<a href=#1156 id=1156 data-nosnippet>1156</a>        <span class="kw">use </span>GrpcMethodFamily::<span class="kw-2">*</span>;
+<a href=#1157 id=1157 data-nosnippet>1157</a>        <span class="kw">for </span>(path, expected) <span class="kw">in </span>[
+<a href=#1158 id=1158 data-nosnippet>1158</a>            (<span class="string">"/axiam.v1.AuthorizationService/CheckAccess"</span>, AuthzCheck),
+<a href=#1159 id=1159 data-nosnippet>1159</a>            (
+<a href=#1160 id=1160 data-nosnippet>1160</a>                <span class="string">"/axiam.v1.AuthorizationService/BatchCheckAccess"</span>,
+<a href=#1161 id=1161 data-nosnippet>1161</a>                AuthzCheck,
+<a href=#1162 id=1162 data-nosnippet>1162</a>            ),
+<a href=#1163 id=1163 data-nosnippet>1163</a>            (<span class="string">"/axiam.v1.UserInfoService/GetUserInfo"</span>, IdentityRead),
+<a href=#1164 id=1164 data-nosnippet>1164</a>            (<span class="string">"/axiam.v1.TokenService/ValidateToken"</span>, IdentityRead),
+<a href=#1165 id=1165 data-nosnippet>1165</a>            (<span class="string">"/axiam.v1.TokenService/IntrospectToken"</span>, IdentityRead),
+<a href=#1166 id=1166 data-nosnippet>1166</a>            (<span class="string">"/axiam.v1.UserService/GetUser"</span>, Admin),
+<a href=#1167 id=1167 data-nosnippet>1167</a>            (<span class="string">"/axiam.v1.UserService/ValidateCredentials"</span>, Admin),
+<a href=#1168 id=1168 data-nosnippet>1168</a>            (<span class="string">"/grpc.health.v1.Health/Check"</span>, Infra),
+<a href=#1169 id=1169 data-nosnippet>1169</a>            (<span class="string">"/grpc.health.v1.Health/Watch"</span>, Infra),
+<a href=#1170 id=1170 data-nosnippet>1170</a>            (
+<a href=#1171 id=1171 data-nosnippet>1171</a>                <span class="string">"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"</span>,
+<a href=#1172 id=1172 data-nosnippet>1172</a>                Infra,
+<a href=#1173 id=1173 data-nosnippet>1173</a>            ),
+<a href=#1174 id=1174 data-nosnippet>1174</a>            (
+<a href=#1175 id=1175 data-nosnippet>1175</a>                <span class="string">"/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"</span>,
+<a href=#1176 id=1176 data-nosnippet>1176</a>                Infra,
+<a href=#1177 id=1177 data-nosnippet>1177</a>            ),
+<a href=#1178 id=1178 data-nosnippet>1178</a>        ] {
+<a href=#1179 id=1179 data-nosnippet>1179</a>            <span class="macro">assert_eq!</span>(GrpcMethodFamily::classify(path), expected, <span class="string">"{path}"</span>);
+<a href=#1180 id=1180 data-nosnippet>1180</a>        }
+<a href=#1181 id=1181 data-nosnippet>1181</a>    }
+<a href=#1182 id=1182 data-nosnippet>1182</a>
+<a href=#1183 id=1183 data-nosnippet>1183</a>    <span class="doccomment">/// Fail-safe default: an unrecognized path lands in the STRICTEST limited
+<a href=#1184 id=1184 data-nosnippet>1184</a>    /// family, never in the most generous one. Adding a service without
+<a href=#1185 id=1185 data-nosnippet>1185</a>    /// updating `classify` must not silently create a loosely-limited gRPC
+<a href=#1186 id=1186 data-nosnippet>1186</a>    /// surface.
+<a href=#1187 id=1187 data-nosnippet>1187</a>    </span><span class="attr">#[test]
+<a href=#1188 id=1188 data-nosnippet>1188</a>    </span><span class="kw">fn </span>unknown_paths_fall_back_to_the_strictest_family() {
+<a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="kw">for </span>path <span class="kw">in </span>[
+<a href=#1190 id=1190 data-nosnippet>1190</a>            <span class="string">"/"</span>,
+<a href=#1191 id=1191 data-nosnippet>1191</a>            <span class="string">"/nonsense"</span>,
+<a href=#1192 id=1192 data-nosnippet>1192</a>            <span class="string">"/some.other.Service/Method"</span>,
+<a href=#1193 id=1193 data-nosnippet>1193</a>            <span class="string">"/axiam.v1.FutureService/Whatever"</span>,
+<a href=#1194 id=1194 data-nosnippet>1194</a>        ] {
+<a href=#1195 id=1195 data-nosnippet>1195</a>            <span class="macro">assert_eq!</span>(
+<a href=#1196 id=1196 data-nosnippet>1196</a>                GrpcMethodFamily::classify(path),
+<a href=#1197 id=1197 data-nosnippet>1197</a>                GrpcMethodFamily::AuthzCheck,
+<a href=#1198 id=1198 data-nosnippet>1198</a>                <span class="string">"{path} must fail safe into the authz bucket"
+<a href=#1199 id=1199 data-nosnippet>1199</a>            </span>);
+<a href=#1200 id=1200 data-nosnippet>1200</a>        }
+<a href=#1201 id=1201 data-nosnippet>1201</a>    }
+<a href=#1202 id=1202 data-nosnippet>1202</a>
+<a href=#1203 id=1203 data-nosnippet>1203</a>    <span class="doccomment">/// I2's core claim: an identity read is no longer throttled by the authz
+<a href=#1204 id=1204 data-nosnippet>1204</a>    /// ceiling, and the three limited families use three distinct buckets.
+<a href=#1205 id=1205 data-nosnippet>1205</a>    </span><span class="attr">#[test]
+<a href=#1206 id=1206 data-nosnippet>1206</a>    </span><span class="kw">fn </span>families_get_distinct_buckets_and_distinct_ceilings() {
+<a href=#1207 id=1207 data-nosnippet>1207</a>        <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>);
+<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="macro">assert_eq!</span>(limits.authz_per_sec, <span class="number">100</span>);
+<a href=#1209 id=1209 data-nosnippet>1209</a>        <span class="macro">assert_eq!</span>(limits.identity_per_sec, <span class="number">500</span>);
+<a href=#1210 id=1210 data-nosnippet>1210</a>        <span class="macro">assert_eq!</span>(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
+<a href=#1211 id=1211 data-nosnippet>1211</a>        <span class="macro">assert!</span>(
+<a href=#1212 id=1212 data-nosnippet>1212</a>            limits.identity_per_sec &gt; limits.authz_per_sec,
+<a href=#1213 id=1213 data-nosnippet>1213</a>            <span class="string">"identity reads measured ~14x an authz check; their ceiling must not \
+<a href=#1214 id=1214 data-nosnippet>1214</a>             be the authz ceiling (I2)"
+<a href=#1215 id=1215 data-nosnippet>1215</a>        </span>);
+<a href=#1216 id=1216 data-nosnippet>1216</a>
+<a href=#1217 id=1217 data-nosnippet>1217</a>        <span class="kw">let </span>endpoints: Vec&lt;<span class="kw">_</span>&gt; = [
+<a href=#1218 id=1218 data-nosnippet>1218</a>            GrpcMethodFamily::AuthzCheck,
+<a href=#1219 id=1219 data-nosnippet>1219</a>            GrpcMethodFamily::IdentityRead,
+<a href=#1220 id=1220 data-nosnippet>1220</a>            GrpcMethodFamily::Admin,
+<a href=#1221 id=1221 data-nosnippet>1221</a>            GrpcMethodFamily::Infra,
+<a href=#1222 id=1222 data-nosnippet>1222</a>        ]
+<a href=#1223 id=1223 data-nosnippet>1223</a>        .iter()
+<a href=#1224 id=1224 data-nosnippet>1224</a>        .map(|f| f.shared_endpoint())
+<a href=#1225 id=1225 data-nosnippet>1225</a>        .collect();
+<a href=#1226 id=1226 data-nosnippet>1226</a>        <span class="macro">assert_eq!</span>(
+<a href=#1227 id=1227 data-nosnippet>1227</a>            endpoints,
+<a href=#1228 id=1228 data-nosnippet>1228</a>            <span class="macro">vec!</span>[<span class="string">"grpc_authz"</span>, <span class="string">"grpc_identity"</span>, <span class="string">"grpc_admin"</span>, <span class="string">"grpc_infra"</span>]
+<a href=#1229 id=1229 data-nosnippet>1229</a>        );
 <a href=#1230 id=1230 data-nosnippet>1230</a>    }
 <a href=#1231 id=1231 data-nosnippet>1231</a>
-<a href=#1232 id=1232 data-nosnippet>1232</a>    <span class="doccomment">/// A profile preset that raises the authz ceiling raises the **identity**
-<a href=#1233 id=1233 data-nosnippet>1233</a>    /// family with it, so `gateway`/`mesh` cannot end up with identity reads
-<a href=#1234 id=1234 data-nosnippet>1234</a>    /// stricter than authz checks — and moves nothing else.
-<a href=#1235 id=1235 data-nosnippet>1235</a>    </span><span class="attr">#[test]
-<a href=#1236 id=1236 data-nosnippet>1236</a>    </span><span class="kw">fn </span>derived_family_scales_with_the_authz_ceiling() {
-<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">100</span>, <span class="number">1_000</span>, <span class="number">5_000</span>] {
-<a href=#1238 id=1238 data-nosnippet>1238</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
-<a href=#1239 id=1239 data-nosnippet>1239</a>            <span class="macro">assert_eq!</span>(limits.identity_per_sec, authz * IDENTITY_PER_SEC_MULTIPLE);
-<a href=#1240 id=1240 data-nosnippet>1240</a>            <span class="macro">assert_eq!</span>(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
-<a href=#1241 id=1241 data-nosnippet>1241</a>            <span class="macro">assert_eq!</span>(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
-<a href=#1242 id=1242 data-nosnippet>1242</a>            <span class="macro">assert!</span>(limits.identity_per_sec &gt;= limits.authz_per_sec);
-<a href=#1243 id=1243 data-nosnippet>1243</a>        }
-<a href=#1244 id=1244 data-nosnippet>1244</a>        <span class="comment">// Saturating, not wrapping.
-<a href=#1245 id=1245 data-nosnippet>1245</a>        </span><span class="kw">let </span>huge = GrpcRateLimits::from_authz_per_sec(u32::MAX);
-<a href=#1246 id=1246 data-nosnippet>1246</a>        <span class="macro">assert_eq!</span>(huge.identity_per_sec, u32::MAX);
-<a href=#1247 id=1247 data-nosnippet>1247</a>    }
-<a href=#1248 id=1248 data-nosnippet>1248</a>
-<a href=#1249 id=1249 data-nosnippet>1249</a>    <span class="doccomment">/// **Residual 4.** The infrastructure family is generous but finite, and
-<a href=#1250 id=1250 data-nosnippet>1250</a>    /// its ceiling is fixed rather than posture-derived.
-<a href=#1251 id=1251 data-nosnippet>1251</a>    </span><span class="attr">#[test]
-<a href=#1252 id=1252 data-nosnippet>1252</a>    </span><span class="kw">fn </span>infra_family_is_generous_but_finite() {
-<a href=#1253 id=1253 data-nosnippet>1253</a>        <span class="macro">assert_eq!</span>(INFRA_PER_SEC, <span class="number">100</span>);
-<a href=#1254 id=1254 data-nosnippet>1254</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">1</span>, <span class="number">100</span>, <span class="number">5_000</span>] {
-<a href=#1255 id=1255 data-nosnippet>1255</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
-<a href=#1256 id=1256 data-nosnippet>1256</a>            <span class="macro">assert_eq!</span>(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
-<a href=#1257 id=1257 data-nosnippet>1257</a>            <span class="macro">assert_eq!</span>(
-<a href=#1258 id=1258 data-nosnippet>1258</a>                limits.window_limit(GrpcMethodFamily::Infra),
-<a href=#1259 id=1259 data-nosnippet>1259</a>                INFRA_PER_SEC * <span class="number">60
-<a href=#1260 id=1260 data-nosnippet>1260</a>            </span>);
-<a href=#1261 id=1261 data-nosnippet>1261</a>        }
-<a href=#1262 id=1262 data-nosnippet>1262</a>        <span class="comment">// Read through the accessor (not the constant) so these stay real
-<a href=#1263 id=1263 data-nosnippet>1263</a>        // assertions rather than const-folded no-ops.
-<a href=#1264 id=1264 data-nosnippet>1264</a>        </span><span class="kw">let </span>infra = GrpcRateLimits::from_authz_per_sec(<span class="number">1</span>).per_sec(GrpcMethodFamily::Infra);
-<a href=#1265 id=1265 data-nosnippet>1265</a>        <span class="macro">assert!</span>(
-<a href=#1266 id=1266 data-nosnippet>1266</a>            infra &gt;= <span class="number">100</span>,
-<a href=#1267 id=1267 data-nosnippet>1267</a>            <span class="string">"a liveness probe must never be the thing that breaks during an incident, \
-<a href=#1268 id=1268 data-nosnippet>1268</a>             got {infra}/s"
-<a href=#1269 id=1269 data-nosnippet>1269</a>        </span>);
-<a href=#1270 id=1270 data-nosnippet>1270</a>        <span class="macro">assert!</span>(
-<a href=#1271 id=1271 data-nosnippet>1271</a>            infra &lt; u32::MAX,
-<a href=#1272 id=1272 data-nosnippet>1272</a>            <span class="string">"…but the family must be bounded — an unbounded prefix match on the \
-<a href=#1273 id=1273 data-nosnippet>1273</a>             attacker-controlled :path is what residual 4 closed"
-<a href=#1274 id=1274 data-nosnippet>1274</a>        </span>);
-<a href=#1275 id=1275 data-nosnippet>1275</a>    }
-<a href=#1276 id=1276 data-nosnippet>1276</a>
-<a href=#1277 id=1277 data-nosnippet>1277</a>    <span class="attr">#[test]
-<a href=#1278 id=1278 data-nosnippet>1278</a>    </span><span class="kw">fn </span>errors_when_no_xff_and_no_peer_info() {
-<a href=#1279 id=1279 data-nosnippet>1279</a>        <span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">0</span>);
-<a href=#1280 id=1280 data-nosnippet>1280</a>        <span class="kw">let </span>req = req_with_xff(<span class="prelude-val">None</span>);
-<a href=#1281 id=1281 data-nosnippet>1281</a>
-<a href=#1282 id=1282 data-nosnippet>1282</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
-<a href=#1283 id=1283 data-nosnippet>1283</a>            extractor.extract(<span class="kw-2">&amp;</span>req),
-<a href=#1284 id=1284 data-nosnippet>1284</a>            <span class="prelude-val">Err</span>(GovernorError::UnableToExtractKey)
-<a href=#1285 id=1285 data-nosnippet>1285</a>        ));
-<a href=#1286 id=1286 data-nosnippet>1286</a>    }
-<a href=#1287 id=1287 data-nosnippet>1287</a>}
+<a href=#1232 id=1232 data-nosnippet>1232</a>    <span class="doccomment">/// **SEC-079.** The admin ceiling is a CPU guard on an Argon2id RPC and
+<a href=#1233 id=1233 data-nosnippet>1233</a>    /// must NOT scale with the read-sized authz base — otherwise a
+<a href=#1234 id=1234 data-nosnippet>1234</a>    /// `gateway`/`mesh` posture (or any operator raising the authz ceiling for
+<a href=#1235 id=1235 data-nosnippet>1235</a>    /// service-mesh throughput) silently widens online password guessing.
+<a href=#1236 id=1236 data-nosnippet>1236</a>    </span><span class="attr">#[test]
+<a href=#1237 id=1237 data-nosnippet>1237</a>    </span><span class="kw">fn </span>admin_ceiling_never_derives_from_the_authz_ceiling() {
+<a href=#1238 id=1238 data-nosnippet>1238</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">1</span>, <span class="number">100</span>, <span class="number">1_000</span>, <span class="number">5_000</span>, <span class="number">60_000</span>, u32::MAX] {
+<a href=#1239 id=1239 data-nosnippet>1239</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
+<a href=#1240 id=1240 data-nosnippet>1240</a>            <span class="macro">assert_eq!</span>(
+<a href=#1241 id=1241 data-nosnippet>1241</a>                limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT,
+<a href=#1242 id=1242 data-nosnippet>1242</a>                <span class="string">"authz={authz}: the admin ceiling must stay at the absolute default \
+<a href=#1243 id=1243 data-nosnippet>1243</a>                 ({ADMIN_PER_SEC_DEFAULT}/s); deriving it from a read-sized base is SEC-079"
+<a href=#1244 id=1244 data-nosnippet>1244</a>            </span>);
+<a href=#1245 id=1245 data-nosnippet>1245</a>            <span class="macro">assert_eq!</span>(
+<a href=#1246 id=1246 data-nosnippet>1246</a>                limits.per_sec(GrpcMethodFamily::Admin),
+<a href=#1247 id=1247 data-nosnippet>1247</a>                ADMIN_PER_SEC_DEFAULT
+<a href=#1248 id=1248 data-nosnippet>1248</a>            );
+<a href=#1249 id=1249 data-nosnippet>1249</a>        }
+<a href=#1250 id=1250 data-nosnippet>1250</a>
+<a href=#1251 id=1251 data-nosnippet>1251</a>        <span class="comment">// And the absolute value is the CPU-appropriate one: 10/s = 600/min
+<a href=#1252 id=1252 data-nosnippet>1252</a>        // per IP through the 60-second shared window.
+<a href=#1253 id=1253 data-nosnippet>1253</a>        </span><span class="macro">assert_eq!</span>(ADMIN_PER_SEC_DEFAULT, <span class="number">10</span>);
+<a href=#1254 id=1254 data-nosnippet>1254</a>        <span class="macro">assert_eq!</span>(
+<a href=#1255 id=1255 data-nosnippet>1255</a>            GrpcRateLimits::from_authz_per_sec(<span class="number">100</span>).window_limit(GrpcMethodFamily::Admin),
+<a href=#1256 id=1256 data-nosnippet>1256</a>            <span class="number">600</span>,
+<a href=#1257 id=1257 data-nosnippet>1257</a>            <span class="string">"600 credential checks per minute per IP — not the 6 000 the units fix \
+<a href=#1258 id=1258 data-nosnippet>1258</a>             would have produced from the read-sized base"
+<a href=#1259 id=1259 data-nosnippet>1259</a>        </span>);
+<a href=#1260 id=1260 data-nosnippet>1260</a>    }
+<a href=#1261 id=1261 data-nosnippet>1261</a>
+<a href=#1262 id=1262 data-nosnippet>1262</a>    <span class="doccomment">/// A profile preset that raises the authz ceiling raises the **identity**
+<a href=#1263 id=1263 data-nosnippet>1263</a>    /// family with it, so `gateway`/`mesh` cannot end up with identity reads
+<a href=#1264 id=1264 data-nosnippet>1264</a>    /// stricter than authz checks — and moves nothing else.
+<a href=#1265 id=1265 data-nosnippet>1265</a>    </span><span class="attr">#[test]
+<a href=#1266 id=1266 data-nosnippet>1266</a>    </span><span class="kw">fn </span>derived_family_scales_with_the_authz_ceiling() {
+<a href=#1267 id=1267 data-nosnippet>1267</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">100</span>, <span class="number">1_000</span>, <span class="number">5_000</span>] {
+<a href=#1268 id=1268 data-nosnippet>1268</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
+<a href=#1269 id=1269 data-nosnippet>1269</a>            <span class="macro">assert_eq!</span>(limits.identity_per_sec, authz * IDENTITY_PER_SEC_MULTIPLE);
+<a href=#1270 id=1270 data-nosnippet>1270</a>            <span class="macro">assert_eq!</span>(limits.admin_per_sec, ADMIN_PER_SEC_DEFAULT);
+<a href=#1271 id=1271 data-nosnippet>1271</a>            <span class="macro">assert_eq!</span>(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
+<a href=#1272 id=1272 data-nosnippet>1272</a>            <span class="macro">assert!</span>(limits.identity_per_sec &gt;= limits.authz_per_sec);
+<a href=#1273 id=1273 data-nosnippet>1273</a>        }
+<a href=#1274 id=1274 data-nosnippet>1274</a>        <span class="comment">// Saturating, not wrapping.
+<a href=#1275 id=1275 data-nosnippet>1275</a>        </span><span class="kw">let </span>huge = GrpcRateLimits::from_authz_per_sec(u32::MAX);
+<a href=#1276 id=1276 data-nosnippet>1276</a>        <span class="macro">assert_eq!</span>(huge.identity_per_sec, u32::MAX);
+<a href=#1277 id=1277 data-nosnippet>1277</a>    }
+<a href=#1278 id=1278 data-nosnippet>1278</a>
+<a href=#1279 id=1279 data-nosnippet>1279</a>    <span class="doccomment">/// **Residual 4.** The infrastructure family is generous but finite, and
+<a href=#1280 id=1280 data-nosnippet>1280</a>    /// its ceiling is fixed rather than posture-derived.
+<a href=#1281 id=1281 data-nosnippet>1281</a>    </span><span class="attr">#[test]
+<a href=#1282 id=1282 data-nosnippet>1282</a>    </span><span class="kw">fn </span>infra_family_is_generous_but_finite() {
+<a href=#1283 id=1283 data-nosnippet>1283</a>        <span class="macro">assert_eq!</span>(INFRA_PER_SEC, <span class="number">100</span>);
+<a href=#1284 id=1284 data-nosnippet>1284</a>        <span class="kw">for </span>authz <span class="kw">in </span>[<span class="number">1</span>, <span class="number">100</span>, <span class="number">5_000</span>] {
+<a href=#1285 id=1285 data-nosnippet>1285</a>            <span class="kw">let </span>limits = GrpcRateLimits::from_authz_per_sec(authz);
+<a href=#1286 id=1286 data-nosnippet>1286</a>            <span class="macro">assert_eq!</span>(limits.per_sec(GrpcMethodFamily::Infra), INFRA_PER_SEC);
+<a href=#1287 id=1287 data-nosnippet>1287</a>            <span class="macro">assert_eq!</span>(
+<a href=#1288 id=1288 data-nosnippet>1288</a>                limits.window_limit(GrpcMethodFamily::Infra),
+<a href=#1289 id=1289 data-nosnippet>1289</a>                INFRA_PER_SEC * <span class="number">60
+<a href=#1290 id=1290 data-nosnippet>1290</a>            </span>);
+<a href=#1291 id=1291 data-nosnippet>1291</a>        }
+<a href=#1292 id=1292 data-nosnippet>1292</a>        <span class="comment">// Read through the accessor (not the constant) so these stay real
+<a href=#1293 id=1293 data-nosnippet>1293</a>        // assertions rather than const-folded no-ops.
+<a href=#1294 id=1294 data-nosnippet>1294</a>        </span><span class="kw">let </span>infra = GrpcRateLimits::from_authz_per_sec(<span class="number">1</span>).per_sec(GrpcMethodFamily::Infra);
+<a href=#1295 id=1295 data-nosnippet>1295</a>        <span class="macro">assert!</span>(
+<a href=#1296 id=1296 data-nosnippet>1296</a>            infra &gt;= <span class="number">100</span>,
+<a href=#1297 id=1297 data-nosnippet>1297</a>            <span class="string">"a liveness probe must never be the thing that breaks during an incident, \
+<a href=#1298 id=1298 data-nosnippet>1298</a>             got {infra}/s"
+<a href=#1299 id=1299 data-nosnippet>1299</a>        </span>);
+<a href=#1300 id=1300 data-nosnippet>1300</a>        <span class="macro">assert!</span>(
+<a href=#1301 id=1301 data-nosnippet>1301</a>            infra &lt; u32::MAX,
+<a href=#1302 id=1302 data-nosnippet>1302</a>            <span class="string">"…but the family must be bounded — an unbounded prefix match on the \
+<a href=#1303 id=1303 data-nosnippet>1303</a>             attacker-controlled :path is what residual 4 closed"
+<a href=#1304 id=1304 data-nosnippet>1304</a>        </span>);
+<a href=#1305 id=1305 data-nosnippet>1305</a>    }
+<a href=#1306 id=1306 data-nosnippet>1306</a>
+<a href=#1307 id=1307 data-nosnippet>1307</a>    <span class="attr">#[test]
+<a href=#1308 id=1308 data-nosnippet>1308</a>    </span><span class="kw">fn </span>errors_when_no_xff_and_no_peer_info() {
+<a href=#1309 id=1309 data-nosnippet>1309</a>        <span class="kw">let </span>extractor = GrpcTrustedHopsKeyExtractor::new(<span class="number">0</span>);
+<a href=#1310 id=1310 data-nosnippet>1310</a>        <span class="kw">let </span>req = req_with_xff(<span class="prelude-val">None</span>);
+<a href=#1311 id=1311 data-nosnippet>1311</a>
+<a href=#1312 id=1312 data-nosnippet>1312</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1313 id=1313 data-nosnippet>1313</a>            extractor.extract(<span class="kw-2">&amp;</span>req),
+<a href=#1314 id=1314 data-nosnippet>1314</a>            <span class="prelude-val">Err</span>(GovernorError::UnableToExtractKey)
+<a href=#1315 id=1315 data-nosnippet>1315</a>        ));
+<a href=#1316 id=1316 data-nosnippet>1316</a>    }
+<a href=#1317 id=1317 data-nosnippet>1317</a>}
 </code></pre></div></section></main></body></html>

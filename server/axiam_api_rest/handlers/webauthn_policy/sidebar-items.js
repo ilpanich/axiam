@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["compliance_report","get_policy","set_policy"],"struct":["ComplianceReportEntry","PolicyResponse"]};

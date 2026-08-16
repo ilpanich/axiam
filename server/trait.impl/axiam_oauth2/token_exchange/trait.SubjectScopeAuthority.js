@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["axiam_api_rest",[["impl&lt;RR, PR&gt; <a class=\"trait\" href=\"axiam_oauth2/token_exchange/trait.SubjectScopeAuthority.html\" title=\"trait axiam_oauth2::token_exchange::SubjectScopeAuthority\">SubjectScopeAuthority</a> for <a class=\"struct\" href=\"axiam_api_rest/token_exchange/struct.RbacScopeAuthority.html\" title=\"struct axiam_api_rest::token_exchange::RbacScopeAuthority\">RbacScopeAuthority</a>&lt;RR, PR&gt;<div class=\"where\">where\n    RR: <a class=\"trait\" href=\"axiam_core/repository/trait.RoleRepository.html\" title=\"trait axiam_core::repository::RoleRepository\">RoleRepository</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html\" title=\"trait core::marker::Send\">Send</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html\" title=\"trait core::marker::Sync\">Sync</a>,\n    PR: <a class=\"trait\" href=\"axiam_core/repository/trait.PermissionRepository.html\" title=\"trait axiam_core::repository::PermissionRepository\">PermissionRepository</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html\" title=\"trait core::marker::Send\">Send</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html\" title=\"trait core::marker::Sync\">Sync</a>,</div>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1337]}

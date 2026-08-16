@@ -618,11 +618,14 @@ async fn main() -> std::io::Result<()> {
     let reactor_gate: axiam_core::models::reactor::SharedReactorGate =
         Arc::new(axiam_amqp::DispatchingReactorGate::new(
             Arc::clone(&reactor_routing),
-            // §22.1's scope note: the lapin RPC transport is not merged yet.
-            // Every dispatch therefore resolves through the registration's
-            // failure policy, which is audited and counted. A deployment with
-            // no registered reactor is unaffected; see the warning below.
-            axiam_amqp::UnavailableReactorTransport,
+            // R2.4: the real lapin RPC transport (§22.1's scope note is
+            // closed). `start` is infallible and supervises its own broker
+            // session — a broker that is slow at boot or restarts later must
+            // not stop the server from serving logins. While it has no
+            // session every dispatch fails fast as a transport error and the
+            // registration's `failure_policy` decides, which is the same
+            // closed set §22.8 puts a timeout in.
+            axiam_amqp::LapinReactorTransport::start(Arc::clone(&amqp), amqp_signing_key.clone()),
             axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(pool.handle_for_repo())),
             amqp_signing_key.clone(),
             axiam_amqp::ReactorGateConfig::default(),
@@ -631,16 +634,15 @@ async fn main() -> std::io::Result<()> {
         let routing = Arc::clone(&reactor_routing);
         Arc::new(move |tenant_id| routing.invalidate_tenant(tenant_id))
     };
-    tracing::warn!(
+    tracing::info!(
         "X1 reactors: the dispatch gate is wired into all five interceptor \
-         events, but the AMQP reactor transport is not implemented in this \
-         build. A tenant with NO registered reactor is unaffected. A REGISTERED \
-         reactor cannot be reached, so its failure_policy applies to every \
+         events over the lapin AMQP transport. A tenant with NO registered \
+         reactor is unaffected and never touches the broker. While the broker \
+         is unreachable a REGISTERED reactor's failure_policy applies to every \
          dispatch — a fail_closed registration (the default for login.post_auth, \
          user.pre_create, user.pre_update and grant.pre_assign) will DENY those \
          operations, and every one of those denials is audited as \
-         'reactor.dispatch_failed'. Do not register interceptors until the \
-         transport ships."
+         'reactor.dispatch_failed'."
     );
 
     let auth_service = AuthService::new(

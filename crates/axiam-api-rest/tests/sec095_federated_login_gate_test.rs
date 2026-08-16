@@ -20,8 +20,10 @@
 //!
 //! It was latent rather than exploitable at the time it was found only because
 //! `UnavailableReactorTransport` meant no reactor reply could be produced at
-//! all. That is a reason to close it in the change that merges the transport,
-//! not a reason to leave it.
+//! all. That was a reason to close it before the transport merged, not a
+//! reason to leave it — and R2.4 has since merged the lapin transport, which
+//! makes these assertions the thing standing between a registered veto and
+//! "Sign in with Okta".
 //!
 //! ## What this file asserts
 //!

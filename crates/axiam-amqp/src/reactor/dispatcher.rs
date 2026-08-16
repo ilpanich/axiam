@@ -85,18 +85,21 @@ pub trait ReactorTransport: Send + Sync {
     /// `false` only for [`UnavailableReactorTransport`]. The REST layer reads
     /// it through [`axiam_core::models::reactor::DynReactorGate`] and refuses
     /// to accept a reactor registration while it is false, because
-    /// registering one today is a self-inflicted, tenant-wide, *complete*
-    /// login outage created by a supported admin action: the transport fails
-    /// every dispatch, `login.post_auth` defaults to `fail_closed`, and the
-    /// only warning is a `tracing::warn!` emitted once at boot, for every
-    /// deployment including the majority that will never register a reactor
-    /// — which is the classic recipe for a warning nobody reads.
+    /// registering one against a transport that cannot deliver is a
+    /// self-inflicted, tenant-wide, *complete* login outage created by a
+    /// supported admin action: the transport fails every dispatch,
+    /// `login.post_auth` defaults to `fail_closed`, and the only warning would
+    /// be a `tracing::warn!` emitted once at boot, for every deployment
+    /// including the majority that will never register a reactor — which is
+    /// the classic recipe for a warning nobody reads.
     ///
     /// This is a statement about the transport's *capability*, not its
-    /// current health. A merged transport whose broker is momentarily down
-    /// returns `true` and lets each registration's `failure_policy` decide,
-    /// which is the whole design. Returning `false` on a blip would turn a
-    /// broker outage into a registration outage.
+    /// current health, and the distinction is load-bearing now that
+    /// [`crate::reactor::transport::LapinReactorTransport`] is what
+    /// `axiam-server` composes: it answers `true` even while its broker
+    /// session is down, and each registration's `failure_policy` decides what
+    /// a dispatch during the outage costs. Returning `false` on a blip would
+    /// turn a broker outage into a registration outage.
     ///
     /// Defaults to `true`, so a real transport says nothing and a test double
     /// needs no change.
@@ -105,21 +108,18 @@ pub trait ReactorTransport: Send + Sync {
     }
 }
 
-/// The transport a deployment has until the lapin one is merged.
+/// The transport for a build that composes no broker.
 ///
 /// # Why this exists rather than a `None`
 ///
-/// R2.2 wires the gate; the lapin RPC transport is the piece
-/// `sdks/CONTRACT.md` §22.1's scope note records as not yet merged. Composing
-/// the gate with *no* transport would mean composing no gate, and a deployment
-/// whose registered `fail_closed` fraud check silently does nothing is the
-/// exact failure mode reactors exist to avoid — an operator who registered one
-/// believes their logins are protected.
+/// Composing the gate with *no* transport would mean composing no gate, and a
+/// deployment whose registered `fail_closed` fraud check silently does nothing
+/// is the exact failure mode reactors exist to avoid — an operator who
+/// registered one believes their logins are protected.
 ///
 /// So every round trip fails as `Transport`, which §22.8 puts in the same
 /// closed "no usable reply" set as a timeout, and **each registration's own
-/// failure policy decides what that costs**. Concretely, until the transport
-/// lands:
+/// failure policy decides what that costs**:
 ///
 /// * a tenant with **no** registered reactor is completely unaffected — the
 ///   routing table returns an empty list and the gate never reaches a
@@ -129,16 +129,31 @@ pub trait ReactorTransport: Send + Sync {
 /// * a registered `fail_closed` reactor (the `login.post_auth`,
 ///   `user.pre_*` and `grant.pre_assign` defaults) **denies** the operation.
 ///
-/// The third bullet is a loud, audited, per-tenant, opt-in consequence of
-/// registering a reactor that cannot be reached, and it is the safe direction.
-/// `axiam-server` warns about it at startup.
+/// The third bullet is a loud, audited, per-tenant consequence of registering
+/// a reactor that cannot be reached, and it is the safe direction. It is also
+/// why [`Self::can_dispatch`] answers `false`: the REST layer refuses the
+/// registration outright rather than letting an operator arm that outage
+/// (SEC-101).
+///
+/// # This is no longer what `axiam-server` composes
+///
+/// R2.4 merged [`crate::reactor::transport::LapinReactorTransport`], and
+/// `axiam-server` composes that. This type remains the correct transport for a
+/// build assembled without a broker, and it is what the SEC-101 handler tests
+/// exercise. Note the deliberate difference from a *disconnected* lapin
+/// transport, which reports `can_dispatch() == true`: that one is a working
+/// transport whose broker is momentarily away, and refusing registrations for
+/// the duration of a broker blip would turn an outage into a second outage.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnavailableReactorTransport;
 
 /// The failure text a dispatch through [`UnavailableReactorTransport`] carries
-/// into the audit record. Named so an operator can grep for it.
+/// into the audit record. Named so an operator can grep for it, and distinct
+/// from [`crate::reactor::transport::REACTOR_TRANSPORT_DISCONNECTED`] — "this
+/// build has no broker" and "the broker is away right now" are different
+/// operational problems and must not read the same in an audit trail.
 pub const REACTOR_TRANSPORT_UNAVAILABLE: &str =
-    "the AMQP reactor transport is not implemented in this build (X1 R2.4)";
+    "no AMQP reactor transport is composed in this build";
 
 impl ReactorTransport for UnavailableReactorTransport {
     async fn round_trip(

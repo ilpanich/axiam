@@ -15,12 +15,14 @@
 //! | [`protocol`] | The signed bodies and every rule for accepting a reply |
 //! | [`dispatcher`] | What a chain of reactors *means* (order, merge, policy) |
 //! | [`gate`] | What the five hook sites call: routing, cap, audit, metrics |
+//! | [`transport`] | The lapin RPC transport — the only part that knows AMQP |
 //! | [`metrics`] | The counters an operator reads |
 
 pub mod dispatcher;
 pub mod gate;
 pub mod metrics;
 pub mod protocol;
+pub mod transport;
 
 pub use dispatcher::{
     ChainResult, DEFAULT_MAX_IN_FLIGHT, DispatchFailure, InFlightLimiter, MAX_CHAIN_BUDGET_MS,
@@ -38,3 +40,4 @@ pub use protocol::{
     REACTOR_EXCHANGE, ReactorEventMessage, ReactorReply, ReplyDecision, ReplyRejection, queue_name,
     routing_key,
 };
+pub use transport::{LapinReactorTransport, REACTOR_TRANSPORT_DISCONNECTED};

@@ -1237,7 +1237,8 @@ fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
 ///
 /// It was latent at the time it was found only because
 /// `UnavailableReactorTransport` meant no reactor reply could be produced at
-/// all; it becomes live the moment the lapin transport merges.
+/// all. R2.4 merged the lapin transport, so it is live now — closing it before
+/// then is why it was closed at all rather than filed against the transport.
 ///
 /// # What it is not
 ///

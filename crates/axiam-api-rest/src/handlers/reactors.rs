@@ -178,19 +178,23 @@ pub struct ReactorEventDescriptor {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// SEC-101 — refuse a registration while the composed transport cannot deliver
-/// to it.
+/// SEC-101 — refuse a registration that could never be delivered to.
 ///
-/// Registering a reactor today is a **self-service, tenant-wide, complete
-/// login outage**. `UnavailableReactorTransport` fails every dispatch;
-/// `login.post_auth`, `user.pre_create`, `user.pre_update` and
-/// `grant.pre_assign` all default to `fail_closed`; so the first login after
-/// the registration is denied, and so is every one after that. The only thing
-/// standing between an operator and that today is one `tracing::warn!` emitted
-/// once at boot — for every deployment, including the overwhelming majority
-/// that will never register a reactor, which is how a warning becomes a line
-/// that is filtered out. The action that causes the outage happens hours or
-/// weeks later, in an admin UI that gives no indication anything is wrong.
+/// Two independent reasons, both of which make an accepted registration a
+/// lie, and both of which are checked before anything is validated or written.
+///
+/// # 1. The composed transport cannot dispatch at all
+///
+/// Registering a reactor against a transport that fails every dispatch is a
+/// **self-service, tenant-wide, complete login outage**: `login.post_auth`,
+/// `user.pre_create`, `user.pre_update` and `grant.pre_assign` all default to
+/// `fail_closed`, so the first login after the registration is denied and so
+/// is every one after that. The only thing standing between an operator and
+/// that would be one `tracing::warn!` emitted once at boot — for every
+/// deployment, including the overwhelming majority that will never register a
+/// reactor, which is how a warning becomes a line that is filtered out. The
+/// action that causes the outage happens hours or weeks later, in an admin UI
+/// that gives no indication anything is wrong.
 ///
 /// The fail-closed posture itself is correct and is not changed here: a
 /// registered fail-closed fraud check that silently did nothing would be
@@ -198,12 +202,25 @@ pub struct ReactorEventDescriptor {
 /// *when* the operator is told — at the point of the action, in the response
 /// to it, instead of in a boot log.
 ///
-/// Both modes are refused. `intercept` for the reason above; `listen` because
-/// `ReactorTransport::publish_listen` has no caller in the tree
-/// (`run_chain` filters listeners out and `intercept` returns early when the
-/// interceptor list is empty), so a listen registration would receive nothing
-/// — the inverse of its contract. Refusing is the honest answer until the
-/// fan-out exists.
+/// Since R2.4 merged the lapin transport this arm no longer fires for
+/// `axiam-server`, which composes a transport that reports `can_dispatch()`.
+/// It is **not** dead: `can_dispatch` reports the transport's capability, and
+/// a build that composes `UnavailableReactorTransport` (or `NoopReactorGate`)
+/// still answers `false`. It deliberately does **not** fire on a broker
+/// outage — see `ReactorTransport::can_dispatch`'s doc for why a blip must not
+/// become a registration outage.
+///
+/// # 2. The registration is `listen`, whose fan-out has no caller
+///
+/// `ReactorTransport::publish_listen` is implemented by the lapin transport,
+/// but nothing calls it: `run_chain` filters listeners out and
+/// `DispatchingReactorGate::intercept` returns early once the interceptor list
+/// is empty. A `listen` registration would therefore receive nothing at all —
+/// the inverse of its contract, and a silent one, since a listener produces no
+/// outcome to notice its absence in. Refusing is the honest answer until the
+/// gate grows the fan-out.
+///
+/// # Why 503, and why only enabled registrations
 ///
 /// 503 rather than 400: nothing is wrong with the request. The dependency the
 /// resource needs is absent from this build, which is exactly what
@@ -216,22 +233,40 @@ pub struct ReactorEventDescriptor {
 fn require_dispatchable_transport<C: Connection + Clone>(
     state: &AppState<C>,
     would_be_enabled: bool,
+    mode: ReactorMode,
 ) -> Result<(), AxiamApiError> {
     use axiam_core::models::reactor::ReactorGate;
 
-    if !would_be_enabled || state.reactor_gate.can_dispatch() {
+    if !would_be_enabled {
         return Ok(());
     }
-    Err(axiam_core::error::AxiamError::ServiceUnavailable(
-        "the AMQP reactor transport is not implemented in this build, so a registered \
-         reactor could never be reached. Registering one would apply its failure_policy \
-         to every dispatch instead — and login.post_auth, user.pre_create, \
-         user.pre_update and grant.pre_assign all default to fail_closed, so the \
-         registration would deny those operations for this tenant. Refusing rather than \
-         accepting a registration that causes an outage."
-            .into(),
-    )
-    .into())
+
+    if !state.reactor_gate.can_dispatch() {
+        return Err(axiam_core::error::AxiamError::ServiceUnavailable(
+            "the AMQP reactor transport is not available in this build, so a registered \
+             reactor could never be reached. Registering one would apply its failure_policy \
+             to every dispatch instead — and login.post_auth, user.pre_create, \
+             user.pre_update and grant.pre_assign all default to fail_closed, so the \
+             registration would deny those operations for this tenant. Refusing rather than \
+             accepting a registration that causes an outage."
+                .into(),
+        )
+        .into());
+    }
+
+    if mode == ReactorMode::Listen {
+        return Err(axiam_core::error::AxiamError::ServiceUnavailable(
+            "listen-mode reactors are not dispatched to yet: the transport can publish a \
+             listen event, but no hook site fans out to listeners, so this registration \
+             would receive nothing and — being a listener — would produce no outcome in \
+             which you could notice. Register the reactor with mode 'intercept', or create \
+             it with enabled: false until the listener fan-out ships."
+                .into(),
+        )
+        .into());
+    }
+
+    Ok(())
 }
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
@@ -303,7 +338,7 @@ pub async fn create<C: Connection + Clone>(
     let req = body.into_inner();
 
     // SEC-101: before anything is validated or written.
-    require_dispatchable_transport(state.get_ref(), req.enabled)?;
+    require_dispatchable_transport(state.get_ref(), req.enabled, req.mode)?;
 
     // Validate the timeout that will actually be stored, not the one the
     // request happened to carry — an omitted value still has to be in range,
@@ -449,7 +484,7 @@ pub async fn update<C: Connection + Clone>(
     // SEC-101, on the merged result: an update that leaves the registration
     // enabled is refused while the transport cannot deliver, and one that
     // disables it is always allowed — that is the operator's way out.
-    require_dispatchable_transport(state.get_ref(), merged_enabled)?;
+    require_dispatchable_transport(state.get_ref(), merged_enabled, merged_mode)?;
 
     validate_registration(&merged_name, &merged_events, merged_mode, merged_timeout)
         .map_err(|e| validation_err(e.to_string()))?;

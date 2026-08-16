@@ -553,6 +553,47 @@ async fn a_listen_registration_is_refused_too_while_the_transport_cannot_dispatc
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 503);
 }
 
+/// …and refused on a **dispatchable** transport too, for exactly the same
+/// reason.
+///
+/// Before R2.4 this case was covered incidentally: every build composed
+/// `UnavailableReactorTransport`, so `can_dispatch()` was `false` and the
+/// check above caught listeners on the way past. Now that `axiam-server`
+/// composes the lapin transport — which reports `true`, and correctly so,
+/// because `can_dispatch` is a statement about capability rather than health
+/// — a listener would have sailed through into a registration that receives
+/// nothing and, being a listener, produces no outcome in which its silence
+/// could be noticed. The refusal is therefore its own check now, and this is
+/// its own test.
+#[actix_web::test]
+async fn a_listen_registration_is_refused_even_when_the_transport_can_dispatch() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = authed!(post, "/api/v1/reactors", token)
+        .set_json(json!({
+            "name": "observer",
+            "events": ["token.pre_issue"],
+            "mode": "listen",
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 503);
+
+    // The way out stays open: a listener created disabled is accepted, so an
+    // operator can register one ahead of the fan-out shipping.
+    let req = authed!(post, "/api/v1/reactors", token)
+        .set_json(json!({
+            "name": "observer-disabled",
+            "events": ["token.pre_issue"],
+            "mode": "listen",
+            "enabled": false,
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 201);
+}
+
 /// The operator must keep a way out. A registration created while the
 /// transport worked has to remain *disable*-able and *delete*-able when it
 /// stops — otherwise the refusal becomes the outage it exists to prevent.

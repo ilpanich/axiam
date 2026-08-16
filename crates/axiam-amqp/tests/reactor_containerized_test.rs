@@ -1,54 +1,50 @@
 //! Containerized-reactor integration test (X1 / R2.4) — the interceptor
-//! chain driven over a REAL RabbitMQ broker.
+//! chain driven over a REAL RabbitMQ broker, through the REAL transport.
 //!
-//! # Why this test builds its own transport
+//! # What this exercises
 //!
-//! `sdks/CONTRACT.md` §22.1's scope note is still accurate as of this test:
-//! the server's lapin `ReactorTransport` is not merged (`axiam-server`
-//! composes [`axiam_amqp::UnavailableReactorTransport`] instead, and every
-//! dispatch resolves through the registration's failure policy — see
-//! `dispatcher.rs`'s doc comment on that type). There is therefore no
-//! production transport this test could exercise end-to-end.
+//! [`LapinReactorTransport`] — the production transport `axiam-server`
+//! composes — wired to [`run_chain`], against a live broker. Both halves of
+//! the round trip are real: the server side declares the §22.1 topology,
+//! signs the event, publishes it and correlates the reply; the reactor side is
+//! a `spawn_fake_reactor` task that consumes and replies exactly as an SDK's
+//! `reactor_serve` helper would (§22.10) — signed, correlated,
+//! decision-plus-optional-patch.
 //!
-//! What it exercises instead: [`run_chain`] — the broker-free composition
-//! logic (ordering, patch merge, deny short-circuit, failure-policy
-//! resolution) that both the production gate and this test drive — wired to
-//! a **minimal test-only RPC transport** (`LapinRpcTransport`) that talks to
-//! a real broker using the exact topology primitives §22.1 defines
-//! (`queue_name`, the standard AMQP `reply_to`/`correlation_id` RPC
-//! convention). A `spawn_fake_reactor` task plays the reactor side: it
-//! consumes from its queue and replies exactly as an SDK's `reactor_serve`
-//! helper would (§22.10) — signed, correlated, decision-plus-optional-patch.
+//! What that proves over the broker-free unit tests in `dispatcher.rs`: the
+//! topology names, the publish/consume path, the signed round trip, the
+//! reply-queue correlation, and timeout-as-failure all survive a real broker.
 //!
-//! This proves the wire-level plumbing (topology names, publish/consume,
-//! signed round-trip, timeout-as-failure) survives a real broker, which a
-//! broker-free unit test cannot. It does **not** prove the not-yet-merged
-//! production transport, because that code does not exist yet — R2.4 records
-//! this test as authored-and-passing against `LapinRpcTransport`, not
-//! against `axiam-server`'s composition.
+//! # The one asymmetry, and why it is the point
 //!
-//! Two things this harness deliberately does NOT do, because a real reactor
-//! must not do them either (§22.1): declare the exchange, or bind a queue to
-//! it. `LapinRpcTransport` publishes directly to the reactor's named queue
-//! (the routing the server would normally arrange via the exchange/binding
-//! it owns), and `spawn_fake_reactor` only ever declares **its own** queue —
-//! the one thing an actor is allowed to touch.
+//! **The fake reactor declares nothing.** §22.1 is explicit that actors
+//! consume and never declare topology — a reactor that can bind is a reactor
+//! that can bind itself to `*.token.pre_issue` and read another tenant's
+//! issuance events. So each test calls
+//! [`LapinReactorTransport::declare_reactor_topology`] (the operation the
+//! server owns, and the one the admin registration path should call at
+//! create/update time) and the fake reactor only `basic_consume`s the queue it
+//! finds. A regression that moved the declare back to the actor would fail
+//! these tests at the consume, which is exactly the failure to want.
+//!
+//! (Historical note: before the transport was merged this file carried its own
+//! minimal `LapinRpcTransport`, because there was no production transport to
+//! exercise. It was also authored blind — "never executed in the development
+//! environment that produced it, there is no docker daemon there, it only
+//! compiles clean and lists correctly". Its first real execution was
+//! 2026-08-16 and it did not connect: see `test_amqp_config` below for the two
+//! broker-config faults that blind authoring left behind.)
 //!
 //! # Running
 //!
 //! Requires a live RabbitMQ broker at `AXIAM__AMQP__URL` (default
-//! `amqp://localhost:5672`, matches `just dev-up`) — `#[ignore]`d by
-//! default, same convention as `webhook_consumer_test.rs`:
+//! `amqp://axiam:axiam@localhost:5672`, matches `just dev-up`) — `#[ignore]`d
+//! by default, same convention as `webhook_consumer_test.rs`:
 //!
 //! ```text
 //! just dev-up
 //! cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored --test-threads=1
 //! ```
-//!
-//! **This test was authored but never executed in the development
-//! environment that produced it — there is no docker daemon there.** It only
-//! compiles clean and lists correctly
-//! (`cargo test -p axiam-amqp --test reactor_containerized_test -- --list`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -56,14 +52,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axiam_amqp::messages::CURRENT_KEY_VERSION;
-use axiam_amqp::reactor::dispatcher::{DispatchFailure, ReactorTransport, run_chain};
+use axiam_amqp::reactor::dispatcher::{DispatchFailure, run_chain};
 use axiam_amqp::reactor::protocol::{ReactorEventMessage, ReactorReply, ReplyDecision, queue_name};
+use axiam_amqp::reactor::transport::LapinReactorTransport;
 use axiam_amqp::{AmqpConfig, AmqpManager};
 use axiam_core::models::reactor::{FailurePolicy, Reactor, ReactorMode};
 use chrono::Utc;
 use futures_lite::StreamExt;
 use lapin::options::{
     BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
+    QueueDeleteOptions,
 };
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel};
@@ -72,112 +70,6 @@ use uuid::Uuid;
 /// Shared by every event/reply signed in this test — a fixed test-only key,
 /// never a production secret (mirrors every other AMQP test's `MASTER`).
 const MASTER: &[u8] = b"test-amqp-master-signing-key-for-reactor-containerized";
-
-// ---------------------------------------------------------------------------
-// The test-only RPC transport (see module docs for why this is not the
-// production lapin transport)
-// ---------------------------------------------------------------------------
-
-struct LapinRpcTransport {
-    channel: Channel,
-}
-
-impl ReactorTransport for LapinRpcTransport {
-    async fn round_trip(
-        &self,
-        reactor: &Reactor,
-        event: &'static str,
-        correlation_id: Uuid,
-        payload: serde_json::Value,
-        timeout_ms: u32,
-    ) -> Result<ReactorReply, DispatchFailure> {
-        let msg = ReactorEventMessage::signed(
-            MASTER,
-            reactor.tenant_id,
-            event,
-            correlation_id,
-            payload,
-            timeout_ms,
-            Utc::now(),
-        )
-        .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
-
-        // §22.1's standard AMQP RPC convention: an exclusive, auto-delete
-        // reply queue named for this one round trip.
-        let reply_queue = self
-            .channel
-            .queue_declare(
-                "".into(),
-                QueueDeclareOptions {
-                    exclusive: true,
-                    auto_delete: true,
-                    ..QueueDeclareOptions::default()
-                },
-                FieldTable::default(),
-            )
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
-        let reply_queue_name = reply_queue.name().as_str().to_string();
-
-        let mut consumer = self
-            .channel
-            .basic_consume(
-                reply_queue_name.clone().into(),
-                format!("reply-{correlation_id}").into(),
-                BasicConsumeOptions {
-                    no_ack: true,
-                    ..BasicConsumeOptions::default()
-                },
-                FieldTable::default(),
-            )
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
-
-        let body =
-            serde_json::to_vec(&msg).map_err(|e| DispatchFailure::Transport(e.to_string()))?;
-        let props = BasicProperties::default()
-            .with_reply_to(reply_queue_name.clone().into())
-            .with_correlation_id(correlation_id.to_string().into());
-
-        self.channel
-            .basic_publish(
-                "".into(),
-                queue_name(reactor.tenant_id, reactor.id).into(),
-                BasicPublishOptions::default(),
-                &body,
-                props,
-            )
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
-
-        // The effective per-reactor budget `run_chain` computed — a late
-        // reply past this point is exactly what §22.3 says an SDK runtime
-        // SHOULD abandon rather than send.
-        match tokio::time::timeout(
-            Duration::from_millis(u64::from(timeout_ms)),
-            consumer.next(),
-        )
-        .await
-        {
-            Ok(Some(Ok(delivery))) => serde_json::from_slice::<ReactorReply>(&delivery.data)
-                .map_err(|e| DispatchFailure::Transport(e.to_string())),
-            Ok(Some(Err(e))) => Err(DispatchFailure::Transport(e.to_string())),
-            Ok(None) => Err(DispatchFailure::Transport("reply consumer closed".into())),
-            Err(_) => Err(DispatchFailure::Timeout),
-        }
-    }
-
-    async fn publish_listen(
-        &self,
-        _reactor: &Reactor,
-        _event: &'static str,
-        _payload: serde_json::Value,
-    ) -> Result<(), DispatchFailure> {
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The fake reactor — plays the SDK `reactor_serve` side (§22.10)
@@ -195,11 +87,11 @@ enum Answer {
     NeverReply,
 }
 
-/// Spawn a task that declares **only its own queue** (§22.1: actors consume,
-/// they never declare topology otherwise) and answers every event it
-/// receives with a fixed, pre-signed `Answer`. Returns the number of events
-/// it has received so far, for the deny-short-circuit assertion — a reactor
-/// later in the chain than a deny must receive **zero** events.
+/// Spawn a task that consumes the queue **the server declared** (§22.1: actors
+/// consume, they never declare topology) and answers every event it receives
+/// with a fixed, pre-signed `Answer`. Returns the number of events it has
+/// received so far, for the deny-short-circuit assertion — a reactor later in
+/// the chain than a deny must receive **zero** events.
 async fn spawn_fake_reactor(
     channel: Channel,
     tenant_id: Uuid,
@@ -209,28 +101,8 @@ async fn spawn_fake_reactor(
     let hits = Arc::new(AtomicUsize::new(0));
     let queue = queue_name(tenant_id, reactor_id);
 
-    channel
-        .queue_declare(
-            queue.clone().into(),
-            // durable, not transient. RabbitMQ deprecated transient
-            // non-exclusive queues and its recent images REFUSE the declare
-            // outright ("Feature `transient_nonexcl_queues` is deprecated ...
-            // not permitted anymore"), taking the whole connection down — which
-            // is how this first surfaced in CI. Durable also matches how
-            // axiam-amqp's own connection.rs declares every real queue, so the
-            // test exercises the production shape rather than a weaker one.
-            // auto_delete still cleans the queue up when the fake reactor
-            // disconnects at end of test.
-            QueueDeclareOptions {
-                durable: true,
-                auto_delete: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await
-        .expect("fake reactor must be able to declare its own queue");
-
+    // No `queue_declare` here, deliberately — see the module docs. If the
+    // server-side declare regressed, this consume is what fails.
     let mut consumer = channel
         .basic_consume(
             queue.clone().into(),
@@ -239,7 +111,7 @@ async fn spawn_fake_reactor(
             FieldTable::default(),
         )
         .await
-        .expect("fake reactor consume");
+        .expect("fake reactor consume (the SERVER must have declared this queue)");
 
     let hits_for_task = Arc::clone(&hits);
     tokio::spawn(async move {
@@ -247,6 +119,10 @@ async fn spawn_fake_reactor(
             hits_for_task.fetch_add(1, Ordering::SeqCst);
             let event: ReactorEventMessage =
                 serde_json::from_slice(&delivery.data).expect("decode event");
+            assert!(
+                event.verify(MASTER),
+                "the server must sign every event it publishes (§22.2)"
+            );
             delivery
                 .ack(BasicAckOptions::default())
                 .await
@@ -319,35 +195,148 @@ fn reactor(tenant: Uuid, event: &str, priority: i32, policy: FailurePolicy) -> R
     }
 }
 
-async fn connect() -> AmqpManager {
-    AmqpManager::connect_with_retry(&AmqpConfig::default())
-        .await
-        .expect("connect to live RabbitMQ (just dev-up)")
+/// Broker URL for the test. `AmqpConfig::default()` is NOT usable here and the
+/// header's claim that it "matches `just dev-up`" was wrong on two counts —
+/// neither was caught because this file had never been executed:
+///
+///  * its `url` is `amqp://localhost:5672` with no credentials, so it dials as
+///    `guest`, while `docker/docker-compose.dev.yml` provisions the broker with
+///    `RABBITMQ_DEFAULT_USER/PASS = axiam/axiam` (and `guest` is refused
+///    non-locally by RabbitMQ anyway);
+///  * `allow_plaintext` defaults to `false`, and `AmqpConfig::validate` turns a
+///    plaintext `amqp://` URL under that setting into `AmqpError::Config`,
+///    which `connect_with_retry` deliberately does NOT retry — so the test
+///    failed before dialling, with a message about TLS rather than about the
+///    broker.
+///
+/// `AXIAM__AMQP__URL` is honoured (that part of the header was the intent), and
+/// the default now matches what `just dev-up` actually stands up.
+fn test_amqp_config() -> AmqpConfig {
+    AmqpConfig {
+        url: std::env::var("AXIAM__AMQP__URL")
+            .unwrap_or_else(|_| "amqp://axiam:axiam@localhost:5672".to_string()),
+        // A local throwaway dev broker over loopback. The production guard is
+        // exactly right; this is the documented escape hatch for it.
+        allow_plaintext: true,
+        ..AmqpConfig::default()
+    }
+}
+
+/// Connect and bring up the production transport, waiting for its supervisor
+/// to establish a session.
+///
+/// `LapinReactorTransport::start` is infallible by design — until the first
+/// session exists every dispatch fails as a transport error and the
+/// registration's failure policy decides — so a test that dispatched
+/// immediately would be racing the supervisor and would "pass" a fail-open
+/// scenario for the wrong reason.
+async fn connected_transport() -> (Arc<AmqpManager>, LapinReactorTransport) {
+    let amqp = Arc::new(
+        AmqpManager::connect_with_retry(&test_amqp_config())
+            .await
+            .expect("connect to live RabbitMQ (just dev-up)"),
+    );
+    let transport = LapinReactorTransport::start(Arc::clone(&amqp), MASTER.to_vec());
+
+    for _ in 0..100 {
+        if transport.is_connected() {
+            return (amqp, transport);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the reactor transport did not establish a broker session within 2s");
+}
+
+/// Delete the durable queues this test created.
+///
+/// Reactor queues are durable and not auto-delete on purpose — a registration
+/// outlives its actor's restarts — so an integration test that generates fresh
+/// UUIDs on every run would otherwise leave a queue behind each time. The
+/// production reclaim path is `x-expires` (seven idle days), which is the
+/// right bound for a deployment and far too slow for a dev broker.
+async fn cleanup(channel: &Channel, tenant: Uuid, reactor_ids: &[Uuid]) {
+    for id in reactor_ids {
+        let _ = channel
+            .queue_delete(
+                queue_name(tenant, *id).into(),
+                QueueDeleteOptions::default(),
+            )
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
 
+/// The server declares the exchange, the queue and the bindings; the actor
+/// declares nothing (§22.1). Asserted with a **passive** declare, which
+/// succeeds only if the queue already exists and fails otherwise — so this
+/// checks the server created it rather than creating it itself.
+#[tokio::test]
+#[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
+            `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
+async fn the_server_declares_the_reactor_queue_and_the_actor_declares_nothing() {
+    let (amqp, transport) = connected_transport().await;
+    let tenant = Uuid::new_v4();
+    let r = reactor(tenant, "token.pre_issue", 0, FailurePolicy::FailOpen);
+
+    let probe = amqp.create_channel().await.unwrap();
+    let before = probe
+        .queue_declare(
+            queue_name(tenant, r.id).into(),
+            QueueDeclareOptions {
+                passive: true,
+                ..QueueDeclareOptions::default()
+            },
+            FieldTable::default(),
+        )
+        .await;
+    assert!(
+        before.is_err(),
+        "nothing should have declared this queue yet"
+    );
+
+    transport
+        .declare_reactor_topology(&r)
+        .await
+        .expect("the server declares the reactor's topology");
+
+    // A passive declare fails the CHANNEL when the queue is missing, so this
+    // needs a fresh one after the expected failure above.
+    let probe = amqp.create_channel().await.unwrap();
+    probe
+        .queue_declare(
+            queue_name(tenant, r.id).into(),
+            QueueDeclareOptions {
+                passive: true,
+                ..QueueDeclareOptions::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .expect("the queue must exist once the server has declared it");
+
+    cleanup(&probe, tenant, &[r.id]).await;
+}
+
 /// Happy path: one interceptor, replies `allow`, over a real broker.
 #[tokio::test]
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
 async fn happy_path_allow_round_trips_over_real_rabbitmq() {
-    let amqp = connect().await;
+    let (amqp, transport) = connected_transport().await;
     let tenant = Uuid::new_v4();
     let r = reactor(tenant, "login.post_auth", 0, FailurePolicy::FailClosed);
 
+    transport.declare_reactor_topology(&r).await.unwrap();
     let fake_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(fake_channel, tenant, r.id, Answer::Allow).await;
 
-    let transport = LapinRpcTransport {
-        channel: amqp.create_publisher_channel().await.unwrap(),
-    };
     let result = run_chain(
         &transport,
         MASTER,
-        &[r],
+        std::slice::from_ref(&r),
         "login.post_auth",
         serde_json::json!({"sub": "alice"}),
         Utc::now,
@@ -355,6 +344,7 @@ async fn happy_path_allow_round_trips_over_real_rabbitmq() {
     )
     .await;
 
+    cleanup(&amqp.create_channel().await.unwrap(), tenant, &[r.id]).await;
     assert!(result.outcome.permits());
     assert!(result.failures.is_empty());
 }
@@ -366,21 +356,19 @@ async fn happy_path_allow_round_trips_over_real_rabbitmq() {
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
 async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
-    let amqp = connect().await;
+    let (amqp, transport) = connected_transport().await;
     let tenant = Uuid::new_v4();
     let mut r = reactor(tenant, "login.post_auth", 0, FailurePolicy::FailClosed);
     r.timeout_ms = 300; // keep the ignored test fast
 
+    transport.declare_reactor_topology(&r).await.unwrap();
     let fake_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(fake_channel, tenant, r.id, Answer::NeverReply).await;
 
-    let transport = LapinRpcTransport {
-        channel: amqp.create_publisher_channel().await.unwrap(),
-    };
     let result = run_chain(
         &transport,
         MASTER,
-        &[r],
+        std::slice::from_ref(&r),
         "login.post_auth",
         serde_json::json!({"sub": "alice"}),
         Utc::now,
@@ -388,6 +376,7 @@ async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
     )
     .await;
 
+    cleanup(&amqp.create_channel().await.unwrap(), tenant, &[r.id]).await;
     assert!(
         !result.outcome.permits(),
         "an unreachable fail_closed reactor must deny"
@@ -404,23 +393,21 @@ async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
 async fn a_forbidden_patch_field_is_refused_over_real_rabbitmq() {
-    let amqp = connect().await;
+    let (amqp, transport) = connected_transport().await;
     let tenant = Uuid::new_v4();
     let r = reactor(tenant, "token.pre_issue", 0, FailurePolicy::FailClosed);
 
     let mut forbidden_patch = BTreeMap::new();
     forbidden_patch.insert("sub".to_string(), "root".to_string());
 
+    transport.declare_reactor_topology(&r).await.unwrap();
     let fake_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(fake_channel, tenant, r.id, Answer::Mutate(forbidden_patch)).await;
 
-    let transport = LapinRpcTransport {
-        channel: amqp.create_publisher_channel().await.unwrap(),
-    };
     let result = run_chain(
         &transport,
         MASTER,
-        &[r],
+        std::slice::from_ref(&r),
         "token.pre_issue",
         serde_json::json!({"sub": "alice"}),
         Utc::now,
@@ -428,6 +415,7 @@ async fn a_forbidden_patch_field_is_refused_over_real_rabbitmq() {
     )
     .await;
 
+    cleanup(&amqp.create_channel().await.unwrap(), tenant, &[r.id]).await;
     assert!(
         !result.outcome.permits(),
         "a reactor must not be able to set 'sub', even correctly signed"
@@ -437,11 +425,17 @@ async fn a_forbidden_patch_field_is_refused_over_real_rabbitmq() {
 /// Two interceptors in priority order, each mutating `token.pre_issue`'s
 /// `ext.` namespace: the merged patch carries both fields, and the
 /// higher-priority reactor's value wins on the shared key.
+///
+/// This is also the scenario that pins **why an interception is addressed to
+/// the reactor's queue rather than fanned out through the topic exchange**:
+/// both reactors are registered for the same `(tenant, event)`, so a publish
+/// through the exchange would deliver one correlation_id to both and let
+/// whichever answered first be consumed as the other's reply.
 #[tokio::test]
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
 async fn a_priority_chain_merges_patches_with_later_winning_over_real_rabbitmq() {
-    let amqp = connect().await;
+    let (amqp, transport) = connected_transport().await;
     let tenant = Uuid::new_v4();
     let first = reactor(tenant, "token.pre_issue", 1, FailurePolicy::FailOpen);
     let second = reactor(tenant, "token.pre_issue", 2, FailurePolicy::FailOpen);
@@ -453,6 +447,8 @@ async fn a_priority_chain_merges_patches_with_later_winning_over_real_rabbitmq()
     second_patch.insert("ext.cost_center".to_string(), "42".to_string());
     second_patch.insert("ext.shared".to_string(), "from-second".to_string());
 
+    transport.declare_reactor_topology(&first).await.unwrap();
+    transport.declare_reactor_topology(&second).await.unwrap();
     let first_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(first_channel, tenant, first.id, Answer::Mutate(first_patch)).await;
     let second_channel = amqp.create_channel().await.unwrap();
@@ -464,9 +460,7 @@ async fn a_priority_chain_merges_patches_with_later_winning_over_real_rabbitmq()
     )
     .await;
 
-    let transport = LapinRpcTransport {
-        channel: amqp.create_publisher_channel().await.unwrap(),
-    };
+    let ids = [first.id, second.id];
     let result = run_chain(
         &transport,
         MASTER,
@@ -478,6 +472,7 @@ async fn a_priority_chain_merges_patches_with_later_winning_over_real_rabbitmq()
     )
     .await;
 
+    cleanup(&amqp.create_channel().await.unwrap(), tenant, &ids).await;
     match result.outcome {
         axiam_core::models::reactor::ReactorOutcome::Mutate { patch } => {
             assert_eq!(patch["ext.department"], "eng");
@@ -498,11 +493,13 @@ async fn a_priority_chain_merges_patches_with_later_winning_over_real_rabbitmq()
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
 async fn a_deny_short_circuits_the_chain_over_real_rabbitmq() {
-    let amqp = connect().await;
+    let (amqp, transport) = connected_transport().await;
     let tenant = Uuid::new_v4();
     let first = reactor(tenant, "login.post_auth", 1, FailurePolicy::FailClosed);
     let second = reactor(tenant, "login.post_auth", 2, FailurePolicy::FailClosed);
 
+    transport.declare_reactor_topology(&first).await.unwrap();
+    transport.declare_reactor_topology(&second).await.unwrap();
     let first_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(
         first_channel,
@@ -514,9 +511,7 @@ async fn a_deny_short_circuits_the_chain_over_real_rabbitmq() {
     let second_channel = amqp.create_channel().await.unwrap();
     let second_hits = spawn_fake_reactor(second_channel, tenant, second.id, Answer::Allow).await;
 
-    let transport = LapinRpcTransport {
-        channel: amqp.create_publisher_channel().await.unwrap(),
-    };
+    let ids = [first.id, second.id];
     let result = run_chain(
         &transport,
         MASTER,
@@ -534,9 +529,10 @@ async fn a_deny_short_circuits_the_chain_over_real_rabbitmq() {
     // anything it was going to observe, then assert it saw nothing at all —
     // not merely that it did not reply.
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let hits = second_hits.load(Ordering::SeqCst);
+    cleanup(&amqp.create_channel().await.unwrap(), tenant, &ids).await;
     assert_eq!(
-        second_hits.load(Ordering::SeqCst),
-        0,
+        hits, 0,
         "nothing later in the chain than a deny should ever be dispatched to"
     );
 }

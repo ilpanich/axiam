@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha26] - 2026-08-16
+
+### Added
+
+- Implement the lapin reactor transport (X1 R2.4)
+
+### Changed
+
+- Close the reactor transport's coverage gaps
+
+### Fixed
+
+- Recover the shared connection from a broker restart
+- Close the neutralized-posture holes the alpha25 dry run exposed
+- Activate the AXIAM bench user after seeding it
+
 ## [1.0.0-alpha25] - 2026-08-16
 
 ### Added

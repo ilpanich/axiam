@@ -178,6 +178,34 @@ inside one minute's budget. Pin the env var if a very large tenant's
 reconciliation sweep needs more. See
 [`../deployment/rate-limit-sizing.md`](../deployment/rate-limit-sizing.md).
 
+### Provisioning tokens — the credential to actually use
+
+`/scim/v2/*` accepts a **provisioning token**: a long-lived, revocable bearer
+handle designed for exactly this workflow — paste once into an IdP, forget.
+Manage them under **SCIM Provisioning** in the admin UI, or through
+`/api/v1/scim-tokens` (`scim_tokens:create` / `:list` / `:revoke`).
+
+A provisioning token:
+
+- is accepted on `/scim/v2/*` and **nowhere else** — not `/api/v1/*`, not
+  `/oauth2/*`. That containment is why a year-long credential is defensible in
+  a system whose other access tokens live 15 minutes;
+- **carries no permissions of its own.** It authenticates *as* a tenant user,
+  and that user's `scim:provision` grant decides everything. Unassign the role
+  or deactivate the user and every token bound to them stops working — you do
+  not have to revoke them separately;
+- is stored only as a SHA-256 hash. The value is shown once, at creation;
+- carries the fixed prefix `axiam_scim_`, so a secret scanner or a `grep` can
+  find it if it is ever pasted somewhere it should not be;
+- expires. There is no never-expires option — the ceiling is
+  `AXIAM__SCIM_TOKEN_MAX_LIFETIME_DAYS` (default 365).
+
+This replaces the refresh-job workaround described below for new deployments.
+The access-token route still works and is documented because an existing
+integration may be using it.
+
+See `claude_dev/scim-provisioning-token-design.md` for the design reasoning.
+
 ### A known limitation: the bearer principal is a user, not a service account
 
 AXIAM has a `service_account` concept explicitly for machine-to-machine

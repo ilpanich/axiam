@@ -241,6 +241,26 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
          (RFC 7643 §4.1.1), including an administrator's — a capability no \
          native users:* permission confers.",
     ),
+    // SCIM provisioning tokens — the long-lived credential an IdP pastes into
+    // its SCIM connector (`claude_dev/scim-provisioning-token-design.md`).
+    //
+    // Separate from `scim:provision` on purpose. Minting a credential for a
+    // provisioner is an administrative act; the provisioner itself must not be
+    // able to mint more of itself, which is exactly what would happen if these
+    // rode along on the permission the token's own principal holds.
+    (
+        "scim_tokens:create",
+        "Mint a SCIM provisioning token. WARNING: the resulting credential \
+         authenticates as the tenant user it is bound to, so it inherits \
+         everything that user's scim:provision grant confers — including \
+         setting any user's password.",
+    ),
+    (
+        "scim_tokens:list",
+        "List SCIM provisioning tokens and their status (metadata only — a \
+         token's value is shown once, at creation, and never again)",
+    ),
+    ("scim_tokens:revoke", "Revoke a SCIM provisioning token"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -567,6 +587,10 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Audit Logs
     ("GET", "/api/v1/audit-logs", "audit_logs:list"),
     ("GET", "/api/v1/audit-logs/system", "audit_logs:list_system"),
+    // SCIM provisioning tokens
+    ("POST", "/api/v1/scim-tokens", "scim_tokens:create"),
+    ("GET", "/api/v1/scim-tokens", "scim_tokens:list"),
+    ("DELETE", "/api/v1/scim-tokens/{id}", "scim_tokens:revoke"),
     // Service Accounts
     ("GET", "/api/v1/service-accounts", "service_accounts:list"),
     (

@@ -49,6 +49,7 @@
 | `reactors` | `reactors/ReactorsPage` | **partial (P3)** | List, editor and delete are covered, and the event options render from `GET /api/v1/reactors/events` rather than a hard-coded list. Health is covered for the two signals the API exposes: `last_seen_at` distinguishes never-connected from silent-since, and `fail_closed` carries a badge. The third planned signal — **recent timeouts and vetoes** — is blocked on the server, not on the UI: the dispatcher builds `ChainResult.failures` but no caller persists it and no reactor audit action exists, so there is nothing to render. See §Planned |
 | `resources` | `resources/ResourcesPage` | covered | includes the `ResourceTree` |
 | `roles` | `roles/RolesPage`, `roles/RoleDetailPage` | covered | |
+| `scim_tokens` | `scim/ScimTokensPage` | covered | Issue, list and revoke the long-lived provisioning token an IdP pastes into its SCIM connector. The credential exists because `/scim/v2` previously had only 15-minute access tokens, which Okta and Entra cannot refresh — see `claude_dev/scim-provisioning-token-design.md`. Create is gated on `scim_tokens:create`, revoke on `scim_tokens:revoke`, both deliberately separate from `scim:provision` so a provisioner cannot mint more of itself. The handle is shown once via `SecretRevealModal` and stored only as a hash, so there is nothing for the list to display and nothing to re-reveal |
 | `scopes` | `permissions/PermissionsPage`, `resources/ScopesPanel` (on `resources/ResourcesPage`) | covered | R4.2c. Scopes are still selectable when granting a permission (`permissions/PermissionsPage`); standalone CRUD now lives on `resources/ScopesPanel`, shown for the currently-selected resource since scopes are always nested under one (`/api/v1/resources/{resource_id}/scopes`). Create is gated on `scopes:create` |
 | `service_accounts` | `service-accounts/ServiceAccountsPage` | covered | |
 | `settings` | `settings/SettingsPage` | covered | |
@@ -69,7 +70,9 @@ remain genuinely open.
 | Surface | Follows | What it needs |
 |---|---|---|
 | Reactor failure history | X1 | **Server-side first.** The console ships without the "recent timeouts and vetoes" panel because the data does not exist: `ChainResult.failures` is computed in `axiam-amqp`'s dispatcher and dropped on the floor — no caller writes it to the audit trail, and the audit action catalogue has no reactor entry. A `fail_open` timeout is invisible in the outcome by design, so absent an audit record it is invisible everywhere, which is exactly the case the dispatcher's own comment says must not happen. Persist the failures, then the panel is a small page change |
-| SCIM token management | B4 | Issue/revoke provisioning tokens, scoped to `scim:provision`. Deliberately deferred: `crates/axiam-scim` is still being written (R3.1 dependency) as of this pass — see `email_config` and `oauth2_clients` rows above for two more R4.2 items that closed except for a named backend gap |
+*(SCIM token management, previously listed here, shipped — see the
+`scim_tokens` row above. It needed a backend first: there was no long-lived
+credential to manage, only 15-minute access tokens.)*
 
 ## How the CI check works
 

@@ -7,6 +7,7 @@ import {
 } from "@/services/roles";
 import {
   permissionService,
+  isElevatedPermission,
   type Permission,
   type PermissionEffect,
 } from "@/services/permissions";
@@ -28,6 +29,7 @@ import {
   Pencil,
   Trash2,
   Ban,
+  AlertTriangle,
 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
@@ -188,6 +190,7 @@ function GrantPermissionDialog({
               <ul>
                 {filtered.map((perm) => {
                   const alreadyGranted = grantedPermissionIds.has(perm.id);
+                  const elevated = isElevatedPermission(perm);
                   return (
                     <li
                       key={perm.id}
@@ -196,9 +199,24 @@ function GrantPermissionDialog({
                       <div>
                         <div className="flex items-center gap-2">
                           <ActionBadge action={perm.action} />
+                          {elevated && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                              <AlertTriangle size={11} aria-hidden="true" />
+                              Elevated
+                            </span>
+                          )}
                         </div>
                         {perm.description && (
-                          <p className="text-xs text-muted-foreground mt-0.5">
+                          <p
+                            className={cn(
+                              "text-xs mt-0.5",
+                              // An elevated grant reads as ordinary help text
+                              // otherwise — see isElevatedPermission.
+                              elevated
+                                ? "text-amber-400/90"
+                                : "text-muted-foreground"
+                            )}
+                          >
                             {perm.description}
                           </p>
                         )}

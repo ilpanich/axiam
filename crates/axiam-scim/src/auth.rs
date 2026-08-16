@@ -68,8 +68,16 @@
 //! here, in the provisioning guide, and in this task's final report so a
 //! follow-on (the planned SCIM token-management UI, or a dedicated fix) has
 //! a precise pointer.
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use actix_web::dev::Payload;
+use actix_web::{FromRequest, HttpRequest, web};
 use axiam_api_rest::authz::{AuthzChecker, RequirePermission};
 use axiam_api_rest::extractors::auth::AuthenticatedUser;
+use axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
+use axiam_core::models::scim_token::SCIM_TOKEN_PREFIX;
 use uuid::Uuid;
 
 use crate::error::ScimError;
@@ -79,19 +87,137 @@ use crate::error::ScimError;
 /// in `axiam_api_rest::permissions::PERMISSION_REGISTRY` (the same array
 /// every other AXIAM permission is declared in) so it is seeded per-tenant
 /// exactly like `users:create`, `groups:list`, etc.
-pub const SCIM_PROVISION_PERMISSION: &str = "scim:provision";
+pub use axiam_core::models::scim_token::SCIM_PROVISION_ACTION as SCIM_PROVISION_PERMISSION;
+
+/// What authenticated a `/scim/v2/*` request.
+///
+/// Two arms because SCIM accepts two credential shapes and they resolve
+/// differently, not because they are authorized differently — both end up in
+/// [`require_scim_provision`] against a `(tenant, user)` pair, and the RBAC
+/// decision is identical.
+pub enum ScimPrincipal {
+    /// A JWT-bearing tenant user — the path that existed before provisioning
+    /// tokens, unchanged.
+    Jwt(Box<AuthenticatedUser>),
+    /// A provisioning token, resolved to the user it is bound to.
+    Token(ScimTokenPrincipal),
+}
+
+impl ScimPrincipal {
+    pub fn tenant_id(&self) -> Uuid {
+        match self {
+            Self::Jwt(u) => u.tenant_id,
+            Self::Token(t) => t.tenant_id,
+        }
+    }
+
+    pub fn user_id(&self) -> Uuid {
+        match self {
+            Self::Jwt(u) => u.user_id,
+            Self::Token(t) => t.user_id,
+        }
+    }
+
+    /// The provisioning token's id, when one authenticated this request.
+    /// `None` for a JWT caller.
+    pub fn token_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Jwt(_) => None,
+            Self::Token(t) => Some(t.token_id),
+        }
+    }
+}
+
+/// Read the bearer value from the `Authorization` header, if there is one.
+///
+/// Header only — never the `axiam_access` cookie. A provisioning token is a
+/// machine credential presented by an IdP; accepting it from a cookie would
+/// make it reachable from a browser, and therefore CSRF-reachable, for no
+/// benefit to any real caller.
+fn bearer_value(req: &HttpRequest) -> Option<String> {
+    req.headers()
+        .get(actix_web::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::to_owned)
+}
+
+impl FromRequest for ScimPrincipal {
+    type Error = ScimError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
+        // Dispatch on the handle prefix rather than trying both arms in
+        // sequence. Trying JWT-then-token would turn every malformed JWT into
+        // a database lookup, and would make "which credential did it think
+        // this was?" unanswerable from the response — which is precisely the
+        // question an operator asks when provisioning breaks.
+        let presented = bearer_value(req);
+        let is_provisioning_token = presented
+            .as_deref()
+            .is_some_and(|t| t.starts_with(SCIM_TOKEN_PREFIX));
+
+        if !is_provisioning_token {
+            let fut = AuthenticatedUser::from_request(req, payload);
+            return Box::pin(async move {
+                fut.await
+                    .map(|u| ScimPrincipal::Jwt(Box::new(u)))
+                    .map_err(ScimError::from)
+            });
+        }
+
+        let resolver = req
+            .app_data::<web::Data<Arc<dyn ScimTokenResolver>>>()
+            .map(|d| d.get_ref().clone());
+
+        Box::pin(async move {
+            // A deployment that registered no resolver cannot honour
+            // provisioning tokens at all. Failing closed here (rather than
+            // falling through to the JWT arm, which would then reject the
+            // handle as a malformed JWT) keeps the error honest.
+            let resolver = resolver.ok_or_else(|| {
+                ScimError::new(
+                    actix_web::http::StatusCode::UNAUTHORIZED,
+                    "SCIM provisioning tokens are not enabled on this deployment",
+                )
+            })?;
+            let raw = presented.unwrap_or_default();
+
+            let principal = resolver.resolve(&raw).await.ok_or_else(|| {
+                ScimError::new(
+                    actix_web::http::StatusCode::UNAUTHORIZED,
+                    "invalid or expired provisioning token",
+                )
+            })?;
+
+            resolver
+                .touch(principal.tenant_id, principal.token_id)
+                .await;
+
+            Ok(ScimPrincipal::Token(principal))
+        })
+    }
+}
 
 /// Enforce `scim:provision` for the calling principal, using the SAME
-/// [`RequirePermission`] guard every native `/api/v1/*` handler uses. Not
+/// authorization path every native `/api/v1/*` handler uses. Not
 /// resource-scoped (SCIM has no notion of an AXIAM `resource` hierarchy), so
 /// the check runs against the global sentinel (`Uuid::nil()`), exactly like
 /// `users:create`/`groups:create` do today.
+///
+/// Goes through [`RequirePermission::check_subject`] rather than `check`
+/// because the principal may not be an [`AuthenticatedUser`]. That seam
+/// already exists for exactly this case ("a caller that may be a machine
+/// rather than a user"), so a provisioning token introduces no new
+/// authorization code — the same grants, resolved the same way, for the same
+/// subject id.
 pub async fn require_scim_provision(
-    user: &AuthenticatedUser,
+    principal: &ScimPrincipal,
     authz: &dyn AuthzChecker,
 ) -> Result<(), ScimError> {
     RequirePermission::new(SCIM_PROVISION_PERMISSION, Uuid::nil())
-        .check(user, authz)
+        .check_subject(principal.tenant_id(), principal.user_id(), authz)
         .await
         .map_err(ScimError::from)
 }

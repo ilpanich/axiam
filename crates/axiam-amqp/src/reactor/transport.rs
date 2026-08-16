@@ -1057,10 +1057,10 @@ mod tests {
         let mut changed = r.clone();
         changed.events = vec!["token.pre_issue".into()];
         assert!(
-            !shared
+            shared
                 .declared_map()
                 .get(&changed.id)
-                .is_some_and(|have| *have == changed.events)
+                .is_none_or(|have| *have != changed.events)
         );
     }
 }

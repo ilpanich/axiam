@@ -237,6 +237,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "private_key_jwt_dpop_and_proof_replay",
         sql: SCHEMA_V39,
     },
+    Migration {
+        version: 40,
+        name: "scim_provisioning_tokens",
+        sql: SCHEMA_V40,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2118,6 +2123,48 @@ DEFINE INDEX IF NOT EXISTS idx_proof_replay_uniq ON TABLE oauth2_proof_replay \
     COLUMNS tenant_id, kind, scope, jti UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_proof_replay_expires_at ON TABLE oauth2_proof_replay \
     COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v40 — SCIM provisioning tokens
+// -----------------------------------------------------------------------
+//
+// The long-lived credential an IdP pastes into its SCIM connector — see
+// `claude_dev/scim-provisioning-token-design.md`.
+//
+// `idx_scim_token_hash` is the one index that is not optional. A presented
+// handle is looked up by hash on **every** `/scim/v2/*` request, and it is
+// looked up without a tenant (there is no authenticated tenant yet — the row
+// is what establishes one), so without this the hot authentication path is a
+// full scan of every token in the deployment. UNIQUE additionally makes a hash
+// collision a write error rather than an ambiguous lookup that silently
+// resolves to whichever row came back first.
+//
+// `idx_scim_token_tenant` serves the admin list, and `idx_scim_token_user`
+// serves the delete-on-user-deletion sweep — without it, removing one user's
+// tokens scans the table.
+//
+// `revoked_at` and `last_used_at` are `option<datetime>` rather than nullable
+// datetimes with a sentinel: "never used" and "used at the epoch" are
+// different facts, and a sentinel would make them the same one.
+const SCHEMA_V40: &str = "\
+DEFINE TABLE IF NOT EXISTS scim_token SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_token TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE scim_token TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE scim_token TYPE string;
+DEFINE FIELD IF NOT EXISTS token_hash ON TABLE scim_token TYPE string;
+DEFINE FIELD IF NOT EXISTS created_by ON TABLE scim_token TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE scim_token TYPE datetime;
+DEFINE FIELD IF NOT EXISTS last_used_at ON TABLE scim_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE scim_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE scim_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_scim_token_hash ON TABLE scim_token \
+    COLUMNS token_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_scim_token_tenant ON TABLE scim_token \
+    COLUMNS tenant_id;
+DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
+    COLUMNS tenant_id, user_id;
 ";
 
 // -----------------------------------------------------------------------

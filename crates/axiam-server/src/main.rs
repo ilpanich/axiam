@@ -64,9 +64,9 @@ use axiam_db::{
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
@@ -503,6 +503,7 @@ async fn main() -> std::io::Result<()> {
     let permission_repo = SurrealPermissionRepository::new(pool.handle_for_repo());
     let resource_repo = SurrealResourceRepository::new(pool.handle_for_repo());
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
+    let scim_token_repo = SurrealScimTokenRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
 
     // §15.2 / §16.6 — legacy service-account secret hashes.
@@ -562,6 +563,17 @@ async fn main() -> std::io::Result<()> {
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
+    // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
+    // on /scim/v2 into the tenant user it is bound to. Registered as its own
+    // app_data (rather than reached through AppState) for the same reason
+    // `session_validator` is — `ScimPrincipal`'s FromRequest impl is
+    // non-generic and cannot name `AppState<C>`.
+    // See `claude_dev/scim-provisioning-token-design.md`.
+    let scim_token_resolver: std::sync::Arc<dyn axiam_api_rest::ScimTokenResolver> =
+        std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
+            scim_token_repo.clone(),
+            axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
+        ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo());
     let ca_cert_repo = SurrealCaCertificateRepository::new(pool.handle_for_repo());
     let federation_link_repo_for_auth =
@@ -1797,6 +1809,7 @@ async fn main() -> std::io::Result<()> {
         permission_repo: permission_repo.clone(),
         resource_repo: resource_repo.clone(),
         scope_repo: scope_repo.clone(),
+        scim_token_repo: scim_token_repo.clone(),
         service_account_repo: service_account_repo.clone(),
         auth_service: auth_service.clone(),
         webauthn_service: webauthn_service.clone(),
@@ -1917,6 +1930,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
             // lives on this one AppState<C> value (see above).

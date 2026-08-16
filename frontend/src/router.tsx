@@ -23,6 +23,7 @@ import { AuditLogsPage } from "@/pages/audit/AuditLogsPage";
 import { OAuth2ClientsPage } from "@/pages/oauth2/OAuth2ClientsPage";
 import { NotificationRulesPage } from "@/pages/notifications/NotificationRulesPage";
 import { ServiceAccountsPage } from "@/pages/service-accounts/ServiceAccountsPage";
+import { ScimTokensPage } from "@/pages/scim/ScimTokensPage";
 import { FederationPage } from "@/pages/federation/FederationPage";
 import { TenantsPage } from "@/pages/tenants/TenantsPage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
@@ -252,6 +253,16 @@ export const router = createBrowserRouter([
             path: "service-accounts",
             element: <ServiceAccountsPage />,
             handle: { crumb: "Service Accounts" },
+          },
+        ],
+      },
+      {
+        element: <ProtectedRoute permission="scim_tokens:list" />,
+        children: [
+          {
+            path: "scim-tokens",
+            element: <ScimTokensPage />,
+            handle: { crumb: "SCIM Provisioning" },
           },
         ],
       },

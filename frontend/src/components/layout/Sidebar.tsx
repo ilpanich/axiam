@@ -90,6 +90,12 @@ const navSections: NavSection[] = [
         requiredPermission: "resources:list",
       },
       {
+        to: "/scim-tokens",
+        label: "SCIM Provisioning",
+        icon: <KeyRound size={18} />,
+        requiredPermission: "scim_tokens:list",
+      },
+      {
         to: "/service-accounts",
         label: "Service Accounts",
         icon: <KeyRound size={18} />,

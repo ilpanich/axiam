@@ -43,6 +43,7 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
+    scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
@@ -451,6 +452,68 @@ pub trait ResourceRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Resource>>> + Send;
+}
+
+/// Storage for SCIM provisioning tokens.
+///
+/// See `axiam_core::models::scim_token` for what a token is and is not. The
+/// lookup below is the whole authentication path for `/scim/v2/*` when the
+/// caller presents a provisioning handle rather than a JWT.
+pub trait ScimTokenRepository: Send + Sync {
+    fn create(&self, input: CreateScimToken)
+    -> impl Future<Output = AxiamResult<ScimToken>> + Send;
+
+    /// Resolve a presented handle by its hash, **without** filtering on
+    /// revocation or expiry.
+    ///
+    /// The caller applies [`ScimToken::is_usable`] instead, for the same
+    /// reason `consume_by_token_hash` does not filter expiry: the row is
+    /// needed in order to record *why* a request was refused, and a query that
+    /// returned `None` for "revoked" and for "never existed" alike would make
+    /// the two indistinguishable in the audit trail even though only one of
+    /// them is somebody using a credential that was taken away from them.
+    ///
+    /// Tenant-free by construction: a presented handle is the only thing the
+    /// caller knows at this point — there is no authenticated tenant yet to
+    /// scope by. The row's own `tenant_id` is what establishes it, which is
+    /// why the hash must be the full-entropy lookup key and not a prefix.
+    fn get_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<ScimToken>>> + Send;
+
+    fn list_for_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<ScimToken>>> + Send;
+
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<ScimToken>> + Send;
+
+    /// Mark a token revoked. Idempotent — revoking an already-revoked token
+    /// keeps the original `revoked_at`, so the audit trail records when
+    /// authority was actually withdrawn rather than when somebody last clicked.
+    fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Best-effort `last_used_at` stamp. Errors are the caller's to swallow:
+    /// failing a provisioning request because a usage timestamp could not be
+    /// written would turn an observability feature into an outage.
+    fn touch_last_used(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove every token bound to a user. Called when the user is deleted, so
+    /// a deprovisioned administrator does not leave live credentials behind.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait ScopeRepository: Send + Sync {

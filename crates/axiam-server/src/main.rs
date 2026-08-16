@@ -65,9 +65,8 @@ use axiam_db::{
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;

@@ -438,17 +438,13 @@ pub async fn delete<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    // `GroupRepository::delete`'s `WHERE tenant_id = $tenant_id` predicate
-    // already makes a cross-tenant delete a correct, silent no-op (no other
-    // tenant's row is ever touched) — but unlike `update`/`get_by_id`, it
-    // does not check whether it actually deleted a row, so it returns `Ok`
-    // even for an id that does not exist in the caller's tenant, which
-    // would surface here as a wrong `204` instead of `404` (the same
-    // wrong-status gap exists in the native `/api/v1/groups/{id}` DELETE
-    // handler — this pre-check is a SCIM-local hardening, not a fix to
-    // shared `axiam-db` code). `get_by_id` is already tenant-scoped and
-    // correctly 404s, so it doubles as the existence check delete needs.
-    state.group_repo.get_by_id(user.tenant_id, id).await?;
+    // SEC-104: the `get_by_id` pre-check that used to stand here is gone.
+    // `GroupRepository::delete` now runs the existence guard itself, inside
+    // the same transaction as the deletes, and returns `NotFound` — which
+    // `ScimError` renders as the `404` RFC 7644 §3.6 asks for. Keeping a
+    // SCIM-local copy of that check would have been the second of four: the
+    // native `/api/v1/groups/{id}` handler needed the same fix, and the third
+    // and fourth copies arrive with the next two resource types.
     state.group_repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

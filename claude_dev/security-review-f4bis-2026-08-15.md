@@ -1403,6 +1403,14 @@ about the wrong thing.
 | — | PAR, AMQP TLS, gRPC strict revocation (promoted) | — | No findings beyond SEC-106 (§12.6-12.7) |
 | — | Reactor patch allow-list + `ext.` rendering | — | No findings (§12.8, §14.3) |
 
+> **Remediation status (2026-08-15, after #323/#324): see §16.** SEC-093 …
+> SEC-095 are closed and merged. Of the twelve below, nine are fixed, two are
+> decided-and-implemented (SEC-097, SEC-107), and one is deferred with a
+> precise residual (SEC-103, blocked on the lapin transport). SEC-106 is split:
+> the CA-trust documentation is corrected, the TLS 1.3 floor is not settable
+> through lapin's public API and is now a MUST-level broker-side deployment
+> requirement.
+
 **Gate status for the execution plan.** R6's gate is "no new HIGH open".
 SEC-093 and SEC-094 are open and live; SEC-095 is open and latent. The gate is
 **not** met.
@@ -1416,3 +1424,169 @@ dispatch once so every grant passes through context construction, DPoP
 verification, registration-driven client authentication and the profile gate
 before it branches — and then the properties hold for the fifth grant nobody has
 written yet.
+
+---
+
+## 16. Remediation of SEC-096 … SEC-107 (2026-08-15, post-#323/#324)
+
+Every one of the twelve was re-triaged against the tree at `cd1af8f` before
+anything was changed. None of them had been closed by #323 or #324 — those
+merges added the SCIM crate, the SCIM rate-limit bucket, the coverage ratchet
+and the three HIGH fixes, and touched none of the code below. Two findings
+turned out to be *narrower* than §5–§11 described, and one turned out to be
+*wider*; those three are called out by name.
+
+| ID | Triage verdict at HEAD | Disposition |
+|---|---|---|
+| SEC-096 | Still applies — `handlers/oauth2.rs:363, 385` still `return`ed above `dpop_from_request` | **Fixed** |
+| SEC-097 | Still applies — `oauth2.rs:549-563`'s comment verbatim; no reader of the field anywhere | **Decided: refuse the switch, keep the field** |
+| SEC-098 | Still applies — `scim/users.rs` PATCH/PUT/DELETE called only `invalidate_subject` | **Fixed + documented** |
+| SEC-099 | Still applies, **narrower than written**: the cap-breach path passes the unfiltered slice; the unreadable-registry path does not use `fail_whole_chain` at all | **Fixed** |
+| SEC-100 | Still applies, **narrower than written**: `resolve`'s unbounded stale-serve already covers a warm process. The live defect is the cold cache | **Fixed for the population it hurt; residual recorded** |
+| SEC-101 | Still applies, **wider than written**: `axiam-api-grpc`'s `ReactorAdminService` is a second, unguarded door onto the same outage | **Fixed on both surfaces** |
+| SEC-102 | Still applies, **wider than written**: `extractors/auth.rs:285` has the same defect at the resource-server end | **Fixed at both sites** |
+| SEC-103 | Still applies and still blocked — `UnavailableReactorTransport` is composed at `main.rs:625`; no lapin transport in the tree | **Deferred; residual recorded below** |
+| SEC-104 | Still applies — `group`, `role`, `resource`, `permission`, `service_account` all `Ok(())` | **Fixed in `axiam-db`; SCIM pre-check deleted** |
+| SEC-105 | Still applies — all three headers verbatim | **Fixed (docs)** |
+| SEC-106 | Still applies, with one correction: the TLS backend is **rustls-connector**, not native-tls. The "adds a root" behaviour is the same (`tcp-stream 0.34/src/rustls_impl.rs` calls `add_parsable_certificates`) | **Half fixed, half deferred with a MUST-level deployment requirement** |
+| SEC-107 | Still applies | **Decided: host allowlist implemented** |
+
+### 16.1 SEC-097 — the decision, and why
+
+Neither of §6's two options is taken verbatim, because both have a cost the
+review did not price.
+
+*Implementing it* requires the client row at `dpop_from_request` time, which is
+before the client is looked up; the comment at that function explicitly argues
+against loading the client twice and putting "does this client need a proof" in
+two places. And without server-side nonce storage the echoed nonce cannot be
+*verified* on the retry — so the honest version of option 1 is a second control
+that does less than it appears to, which is the same defect one layer along.
+
+*Removing the field* is a wire break: it is in `sdks/openapi.json` and therefore
+in eleven downstream SDK repos, for a value that is always `false`.
+
+**What was done instead:** the field stays (no wire break, `false` still
+round-trips), the lying comment is gone, and `POST`/`PUT
+/api/v1/oauth2-clients` now **refuse `dpop_require_nonce: true` with 400**,
+naming the reason. That removes exactly what §6 said was unacceptable — a
+persisted, API-visible switch that does nothing — at the point of the action,
+which is the same shape as SEC-101's fix. `docs/security-profiles.md` records
+the posture and the `jti` single-use control that actually carries the weight.
+The refusal is one `if` a future nonce implementation deletes.
+
+**Owed elsewhere:** `claude_dev/fapi-conformance-runbook.md:168` describes a
+client "registered with `dpop_require_nonce: true`". That row is now
+unreachable and needs amending; it was outside this change's file scope.
+
+### 16.2 SEC-100 — what is fixed and what is not
+
+The review's two options have the same residual, and it is worth stating so
+nobody re-opens this expecting more. `ReactorRoutingTable::resolve` already
+serves a stale entry **without a TTL bound**, so option 1 ("treat 'observed to
+have zero reactors within the last N minutes' as sufficient") was already in
+place for any process that has completed one successful resolve. Option 2's
+in-process bit has the same hole. Both fail in exactly one case: a **cold
+replica** whose very first read of `(tenant, event)` fails.
+
+That case is now handled by asking a *different, broader* question —
+`ReactorSource::tenant_has_registrations`, backed by a one-row `list` with its
+own 60-second cache — and allowing only on `Ok(false)`. A per-table timeout or a
+bad plan on the event index can take out one query and not the other, which is
+the realistic trigger §9 names. An **error** from the probe is deliberately not
+folded into "no registrations": that would rebuild the availability-shaped off
+switch the rule exists to remove.
+
+**Residual:** when both the per-event read and the presence probe fail on a cold
+cache, the deny stands and resolves the **event's** default policy rather than
+the registrations' own. That is not fixable — the premise of the arm is that the
+registration list is unknown, so there are no per-registration policies to
+resolve. Recorded in `gate.rs` beside the code.
+
+### 16.3 SEC-103 — deferred, with the residual stated precisely
+
+**No code change.** The lapin transport has not landed:
+`axiam-server/src/main.rs:625` still composes `UnavailableReactorTransport`, and
+`ReactorTransport::round_trip` has exactly one implementation, which always
+fails. Adding `reactor_id` to `derive_tenant_key`'s HKDF `info` now would change
+a key derivation that no deployed reactor can yet exercise, in a change nobody
+can test end to end — and would then have to be re-verified against the
+transport when it arrives. It is free at that point and impossible afterwards,
+which is the argument for doing it *with* the transport, not before it.
+
+**The residual, unchanged and unmitigated:**
+
+1. Every reactor registered in a tenant derives the same reply-signing key from
+   `(master, key_version, tenant_id)` (`axiam-amqp/src/messages.rs:101-111`), so
+   reactor A can produce a reply the server accepts as reactor B's. The only
+   thing preventing it is that `correlation_id` is a fresh `Uuid::new_v4()`
+   delivered to B's own queue — secrecy of a value, not authentication of a
+   party.
+2. `ReactorReply::nonce` is signed and covered by the MAC and **never checked**
+   (`protocol.rs:94`, `into_outcome` at `:237-309`). Single-use rests entirely on
+   ±300 s freshness plus "the transport awaits exactly one reply per
+   `correlation_id`", and that second half has no implementation.
+
+**Both are acceptance criteria on the lapin transport PR, not on this change:**
+add `reactor_id` to the HKDF `info`, and make "exactly one reply is consumed per
+`correlation_id`" an explicit test.
+
+### 16.4 SEC-106 — the TLS 1.3 floor cannot be set client-side
+
+The `ca_cert_path` documentation is corrected in `axiam-amqp/src/config.rs` and
+in `docs/deployment/README.md`: a supplied bundle is **added to** the platform
+roots, so an operator pinning their private broker CA has widened the trust set,
+not narrowed it. (The review attributed this to lapin's native-tls backend; the
+backend here is rustls-connector, and it does the same thing via
+`add_parsable_certificates`.)
+
+**The version floor is deferred, and it is a dependency limit rather than a
+choice.** lapin 4.10's only TLS-carrying entry point is
+`Connection::connect_with_config(uri, props, OwnedTLSConfig, runtime)`, and
+`OwnedTLSConfig` (`tcp-stream 0.34`) has exactly two fields — `identity` and
+`cert_chain`. There is no seam for a rustls `ClientConfig`, so a client-side
+floor means reimplementing `AMQPUriTcpExt::connect_with_config` against
+`tcp_stream::TcpStream::into_rustls` and owning lapin's handshake sequencing.
+rustls 0.23's default version set is TLS 1.2 + 1.3, so a broker offering only
+1.2 is accepted today.
+
+`docs/deployment/README.md` now states `ssl_options.versions.1 = tlsv1.3` on the
+broker as a **MUST-level** deployment requirement, with the `openssl s_client`
+commands to verify it, and `connection.rs::build_tls_config` carries the same
+note beside the code so the next reader does not re-derive it. Revisit if lapin
+gains a connector hook.
+
+### 16.5 SEC-107 — the allowlist, and the five things that keep it from being a hole
+
+`AXIAM__PKI__SSRF_ALLOWED_HOSTS` is implemented as §14.6's preferred option: a
+per-destination **host** list, never a boolean and never a CIDR. It is
+default-empty; installed once in the composition root and not re-armable;
+matched by ASCII-lowercased **exact** equality with no wildcard or suffix
+semantics; honoured on the **first hop only**, with every redirect target still
+validated strictly; and it cannot reach a cloud metadata endpoint —
+`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`,
+`192.0.0.192` and the deprecated `::/96` encoding stay refused for an
+allowlisted host, with the IPv4-mapped spelling canonicalised **before** that
+check so SEC-094 is not re-opened. Every use logs at WARN; an allowlisted host
+resolving to a metadata endpoint logs at ERROR and is refused.
+
+### 16.6 New findings turned up during the work
+
+* **SEC-102 has a second site.** `axiam-api-rest/src/extractors/auth.rs:285`
+  built the resource-server `htu` from `req.full_url()` too — the same defect at
+  the other end of the same comparison. Fixed in the same change, fail-closed
+  (no `AuthConfig` in scope ⇒ no proof verifies ⇒ a `jkt`-bound token is
+  refused rather than accepted against an attacker-chosen `htu`).
+* **SEC-101 has a second door.** `axiam-api-grpc`'s `ReactorAdminService`
+  accepts registrations through `create_reactor`/`update_reactor` and never saw
+  the gate. Refusing only in REST would have left the outage one `grpcurl`
+  away. Both surfaces now read the same `can_dispatch()` off the same composed
+  gate.
+* **Two existing tests asserted the behaviour SEC-104 removes**, and both have
+  been rewritten rather than relaxed:
+  `axiam-db/tests/role_permission_test.rs::delete_role_does_not_strip_foreign_tenant_edge`
+  (the survival assertions — the actual security property — are unchanged; only
+  the status the caller is told changes) and
+  `axiam-api-rest/tests/rbac_handlers_gaps_test.rs::delete_permission_not_found_is_idempotent_204`,
+  which called the old 204 "idempotence" when what it actually was is an
+  uninspected statement result.

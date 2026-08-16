@@ -401,11 +401,20 @@ where
     /// The exchanging client is assumed already authenticated by the caller —
     /// the token endpoint does that for every grant — and `client` is the row
     /// that authentication produced.
+    ///
+    /// `cnf` is the confirmation claim the *exchanging client* earned on this
+    /// request, produced by `TokenService::certificate_binding_for` from the
+    /// certificate or DPoP proof it actually presented (SEC-096). It is
+    /// threaded in rather than computed here because the transport context
+    /// belongs to the HTTP layer and this service must not learn about it.
+    /// `None` — every client that registered no binding — issues exactly the
+    /// bytes this grant issued before SEC-096.
     pub async fn exchange(
         &self,
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         if !client
             .grant_types
@@ -477,7 +486,7 @@ where
         };
 
         if is_external {
-            return self.exchange_external(tenant_id, client, req).await;
+            return self.exchange_external(tenant_id, client, req, cnf).await;
         }
 
         // From here down is B3, unchanged except for the transitivity check.
@@ -668,6 +677,7 @@ where
             act,
             // Same-domain: no foreign provenance to record.
             None,
+            cnf.clone(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -675,7 +685,11 @@ where
             response: TokenExchangeResponse {
                 access_token,
                 issued_token_type: TOKEN_TYPE_ACCESS_TOKEN.to_string(),
-                token_type: "Bearer".into(),
+                // RFC 9449 §5: a DPoP-bound token is announced as such.
+                // Certificate-bound tokens stay `Bearer` (RFC 8705 leaves the
+                // HTTP scheme alone), so this is `Bearer` for every client
+                // that did not ask for DPoP binding.
+                token_type: crate::dpop::token_type_for(cnf.as_ref()),
                 expires_in: lifetime as u64,
                 scope: Some(granted.join(" ")),
                 // No refresh token, ever. One would let the holder outlive the
@@ -708,6 +722,7 @@ where
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         // Not configured ⇒ the external path does not exist. Deliberately the
         // same answer as "no provider trusts this issuer": whether a
@@ -894,6 +909,7 @@ where
             Some(ExtExchangeClaim {
                 iss: external.issuer.clone(),
             }),
+            cnf.clone(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -901,7 +917,8 @@ where
             response: TokenExchangeResponse {
                 access_token,
                 issued_token_type: TOKEN_TYPE_ACCESS_TOKEN.to_string(),
-                token_type: "Bearer".into(),
+                // SEC-096, as on the same-domain path above.
+                token_type: crate::dpop::token_type_for(cnf.as_ref()),
                 expires_in: lifetime as u64,
                 scope: Some(granted.join(" ")),
             },
@@ -1320,6 +1337,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders", "write:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .expect("a fully-permitted exchange must succeed");
@@ -1363,6 +1381,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders", "admin"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1388,6 +1407,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders", "admin"]),
                     request(foreign_token(EXT_ISS), Some("read:orders admin")),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1396,6 +1416,81 @@ mod tests {
             assert!(
                 err.error_description().contains("admin"),
                 "the error must name the offending scope: {err}"
+            );
+        }
+
+        /// SEC-096. The exchanging client's own confirmation claim reaches
+        /// the issued token, and the response announces `DPoP` for it.
+        ///
+        /// Before SEC-096 the token-exchange grant `return`ed from
+        /// `handlers::token` above `dpop_from_request`, so no proof was ever
+        /// verified on this path and `issue_exchanged_token` had no `cnf`
+        /// parameter to give one to: a `cnf.jkt`-bound token could be
+        /// exchanged for a plain bearer token with the same subject and a
+        /// subset of the same scopes.
+        #[tokio::test]
+        async fn an_exchange_carries_the_exchanging_clients_binding() {
+            let cfg = auth_config();
+            let svc = service(
+                &cfg,
+                StubResolver::ok(subject(&["read:orders"])),
+                Arc::new(StubAuthority(vec!["read:orders".into()])),
+            );
+
+            let jkt = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+            let outcome = svc
+                .exchange(
+                    Uuid::new_v4(),
+                    &client(&["read:orders"]),
+                    request(foreign_token(EXT_ISS), None),
+                    Some(axiam_auth::token::CnfClaim::from_dpop_thumbprint(jkt)),
+                )
+                .await
+                .expect("a fully-permitted exchange must succeed");
+
+            assert_eq!(
+                outcome.response.token_type, "DPoP",
+                "RFC 9449 §5: a DPoP-bound token is announced as such"
+            );
+            let claims = decode_access_token(&outcome.response.access_token, &cfg).unwrap();
+            assert_eq!(
+                claims
+                    .cnf
+                    .as_ref()
+                    .and_then(axiam_auth::token::CnfClaim::dpop_thumbprint),
+                Some(jkt),
+                "the exchanged token must be sender-constrained to the exchanging \
+                 client's key, not laundered into a bearer token"
+            );
+        }
+
+        /// The same property in the other direction: a client that registered
+        /// no binding gets byte-for-byte what it got before SEC-096.
+        #[tokio::test]
+        async fn an_unbound_exchange_is_unchanged_by_sec_096() {
+            let cfg = auth_config();
+            let svc = service(
+                &cfg,
+                StubResolver::ok(subject(&["read:orders"])),
+                Arc::new(StubAuthority(vec!["read:orders".into()])),
+            );
+
+            let outcome = svc
+                .exchange(
+                    Uuid::new_v4(),
+                    &client(&["read:orders"]),
+                    request(foreign_token(EXT_ISS), None),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.response.token_type, "Bearer");
+            assert!(
+                decode_access_token(&outcome.response.access_token, &cfg)
+                    .unwrap()
+                    .cnf
+                    .is_none()
             );
         }
 
@@ -1414,6 +1509,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), Some("admin")),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1434,6 +1530,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1461,6 +1558,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1482,6 +1580,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token("https://nobody.example"), None),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1506,6 +1605,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1530,7 +1630,7 @@ mod tests {
             let mut req = request(foreign_token(cfg.effective_issuer()), None);
             req.subject_token_type = TOKEN_TYPE_ACCESS_TOKEN.into();
             let err = svc
-                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req)
+                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req, None)
                 .await
                 .unwrap_err();
 
@@ -1558,7 +1658,7 @@ mod tests {
             req.actor_token_type = Some(TOKEN_TYPE_ACCESS_TOKEN.into());
 
             let err = svc
-                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req)
+                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req, None)
                 .await
                 .unwrap_err();
             assert_eq!(err.error_code(), "invalid_request");
@@ -1585,7 +1685,7 @@ mod tests {
                 let mut req = request(foreign_token(EXT_ISS), None);
                 req.subject_token_type = ty.into();
                 let err = svc
-                    .exchange(Uuid::new_v4(), &client(&["read:orders"]), req)
+                    .exchange(Uuid::new_v4(), &client(&["read:orders"]), req, None)
                     .await
                     .unwrap_err();
                 assert_eq!(err.error_code(), "invalid_request");
@@ -1613,6 +1713,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1622,7 +1723,7 @@ mod tests {
             let mut req = request(first.response.access_token, None);
             req.subject_token_type = TOKEN_TYPE_ACCESS_TOKEN.into();
             let err = svc
-                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req)
+                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req, None)
                 .await
                 .unwrap_err();
 
@@ -1651,6 +1752,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1677,6 +1779,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1699,6 +1802,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -1721,6 +1825,7 @@ mod tests {
                     Uuid::new_v4(),
                     &client(&["read:orders"]),
                     request(foreign_token(EXT_ISS), None),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1739,7 +1844,7 @@ mod tests {
             let mut req = request(foreign_token(EXT_ISS), None);
             req.audience = Some("https://not-registered.example".into());
             let err = svc
-                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req)
+                .exchange(Uuid::new_v4(), &client(&["read:orders"]), req, None)
                 .await
                 .unwrap_err();
             assert_eq!(err.error_code(), "invalid_target");
@@ -1758,7 +1863,12 @@ mod tests {
             let mut c = client(&["read:orders"]);
             c.grant_types.clear();
             let err = svc
-                .exchange(Uuid::new_v4(), &c, request(foreign_token(EXT_ISS), None))
+                .exchange(
+                    Uuid::new_v4(),
+                    &c,
+                    request(foreign_token(EXT_ISS), None),
+                    None,
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.error_code(), "unauthorized_client");
@@ -1779,9 +1889,14 @@ mod tests {
             let c = client(&["read:orders"]);
             assert!(!client_may_impersonate(&c));
             assert!(
-                svc.exchange(Uuid::new_v4(), &c, request(foreign_token(EXT_ISS), None))
-                    .await
-                    .is_ok()
+                svc.exchange(
+                    Uuid::new_v4(),
+                    &c,
+                    request(foreign_token(EXT_ISS), None),
+                    None
+                )
+                .await
+                .is_ok()
             );
         }
 
@@ -1818,7 +1933,12 @@ mod tests {
                         c.scopes = client_scopes.clone();
 
                         match svc
-                            .exchange(Uuid::new_v4(), &c, request(foreign_token(EXT_ISS), None))
+                            .exchange(
+                                Uuid::new_v4(),
+                                &c,
+                                request(foreign_token(EXT_ISS), None),
+                                None,
+                            )
                             .await
                         {
                             Ok(outcome) => {

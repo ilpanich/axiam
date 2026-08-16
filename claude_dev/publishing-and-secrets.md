@@ -508,8 +508,48 @@ This repo's CI still guards the **sources**: `sdk-openapi-drift.yml` fails if
 `sdks/openapi.json` drifts from a fresh `--dump-openapi` export, and `sdk-buf-gates.yml` runs
 buf lint/breaking/format on `proto/`.
 
-Nothing yet detects a **stale copy downstream**. Until that gate exists, treat any change to
-the three files above as a change that must be propagated: open a follow-up PR in each SDK
-repo re-copying them, and re-run that SDK's codegen. This is the single sharpest edge
-introduced by the multi-repo split — a silently stale `proto/` in one SDK produces stubs that
-compile fine and talk to the server incorrectly.
+A stale copy **downstream** is now detected by `sdk-artifact-drift.yml`, which runs
+`scripts/check-sdk-artifact-drift.py` daily. It compares the git **blob hash** of
+`CONTRACT.md`, `openapi.json` and the `proto/axiam/v1/*.proto` set in each SDK repo's default
+branch against this repo's sources, and fails with a per-repo staleness report naming every
+artifact that drifted. This is the single sharpest edge introduced by the multi-repo split —
+a silently stale `proto/` in one SDK produces stubs that compile fine and talk to the server
+incorrectly.
+
+Treat any change to the three files above as a change that must be propagated: open a
+follow-up PR in each SDK repo re-copying them, and re-run that SDK's codegen. The gate tells
+you when you forgot; it does not do the propagation.
+
+**The gate needs one secret, and is red until it has it.** It reads eleven other
+repositories, which the default Actions `GITHUB_TOKEN` cannot do — that token is scoped to
+this repo. Create a fine-grained PAT with **`Contents: Read-only`** on the eleven
+`ilpanich/axiam-*-sdk` repos and add it here as the repository secret **`SDK_SYNC_READ_TOKEN`**
+(Settings → Secrets and variables → Actions → New repository secret).
+
+Without it the script exits **2** — "the gate could not run" — which is a distinct code from
+exit 1, "drift found". Both fail the job, deliberately: a scheduled staleness job that goes
+green when its credentials are missing reports *"nothing is stale"* when what actually
+happened is *"nothing was checked"*, and that manufactures exactly the confidence this gate
+exists to remove.
+
+Two things the gate deliberately does **not** cover:
+
+- **Generated stubs.** It compares the vendored artifacts, not each SDK's committed codegen
+  output against that SDK's own vendored proto. Those are different failures and both are
+  real: `axiam-php-sdk`'s `CheckAccessResponse.php` was missing `reason_code = 3` while its
+  vendored `authorization.proto` was perfectly current, so this job would have passed it.
+  Codegen drift is each SDK repo's own gate.
+- **The reference-vector fixture.** It is vendored to different paths per language, so
+  "same path, same bytes" is not the right model for it.
+
+`axiam-c-sdk` and `axiam-cplusplus-sdk` vendor **no protos** — they are pure REST/libcurl SDKs.
+That exemption is a named entry in the script's `REST_ONLY_REPOS` table rather than an
+inferred "file absent, therefore fine", so it is auditable and so the converse is caught too:
+a repo declared REST-only that starts vendoring protos is reported as a failure telling you to
+update the table.
+
+Run it locally before pushing an artifact change — no token, no egress needed:
+
+```bash
+scripts/check-sdk-artifact-drift.py --local-root ..   # against sibling clones
+```

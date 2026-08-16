@@ -146,6 +146,82 @@ pub fn paginate<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Delete-target existence guard (SEC-104)
+// ---------------------------------------------------------------------------
+
+/// The sentinel a delete transaction `THROW`s when its target row does not
+/// exist in the caller's tenant (SEC-104).
+///
+/// Not a human sentence: it is matched, not read, and a message that reads
+/// like prose invites someone to reword it.
+pub const DELETE_TARGET_MISSING: &str = "axiam:delete_target_missing";
+
+/// The first statement of a delete transaction: abort unless the target row
+/// exists **in this tenant** (SEC-104).
+///
+/// # Why the guard rather than inspecting the DELETE's result
+///
+/// Five repositories (`group`, `role`, `resource`, `permission`,
+/// `service_account`) delete a record plus its edges inside one transaction and
+/// returned `Ok(())` without looking at whether anything matched. The
+/// `WHERE tenant_id = $tenant_id` predicate was — and is — correct, so no other
+/// tenant's data was ever touched, and because the answer was a uniform 204 for
+/// a foreign id, an unknown id and a real one, it was not an existence oracle
+/// either. What it cost is an administrator who deletes the wrong id, is told
+/// it worked, and believes the group is gone. `user` and `webhook` already got
+/// this right with `RETURN BEFORE` + an empty-row check; this makes the other
+/// five agree, in the repository, so `axiam-scim`'s hand-written pre-check can
+/// be deleted rather than recopied for every future resource type.
+///
+/// Placing the check **inside** the transaction, as its first statement, is
+/// what makes it more than a pre-check: a `THROW` aborts, so a delete against
+/// a missing record leaves the edge deletes unexecuted too, rather than
+/// stripping edges belonging to nothing and then reporting failure.
+///
+/// `table` is a literal table name from the calling repository, never caller
+/// input; `$id` and `$tenant_id` are bound parameters.
+pub fn delete_existence_guard(table: &str) -> String {
+    format!(
+        "LET $existing = (SELECT VALUE id FROM type::record('{table}', $id) \
+           WHERE tenant_id = $tenant_id); \
+         IF array::len($existing) == 0 {{ THROW '{DELETE_TARGET_MISSING}'; }};"
+    )
+}
+
+/// Turn a delete transaction's statement errors into the right [`DbError`]
+/// (SEC-104).
+///
+/// Scans **every** statement's error rather than trusting `Response::check()`,
+/// for the reason `resource::delete` already documents: a `THROW` fires on its
+/// own slot while the trailing statements report the generic "not executed due
+/// to a failed transaction", and `check()` can surface one of those instead —
+/// which would silently downgrade a precise `404` into an opaque `500`.
+///
+/// `extra` lets a repository claim a `THROW` of its own (`resource`'s
+/// child-count guard) before the generic mapping runs.
+pub fn map_delete_errors(
+    errors: std::collections::HashMap<usize, surrealdb::Error>,
+    entity: &str,
+    id: &str,
+) -> Result<(), DbError> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let combined = errors
+        .into_values()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if combined.contains(DELETE_TARGET_MISSING) {
+        return Err(DbError::NotFound {
+            entity: entity.to_string(),
+            id: id.to_string(),
+        });
+    }
+    Err(DbError::Migration(combined))
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

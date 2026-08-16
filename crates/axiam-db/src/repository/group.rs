@@ -283,22 +283,28 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // without it a caller with a foreign-tenant group id could strip
         // another tenant's memberships. `.check()` surfaces per-statement
         // failures instead of swallowing them as Ok.
+        // SEC-104: the existence guard runs FIRST, inside the transaction, so
+        // a delete against a foreign or unknown id aborts with `NotFound`
+        // instead of reporting success — see `helpers::delete_existence_guard`.
+        let guard = crate::helpers::delete_existence_guard("group");
         let query = format!(
             "BEGIN TRANSACTION; \
+             {guard} \
              DELETE member_of WHERE out = group:`{id_str}` AND out.tenant_id = $tenant_id; \
              DELETE type::record('group', $id) WHERE tenant_id = $tenant_id; \
              COMMIT TRANSACTION"
         );
 
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(query)
-            .bind(("id", id_str))
+            .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
             .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(DbError::from)?;
+
+        crate::helpers::map_delete_errors(result.take_errors(), "group", &id_str)?;
 
         Ok(())
     }

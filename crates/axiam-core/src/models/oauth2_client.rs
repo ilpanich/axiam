@@ -268,9 +268,24 @@ pub struct OAuth2Client {
     /// Server policy rather than client metadata in the RFC, but per-client
     /// here because the cost is per-client: a nonce turns every first request
     /// into two round trips, which a high-frequency IoT client feels and a
-    /// browser-driven one does not. `false` — no nonce required — is the
-    /// pre-v39 behaviour and the default, so turning DPoP on does not silently
-    /// double anybody's request count.
+    /// browser-driven one does not.
+    ///
+    /// # NOT IMPLEMENTED in this build (SEC-097)
+    ///
+    /// **Nothing reads this field.** `verify_dpop_proof` implements RFC 9449
+    /// §8 completely, but the token endpoint passes `require_nonce: false`
+    /// unconditionally because this deployment stores no per-client nonce to
+    /// compare an echoed one against — so a challenge could prove liveness and
+    /// nothing more. Rather than leave a persisted, API-visible security
+    /// switch that silently does nothing, the admin API **refuses to set this
+    /// to `true`** (`handlers::oauth2_clients`), and every stored row is
+    /// therefore `false`. The field is retained rather than removed so the
+    /// wire shape stays stable for the seven SDKs; see
+    /// `docs/security-profiles.md`.
+    ///
+    /// The control that actually makes a proof unreplayable here is the
+    /// single-use `jti` recorded at the token endpoint, which is the stronger
+    /// of the two and is not optional.
     #[serde(default)]
     pub dpop_require_nonce: bool,
     pub created_at: DateTime<Utc>,

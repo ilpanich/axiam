@@ -64,6 +64,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticator with only a UV-bypass advisory still passes that check.
   Operators who care should use `blocked_aaguids`.
 
+- **SCIM 2.0 provisioning (RFC 7643/7644, B4).** A new `axiam-scim` crate mounts
+  `/scim/v2`, so an IdP — Okta and Microsoft Entra are the two the scope was
+  drawn from — can create, update, deactivate and delete users and groups in a
+  tenant without anyone writing a bespoke sync job against `/api/v1`.
+
+  `Users` and `Groups` get full CRUD plus the discovery endpoints
+  (`/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas`). It maps onto the
+  **existing** `UserRepository`/`GroupRepository` — there is no parallel SCIM
+  store, so a SCIM-provisioned user is an ordinary AXIAM user from the first
+  request onward.
+
+  The scope is deliberately the subset those two IdPs actually send, and the
+  parts outside it fail loudly rather than silently doing something
+  approximate: `PATCH` implements the RFC 7644 §3.5.2 add/replace/remove ops on
+  standard attribute paths; filtering is `userName eq` and `externalId eq` with
+  paging, and any more complex filter returns **400 `invalidFilter`**; bulk
+  operations are not implemented and `POST /Bulk` returns **501**.
+
+  Authorization is a dedicated `scim:provision` permission, checked per request.
+  Tenant scoping is not a check SCIM adds but a channel it never opens: the
+  tenant comes only from the validated JWT's `tenant_id` claim, never from the
+  request path or body, and every repository call takes that tenant as a
+  mandatory parameter. The contract tests exercise that adversarially — by UUID,
+  cross-tenant, on GET/PUT/PATCH/DELETE/list — rather than only testing "no
+  token".
+
+  **Operator note:** the bearer principal must be a tenant *user* that holds
+  `scim:provision` (create a `scim-provisioner` user and grant it a role through
+  the existing `/api/v1` APIs), **not** a `service_account`. AXIAM's RBAC
+  role-assignment edge is hard-scoped to the `user` table today, so a
+  `service_account` subject can hold no RBAC permission at all. That predates
+  this crate. See [`docs/api/scim-provisioning.md`](docs/api/scim-provisioning.md)
+  for the Okta and Entra walkthroughs.
+
+  Rate limiting: one bucket spans the whole `/scim/v2` scope — reads, writes and
+  discovery alike — at `scim_per_min = 600` (`AXIAM__RATE_LIMIT__SCIM_PER_MIN`),
+  the same 10/s the gRPC Admin family uses. Both surfaces are fully-privileged,
+  machine-driven, and sized as a CPU guard on Argon2id, which is SCIM's real
+  cost profile: `POST /Users` and a `password` PATCH both hash. The limiters sit
+  *outside* the credential check so an unauthenticated flood is shed before it
+  reaches Argon2id, which is also why the discovery endpoints share the bucket
+  instead of going unmetered.
+
 - **OIDC logout: RP-initiated and back-channel (B5).**
   `GET`/`POST /oauth2/end_session` ends the session named by a signed
   `id_token_hint`, and every client that participated in that session and

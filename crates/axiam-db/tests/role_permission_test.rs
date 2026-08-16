@@ -237,12 +237,20 @@ async fn delete_role_does_not_strip_foreign_tenant_edge() {
         .unwrap();
 
     // Tenant A attempts to delete tenant B's role, supplying its foreign id
-    // while claiming tenant A as the caller's tenant (foreign-id delete
-    // attempt). This must be a no-op, not an error — every statement in the
-    // transaction is tenant-predicated and simply matches zero rows.
-    repo.delete(tenant_a, role_b.id)
-        .await
-        .expect("foreign-tenant delete must no-op, not error");
+    // while claiming tenant A as the caller's tenant. Every statement in the
+    // transaction is tenant-predicated, so nothing of tenant B's is touched —
+    // that is the security property, and it is asserted below.
+    //
+    // SEC-104 changed only what the caller is *told*. This used to answer
+    // `Ok(())`, which meant an administrator who deleted the wrong id was
+    // told it worked; the transaction now runs an existence guard as its first
+    // statement and aborts with `NotFound`. The answer is uniform for a
+    // foreign id and a nonexistent one, so it is still not an existence
+    // oracle: tenant A learns nothing about tenant B either way.
+    match repo.delete(tenant_a, role_b.id).await {
+        Err(axiam_core::error::AxiamError::NotFound { .. }) => {}
+        other => panic!("foreign-tenant delete must answer NotFound, got {other:?}"),
+    }
 
     // Tenant B's has_role edge must survive.
     let roles_b_after = repo.get_user_roles(tenant_b.id, user_b.id).await.unwrap();

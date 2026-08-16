@@ -291,23 +291,27 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         // Result slots: BEGIN=0, DELETE has_role=1, DELETE grants=2,
         // DELETE role=3, COMMIT=4. delete() returns Ok(()) — no row data
         // to extract, .check() alone proves the transaction committed.
+        // SEC-104 — see `helpers::delete_existence_guard`.
+        let guard = crate::helpers::delete_existence_guard("role");
         let query = format!(
             "BEGIN TRANSACTION; \
+             {guard} \
              DELETE has_role WHERE out = role:`{id_str}` AND out.tenant_id = $tenant_id; \
              DELETE grants WHERE in = role:`{id_str}` AND in.tenant_id = $tenant_id; \
              DELETE type::record('role', $id) WHERE tenant_id = $tenant_id; \
              COMMIT TRANSACTION"
         );
 
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(query)
-            .bind(("id", id_str))
+            .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
             .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(DbError::from)?;
+
+        crate::helpers::map_delete_errors(result.take_errors(), "role", &id_str)?;
 
         Ok(())
     }

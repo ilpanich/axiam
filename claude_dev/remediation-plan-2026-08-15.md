@@ -682,3 +682,273 @@ both k6 scenarios "still need authoring" after R7/E4 had authored them. Fixed in
 distinguishes the scenario being *written* (done, in-repo) from the cell being *measured* (outstanding,
 and blocked on operator hardware) — which keeps "publish every cell honestly" from being misread as a
 claim that these two have numbers. They do not; no benchmark cell was executed in this pass, per scope.
+
+---
+
+### Execution log — update 5 (the tracked follow-ups, 2026-08-15 evening)
+
+The seven follow-ups left over from this plan. Same scope exclusions as before: **no benchmark cell
+was executed** (no docker daemon, no G-box) and wave R8 was untouched.
+
+**The headline: three of the four premises this round inherited were wrong.** Each was found by
+running the control rather than re-reading the claim, which is now the third consecutive pass where
+that has been the difference between a closed item and a missed defect.
+
+**1. SDK-Q10 — the obligation was unmet in every SDK where codegen did not force it.**
+Merged: **java#52**, **csharp#50**, **go#44**. The plan expected java and csharp to need work and go to
+need an audit. All three turned out to have the *identical* defect, and it was worse than "missing a
+fallback": each read `deny_reason` unconditionally and **never looked at `reason` at all**. Java's
+`GrpcAuthzClient.toAccessResult`, C#'s `AxiamGrpcAuthzClient.ToDecision` and Go's
+`AuthzClient.CheckAccessDecision` were all reading the deprecated field and ignoring the canonical one,
+so the precedence rule was not merely absent but inverted.
+
+All three now guard on **presence**, not truthiness — `hasReason()` / `HasReason` / `resp.Reason != nil` —
+matching python's `HasField` reasoning: an explicitly-empty `reason` on a refusal must not fall back.
+Each carries the same four regression tests (present and non-empty; explicitly empty on a refusal;
+absent on a refusal; absent on an allow). `subject_id` was left required everywhere, per the deliberate
+cross-SDK deferral.
+
+Go additionally *retired* `DenyReason` rather than deprecating it, on the grounds that the module has no
+released tag yet — the only divergence in accessor shape, and a defensible one.
+
+**php has no gRPC decision-mapping site at all**, which is why nothing was found there. Its
+`AuthzDispatcher` returns `getAllowed()` from the gRPC path and never reads a reason, and
+`AuthzGrpcClient` hands back the raw generated message. Rule 9 is therefore vacuously satisfied, but the
+consequence is a **REST/gRPC asymmetry**: php can obtain a reason over REST (`checkAccessDecision` →
+`AccessDecision`) and has no way to obtain one over gRPC. Adding a gRPC decision API is a feature
+decision of the same class as exposing `ReactorAdminService`, so it is recorded rather than taken.
+
+**2. php codegen drift gate — landed, and the premise about who else lacked one was wrong.**
+Merged: **php#37**. A `protoc-drift-check` job regenerates from the repo's own vendored `proto/` using
+the real D-03 generator and `git diff --exit-code`s against `src/Grpc/Gen`. `protoc` is pinned to v25.3
+and sha256-verified, because protoc stamps its version into a generated header comment — an unpinned
+toolchain would produce version-only false drift across every open PR the day it bumped.
+
+Proven to bite rather than asserted: re-introducing the original defect (the missing `reason_code`
+property/getter/setter on `CheckAccessResponse.php`) made it exit 1 with the real diff.
+
+*Premise correction:* the note that "the real open question is python" was false. **python already had a
+working drift gate (D-04, pinned `grpcio-tools==1.78.*`).** php was the only genuine gap in all eleven
+repos. kotlin and swift have no codegen wired at all (gRPC deferred); java/csharp/rust/typescript
+generate into gitignored trees.
+
+**3. Cross-repo artifact drift job — `publishing-and-secrets.md` §8 closed.**
+`scripts/check-sdk-artifact-drift.py` + `.github/workflows/sdk-artifact-drift.yml`. Compares git blob
+hashes of `CONTRACT.md`, `openapi.json` and the `proto/axiam/v1/*.proto` set across all eleven repos.
+
+Three design points worth keeping:
+
+- The c/cplusplus no-protos exemption is a **named `REST_ONLY_REPOS` policy table**, not "404 means
+  fine". That makes it auditable and catches the converse — a repo declared REST-only that starts
+  vendoring protos fails, telling you to update the table.
+- **"Nothing could be checked" exits 2, not 0.** The default Actions token cannot read the other eleven
+  repos, and a scheduled staleness job that goes green without credentials reports "nothing is stale"
+  when what happened is "nothing was checked". Exit 2 is distinct from exit 1 (drift found).
+- A `--local-root` mode reads blob ids straight out of sibling clones' default-branch trees via
+  `git rev-parse`/`ls-tree` — no token, no egress. It makes the gate testable offline and gave a genuine
+  cross-check: two independent readers agreeing on all eleven repos.
+
+Every path was exercised: both readers clean over all eleven (exit 0); perturbed source → STALE
+everywhere; deleted vendored proto → MISSING; extra vendored proto → UNEXPECTED; protos in a REST-only
+repo → UNEXPECTED naming the table; no access → every repo SKIPPED **by name**, exit 2; partial access →
+skips named rather than folded into the pass.
+
+Scheduled daily rather than on push to main, deliberately: re-vendoring is inherently multi-repo, so an
+on-push run would be red by construction after every legitimate contract change, and a check that is red
+by design is one people learn to ignore.
+
+**Residual (precise):** the job is red until a maintainer creates a fine-grained PAT with
+`Contents: Read-only` on the eleven SDK repos and stores it as `SDK_SYNC_READ_TOKEN`. That cannot be
+provisioned from this environment. §8 documents the exact steps. This is the intended failure mode, not
+an oversight.
+
+**It does not subsume the per-SDK codegen gate and says so in its own docstring.** php's vendored proto
+was correct while its stubs had drifted; this job would have passed that repo.
+
+**5. Coverage floors — the diagnosis in the plan was wrong, and the real bug was worse.**
+Merged: **python#47**.
+
+The premise was "the gate only runs on PRs, and a PR's coverage includes its own new tests". False for
+this repo: `coverage.yml` has triggered on **both** push-to-main and pull_request since its first
+commit. The actual defect is a rounding inconsistency inside `pytest-cov`/`coverage.py`:
+
+- the printed `FAIL ...` banner compares the **raw** total;
+- the **exit code** compares `round(total, precision)`, and `precision` defaulted to `0`.
+
+So `round(96.93, 0) == 97.0`, `97.0 < 97` is false, and the gate passed. This was confirmed against the
+real historical job log, not inferred: on `34bcea3` the step printed
+`FAIL Required test coverage of 97.0% not reached. Total coverage: 96.93%` inside a run recorded as
+`conclusion: success`. **Any true coverage in `[96.5, 97.0)` passed silently while printing red text.**
+A missing trigger would have been the milder bug; a gate whose own error message disagrees with its exit
+code is worse, because the evidence of the failure is right there and still not acted on.
+
+Fixed with `precision = 2`. `main` measures **97.33%** today, so the floor stands untouched.
+
+Noted while there: python's *required*, merge-blocking check (`sdk-ci-python.yml`'s `test` job) measures
+no coverage at all — the coverage workflow is deliberately non-required so a Coveralls outage cannot
+block merges.
+
+*The audit across the other ten gates is the reassuring half:* **every one already triggers on push to
+main as well as pull_request.** python was the sole instance of the trigger blind spot, and it turned out
+not to be the actual cause anyway. No default branch is currently under its floor. No floor was lowered
+anywhere and none is recommended for lowering.
+
+Two things it did surface:
+
+- **`axiam-c-sdk`'s `main` failed its own branch floor today** — 79.9% against 80.0%, at 08:26 UTC on
+  `c4a56ece` — and was fixed forward to 80.1% by `fd0149f8`. A tenth of a point is not headroom. Being
+  fixed with tests, not by moving the number; the workflow's own comment already says "add the test
+  rather than lowering the number".
+- **The main repo's frontend coverage job printed no percentage at all.** `--coverage.reporter=lcov`
+  *replaces* vitest's text reporter, so `vitest.config.ts`'s "94.41% measured" claim had never been
+  confirmed by CI, and this repo's own rule — a floor may only move to a number CI has printed — could
+  not be obeyed. Fixed by adding `text-summary` and teeing to `$GITHUB_STEP_SUMMARY`, mirroring the Rust
+  job.
+
+  **`set -o pipefail` is load-bearing there and must not be removed.** Actions runs `run:` under
+  `bash -e`, which does not set pipefail, and unlike the Rust job — where the tee'd command is an
+  informational `--summary-only` report and the real gate is a separate un-piped command — here vitest
+  *is* the gate. Verified directly: `bash -e -c 'false | tee /dev/null; echo $?'` prints `0`. Piping the
+  gate into `tee` without pipefail would have turned a coverage regression green — the same class of bug
+  as the pytest-cov one above, introduced while fixing it.
+
+Several repos run sub-1pp margins by design (rust-sdk 0.87, cplusplus 0.88, swift 0.71, this repo's Rust
+workspace 0.61). Worth knowing before assuming any single red coverage build is isolated.
+
+**6. C++ reactor example is now a real conformance gate.**
+Merged: **cplusplus#29**. `-DAXIAM_BUILD_EXAMPLES=ON` on both matrix legs plus a step that *runs*
+`axiam_example_reactor`, which self-checks against the §22.13 vectors and exits non-zero on mismatch.
+Enabling the option builds all nine examples; each was checked to need nothing CI lacks, and all nine
+were built under gcc 13 and clang 18 before the switch was flipped. Proven to bite: corrupting one hex
+digit of `reactor_to_server.allow.hmac_signature_hex` produced `CHECKS FAILED` and exit 1.
+
+*Premise correction, and the most useful finding of the three:* "several repos claimed to be
+compile-gated" — verified, and mostly false. Only **Go, Rust and C#** build their reactor example, and
+**not one of the eleven executes it**. java, kotlin, php and typescript do not build theirs at all
+despite it existing. The sharpest case is **typescript**, which has a purpose-built
+`examples/tsconfig.json` whose own comment says it exists specifically to type-check
+`examples/reactor/index.ts` — wired to nothing: the root tsconfig excludes `examples/`, no npm script
+references it, and a repo-wide grep for the path returns zero hits. A false claim encoded as dead config
+rather than prose, which is why reading the docs would never have caught it.
+
+Recommended follow-up, not taken here because the ask was to check rather than to fix: build the example
+in java/kotlin/php/typescript CI, and connect typescript's orphaned tsconfig.
+
+**7. Residuals.**
+
+*`axiam-scim` CHANGELOG* — written. Records the deliberate scope subset (400 `invalidFilter`, 501 on
+`/Bulk`), the tenant-scoping argument, the 600/min bucket's provenance, and the operator trap that the
+SCIM principal must be a tenant **user**, since the RBAC role edge is hard-scoped to the `user` table and
+a service_account can hold no permission at all.
+
+*The SCIM benchmark scenario* — **the plan's "fixing that is a `seed.sh` change" was half right, and the
+wrong half mattered.** `scim:provision` is an RBAC permission, not an OAuth2 scope:
+`require_scim_provision` calls `RequirePermission::new("scim:provision", Uuid::nil()).check(...)` against
+the token's *subject*. So adding the scope to the bench client would have changed nothing — the scope
+rides on the token and the check still denies. Worse, the scenario minted a **client_credentials** token,
+whose `sub_kind: ServiceAccount` subject can hold no RBAC permission whatsoever. Two changes were
+needed: a **global** `bench-scim` role on the bench **user** (unscoped, because the check is against
+`Uuid::nil()`), and switching the scenario to `mintUserToken()` — with that helper's silent
+client_credentials fallback explicitly *rejected*, since here it would yield a service-account subject and
+surface as an opaque 403 rather than as the seeding fault it is.
+
+**It stays in `PENDING_SCENARIOS` deliberately.** The scenario has still never executed against a live
+server. Its payloads were checked statically against the real DTOs (`users.rs`'s `userName`/`externalId`/
+`emails[].primary`/`active`; `patch.rs`'s `replace` on `active` with a boolean) and they match — but
+"matches on inspection" is not "runs green", and un-pending it unrun would convert a skip into a red
+matrix cell, which is the failure that list exists to prevent. **To close: one supervised run with
+`BENCH_ENABLE_PENDING_SCENARIOS=1`.** No further code change is expected.
+
+**Operational note — a conflicted PR is not the only way to get a misleading green.**
+cplusplus#29 sat at `mergeable_state: blocked` with nine green checks and one job "in progress" for 19
+minutes against a 1:40 historical norm. It was hung on step 3, `Install dependencies` — an apt hang,
+before any test body ran. The change could not have caused it (the `sanitizers` job configures its own
+`build-asan`/`build-vg` trees and never sets `AXIAM_BUILD_EXAMPLES`), which is what made a cancel-and-rerun
+the right call rather than a guess; the re-run completed in 3:14. **Check job *duration* against that
+job's own history, not just its status** — "still running" and "stuck" look identical in the checks API.
+
+**4. SEC-096 … SEC-107 — nine fixed, two decided, one deferred.**
+
+Triaged against `cd1af8f` first, per the brief. **None was closed by #323/#324** — those merges added
+the SCIM crate, its bucket, the coverage ratchet and the three HIGH fixes, and touched none of this
+code. Three findings were mis-sized in the review, in both directions:
+
+- **SEC-099 narrower.** Only the cap-breach path applied `listen` registrations' policy; the
+  unreadable-registry path does not use `fail_whole_chain` at all, contrary to §8.
+- **SEC-100 narrower.** `resolve` already served a stale entry with no TTL bound, so a warm process
+  was covered. The live defect is a **cold cache** only — which is exactly the window a restart opens.
+- **SEC-101 and SEC-102 wider**, and these are the two that mattered:
+  - `axiam-api-grpc`'s `ReactorAdminService` is a **second, unguarded registration door**. Refusing
+    only in REST would have left the self-service outage one `grpcurl` away.
+  - SEC-102 has a **second site**: `extractors/auth.rs` built the resource-server `htu` from
+    `req.full_url()` too. Fixed fail-closed — with no `AuthConfig`, no proof verifies, so a
+    `jkt`-bound token is refused rather than accepted against an attacker-chosen `htu`.
+
+**Fixed (9):** SEC-096, SEC-098, SEC-099, SEC-100, SEC-101, SEC-102, SEC-104, SEC-105, SEC-107.
+
+**SEC-097 — decided, and neither option the review offered was taken.** Implementing the nonce needs
+the client row *before* the client lookup, which is the thing `dpop_from_request`'s own doc argues
+against, and without server-side storage the echoed nonce cannot be verified — a second control that
+does less than it appears to. Removing the field is a wire break across eleven SDK repos for a value
+that is always `false`. So the field stays, the lying comment is gone, and the admin API now **refuses
+`dpop_require_nonce: true` with 400**. That removes what §6 called unacceptable — a persisted,
+API-visible switch that does nothing — at the point where someone would try to rely on it.
+
+**SEC-107 — decided: allowlist implemented** (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`), §14.6's preferred
+option. It is a security control with a deliberate bypass in it, so the shape is the substance:
+default-empty, composition-root only, **exact** host match (no wildcards, no CIDRs), first hop only
+with redirects always strict, every use logged, and **metadata endpoints blocked even for an
+allowlisted host** with IPv4-mapped canonicalisation running *before* that check — so **SEC-094 is not
+re-opened through its own remedy**, which was the first thing tested.
+
+**SEC-103 — deferred, residual stated.** The lapin transport is unmerged and `round_trip` has one impl
+that always fails, so changing `derive_tenant_key`'s HKDF info now would alter a derivation nobody can
+exercise end to end. Open, precisely: (a) every reactor in a tenant shares the reply key, so reactor A
+can answer as reactor B — only `correlation_id` secrecy prevents it; (b) `ReactorReply::nonce` is
+signed and never checked, and the "one reply per `correlation_id`" half has **no implementation**. Both
+are now named acceptance criteria on the transport PR.
+
+**SEC-106 — split.** The CA-trust doc was wrong and is corrected: a supplied CA is **added to** the
+system roots (`add_parsable_certificates`), so any publicly-trusted CA still validates the broker — an
+operator pinning a private CA to *constrain* trust was not getting that. One correction to the review
+itself: the backend is **rustls-connector, not native-tls**; the conclusion holds either way. The TLS
+1.3 floor **could not** be pinned client-side, and the reason is recorded rather than left as
+"not done": lapin's `connect_with_config` takes an `OwnedTLSConfig` of exactly `identity` +
+`cert_chain`, with no seam for a rustls `ClientConfig`, so a client-side floor means reimplementing
+`AMQPUriTcpExt::connect_with_config`. It becomes a MUST-level broker-side requirement with
+verification commands.
+
+**Two existing tests asserted the behaviour SEC-104 removes**, and were rewritten rather than relaxed:
+`delete_role_does_not_strip_foreign_tenant_edge` (its survival assertions — the actual security
+property — unchanged) and `delete_permission_not_found_is_idempotent_204`, which called an uninspected
+statement result "idempotence". It was pinning the defect. A test that pins a bug is worse than no
+test, because it converts the fix into an apparent regression.
+
+**Verification.** `cargo fmt --all -- --check` clean (re-run independently); `cargo clippy --workspace
+--all-targets -- -D warnings` clean, CI-exact, with libxml2/xmlsec1 installed; the same clippy clean
+under `--no-default-features`; `--dump-openapi` diffed against `sdks/openapi.json` — in sync;
+`cargo test --workspace --no-default-features --lib` → **1229 passed, 0 failed**; and every integration
+target run per `--test` with disk reclaim between (axiam-db 46, axiam-api-rest 63, axiam-amqp 9,
+axiam-auth 9, axiam-pki 7, axiam-api-grpc 6 incl. `--features client`, axiam-server 11, and the rest)
+— all passed.
+
+**Could not run, precisely:** `axiam-api-rest`'s `federation_test` with the **`saml` feature on**. Its
+15 `saml_acs_*` tests 404 under `--no-default-features` because the ACS routes are
+`#[cfg(feature = "saml")]` — pre-existing, not a regression, and that file is untouched. The SAML-on
+build needs a second full dependency tree and hit ENOSPC. The volume hit 100% three times and was
+reclaimed by deleting regenerable test executables and 11 of 12 stale `libsurrealdb_core-*.rlib`
+copies — no `cargo clean`, no source touched.
+
+**⚠ Wire/contract change — CONTRACT.md is now 1.20 and the fleet is stale again.**
+SEC-096 is behavioural: an exchanged access token (and a §20 RPT) is now sender-constrained to whatever
+the *exchanging client* proved, so `token_type` on the token-exchange and uma-ticket grants can be
+`"DPoP"` where it was unconditionally `"Bearer"`. **An SDK that hard-codes `Bearer` when forwarding
+will send a DPoP token under the wrong scheme.** A client registered for DPoP/certificate binding that
+exchanges *without* presenting its credential now gets `invalid_client` instead of an unbound token,
+and that refusal must not be retried unbound. **A client that registered no binding sees byte-identical
+responses** — that is the compatibility property, and both halves are pinned by tests. §22.8 and §22.9
+rule 3 add the reactor statements an SDK could not infer.
+
+`sdks/CONTRACT.md` and `sdks/openapi.json` therefore need re-vendoring into the SDK repos — which is
+exactly what R5.8b's new job exists to report, rather than letting it sit unnoticed the way eight repos
+came to sit at 1.17 while this one was at 1.19.

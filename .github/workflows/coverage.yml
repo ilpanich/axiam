@@ -172,7 +172,26 @@ jobs:
 
       - name: Collect coverage
         working-directory: frontend
-        run: npx vitest run --coverage --coverage.reporter=lcov
+        # `--coverage.reporter=lcov` REPLACES vitest's default text reporter, so
+        # this job printed no percentage anywhere: the threshold in
+        # vitest.config.ts could be neither audited nor ratcheted against a
+        # number CI had actually printed, which is the rule the rust job above
+        # states for itself. `text-summary` restores it and is teed onto the run
+        # summary page, exactly as `cargo llvm-cov report --summary-only` is.
+        #
+        # `set -o pipefail` is load-bearing, not decoration. Actions runs `run:`
+        # under `bash -e`, which does NOT set pipefail, and here vitest IS the
+        # gate — without it, `tee`'s exit 0 would mask a threshold failure and
+        # this job would go green on a coverage regression. (The rust job needs
+        # no such guard: what it tees is an informational `--summary-only`
+        # report, and its actual `--fail-under-lines` gate is a separate,
+        # un-piped command.)
+        run: |
+          set -o pipefail
+          npx vitest run --coverage \
+            --coverage.reporter=lcov \
+            --coverage.reporter=text-summary \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329  # v2.3.8

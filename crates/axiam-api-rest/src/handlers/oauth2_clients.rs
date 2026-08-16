@@ -97,8 +97,14 @@ pub struct CreateOAuth2ClientRequest {
     #[serde(default)]
     pub dpop_bound_access_tokens: bool,
     /// RFC 9449 §8 — require this client's DPoP proofs to carry a
-    /// server-issued nonce. Costs a round trip on the first request of each
-    /// nonce window; `false` (the default) is the pre-v39 behaviour.
+    /// server-issued nonce.
+    ///
+    /// **Not implemented in this build (SEC-097).** `true` is refused with
+    /// `400`; only `false` (the default) is accepted. Nothing reads the stored
+    /// value, so accepting `true` would persist and echo back a security
+    /// switch that does nothing. DPoP proofs are made single-use at the token
+    /// endpoint by `jti` replay detection instead — see
+    /// `docs/security-profiles.md`.
     #[serde(default)]
     pub dpop_require_nonce: bool,
 }
@@ -217,6 +223,33 @@ pub struct OAuth2ClientCreatedResponse {
 // Validation
 // ---------------------------------------------------------------------------
 
+/// SEC-097 — refuse `dpop_require_nonce: true` while nothing reads it.
+///
+/// The field is persisted, echoed back by `GET`, and documented in the OpenAPI
+/// schema, and **no code path consults it**: the token endpoint passes
+/// `require_nonce: false` unconditionally because this deployment stores no
+/// per-client nonce to compare an echoed one against, so a challenge would
+/// prove liveness and nothing else.
+///
+/// An operator who sets a security switch, sees it persisted and echoed back,
+/// and gets nothing has been told a lie by the API. Refusing at the point of
+/// action is the same shape as SEC-101's transport check and is the only
+/// answer that does not require the operator to read `handlers/oauth2.rs` to
+/// discover the truth. The field itself is kept — removing it would be a wire
+/// break across seven SDKs for a value that is always `false` anyway — and
+/// this check is what a future nonce implementation deletes.
+fn reject_unimplemented_dpop_nonce(requested: Option<bool>) -> Result<(), AxiamApiError> {
+    if requested == Some(true) {
+        return Err(validation_err(
+            "dpop_require_nonce is not implemented in this build: nothing reads the stored \
+             value, so setting it would persist a security switch that does nothing. DPoP \
+             proofs are already made single-use at the token endpoint by jti replay \
+             detection (RFC 9449 §11.1). See docs/security-profiles.md.",
+        ));
+    }
+    Ok(())
+}
+
 /// Grant types a client may be registered for through this API.
 ///
 /// This list MUST stay in step with what the token endpoint actually honours.
@@ -329,6 +362,7 @@ pub async fn create<C: Connection + Clone>(
         return Err(validation_err("name must not be empty"));
     }
     validate_grant_types(&req.grant_types)?;
+    reject_unimplemented_dpop_nonce(Some(req.dpop_require_nonce))?;
     // redirect_uris are only required when the client uses
     // authorization_code (which involves user-agent redirects).
     // M2M clients (client_credentials only) don't need them.
@@ -487,6 +521,7 @@ pub async fn update<C: Connection + Clone>(
     if let Some(ref gts) = req.grant_types {
         validate_grant_types(gts)?;
     }
+    reject_unimplemented_dpop_nonce(req.dpop_require_nonce)?;
     if let Some(ref uris) = req.redirect_uris {
         let needs_redirects = req
             .grant_types

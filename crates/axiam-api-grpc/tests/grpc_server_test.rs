@@ -184,6 +184,8 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         reactor_repo,
         reactor_audit_repo,
         reactor_routing_invalidator,
+        // SEC-101: the test double's transport can dispatch.
+        true,
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -252,6 +254,8 @@ async fn start_grpc_server_boots_in_tls_mode() {
         reactor_repo,
         reactor_audit_repo,
         reactor_routing_invalidator,
+        // SEC-101: the test double's transport can dispatch.
+        true,
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -344,6 +348,8 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         reactor_repo,
         reactor_audit_repo,
         reactor_routing_invalidator,
+        // SEC-101: the test double's transport can dispatch.
+        true,
     )
     .await;
 }
@@ -399,6 +405,8 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         reactor_repo,
         reactor_audit_repo,
         reactor_routing_invalidator,
+        // SEC-101: the test double's transport can dispatch.
+        true,
     )
     .await;
 }

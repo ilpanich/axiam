@@ -246,17 +246,26 @@ skip_oauth2() {
 # inverted. Remove a scenario from this list in the same commit that lands
 # the LAST thing it was pending on — not the first.
 #
-# R5.2 / B4: scim_provisioning.js — the reason CHANGED, so read this before
-# assuming it is still blocked on the same thing. `axiam-scim` HAS landed
-# (R3.1) and `/scim/v2` now answers, and the R5.2 tail gave it a real
-# `scim_per_min` bucket, so rl_prod_check.py checks the family for real. What
-# is still missing is on the harness side: seed.sh registers the bench client
-# with scopes ["openid","uma_protection"] only, and there is no
-# `scim:provision` grant for it, so this scenario's setup() would fail loudly
-# minting its token. Seeding that grant is a seed.sh change (a tenant user +
-# role holding `scim:provision`, per docs/api/scim-provisioning.md's setup
-# steps), not part of the limiter work. Drop this from the list in the commit
-# that lands it.
+# R5.2 / B4: scim_provisioning.js — the reason CHANGED AGAIN, so read this
+# before assuming it is still blocked on the same thing. `axiam-scim` HAS
+# landed (R3.1) and `/scim/v2` now answers; the R5.2 tail gave it a real
+# `scim_per_min` bucket, so rl_prod_check.py checks the family for real; and
+# seed.sh now provisions the principal that was missing — a GLOBAL bench-scim
+# role holding `scim:provision`, assigned to the bench user, with the scenario
+# minting a user token instead of client_credentials. (That took two changes,
+# not the one previously recorded here: `scim:provision` is an RBAC permission,
+# not an OAuth2 scope, and a client_credentials token's service_account subject
+# can hold no RBAC permission at all. The scenario header explains both.)
+#
+# It stays listed for ONE reason, and it is not a code reason: the scenario has
+# still never executed against a live server, and no benchmark cell was run in
+# the pass that fixed the seeding. Its payloads were checked statically against
+# the real SCIM DTOs and match, but "matches on inspection" is not "runs green",
+# and un-pending it unrun would risk converting a skip into a red matrix cell —
+# exactly what this list exists to prevent.
+#
+# To close: run it once with BENCH_ENABLE_PENDING_SCENARIOS=1. If it passes,
+# drop it from the list in that same commit.
 # R2.4: oauth2_client_credentials_reactor_hook.js — pending two things, in
 # order (an admin-session helper for k6 scenarios, then the lapin reactor
 # transport / a real no-op reactor process); see that file's own header for

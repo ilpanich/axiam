@@ -233,6 +233,12 @@ mod tests {
             let outcome = self.0.clone();
             Box::pin(std::future::ready(outcome))
         }
+
+        // SEC-101: a scripted test double stands in for a working
+        // transport, so registrations are acceptable under it.
+        fn can_dispatch_dyn(&self) -> bool {
+            true
+        }
     }
 
     fn gate(outcome: ReactorOutcome) -> SharedReactorGate {

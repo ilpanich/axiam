@@ -929,3 +929,101 @@ async fn update_oauth2_client_rejects_the_may_impersonate_marker() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
 }
+
+// ---------------------------------------------------------------------------
+// SEC-097 — `dpop_require_nonce` is refused rather than silently inert
+// ---------------------------------------------------------------------------
+
+/// The field is persisted, echoed back by `GET`, and documented in the OpenAPI
+/// schema — and **nothing reads it**. The token endpoint passes
+/// `require_nonce: false` unconditionally, because this deployment stores no
+/// per-client nonce to compare an echoed one against.
+///
+/// An operator who sets a security switch, sees it persisted and echoed back,
+/// and gets nothing has been told a lie by the API. Until a real nonce exists,
+/// `true` is refused at the point of action. `false` still round-trips, so the
+/// wire shape is unchanged for the seven SDKs.
+#[actix_rt::test]
+async fn create_oauth2_client_refuses_the_unimplemented_dpop_nonce_switch() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Nonce Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "dpop_require_nonce": true
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a switch nothing reads must not be persisted as though it worked"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body.to_string().contains("dpop_require_nonce"),
+        "the refusal must name the field: {body}"
+    );
+}
+
+/// `false` — the default and the only value any stored row holds — is
+/// unaffected, so no existing client or SDK sees a behaviour change.
+#[actix_rt::test]
+async fn create_oauth2_client_still_accepts_dpop_require_nonce_false() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Plain Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "dpop_require_nonce": false
+        }))
+        .to_request();
+
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 201);
+}
+
+/// The update path is the other door onto the same field.
+#[actix_rt::test]
+async fn update_oauth2_client_refuses_the_unimplemented_dpop_nonce_switch() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "dpop_require_nonce": true }))
+        .to_request();
+
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+}

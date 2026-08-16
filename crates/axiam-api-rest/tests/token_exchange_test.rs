@@ -715,3 +715,95 @@ async fn discovery_advertises_the_exchange_grant() {
         "discovery advertises {grants:?}, missing {TOKEN_EXCHANGE_GRANT_TYPE}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SEC-096 — the profile gate and the binding decision reach this grant
+// ---------------------------------------------------------------------------
+
+/// A client registered for **DPoP-bound access tokens** that exchanges without
+/// presenting a proof is refused, instead of receiving a plain bearer token.
+///
+/// This is the concrete shape of SEC-096's first consequence. Before the fix
+/// the token-exchange grant `return`ed from `handlers::token` *above*
+/// `dpop_from_request`, so no proof was ever verified on this path and neither
+/// `fapi::enforce_token_request` nor `certificate_binding_for` was consulted —
+/// which meant a client holding a `cnf.jkt`-bound token could exchange it and
+/// get back an unconstrained token with the same subject and a subset of the
+/// same scopes. `certificate_binding_for`'s own doc comment calls that silent
+/// downgrade "the worst possible behaviour"; the exchange path did it by
+/// omission.
+///
+/// Before the fix this returns `200`.
+#[actix_web::test]
+async fn a_binding_client_cannot_launder_its_constraint_away_through_an_exchange() {
+    let f = setup().await;
+
+    // Turn the exchanging client into one that requires DPoP binding. Written
+    // through the repository rather than the admin API so the test is about
+    // the token endpoint, not about registration validation.
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            client_row_id(&f).await,
+            axiam_core::models::oauth2_client::UpdateOAuth2Client {
+                dpop_bound_access_tokens: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let app = test_app!(f);
+    let (status, json) = exchange!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        subject_params(&f, &["read"])
+    );
+
+    assert_eq!(
+        status, 401,
+        "a client that registered binding and presented nothing must be refused, \
+         not handed an unbound token: {json}"
+    );
+    assert_eq!(json["error"], "invalid_client");
+}
+
+/// The other half, and the one that protects every existing deployment: a
+/// client that registered **no** binding is completely unaffected — same
+/// status, same `token_type`, no `cnf`.
+#[actix_web::test]
+async fn an_unbound_client_sees_no_change_from_sec_096() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (status, json) = exchange!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        subject_params(&f, &["read"])
+    );
+
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["token_type"], "Bearer");
+
+    let claims =
+        axiam_auth::token::decode_access_token(json["access_token"].as_str().unwrap(), &f.auth)
+            .unwrap();
+    assert!(
+        claims.cnf.is_none(),
+        "an unbound client's exchanged token must carry no confirmation claim"
+    );
+}
+
+/// The exchanging client's row id, for the repository-level edit above.
+async fn client_row_id(f: &Fixture) -> uuid::Uuid {
+    use axiam_core::repository::OAuth2ClientRepository;
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(f.db.clone())
+        .get_by_client_id(f.tenant_id, &f.client_id)
+        .await
+        .unwrap()
+        .id
+}

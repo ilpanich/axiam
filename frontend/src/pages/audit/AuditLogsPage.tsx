@@ -12,6 +12,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime } from "@/lib/utils";
+import { usePermissions } from "@/hooks/usePermissions";
 
 // ─── Outcome badge ────────────────────────────────────────────────────────────
 
@@ -64,6 +65,65 @@ function DetailsExpander({
           {JSON.stringify(details, null, 2)}
         </pre>
       )}
+    </div>
+  );
+}
+
+// ─── Scope switch ─────────────────────────────────────────────────────────────
+
+type AuditScope = "tenant" | "system";
+
+/**
+ * Switches between the tenant trail and the system trail.
+ *
+ * Rendered only when the operator holds `audit_logs:list_system` — the
+ * tenant list is self-service for every authenticated user, the system list is
+ * not, and showing a tab that always 403s teaches nothing.
+ */
+function ScopeSwitch({
+  scope,
+  onChange,
+}: {
+  scope: AuditScope;
+  onChange: (s: AuditScope) => void;
+}) {
+  const scopes: { id: AuditScope; label: string; hint: string }[] = [
+    {
+      id: "tenant",
+      label: "Tenant",
+      hint: "Actions taken within this tenant.",
+    },
+    {
+      id: "system",
+      label: "System",
+      hint: "Unauthenticated and system requests — failed logins against unknown accounts, bootstrap, and anything else recorded before a tenant was known.",
+    },
+  ];
+
+  return (
+    <div
+      className="flex gap-1 border-b border-primary/10 mb-4"
+      role="tablist"
+      aria-label="Audit log scope"
+    >
+      {scopes.map((s) => (
+        <button
+          key={s.id}
+          role="tab"
+          type="button"
+          aria-selected={scope === s.id}
+          title={s.hint}
+          onClick={() => onChange(s.id)}
+          className={cn(
+            "px-4 py-2.5 text-sm font-medium transition-all duration-200 border-b-2 -mb-px focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:ring-inset rounded-t",
+            scope === s.id
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground hover:border-white/20"
+          )}
+        >
+          {s.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -193,6 +253,13 @@ function FilterBar({
 const PER_PAGE = 20;
 
 export function AuditLogsPage() {
+  const { can } = usePermissions();
+  // The two trails are separate endpoints, not a filter: system entries carry
+  // the nil tenant id and are invisible to the tenant-scoped list, so there is
+  // no query that returns both.
+  const canReadSystem = can("audit_logs:list_system");
+  const [scope, setScope] = useState<AuditScope>("tenant");
+
   // Raw filter inputs (undbounced for actors/actions)
   const [actorInput, setActorInput] = useState("");
   const [actionInput, setActionInput] = useState("");
@@ -283,8 +350,11 @@ export function AuditLogsPage() {
   };
 
   const { data, isLoading } = useQuery({
-    queryKey: ["audit-logs", filters],
-    queryFn: () => auditService.list(filters),
+    queryKey: ["audit-logs", scope, filters],
+    queryFn: () =>
+      scope === "system"
+        ? auditService.listSystem(filters)
+        : auditService.list(filters),
     placeholderData: (prev) => prev,
   });
 
@@ -370,8 +440,24 @@ export function AuditLogsPage() {
     <div>
       <PageHeader
         title="Audit Logs"
-        description="Append-only record of all actions performed in this tenant."
+        description={
+          scope === "system"
+            ? "Append-only record of unauthenticated and system requests, which carry no tenant."
+            : "Append-only record of all actions performed in this tenant."
+        }
       />
+
+      {canReadSystem && (
+        <ScopeSwitch
+          scope={scope}
+          onChange={(s) => {
+            setScope(s);
+            // The two trails do not share a page count, so an offset carried
+            // across the switch would land on an empty page.
+            setPage(1);
+          }}
+        />
+      )}
 
       <FilterBar
         actor={actorInput}

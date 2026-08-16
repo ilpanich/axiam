@@ -30,6 +30,13 @@ export interface Certificate {
   created_at: string;
 }
 
+/** The bind endpoint's acknowledgement. */
+export interface CertificateBinding {
+  certificate_id: string;
+  service_account_id: string;
+  status: string;
+}
+
 /**
  * Organization CA certificate as serialized by the backend
  * (`axiam_core::models::certificate::CaCertificate`). Only the fields the
@@ -89,6 +96,26 @@ export const certificateService = {
 
   revoke: (id: string): Promise<void> =>
     api.post(`/api/v1/certificates/${id}/revoke`).then(() => undefined),
+
+  /**
+   * Bind an existing tenant certificate to a service account, so that account
+   * can authenticate by mTLS instead of (or as well as) its client secret.
+   *
+   * Routed under the service account rather than the certificate
+   * (`POST /api/v1/service-accounts/{sa_id}/bind-certificate`) but handled by
+   * the certificates module, which is why it lives here. Gated on
+   * `certificates:bind`.
+   */
+  bindToServiceAccount: (
+    serviceAccountId: string,
+    certificateId: string
+  ): Promise<CertificateBinding> =>
+    api
+      .post<CertificateBinding>(
+        `/api/v1/service-accounts/${serviceAccountId}/bind-certificate`,
+        { certificate_id: certificateId }
+      )
+      .then((r) => r.data),
 
   /**
    * List the Active CA certificates for the caller's organization.

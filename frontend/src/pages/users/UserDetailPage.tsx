@@ -7,6 +7,12 @@ import {
   type UpdateUserPayload,
 } from "@/services/users";
 import { roleService, type Role } from "@/services/roles";
+import {
+  federationService,
+  federationLinkService,
+  type FederationLink,
+} from "@/services/federation";
+import { usePermissions } from "@/hooks/usePermissions";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -14,7 +20,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, Trash2, ShieldX } from "lucide-react";
+import { Loader2, Trash2, ShieldX, Unlink } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { SectionCard, ToggleField } from "@/components/shared";
 
@@ -110,6 +116,7 @@ function MethodTypeBadge({ type }: { type: "totp" | "webauthn" }) {
 export function UserDetailPage() {
   const { userId } = useParams<{ userId: string }>();
   const queryClient = useQueryClient();
+  const { can } = usePermissions();
 
   // ─── User query ───────────────────────────────────────────────────────────────
   const {
@@ -133,6 +140,38 @@ export function UserDetailPage() {
   const { data: allRoles = [] } = useQuery({
     queryKey: ["roles"],
     queryFn: roleService.list,
+  });
+
+  // ─── Federation links ─────────────────────────────────────────────────────────
+  const canListFederation = can("federation:list");
+  const canUnlinkFederation = can("federation:delete");
+
+  const { data: federationLinks = [], isLoading: federationLinksLoading } =
+    useQuery({
+      queryKey: ["user-federation-links", userId],
+      queryFn: () => federationLinkService.listForUser(userId!),
+      enabled: !!userId && canListFederation,
+    });
+
+  // Resolve `federation_config_id` to the provider's name. The link endpoint
+  // returns the id only, and a bare UUID tells an operator nothing about which
+  // IdP is on the other end.
+  const { data: federationConfigs = [] } = useQuery({
+    queryKey: ["federation-configs"],
+    queryFn: federationService.getAll,
+    enabled: canListFederation,
+  });
+
+  const [unlinkTarget, setUnlinkTarget] = useState<FederationLink | null>(null);
+
+  const unlinkMutation = useMutation({
+    mutationFn: (id: string) => federationLinkService.unlink(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["user-federation-links", userId],
+      });
+      setUnlinkTarget(null);
+    },
   });
 
   // ─── Edit state ───────────────────────────────────────────────────────────────
@@ -276,6 +315,70 @@ export function UserDetailPage() {
     },
   ];
 
+  const federationLinkColumns: Column<FederationLink>[] = [
+    {
+      key: "provider",
+      header: "Provider",
+      render: (row) => {
+        const config = federationConfigs.find(
+          (c) => c.id === row.federation_config_id
+        );
+        return (
+          <span className="text-sm text-foreground/90">
+            {/* The config may have been deleted out from under the link, so
+                fall back to the raw id rather than rendering an empty cell. */}
+            {config?.provider ?? row.federation_config_id}
+          </span>
+        );
+      },
+    },
+    {
+      key: "external_subject",
+      header: "External Subject",
+      render: (row) => (
+        <span
+          className="font-mono text-xs text-foreground/70 max-w-[220px] truncate block"
+          title={row.external_subject}
+        >
+          {row.external_subject}
+        </span>
+      ),
+    },
+    {
+      key: "external_email",
+      header: "External Email",
+      render: (row) => (
+        <span className="text-sm text-muted-foreground">
+          {row.external_email ?? "—"}
+        </span>
+      ),
+    },
+    {
+      key: "created_at",
+      header: "Linked",
+      render: (row) => (
+        <span className="text-sm text-muted-foreground">
+          {formatDate(row.created_at)}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      width: "w-20",
+      render: (row) =>
+        canUnlinkFederation ? (
+          <button
+            aria-label={`Unlink federated identity ${row.external_subject}`}
+            onClick={() => setUnlinkTarget(row)}
+            className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+          >
+            <Unlink size={14} />
+          </button>
+        ) : null,
+    },
+  ];
+
   // ─── Loading / error states ───────────────────────────────────────────────────
   if (userLoading) {
     return (
@@ -354,7 +457,22 @@ export function UserDetailPage() {
         />
       </SectionCard>
 
-      {/* ── Section 3: Role Assignments ── */}
+      {/* ── Section 3: Federated Identities ──
+          Which external IdP accounts can sign in as this user. Gated on
+          federation:list, the same permission the endpoint enforces, so an
+          operator without it sees no perpetually-failing panel. */}
+      {canListFederation && (
+        <SectionCard title="Federated Identities">
+          <DataTable
+            columns={federationLinkColumns}
+            data={federationLinks}
+            isLoading={federationLinksLoading}
+            emptyMessage="No external identity provider is linked to this user."
+          />
+        </SectionCard>
+      )}
+
+      {/* ── Section 4: Role Assignments ── */}
       <SectionCard
         title="Role Assignments"
         action={
@@ -401,6 +519,19 @@ export function UserDetailPage() {
         title="Remove MFA Method"
         description={`Are you sure you want to remove "${deleteMethod?.name}"?`}
         isLoading={deleteMethodMutation.isPending}
+      />
+
+      {/* Unlink federated identity confirm */}
+      <ConfirmDialog
+        open={unlinkTarget !== null}
+        onClose={() => setUnlinkTarget(null)}
+        onConfirm={() =>
+          unlinkTarget && unlinkMutation.mutate(unlinkTarget.id)
+        }
+        title="Unlink Federated Identity"
+        description={`"${unlinkTarget?.external_subject}" will no longer be able to sign in as this user through that identity provider. A later federated login with the same subject will establish a fresh link.`}
+        confirmLabel="Unlink"
+        isLoading={unlinkMutation.isPending}
       />
 
       {/* Reset MFA confirm */}

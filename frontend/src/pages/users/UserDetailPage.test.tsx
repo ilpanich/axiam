@@ -10,6 +10,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { UserDetailPage } from "./UserDetailPage";
 import { makeClient } from "@/test/renderWithProviders";
+import { useAuthStore, type AuthUser } from "@/stores/auth";
 
 const user = {
   id: "u1",
@@ -36,11 +37,42 @@ const roles = [
   { id: "r2", name: "Viewer", is_global: false, created_at: "t" },
 ];
 
+const federationLinks = [
+  {
+    id: "fl1",
+    tenant_id: "t1",
+    user_id: "u1",
+    federation_config_id: "fc1",
+    external_subject: "okta|00u123",
+    external_email: "alice@corp.example",
+    created_at: "2026-01-03T00:00:00Z",
+    updated_at: "2026-01-03T00:00:00Z",
+  },
+];
+
+const federationConfigs = [
+  { id: "fc1", provider: "Okta", protocol: "oidc", enabled: true },
+];
+
 const URLS = {
   user: "/api/v1/users/u1",
   mfa: "/api/v1/users/u1/mfa-methods",
   roles: "/api/v1/roles",
+  federationLinks: "/api/v1/federation-links/user/u1",
+  federationConfigs: "/api/v1/federation-configs",
 };
+
+/** The federation panel is gated; give the operator the permissions it needs. */
+function asFederationAdmin(permissions = ["federation:list", "federation:delete"]) {
+  const u: AuthUser = {
+    id: "admin",
+    username: "admin",
+    email: "admin@x.io",
+    permissions,
+    tenant_id: "t1",
+  };
+  useAuthStore.setState({ user: u, isAuthenticated: true, isInitializing: false });
+}
 
 function routeGet(map: Record<string, unknown>) {
   apiMock.get.mockImplementation((url: string) => {
@@ -68,6 +100,11 @@ function renderPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isInitializing: false,
+  });
 });
 
 describe("UserDetailPage", () => {
@@ -224,5 +261,98 @@ describe("UserDetailPage", () => {
     renderPage();
     expect(await screen.findByText("Not verified")).toBeInTheDocument();
     expect(screen.getByText("Disabled")).toBeInTheDocument();
+  });
+
+  // ─── Federated identities ──────────────────────────────────────────────────
+
+  it("hides the federated identities section without federation:list", async () => {
+    routeGet(defaults());
+    renderPage();
+    expect(await screen.findByText("alice")).toBeInTheDocument();
+    expect(screen.queryByText("Federated Identities")).not.toBeInTheDocument();
+    expect(apiMock.get).not.toHaveBeenCalledWith(URLS.federationLinks);
+  });
+
+  it("lists a user's linked identities, resolving the provider name", async () => {
+    asFederationAdmin();
+    routeGet(
+      defaults({
+        [URLS.federationLinks]: federationLinks,
+        [URLS.federationConfigs]: federationConfigs,
+      })
+    );
+    renderPage();
+
+    expect(await screen.findByText("Federated Identities")).toBeInTheDocument();
+    // The link carries only federation_config_id; a bare UUID would tell the
+    // operator nothing about which IdP is on the other end.
+    expect(await screen.findByText("Okta")).toBeInTheDocument();
+    expect(screen.getByText("okta|00u123")).toBeInTheDocument();
+    expect(screen.getByText("alice@corp.example")).toBeInTheDocument();
+  });
+
+  it("falls back to the raw config id when the config is gone", async () => {
+    asFederationAdmin();
+    routeGet(
+      defaults({
+        [URLS.federationLinks]: federationLinks,
+        [URLS.federationConfigs]: [],
+      })
+    );
+    renderPage();
+    expect(await screen.findByText("fc1")).toBeInTheDocument();
+  });
+
+  it("shows the empty state when nothing is linked", async () => {
+    asFederationAdmin();
+    routeGet(defaults({ [URLS.federationLinks]: [] }));
+    renderPage();
+    expect(
+      await screen.findByText(
+        "No external identity provider is linked to this user."
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("unlinks by link id after confirmation", async () => {
+    asFederationAdmin();
+    routeGet(
+      defaults({
+        [URLS.federationLinks]: federationLinks,
+        [URLS.federationConfigs]: federationConfigs,
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: /Unlink federated identity okta\|00u123/,
+      })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(
+      within(confirm).getByRole("button", { name: "Unlink" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/federation-links/fl1")
+    );
+  });
+
+  it("offers no unlink control without federation:delete", async () => {
+    asFederationAdmin(["federation:list"]);
+    routeGet(
+      defaults({
+        [URLS.federationLinks]: federationLinks,
+        [URLS.federationConfigs]: federationConfigs,
+      })
+    );
+    renderPage();
+
+    expect(await screen.findByText("okta|00u123")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Unlink federated identity/ })
+    ).not.toBeInTheDocument();
   });
 });

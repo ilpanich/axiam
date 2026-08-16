@@ -17,6 +17,7 @@ import api from "@/lib/api";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import type { AxiosError } from "axios";
+import { redactSecrets } from "@/lib/apiError";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
 
@@ -256,10 +257,11 @@ export function LoginPage() {
         );
         return;
       }
-      const msg =
+      const msg = redactSecrets(
         axiosErr.response?.data?.message ??
-        axiosErr.response?.data?.error ??
-        "Invalid credentials. Please try again.";
+          axiosErr.response?.data?.error ??
+          "Invalid credentials. Please try again."
+      );
       setError(msg);
     } finally {
       setIsLoading(false);
@@ -298,10 +300,11 @@ export function LoginPage() {
         );
         return;
       }
-      const msg =
+      const msg = redactSecrets(
         axiosErr.response?.data?.message ??
-        axiosErr.response?.data?.error ??
-        "Invalid or expired MFA code.";
+          axiosErr.response?.data?.error ??
+          "Invalid or expired MFA code."
+      );
       setError(msg);
     } finally {
       setIsLoading(false);

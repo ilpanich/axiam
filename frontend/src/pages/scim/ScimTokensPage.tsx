@@ -18,7 +18,7 @@ import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getApiErrorMessage } from "@/lib/apiError";
+import { getApiErrorMessage, redactSecrets } from "@/lib/apiError";
 import { cn, formatDate, formatDateTime } from "@/lib/utils";
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
@@ -59,8 +59,12 @@ function createErrorMessage(err: unknown): string {
   const message = (
     err as { response?: { data?: { message?: unknown } } }
   )?.response?.data?.message;
+  // redactSecrets, not the raw value: reading `data.message` directly is what
+  // bypasses `getApiErrorMessage`, and with it the redaction — on the one page
+  // whose whole subject is a live credential. The preference for `message`
+  // over `error` is the only thing this helper is allowed to change.
   return typeof message === "string" && message.length > 0
-    ? message
+    ? redactSecrets(message)
     : getApiErrorMessage(err);
 }
 

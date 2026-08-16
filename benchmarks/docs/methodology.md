@@ -269,6 +269,51 @@ the "All results" table's `fallback` column, and as a per-target caveat in
 the "Efficiency comparison" section) so a reader sees the operations diverge
 before reading the numbers as "AXIAM is Nx Keycloak at refresh".
 
+### Comparability: model variant (nested-resource authorization, N1)
+A fourth class, and the strongest of the four — strong enough that it is kept
+out of `report.py` entirely rather than annotated inside it.
+
+The nested-resource depth sweep (`just bench-nested`,
+`scenarios/authz_nested_{rest,grpc}.js`) asks all three targets the same
+*question* — may this subject read a resource nested N levels below the one
+carrying the grant — and gets three answers produced by three different
+mechanisms, because only one of the three products has the mechanism:
+
+* **axiam** — a real hierarchy walk. One role assignment on the chain root
+  cascades to the leaf (`engine.rs` `applicable_role_ids` accepts an assignment
+  scoped to any ancestor; the ancestor set is one recursive graph query over the
+  `child_of` edge). Depth is expected to cost something, and what it costs is the
+  measurement.
+* **keycloak** — no parent/child resource relation exists, so nesting is
+  expressed as URI paths over a flat resource set: one `/<root>/*` resource plus
+  one scope-based permission covers the subtree, and the decision request names
+  the full leaf path (`permission_resource_format=uri`,
+  `permission_resource_matching_uri=true`). Same administrative shape — one grant
+  reaches an unbounded subtree — reached by a different mechanism.
+* **zitadel** — **no per-resource authorization decision endpoint exists at
+  all.** Project roles ride in the token and the application decides locally.
+  That arm measures the role-claim round trip a resource server makes before
+  deciding, and it is depth-invariant *by construction*. A flat ladder and "there
+  is no such operation" look identical in a table and mean completely different
+  things, so `nested_report.py` refuses to compute a slope for it and prints the
+  reason in its place.
+
+This differs from `protocol-variant` in kind, not just degree. A
+protocol-variant cell measures the right operation for its own target and merely
+reaches it over a different protocol, so it stays in head-to-head tables with a
+caveat. Here one target has no such operation to measure. So the sweep's
+**primary artifact is per-target depth SENSITIVITY** — each product compared only
+against itself, which is sound unconditionally — and the absolute cross-target
+table is secondary, printed with the model caveat attached to every row and never
+without it.
+
+Mechanically, this class is enforced by layout rather than by a flag: sweep cells
+land in `results/nested/d<N>/<target>/<profile>/`, one level deeper than
+`report.py`'s `collect_dir` walk reaches, so they can never enter a matrix median
+or a winner table by accident — the same structural guarantee that keeps
+`results/dry-run/` out. `runner/nested_report.py` is the tree's own reader, and
+`runner/nested-selftest.sh` (CI, hermetic) is the regression guard on all of it.
+
 ### Security cost (derived across profiles)
 For a fixed (target, scenario), the report computes the **relative cost** of each
 profile vs the `p0-plaintext` baseline:

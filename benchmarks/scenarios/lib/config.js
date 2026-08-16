@@ -147,6 +147,72 @@ export const cfg = {
   // benchmark-fixture credentials for a disposable container; never log them.
   adminUsername: str('BENCH_ADMIN_USERNAME', 'admin'),
   adminPassword: str('BENCH_ADMIN_PASSWORD', 'Bench@Admin123!'),
+
+  // --- N1: nested-resource authorization depth sweep -----------------------
+  // (authz_nested_rest.js / authz_nested_grpc.js, driven by `just bench-nested`)
+  //
+  // DEPTH IS DEFINED AS "how many levels the decision has to climb", not as
+  // "how many resources exist". Concretely, for AXIAM it is the number of
+  // ANCESTORS between the resource named in the check and the resource the
+  // role assignment is scoped to:
+  //
+  //   BENCH_AUTHZ_DEPTH=0   check the seeded `bench-resource` itself — the
+  //                         grant is scoped exactly there, zero ancestors to
+  //                         walk. This is the SAME logical request
+  //                         authz_check_rest.js sends, so it doubles as the
+  //                         sweep's own control point.
+  //   BENCH_AUTHZ_DEPTH=N   check a resource N levels BELOW `bench-resource`,
+  //                         whose only applicable grant is still the one on
+  //                         `bench-resource`. The engine must resolve the
+  //                         ancestor chain before it can decide
+  //                         (crates/axiam-authz/src/engine.rs
+  //                         `applicable_role_ids` accepts an assignment scoped
+  //                         to any ancestor of the target).
+  //
+  // Ceiling: `crates/axiam-db/src/repository/resource.rs` sets
+  // MAX_ANCESTOR_DEPTH = 50 and `get_ancestors` returns an ERROR (not a
+  // truncated walk) once a resource has >= 50 ancestors — so a depth at or
+  // near 50 measures the failure path, not the authorization path. The
+  // clamp in lib/nested.js keeps the sweep inside that bound with headroom.
+  authzDepth: num('BENCH_AUTHZ_DEPTH', 0),
+
+  // How the KEYCLOAK arm expresses "a resource nested N levels deep".
+  // Keycloak Authorization Services has no parent/child resource hierarchy, so
+  // there is no single mechanical translation — see lib/nested.js's header for
+  // the full reasoning behind each.
+  //
+  //   'wildcard' (default) — ONE registered resource with the URI
+  //       `/<root>/*` plus one scope-based permission, and every measured
+  //       request asks for a decision on the full leaf PATH
+  //       (`/<root>/l1/…/lN#read`) using Keycloak's own URI resolution
+  //       (`permission_resource_format=uri`,
+  //       `permission_resource_matching_uri=true`). This is Keycloak's real
+  //       semantic equivalent of AXIAM's cascade: one grant covers the whole
+  //       subtree, and what depth costs is the path match.
+  //   'per-node' — N registered resources, one per level, each with its own
+  //       scope-based permission, and the request names the leaf resource
+  //       directly. Kept as an explicitly-selected control/fallback (it is the
+  //       modelling many Keycloak deployments actually use, and it is the
+  //       escape hatch if a Keycloak version's path matcher does not recurse
+  //       through `/*`), never as the default — its admin cost is O(N) and its
+  //       decision cost is depth-flat by construction.
+  kcNestedMode: str('BENCH_KC_NESTED_MODE', 'wildcard'),
+
+  // Keycloak master-realm admin credentials, used ONLY by the nested-authz
+  // setup() to provision the resource server (Keycloak's Authorization
+  // Services config is not reachable through any non-admin API). Defaults
+  // mirror runner/seed.sh's KC_ADMIN / KC_ADMIN_PASSWORD, and the legacy
+  // unprefixed names are still honoured so an operator who exported them for
+  // seeding does not have to export them twice. Throwaway container
+  // credentials; never logged.
+  kcAdminUsername: str('BENCH_KC_ADMIN', str('KC_ADMIN', 'admin')),
+  kcAdminPassword: str('BENCH_KC_ADMIN_PASSWORD', str('KC_ADMIN_PASSWORD', 'admin')),
+
+  // Name/URI prefix for every object the nested-authz setup provisions, on
+  // every target. Deterministic so a re-run against a stack that was NOT torn
+  // down reuses the fixture instead of duplicating it (the sweep walks
+  // depth 0 -> 1 -> 2 -> … against one live stack).
+  nestedPrefix: str('BENCH_NESTED_PREFIX', 'bench-nest'),
 };
 
 export function baseUrl() {

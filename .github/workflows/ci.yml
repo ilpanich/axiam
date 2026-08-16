@@ -386,6 +386,17 @@ jobs:
       - name: rl-prod results-layout self-test
         working-directory: benchmarks
         run: bash runner/rl-prod-layout-selftest.sh
+      # N1: the nested-resource depth sweep's harness wiring. Three silent
+      # failure modes, all caught here: a labelled sweep rung leaking into the
+      # default `--scenario all` set (hours added to every future matrix, and
+      # one arbitrary depth published as "the" nested number), the AXIAM-only
+      # gRPC arm running against a competitor, and nested_report.py computing a
+      # depth slope for the capability-gap arm — a flat line and "there is no
+      # such operation" look identical in a table and mean different things.
+      # Hermetic: no docker, no k6, no seeded stack.
+      - name: Nested-authz sweep self-test
+        working-directory: benchmarks
+        run: bash runner/nested-selftest.sh
       # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at

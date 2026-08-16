@@ -373,9 +373,31 @@ impl ReactorTransport for LapinReactorTransport {
             ));
         };
 
-        declare_reactor_topology_on(&session.channel, &self.shared, reactor)
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
+        // `timeout_ms` bounds the WHOLE round trip, not just the wait for a
+        // reply.
+        //
+        // Everything below this line talks to the broker, and none of it is
+        // instantaneous: a declare is an RPC, and a publish on a confirm
+        // channel waits for the broker's ack. Since `AmqpManager` dials with
+        // `enable_auto_recover`, a channel whose connection is being recovered
+        // makes those calls *wait* for recovery rather than fail — which is
+        // the right behaviour for a background consumer and the wrong one on
+        // the login path. `run_chain` enforces `MAX_CHAIN_BUDGET_MS` only
+        // *between* reactors, so an unbounded await in here is an unbounded
+        // login, which is precisely the failure the whole timeout design
+        // exists to prevent. Each step therefore gets what is left of the
+        // budget, and running out is a `Timeout` like any other.
+        let budget = Duration::from_millis(u64::from(timeout_ms));
+        let started = std::time::Instant::now();
+        let remaining = || budget.saturating_sub(started.elapsed());
+
+        tokio::time::timeout(
+            remaining(),
+            declare_reactor_topology_on(&session.channel, &self.shared, reactor),
+        )
+        .await
+        .map_err(|_| DispatchFailure::Timeout)?
+        .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
 
         let msg = ReactorEventMessage::signed(
             &self.signing_key,
@@ -400,16 +422,20 @@ impl ReactorTransport for LapinReactorTransport {
             correlation_id,
         };
 
-        self.publish(
-            &session,
-            reactor,
-            &msg,
-            Some(&session.reply_queue),
-            Some(timeout_ms),
+        tokio::time::timeout(
+            remaining(),
+            self.publish(
+                &session,
+                reactor,
+                &msg,
+                Some(&session.reply_queue),
+                Some(timeout_ms),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| DispatchFailure::Timeout)??;
 
-        match tokio::time::timeout(Duration::from_millis(u64::from(timeout_ms)), rx).await {
+        match tokio::time::timeout(remaining(), rx).await {
             Ok(Ok(body)) => serde_json::from_slice::<ReactorReply>(&body)
                 .map_err(|e| DispatchFailure::Transport(e.to_string())),
             // The sender was dropped: the session died under us (see
@@ -433,9 +459,21 @@ impl ReactorTransport for LapinReactorTransport {
             ));
         };
 
-        declare_reactor_topology_on(&session.channel, &self.shared, reactor)
-            .await
-            .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
+        // Bounded by the registration's own `timeout_ms` for the same reason
+        // `round_trip` is (see the comment there): nothing about being
+        // fire-and-forget makes a broker RPC instantaneous, and the fan-out
+        // this exists for would run at a hook site. A listener that cannot
+        // affect an outcome must also be unable to affect a latency.
+        let budget = Duration::from_millis(u64::from(reactor.timeout_ms));
+        let started = std::time::Instant::now();
+
+        tokio::time::timeout(
+            budget,
+            declare_reactor_topology_on(&session.channel, &self.shared, reactor),
+        )
+        .await
+        .map_err(|_| DispatchFailure::Timeout)?
+        .map_err(|e| DispatchFailure::Transport(e.to_string()))?;
 
         // `timeout_ms` is carried so a listener sees the same body shape an
         // interceptor does, but nothing waits on it and no `reply_to` is set:
@@ -455,7 +493,12 @@ impl ReactorTransport for LapinReactorTransport {
         // Addressed to the reactor's queue, one message per registration —
         // not fanned out through the exchange, which would deliver one copy
         // per bound listener for every listener the caller iterates over.
-        self.publish(&session, reactor, &msg, None, None).await
+        tokio::time::timeout(
+            budget.saturating_sub(started.elapsed()),
+            self.publish(&session, reactor, &msg, None, None),
+        )
+        .await
+        .map_err(|_| DispatchFailure::Timeout)?
     }
 }
 

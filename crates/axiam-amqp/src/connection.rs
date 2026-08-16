@@ -79,6 +79,47 @@ fn build_tls_config(config: &AmqpConfig) -> Result<OwnedTLSConfig, AmqpError> {
     })
 }
 
+/// The `ConnectionProperties` every AXIAM AMQP connection is dialled with.
+///
+/// # Why `enable_auto_recover` rather than `default()`
+///
+/// Every long-lived consumer in `axiam-server` is supervised by the same shape
+/// of loop: on failure, call [`AmqpManager::create_channel`] on the shared
+/// manager and start again. The cache-invalidation consumer (§4.2), the
+/// webhook consumer (CORR-03) and the X1 reactor transport's reply session all
+/// do exactly this, and every one of them rebuilds a **channel** on an
+/// existing **connection**.
+///
+/// That is the right recovery for the failure those loops were written for — a
+/// channel-level exception closes one channel and leaves the connection up. It
+/// does nothing at all for a broker restart. Under
+/// `ConnectionProperties::default()` lapin does **not** reconnect (auto
+/// recovery is off) and its TCP reconnect backoff is *zero retries*, so the
+/// `Connection` stays dead, `create_channel` fails forever, and every
+/// supervisor in the process spins until someone restarts it. Measured, not
+/// argued: `tests/amqp_recovery_test.rs` polled a shared manager for 60 s
+/// after a `docker restart` and it never became usable again.
+///
+/// The symptom that produces is the expensive kind, because the server keeps
+/// serving. HTTP stays up, the decision cache goes permanently UNTRUSTED,
+/// webhooks stop, and — since R2.4 — the reactor transport reports itself down
+/// forever, which makes every `fail_closed` registration deny every login for
+/// its tenant. Nothing in that picture points at the broker having bounced
+/// hours earlier.
+///
+/// `enable_auto_recover` makes the IO loop reconnect transparently and replay
+/// the exchange/queue/binding/consumer topology on the new connection, and
+/// raises the TCP backoff to 16 attempts. The existing supervisors are
+/// unaffected and still correct: they keep handling channel-level faults, and
+/// they now do so on a connection that can actually come back.
+///
+/// Recovery applies to *recoverable* errors only — a deliberate
+/// client-side `Connection::close` is still final, which is what
+/// `reactor_containerized_test.rs`'s teardown test relies on.
+fn connection_properties() -> ConnectionProperties {
+    ConnectionProperties::default().enable_auto_recover()
+}
+
 /// Well-known queue names used by AXIAM.
 pub mod queues {
     /// Inbound async authorization check requests.
@@ -185,14 +226,14 @@ impl AmqpManager {
             let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
             Connection::connect_with_config(
                 &config.url,
-                ConnectionProperties::default(),
+                connection_properties(),
                 tls_config,
                 runtime,
             )
             .await
             .map_err(AmqpError::Connection)?
         } else {
-            Connection::connect(&config.url, ConnectionProperties::default())
+            Connection::connect(&config.url, connection_properties())
                 .await
                 .map_err(AmqpError::Connection)?
         };

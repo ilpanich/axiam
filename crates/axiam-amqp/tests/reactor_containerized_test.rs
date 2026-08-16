@@ -299,6 +299,29 @@ async fn expect_empty(channel: &Channel, queue: &str, why: &str) {
     assert!(got.is_none(), "{why}");
 }
 
+/// Open a channel, retrying while the broker settles.
+///
+/// A restarted RabbitMQ accepts a TCP connection before it is ready to serve,
+/// and lapin's auto-recovery races that: there is a window where the transport
+/// has a session but a *fresh* `create_channel` still fails with
+/// `CONNECTION_FORCED`. `axiam-server`'s supervisors all retry through this
+/// window; this helper is the test harness doing the same, and it is not
+/// papering over anything — the assertion that matters is that a dispatch
+/// eventually round-trips.
+async fn channel_with_retry(amqp: &AmqpManager) -> Channel {
+    let mut last = None;
+    for _ in 0..150 {
+        match amqp.create_channel().await {
+            Ok(channel) => return channel,
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    panic!("no usable channel after the broker settled: {last:?}");
+}
+
 /// Publish a bare message through the reactor topic exchange, which is how a
 /// binding is observed: a bound queue receives it, an unbound one does not.
 async fn publish_through_exchange(channel: &Channel, tenant: Uuid, event: &str) {
@@ -487,12 +510,16 @@ async fn removing_an_event_from_a_registration_unbinds_it() {
 /// policy, but only one of them is honest about what happened, and a fail-open
 /// login should not spend five seconds discovering the broker is gone.
 ///
-/// **What this deliberately does not assert is recovery.** The supervisor
-/// rebuilds the *channel* on the `AmqpManager`'s existing connection — the same
-/// shape as `axiam-server`'s cache-invalidation consumer — so it heals a
-/// channel-level exception but cannot heal the closed *connection* this test
-/// creates, because nothing in `AmqpManager` redials. That limit is recorded
-/// here rather than papered over; see the note in the module-level review.
+/// **What this deliberately does not assert is recovery**, and the reason is
+/// not that recovery is missing — `AmqpManager` dials with
+/// `enable_auto_recover`, and
+/// [`a_dispatch_still_round_trips_after_a_broker_restart`] proves a whole round
+/// trip survives a real broker restart. It is that lapin recovers *recoverable*
+/// errors, and a deliberate client-side `Connection::close` is not one: it is
+/// an instruction, not a fault, and a client library that reconnected after
+/// being told to disconnect would be broken. So this test gets a permanently
+/// dead session, which is exactly what it wants — an unambiguous teardown to
+/// assert against.
 #[tokio::test]
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
             `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
@@ -559,6 +586,117 @@ async fn losing_the_broker_session_wakes_an_in_flight_dispatch() {
     cleanup(&fresh.create_channel().await.unwrap(), tenant, &[r.id]).await;
 }
 
+/// A dispatch still round-trips **after the broker has been restarted**.
+///
+/// This is the test that earns `enable_auto_recover`, and it is here rather
+/// than in `amqp_recovery_test.rs` because the risk it covers is specific to
+/// this transport. Auto-recovery replays the consumer topology onto the new
+/// connection, and this transport's reply queue is **server-named** (`""`) and
+/// exclusive. If a replay produced a differently-named queue while `Shared`
+/// still advertised the old name, every subsequent round trip would publish a
+/// `reply_to` nobody consumes, and every dispatch would time out — a failure
+/// mode strictly worse than the one auto-recovery was turned on to fix,
+/// because the transport would report itself perfectly healthy throughout.
+///
+/// Destructive, so it carries the same opt-in as `amqp_recovery_test.rs`.
+#[tokio::test]
+#[ignore = "destructive: restarts the RabbitMQ container — needs \
+            AXIAM_TEST_ALLOW_BROKER_RESTART=1"]
+async fn a_dispatch_still_round_trips_after_a_broker_restart() {
+    if std::env::var("AXIAM_TEST_ALLOW_BROKER_RESTART").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set AXIAM_TEST_ALLOW_BROKER_RESTART=1 to run this");
+        return;
+    }
+
+    let (amqp, transport) = connected_transport().await;
+    let tenant = Uuid::new_v4();
+    let r = reactor(tenant, "login.post_auth", 0, FailurePolicy::FailClosed);
+
+    // Prove the transport works before the restart, so a failure afterwards is
+    // unambiguously about the restart.
+    transport.declare_reactor_topology(&r).await.unwrap();
+    spawn_fake_reactor(
+        amqp.create_channel().await.unwrap(),
+        tenant,
+        r.id,
+        Answer::Allow,
+    )
+    .await;
+    let before = run_chain(
+        &transport,
+        MASTER,
+        std::slice::from_ref(&r),
+        "login.post_auth",
+        serde_json::json!({"sub": "alice"}),
+        Utc::now,
+        || 0,
+    )
+    .await;
+    assert!(before.outcome.permits(), "sanity: works before the restart");
+
+    let status = std::process::Command::new("docker")
+        .args(["restart", "axiam-rabbitmq"])
+        .status()
+        .expect("docker restart must run");
+    assert!(status.success(), "docker restart axiam-rabbitmq failed");
+
+    // A restarted broker accepts connections before it can serve them, so the
+    // transport's supervisor legitimately *flaps* for a few seconds: it gets a
+    // session, the broker forces it closed, it backs off and retries. The
+    // assertion is therefore "a dispatch eventually round-trips", not "the
+    // first attempt after `is_connected()` works" — and whether recovery comes
+    // from lapin's auto-recovery or from this transport's own supervisor is
+    // deliberately not asserted. What must hold is that it comes.
+    let mut declared = false;
+    for _ in 0..300 {
+        if transport.is_connected() && transport.declare_reactor_topology(&r).await.is_ok() {
+            declared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        declared,
+        "the transport never re-established a usable session after the broker restart"
+    );
+
+    // The actor reconnects too — a real reactor's SDK runtime does this, and
+    // the queue is durable so it is still there.
+    spawn_fake_reactor(channel_with_retry(&amqp).await, tenant, r.id, Answer::Allow).await;
+
+    let mut after = None;
+    for _ in 0..60 {
+        let result = run_chain(
+            &transport,
+            MASTER,
+            std::slice::from_ref(&r),
+            "login.post_auth",
+            serde_json::json!({"sub": "alice"}),
+            Utc::now,
+            || 0,
+        )
+        .await;
+        let permitted = result.outcome.permits();
+        after = Some(result);
+        if permitted {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    cleanup(&channel_with_retry(&amqp).await, tenant, &[r.id]).await;
+    let after = after.expect("at least one dispatch attempt");
+    assert!(
+        after.outcome.permits(),
+        "a dispatch must round-trip after a broker restart — got {:?} with failures {:?}. \
+         A persistent Timeout here would mean the reply queue the transport advertises is \
+         not the one it consumes, which is the specific hazard of replaying a server-named \
+         exclusive queue.",
+        after.outcome,
+        after.failures
+    );
+}
+
 /// Happy path: one interceptor, replies `allow`, over a real broker.
 #[tokio::test]
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
@@ -604,6 +742,7 @@ async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
     let fake_channel = amqp.create_channel().await.unwrap();
     spawn_fake_reactor(fake_channel, tenant, r.id, Answer::NeverReply).await;
 
+    let started = std::time::Instant::now();
     let result = run_chain(
         &transport,
         MASTER,
@@ -614,6 +753,7 @@ async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
         || 0,
     )
     .await;
+    let elapsed = started.elapsed();
 
     cleanup(&amqp.create_channel().await.unwrap(), tenant, &[r.id]).await;
     assert!(
@@ -622,6 +762,18 @@ async fn an_unanswered_event_times_out_and_denies_under_fail_closed() {
     );
     assert_eq!(result.failures.len(), 1);
     assert_eq!(result.failures[0].1, DispatchFailure::Timeout);
+
+    // `timeout_ms` bounds the WHOLE round trip, not merely the wait for a
+    // reply. The declare and the publish are broker RPCs, and since
+    // `AmqpManager` dials with `enable_auto_recover` a channel under recovery
+    // makes them *wait* rather than fail — so leaving them outside the budget
+    // would make a recovering broker an unbounded login. `run_chain` bounds
+    // the chain only between reactors, so nothing else would catch it.
+    assert!(
+        elapsed < Duration::from_millis(2_000),
+        "a 300ms reactor budget must bound the whole round trip, not just the \
+         reply wait (took {elapsed:?})"
+    );
 }
 
 /// A signed reply carrying a field outside `token.pre_issue`'s `ext.`

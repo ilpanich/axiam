@@ -179,3 +179,139 @@ impl From<AxiamApiError> for ScimError {
         err.0.into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of this module: a SCIM client must never receive AXIAM's
+    /// ordinary REST envelope. Each arm below pins the STATUS and the RFC 7644
+    /// `scimType` a generic SCIM client (Okta, Entra) dispatches on — getting
+    /// the status right but the `scimType` wrong is a silent interop failure,
+    /// because those clients branch on `scimType` to decide whether to retry,
+    /// re-map an attribute, or surface a conflict to an administrator.
+    #[test]
+    fn axiam_errors_map_to_the_rfc_7644_status_and_scim_type() {
+        let cases: Vec<(AxiamError, StatusCode, Option<&'static str>)> = vec![
+            (
+                AxiamError::NotFound {
+                    entity: "User".into(),
+                    id: "abc".into(),
+                },
+                StatusCode::NOT_FOUND,
+                None,
+            ),
+            // `uniqueness` is the one a provisioning client acts on: it means
+            // "this user already exists", not "retry later".
+            (
+                AxiamError::AlreadyExists {
+                    entity: "User".into(),
+                },
+                StatusCode::CONFLICT,
+                Some("uniqueness"),
+            ),
+            (
+                AxiamError::AuthenticationFailed {
+                    reason: "bad token".into(),
+                },
+                StatusCode::UNAUTHORIZED,
+                None,
+            ),
+            (
+                AxiamError::AuthorizationDenied {
+                    reason: "no grant".into(),
+                    action: Some("users:create".into()),
+                    resource_id: None,
+                },
+                StatusCode::FORBIDDEN,
+                None,
+            ),
+            (
+                AxiamError::Validation {
+                    message: "userName is required".into(),
+                },
+                StatusCode::BAD_REQUEST,
+                Some("invalidValue"),
+            ),
+            (
+                AxiamError::PasswordPolicy {
+                    message: "too short".into(),
+                },
+                StatusCode::BAD_REQUEST,
+                Some("invalidValue"),
+            ),
+            (AxiamError::TenantContext, StatusCode::BAD_REQUEST, None),
+            (AxiamError::RateLimited, StatusCode::TOO_MANY_REQUESTS, None),
+            (
+                AxiamError::ServiceUnavailable("db down".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+            ),
+            // The catch-all: every remaining variant is 5xx-shaped.
+            (
+                AxiamError::Database("connection reset".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+            ),
+            (
+                AxiamError::Internal("boom".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+            ),
+        ];
+
+        for (err, want_status, want_type) in cases {
+            let rendered = format!("{err}");
+            let scim: ScimError = err.into();
+            assert_eq!(scim.status, want_status, "status for {rendered}");
+            assert_eq!(scim.scim_type, want_type, "scimType for {rendered}");
+        }
+    }
+
+    #[test]
+    fn not_found_detail_names_the_entity_and_id() {
+        let scim: ScimError = AxiamError::NotFound {
+            entity: "Group".into(),
+            id: "g-1".into(),
+        }
+        .into();
+        assert!(scim.detail.contains("Group"), "detail: {}", scim.detail);
+        assert!(scim.detail.contains("g-1"), "detail: {}", scim.detail);
+    }
+
+    #[test]
+    fn status_code_is_the_status_the_error_carries() {
+        // ResponseError::status_code is what Actix uses to build the response
+        // line; a constructor that set `status` without it being reflected here
+        // would send a 200 with an error body.
+        let e = ScimError::not_implemented("bulk is out of scope");
+        assert_eq!(ResponseError::status_code(&e), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(e.scim_type, None);
+
+        let m = ScimError::mutability("readOnly attribute");
+        assert_eq!(ResponseError::status_code(&m), StatusCode::BAD_REQUEST);
+        assert_eq!(m.scim_type, Some("mutability"));
+    }
+
+    #[test]
+    fn display_carries_the_status_and_detail_for_logs() {
+        let e = ScimError::new(StatusCode::NOT_FOUND, "User 42 not found");
+        let s = e.to_string();
+        assert!(s.contains("404"), "{s}");
+        assert!(s.contains("User 42 not found"), "{s}");
+    }
+
+    /// SEC-011: a 5xx body must not echo the internal detail — the DB string
+    /// that produced it goes to the log, not to a SCIM client. This is the
+    /// asymmetry worth pinning, since the 4xx branch DOES echo detail.
+    #[test]
+    fn server_errors_do_not_leak_detail_into_the_body() {
+        let internal: ScimError = AxiamError::Database("host=db-1 user=axiam".into()).into();
+        let resp = ResponseError::error_response(&internal);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let client_error = ScimError::invalid_value("userName is required");
+        let resp = ResponseError::error_response(&client_error);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

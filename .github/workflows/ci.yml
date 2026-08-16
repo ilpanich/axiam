@@ -371,6 +371,21 @@ jobs:
       - name: SDK median-of-N provenance self-test
         working-directory: benchmarks
         run: bash sdk/test-median-provenance.sh
+      # M1: an extension-less `--scenario` must be normalized BEFORE
+      # filter_scenarios() runs — otherwise it matches none of the
+      # `.js`-suffixed filter lists and silently bypasses every one of them,
+      # pending scenarios included. Drives the real runner in dry-run mode; no
+      # docker, no k6 (every scenario in the fixture is filtered out).
+      - name: Scenario-name filter self-test
+        working-directory: benchmarks
+        run: bash runner/scenario-filter-selftest.sh
+      # M2: rl_prod_check.py must read a `bench-matrix` (`run-*/`) tree as well
+      # as a flat one. Reading only the flat layout made a matrix rl=prod pass
+      # report "no data" on every endpoint and exit 0 — an unverified limiter
+      # pass that looks like a clean one. Stdlib python only.
+      - name: rl-prod results-layout self-test
+        working-directory: benchmarks
+        run: bash runner/rl-prod-layout-selftest.sh
       # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at

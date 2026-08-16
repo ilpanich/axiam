@@ -58,7 +58,7 @@ just target=axiam profile=p2-tls13 bench-up
 just target=axiam bench-seed
 BENCH_SEED_DENY_RATIO=0 just scale=10 bench-bulk-seed
 BENCH_RESULTS_DIR=$PWD/results/e4-deny-none \
-  just target=axiam profile=p2-tls13 scenario=authz_check_rest bench-run
+  just target=axiam profile=p2-tls13 scenario=authz_check_rest.js bench-run
 just target=axiam bench-down
 
 # ---- Arm B: 5% of grants carry effect: deny. ----
@@ -66,7 +66,7 @@ just target=axiam profile=p2-tls13 bench-up
 just target=axiam bench-seed
 BENCH_SEED_DENY_RATIO=0.05 just scale=10 bench-bulk-seed
 BENCH_RESULTS_DIR=$PWD/results/e4-deny-present \
-  just target=axiam profile=p2-tls13 scenario=authz_check_rest bench-run
+  just target=axiam profile=p2-tls13 scenario=authz_check_rest.js bench-run
 just target=axiam bench-down
 ```
 
@@ -96,7 +96,7 @@ cd benchmarks
 just target=axiam profile=p2-tls13 bench-up
 just target=axiam bench-seed
 BENCH_RESULTS_DIR=$PWD/results/e4-grpc-default \
-  just target=axiam profile=p2-tls13 scenario=authz_check_grpc bench-run
+  just target=axiam profile=p2-tls13 scenario=authz_check_grpc.js bench-run
 just target=axiam bench-down
 
 # ---- Arm B: strict mode, with the session cache the mode is designed for. ----
@@ -106,7 +106,7 @@ AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5 \
 just target=axiam bench-seed
 BENCH_REQUIRE_ENV="AXIAM__GRPC__STRICT_REVOCATION" \
 BENCH_RESULTS_DIR=$PWD/results/e4-grpc-strict \
-  just target=axiam profile=p2-tls13 scenario=authz_check_grpc bench-run
+  just target=axiam profile=p2-tls13 scenario=authz_check_grpc.js bench-run
 just target=axiam bench-down
 ```
 
@@ -137,7 +137,7 @@ just target=axiam bench-seed
 for S in 1 10 100; do
   [ "$S" = 1 ] || just scale=$S bench-bulk-seed
   BENCH_RESULTS_DIR=$PWD/results/e4-seed-$S \
-    just target=axiam profile=p2-tls13 scenario=authz_check_rest bench-run
+    just target=axiam profile=p2-tls13 scenario=authz_check_rest.js bench-run
 done
 just target=axiam bench-down
 ```

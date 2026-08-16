@@ -27,6 +27,15 @@
 Neither change is strictly required — every command in this runbook works against the
 harness as-is — but M1 removes a real foot-gun and both should land first.
 
+> **Status: M1 and M2 both landed.** `run-benchmark.sh` now normalizes an
+> extension-less `--scenario` to its `.js` filename *before* `filter_scenarios()`
+> runs, the five copy-paste traps in `new-feature-bench-cells.md` are fixed, and
+> `rl_prod_check.py` reads a `run-*/` matrix tree as well as a flat one (medianing
+> across passes, as `report.py` does). Each is guarded by a hermetic CI self-test —
+> `runner/scenario-filter-selftest.sh` and `runner/rl-prod-layout-selftest.sh`, both
+> in the `bench-harness` job. The §4 `BENCH_RESULTS_DIR` workaround still works and
+> is still the recommended form there; it is no longer load-bearing.
+
 **M1 — Scenario-name normalization (recommended; prevents a silent failure + filter
 bypass).** `benchmarks/runner/run-benchmark.sh:188` passes `--scenario` through verbatim;
 a name without `.js` is not a file, **and** the filter-list membership tests compare

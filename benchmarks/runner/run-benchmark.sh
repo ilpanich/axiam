@@ -182,10 +182,20 @@ export BENCH_HOST="${BENCH_HOST:-localhost}"
 BASE="${BENCH_SCHEME:-http}://${BENCH_HOST}:${BENCH_PORT:-8090}"
 
 # Scenario set
+#
+# M1: normalize an extension-less `--scenario` to its `.js` filename. Passing
+# it through verbatim broke two things at once, and only one of them was
+# visible: `k6 run scenarios/authz_check_rest` is not a file (loud), but every
+# membership test below — PENDING_SCENARIOS, AXIAM_ONLY_SCENARIOS,
+# ZITADEL_ONLY_SCENARIOS, OAUTH2_SCENARIOS, BENCH_SCENARIO_EXCLUDE — compares
+# against `.js`-suffixed names, so an extension-less name silently matched
+# none of them and bypassed every filter (silent). Normalizing here, before
+# filter_scenarios() runs, fixes both: `scenario=authz_check_rest` and
+# `scenario=authz_check_rest.js` are now the same cell, filters included.
 if [ "$SCENARIO" = "all" ]; then
   mapfile -t SCENARIOS < <(cd "$BENCH/scenarios" && ls ./*.js | sed 's#^\./##')
 else
-  SCENARIOS=("$SCENARIO")
+  case "$SCENARIO" in *.js) SCENARIOS=("$SCENARIO") ;; *) SCENARIOS=("$SCENARIO.js") ;; esac
 fi
 
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.

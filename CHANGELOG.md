@@ -5,6 +5,193 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha25] - 2026-08-16
+
+### Added
+
+- A host allowlist for same-network IdPs behind the SSRF guard (SEC-107)
+- Give SCIM provisioning a real bucket (R5.2 tail)
+- SDK-Q10 — reason supersedes deny_reason, deprecate-and-add (R5.6)
+- GRPC admin service, health surface, integration tests and docs (R2.3, R2.4, R2.6)
+- Wire the reactor gate into all five interceptor sites (R2.2, X1)
+- Add the axiam-scim crate — SCIM 2.0 provisioning under /scim/v2 (R3.1, B4)
+- Per-client logout settings — post_logout_redirect_uris and back-channel URI (R4.2d, B5)
+- Scopes CRUD and the effective-access preview with deny cascade (R4.2c, R4.2e)
+- Add the device verification page and the GDPR privacy console (R4.1, R4.2a)
+- Give FormDialog an accessible error slot and thread mutation errors (R4.3)
+- Carry sender-constraining, UMA and X4 provenance on the gRPC surface
+- X5.1 second half — private_key_jwt and DPoP (contract 1.16)
+- X4 — external-IdP token exchange (RFC 8693, cross-domain)
+- X3 — attestation policy enforcement via FIDO MDS3
+- X2d — resource registration, RPT introspection, provenance
+- X2c — the UMA 2.0 HTTP surface
+- X2b — permission endpoint and uma-ticket grant
+- X2a — permission ticket domain model and store
+- Reactor admin console (X1)
+- X1b — REST CRUD, event registry endpoint, OpenAPI
+- X1a — event registry, wire protocol and dispatch chain
+- §19 config_clamped event — a clamp must be reported (1.9)
+- Mount RP-initiated and back-channel logout (B5b)
+- Logout-token issuance and session identity for B5
+- Mount PAR and teach the authorize endpoint request_uri (B5)
+- PAR core — request-URI issuance and single-use consumption (B5)
+- Finish the token-exchange grant and wire B2/B3 into the server (B3)
+- Wire the token-exchange grant into the REST surface (B3, WIP)
+- Token-exchange core — the narrowing rules and their property test (B3, WIP)
+- Mount the Device Authorization Grant's REST surface (B2)
+- The three unblocked new-feature cells, and why the rest wait (E4)
+- Bulk-seed tooling for the seed-size sensitivity cell (E3/J12)
+- Device authorization grant — core, storage and state machine (B2, partial)
+- A11y smoke suite, coverage matrix, and the deny-effect editor (C3, C4)
+- Passkey and security-key enrolment and sign-in (C1, C2)
+- RBAC deny-override — explicit deny that beats every allow (B1)
+- TLS transport encryption for broker traffic (A6)
+- Opt-in strict session-revocation mode + document the default (A4/J10)
+- Read-replica routing primitive + staleness contract (A3/J11)
+- Link the Coveralls coverage reports
+
+### Changed
+
+- Quick-run benchmark runbook for alpha25 (AXIAM-only, p0/p2/p3)
+- Execution log update 5b — SEC-096..SEC-107, and a runbook row the fix invalidated
+- Contract 1.20 and the SEC-096..SEC-107 dispositions
+- Correct the CA-trust claim and the nonce backstop's reach (SEC-105, SEC-106)
+- Execution log update 5 — the tracked follow-ups
+- Make the frontend job print the coverage it achieved
+- Provision the scim:provision principal the SCIM scenario needs
+- Detect stale vendored artifacts across the SDK repos (R5.8b)
+- Execution log update 4 — R5.8 fan-out, merges, R5.9, R5.2 tail
+- Ratchet the Rust line-coverage floor 80 -> 88 (R5.9)
+- The two authored k6 scenarios are no longer owed (R5.11)
+- Execution log update 2 — final wave status, residuals and new findings
+- Add the first coverage floor to vitest.config.ts (R5.9)
+- F4-bis review of everything post-2026-08-10 (R6)
+- Drop the on-failure server-log dump entirely (R5.1)
+- Shrink the smoke failure dump to 40 lines (R5.1)
+- Clear the two clippy findings in the reactor test code (R2.2)
+- Rustfmt the gate wiring and drop a literal test credential (R2.2)
+- Prove X4 token exchange against a real Keycloak (R5.4)
+- Close the X2 test gaps — Keycloak RPT compat and a deny-override property test (R5.3)
+- Supply the three mandatory startup secrets to the smoke stack (R5.1)
+- Assert native constraint validation on the login form (R4.7)
+- Make the runtime-smoke failure legible and supply b3's password (R5.1)
+- Drop needless borrows in the contract tests (R3.1)
+- Join the grants_by_role declaration onto one line (R1.3)
+- Add the F3 examples tree with a two-tier CI smoke job (R5.1)
+- State the SEC-089 audience allow-list where operators and callers read it (R1.1)
+- Refresh the frontend coverage matrix for the R4 surfaces
+- Add the execution log for the 2026-08-15 remediation pass
+- Add §22 Reactors and bump the contract to 1.18 (R2.1)
+- Record token exchange's revocation posture where F4 asked for it (R1.2)
+- Add A1's owed sustained-flood integration test (R5.2)
+- Run the limiter suite as a dedicated job (R5.2)
+- Add the missing flood scenarios and the two unwritten R7 cells (R5.2, R7)
+- Correct the stale permissions row in the coverage matrix (R4.9)
+- Emit CycloneDX SBOMs for the Rust workspace and frontend (R5.10)
+- Truth up stale status lines across five planning docs (R5.11)
+- Benchmark Run5 changes
+- Consolidated remediation plan from the 2026-08-15 full verification
+- Drop the owned copies totp-rs 5.x's Secret::Encoded required
+- Keep the RFC 9449 `ath` vector in exactly one place
+- Regenerate openapi.json for the contract 1.16 client fields
+- Bump totp-rs from 5.7.2 to 6.0.0
+- X5 — FAPI 2.0 readiness, conformance harness, and contract 1.15 (#319)
+- Contract 1.14 + STRIDE model for the X6 single-use guarantee
+- Subject_token_type becomes required (contract 1.13)
+- Add X6 — make single-use redemption a guarantee (closes the #302 residual)
+- Bump the minor-patch group across 1 directory with 7 updates
+- Allow BSL-1.0 for xxhash-rust
+- Dispatch /oauth2 errors on the error field (contract 1.12)
+- Lift the §12.6 Swift/C/C++ deferral (contract 1.11)
+- §20 — the UMA 2.0 contract the SDK fan-out implements
+- Shrink test-job target/ so the gRPC relinks stop exhausting runner disk
+- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
+- Bump dtolnay/rust-toolchain
+- Bump github/codeql-action/upload-sarif
+- Bump taiki-e/install-action from 2.85.5 to 2.85.10
+- Bump the minor-patch group in /frontend with 6 updates
+- Bump actions/attest-build-provenance from 4.1.1 to 4.2.2
+- Fold the single-use suite into one test binary
+- E2e specs for the reactor console (X1)
+- Record the reactor console as a P1 gap (X1)
+- Correct the deny-override claim across the live doc set (F2) (#288)
+- F4 review of the B-track; fix SEC-088 sub_kind confusion
+- §16 preamble rewritten from tests, not greps (1.8.3)
+- §16 preamble errata — five SDKs diverged (1.8.2)
+- §16 preamble errata — three SDKs diverged, not two (1.8.1)
+- Contract 1.8 — retry policy, decision memo, close(), telemetry (D5) (#283)
+- Contract 1.7 — device_login credential-adoption errata (D6)
+- Contract §12.7 logout helpers; server logout guide (D4)
+- Contract §14 device grant, §15 token exchange; B5 design (D4)
+- Drive the device-flow suite green — all 14 pass
+- Answer the two questions that decide X3's cost, before starting it
+- One shared test-password helper; lint the AMQP transport posture
+- Add extra B-track features doc (X1-X5) — Reactors, UMA 2.0, MDS3, external-IdP exchange, FAPI 2.0
+- Cut refresh rotation from five datastore round trips to three (A2/J2)
+- Add A6 — AMQP transport encryption (amqps/TLS)
+- Post-run-5 improvement plan — fixes, competitor gaps, frontend/SDK completion
+- Update benchmarks page to run 5, add SDK and §10 sections
+- Benchmark run 5 — release image, full matrix, three mysteries closed (#275)
+- Run 5 targets the published 1.0.0-alpha24 image, not a local build
+
+### Fixed
+
+- Normalize extension-less --scenario; read matrix trees in rl-prod-check
+- Delete must report NotFound for a foreign or unknown id (SEC-104)
+- Deprovisioning must revoke live sessions and refresh tokens (SEC-098)
+- Correct the gate's deny paths and refuse an undispatchable registration (SEC-099, SEC-100, SEC-101)
+- Stop token exchange stripping sender-constraining (SEC-096, SEC-097, SEC-102)
+- B5 back-channel logout URI must be reachable from AXIAM (R5.1)
+- B5 must send tenant_id on the RP-initiated logout URL (R5.1)
+- Declare the containerized reactor test queue durable, not transient (R2.4)
+- Close the three HIGH findings from the F4-bis review (SEC-093, SEC-094, SEC-095)
+- Configure a real OIDC issuer URL for the compose stack (R5.1)
+- Generate the reactor test fixture's password instead of hard-coding it (R2.3)
+- B2 read tenant_id from the wrong path in the /auth/me response (R5.1)
+- B2 must send tenant_id to /oauth2/device_authorization (R5.1)
+- Correct the role-assignment status codes and stop carrying a literal test password (R5.1)
+- B1 asserted 201 where the API returns 204 (R5.1)
+- Use express-rate-limit in the B5 RP example (R5.1)
+- Close the CodeQL findings in the B3 and B5 examples (R5.1)
+- Allow registering the device-code and token-exchange grants
+- Enforce bearer SubjectConfirmationData — Recipient, NotOnOrAfter, InResponseTo (R1.5, SEC-005)
+- Key batch grants per tenant and document the widening fallback (R1.3)
+- Stop claiming the RBAC engine has no deny-override (R4.4)
+- Surface delete failures on the tenants page (R4.6)
+- Gate every protected route and fail closed on a null /auth/me (R4.5, R4.7)
+- Keep proof_replay_repo out of SamlFederationService::new
+- Port TOTP to totp-rs 6.0's builder, struct Secret and Token
+- The authorization-code grant joins the layered single-use mechanism
+- X6 — single-use redemption becomes a guarantee (#302)
+- Repair the db test build, split the frontend format helpers
+- Commit the vendored MDS trust anchor, which .gitignore ate
+- Give resource delete and child create a key to collide on
+- Run the serialisation tests and both deployments on surrealkv
+- Wire X2 into the server binary and regenerate the derived artifacts
+- Stop device-grant and PAR single-use depending on conflict detection
+- Decide the ticket race in `consume` instead of asking SurrealDB to
+- Serialise single-use consumes for device grants and PAR
+- Keep the FormDialog footer reachable on tall forms
+- Register the reactor permissions and routes (X1b)
+- Deny-override precedence pass — end-to-end tests + SEC-092 (#289)
+- Box ClientOutcome::Found — B5's fields tripped large_enum_variant
+- Classify the device verification paths; B5 registration groundwork
+- Give the authorization test fixture B3's new `act` claim
+- One authenticate_client, and use the J1-aware rate-limit check (B3)
+- Apply SDK_BENCH_CONCURRENCY to the C++ client, not just its workers (D2/J6)
+- Record the Python bench's event loop and prefer uvloop (D1/J5)
+- Close the three SDK-harness audits — TS baseline, C# accounting, Rust CPU (D3/J7/J8/J8b)
+- Make the required container env provable, and stop dropping investigation artifacts (E1/E2)
+- Repair the two specs C1/C2 invalidated
+- Set ALLOW_PLAINTEXT on the three release-image stacks A6 broke
+- Generate the budget test's password; bump dev-only nanoid past GHSA-2v37-7h3g-55p8
+- Exempt human-scale limits from the cold-entry seed (A1 follow-up)
+- Pre-mint the refresh session pool inside the login budget (A5/J4)
+- Close the two-layer starvation and boundary over-admission (A1/J1)
+- Repair the dry-run matrix — teardown, seed idempotency, mTLS probe
+- Realign rate-limit assertions with SEC-079; fix run-5 preflight
+- Align the footer link columns
+
 ## [Unreleased]
 
 ### Added

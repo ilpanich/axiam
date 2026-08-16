@@ -64,7 +64,8 @@ use axiam_db::{
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
+    SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionClientRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
@@ -503,6 +504,7 @@ async fn main() -> std::io::Result<()> {
     let permission_repo = SurrealPermissionRepository::new(pool.handle_for_repo());
     let resource_repo = SurrealResourceRepository::new(pool.handle_for_repo());
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
+    let scim_token_repo = SurrealScimTokenRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
 
     // §15.2 / §16.6 — legacy service-account secret hashes.
@@ -570,7 +572,7 @@ async fn main() -> std::io::Result<()> {
     // See `claude_dev/scim-provisioning-token-design.md`.
     let scim_token_resolver: std::sync::Arc<dyn axiam_api_rest::ScimTokenResolver> =
         std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
-            axiam_db::SurrealScimTokenRepository::new(pool.handle_for_repo()),
+            scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
         ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo());
@@ -1808,6 +1810,7 @@ async fn main() -> std::io::Result<()> {
         permission_repo: permission_repo.clone(),
         resource_repo: resource_repo.clone(),
         scope_repo: scope_repo.clone(),
+        scim_token_repo: scim_token_repo.clone(),
         service_account_repo: service_account_repo.clone(),
         auth_service: auth_service.clone(),
         webauthn_service: webauthn_service.clone(),

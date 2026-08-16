@@ -7,6 +7,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { ServiceAccountsPage } from "./ServiceAccountsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { useAuthStore, type AuthUser } from "@/stores/auth";
 
 const accounts = [
   {
@@ -31,8 +32,50 @@ const accounts = [
   },
 ];
 
+const certificates = [
+  {
+    id: "cert-active-service",
+    subject: "CN=ci-runner",
+    fingerprint: "AABBCCDDEEFF00112233",
+    cert_type: "Service",
+    status: "Active",
+  },
+  // Filtered out: revoked, and a User cert cannot bind to a service account.
+  {
+    id: "cert-revoked",
+    subject: "CN=old",
+    fingerprint: "DEAD",
+    cert_type: "Service",
+    status: "Revoked",
+  },
+  {
+    id: "cert-user",
+    subject: "CN=alice",
+    fingerprint: "BEEF",
+    cert_type: "User",
+    status: "Active",
+  },
+];
+
+/** The bind action is gated on certificates:bind. */
+function asCertBinder(permissions = ["certificates:bind"]) {
+  const u: AuthUser = {
+    id: "admin",
+    username: "admin",
+    email: "admin@x.io",
+    permissions,
+    tenant_id: "t1",
+  };
+  useAuthStore.setState({ user: u, isAuthenticated: true, isInitializing: false });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isInitializing: false,
+  });
 });
 
 describe("ServiceAccountsPage", () => {
@@ -251,5 +294,107 @@ describe("ServiceAccountsPage", () => {
     expect(within(secretDialog).getByText("Secret Rotated")).toBeInTheDocument();
     expect(within(secretDialog).getByText("client-abc-123")).toBeInTheDocument();
     expect(within(secretDialog).getByText("rotated-secret-xyz")).toBeInTheDocument();
+  });
+
+  // ─── Certificate binding ───────────────────────────────────────────────────
+
+  it("offers no bind action without certificates:bind", async () => {
+    apiMock.get.mockResolvedValue(res(accounts));
+    renderWithProviders(<ServiceAccountsPage />);
+    expect(await screen.findByText("ci-runner")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Bind certificate to ci-runner/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists only active Service certificates as bind candidates", async () => {
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(url === "/api/v1/certificates" ? certificates : accounts)
+      )
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    const select = within(dialog).getByLabelText("Certificate *");
+
+    // A revoked or User certificate would bind and then fail every handshake.
+    expect(within(select).getByText(/CN=ci-runner/)).toBeInTheDocument();
+    expect(within(select).queryByText(/CN=old/)).not.toBeInTheDocument();
+    expect(within(select).queryByText(/CN=alice/)).not.toBeInTheDocument();
+  });
+
+  it("binds the selected certificate to the service account", async () => {
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(url === "/api/v1/certificates" ? certificates : accounts)
+      )
+    );
+    apiMock.post.mockResolvedValue(
+      res({
+        certificate_id: "cert-active-service",
+        service_account_id: "sa1",
+        status: "bound",
+      })
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Certificate *"),
+      "cert-active-service"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Bind" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/service-accounts/sa1/bind-certificate",
+        { certificate_id: "cert-active-service" }
+      )
+    );
+  });
+
+  it("requires a certificate to be selected", async () => {
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(url === "/api/v1/certificates" ? certificates : accounts)
+      )
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Bind" }));
+
+    expect(
+      await within(dialog).findByText("Select a certificate to bind.")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("points the operator at the Certificates page when none are eligible", async () => {
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(res(url === "/api/v1/certificates" ? [] : accounts))
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    expect(
+      await screen.findByText(/No active Service certificates exist yet/)
+    ).toBeInTheDocument();
   });
 });

@@ -18,6 +18,8 @@ import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { OrgEmailConfigPanel } from "./EmailConfigPanel";
+import { usePermissions } from "@/hooks/usePermissions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
@@ -29,19 +31,22 @@ import { Textarea } from "@/components/ui/textarea";
 
 // ─── Tab bar ──────────────────────────────────────────────────────────────────
 
-type Tab = "tenants" | "certificates" | "settings";
+type Tab = "tenants" | "certificates" | "settings" | "email";
 
 interface TabBarProps {
   active: Tab;
   onChange: (tab: Tab) => void;
+  /** Tabs whose permission the caller has already checked away. */
+  hidden?: readonly Tab[];
 }
 
-function TabBar({ active, onChange }: TabBarProps) {
+function TabBar({ active, onChange, hidden = [] }: TabBarProps) {
   const tabs: { id: Tab; label: string }[] = [
     { id: "tenants", label: "Tenants" },
     { id: "certificates", label: "CA Certificates" },
     { id: "settings", label: "Settings" },
-  ];
+    { id: "email", label: "Email" },
+  ].filter((t) => !hidden.includes(t.id as Tab)) as { id: Tab; label: string }[];
 
   return (
     <div
@@ -1132,6 +1137,8 @@ function SettingsTab({
 
 export function OrganizationDetailPage() {
   const { orgId } = useParams<{ orgId: string }>();
+  const { can } = usePermissions();
+  const canReadEmail = can("email_config:read");
   const [activeTab, setActiveTab] = useState<Tab>("tenants");
   // D-19: SettingsTab's dirty state, lifted up so switching AWAY from the
   // Settings tab (a local component-state change, not a router navigation)
@@ -1203,7 +1210,11 @@ export function OrganizationDetailPage() {
         }
       />
 
-      <TabBar active={activeTab} onChange={handleTabChange} />
+      <TabBar
+        active={activeTab}
+        onChange={handleTabChange}
+        hidden={canReadEmail ? [] : ["email"]}
+      />
 
       {activeTab === "tenants" && <TenantsTab orgId={orgId} />}
       {activeTab === "certificates" && <CaCertificatesTab orgId={orgId} />}
@@ -1213,6 +1224,9 @@ export function OrganizationDetailPage() {
           orgId={orgId}
           onDirtyChange={setSettingsDirty}
         />
+      )}
+      {activeTab === "email" && canReadEmail && (
+        <OrgEmailConfigPanel orgId={orgId} />
       )}
 
       {/* D-19: in-app navigate-away guard for the Settings tab's own

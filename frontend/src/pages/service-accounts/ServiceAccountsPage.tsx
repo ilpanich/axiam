@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, RotateCw } from "lucide-react";
+import { Plus, Pencil, Trash2, RotateCw, FileKey } from "lucide-react";
 import {
   serviceAccountService,
   type ServiceAccount,
@@ -20,6 +20,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDate } from "@/lib/utils";
 import { ToggleField } from "@/components/shared";
+import { certificateService } from "@/services/certificates";
+import { usePermissions } from "@/hooks/usePermissions";
 
 // ─── Create form fields ───────────────────────────────────────────────────────
 
@@ -119,6 +121,7 @@ function EditFields({
 
 export function ServiceAccountsPage() {
   const queryClient = useQueryClient();
+  const { can } = usePermissions();
 
   const { data: accounts = [], isLoading } = useQuery({
     queryKey: ["service-accounts"],
@@ -290,6 +293,59 @@ export function ServiceAccountsPage() {
   });
 
   // ─── Table columns ─────────────────────────────────────────────────────────
+  // ─── Certificate binding ───────────────────────────────────────────────────
+  // Lets a service account authenticate by mTLS rather than by its client
+  // secret — the credential shape IoT and service-mesh deployments actually
+  // use, and until now reachable only by calling the API directly.
+  const canBindCertificate = can("certificates:bind");
+
+  const [bindAccount, setBindAccount] = useState<ServiceAccount | null>(null);
+  const [bindCertId, setBindCertId] = useState("");
+  const [bindError, setBindError] = useState("");
+
+  // Only Service-type certificates can meaningfully bind to a service account,
+  // and a revoked or expired one would bind and then fail every handshake.
+  const { data: allCertificates = [] } = useQuery({
+    queryKey: ["certificates"],
+    queryFn: () => certificateService.list(),
+    enabled: canBindCertificate && bindAccount !== null,
+  });
+
+  const bindableCertificates = allCertificates.filter(
+    (c) => c.status === "Active" && c.cert_type === "Service"
+  );
+
+  function openBind(account: ServiceAccount) {
+    setBindAccount(account);
+    setBindCertId("");
+    setBindError("");
+  }
+
+  const bindMutation = useMutation({
+    mutationFn: ({ saId, certId }: { saId: string; certId: string }) =>
+      certificateService.bindToServiceAccount(saId, certId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["service-accounts"] });
+      setBindAccount(null);
+      setBindCertId("");
+    },
+    onError: (err: unknown) =>
+      setBindError(
+        err instanceof Error ? err.message : "Failed to bind the certificate."
+      ),
+  });
+
+  function handleBindSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setBindError("");
+    if (!bindAccount) return;
+    if (!bindCertId) {
+      setBindError("Select a certificate to bind.");
+      return;
+    }
+    bindMutation.mutate({ saId: bindAccount.id, certId: bindCertId });
+  }
+
   const columns: Column<ServiceAccount>[] = [
     {
       key: "name",
@@ -362,6 +418,16 @@ export function ServiceAccountsPage() {
           >
             <RotateCw size={14} />
           </button>
+          {canBindCertificate && (
+            <button
+              aria-label={`Bind certificate to ${row.name}`}
+              onClick={() => openBind(row)}
+              className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+              title="Bind certificate"
+            >
+              <FileKey size={14} />
+            </button>
+          )}
           <button
             aria-label={`Delete ${row.name}`}
             onClick={() => setDeleteAccount(row)}
@@ -463,6 +529,46 @@ export function ServiceAccountsPage() {
           { label: "Client Secret", value: revealedSecret },
         ]}
       />
+
+      {/* Bind certificate */}
+      <FormDialog
+        open={bindAccount !== null}
+        onClose={() => setBindAccount(null)}
+        title={`Bind Certificate to ${bindAccount?.name ?? ""}`}
+        onSubmit={handleBindSubmit}
+        isLoading={bindMutation.isPending}
+        submitLabel="Bind"
+        error={bindError}
+        errorId="service-account-bind-error"
+      >
+        <div className="space-y-2">
+          <Label htmlFor="bind-certificate">Certificate *</Label>
+          <select
+            id="bind-certificate"
+            value={bindCertId}
+            onChange={(e) => setBindCertId(e.target.value)}
+            className="w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm"
+          >
+            <option value="">Select a certificate…</option>
+            {bindableCertificates.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.subject} — {c.fingerprint.slice(0, 16)}…
+              </option>
+            ))}
+          </select>
+          {bindableCertificates.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No active Service certificates exist yet. Issue one from the{" "}
+              <span className="text-primary">Certificates</span> page first.
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            The service account will be able to authenticate with this
+            certificate over mTLS. Only active certificates of type{" "}
+            <code>Service</code> are listed.
+          </p>
+        </div>
+      </FormDialog>
 
       {/* Rotate secret confirm */}
       <ConfirmDialog

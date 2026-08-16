@@ -3,9 +3,16 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   oauth2ClientService,
+  validateClientPosture,
   GRANT_TYPES,
   OAUTH2_SCOPES,
+  OAUTH2_SCOPE_HINTS,
+  CLIENT_PROFILES,
+  CLIENT_AUTH_METHODS,
   type OAuth2Client,
+  type ClientProfile,
+  type ClientAuthMethod,
+  type ClientPosturePayload,
   type CreateOAuth2ClientPayload,
   type UpdateOAuth2ClientPayload,
 } from "@/services/oauth2clients";
@@ -36,6 +43,95 @@ function GrantTypeBadge({ type }: { type: string }) {
   );
 }
 
+// ─── X5.1 posture presentation ────────────────────────────────────────────────
+
+const AUTH_METHOD_LABELS: Record<string, string> = {
+  client_secret_post: "Client Secret",
+  tls_client_auth: "mTLS (PKI)",
+  self_signed_tls_client_auth: "mTLS (self-signed)",
+  private_key_jwt: "Private Key JWT",
+};
+
+const PROFILE_LABELS: Record<string, string> = {
+  standard: "Standard",
+  fapi2: "FAPI 2.0",
+};
+
+/**
+ * The posture summary shown in the list. Only the *notable* facts get a badge:
+ * a `standard` client authenticating with a secret and no sender constraint —
+ * every client that predates X5.1 — renders nothing, so the column draws the
+ * eye only to clients that are actually hardened.
+ */
+function PostureBadges({ client }: { client: OAuth2Client }) {
+  const method = client.token_endpoint_auth_method ?? "client_secret_post";
+  const badges: { key: string; label: string; className: string; title: string }[] =
+    [];
+
+  if (client.profile === "fapi2") {
+    badges.push({
+      key: "profile",
+      label: "FAPI 2.0",
+      className:
+        "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+      title:
+        "Registered under the FAPI 2.0 Security Profile: PAR, strong client authentication and sender-constrained tokens are all enforced.",
+    });
+  }
+  if (method !== "client_secret_post") {
+    badges.push({
+      key: "auth",
+      label: AUTH_METHOD_LABELS[method] ?? method,
+      className: "bg-violet-500/15 text-violet-400 border-violet-500/30",
+      title: `Authenticates at the token endpoint with ${method}.`,
+    });
+  }
+  if (client.tls_client_certificate_bound_access_tokens) {
+    badges.push({
+      key: "mtls-bound",
+      label: "cert-bound",
+      className: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+      title:
+        "RFC 8705 §3.4 — access tokens are bound to the client's TLS certificate.",
+    });
+  }
+  if (client.dpop_bound_access_tokens) {
+    badges.push({
+      key: "dpop",
+      label: "DPoP",
+      className: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+      title: "RFC 9449 §5.2 — access tokens are DPoP-bound.",
+    });
+  }
+  if (client.require_par) {
+    badges.push({
+      key: "par",
+      label: "PAR",
+      className: "bg-sky-500/15 text-sky-400 border-sky-500/30",
+      title:
+        "RFC 9126 — this client must push its authorization parameters rather than sending them through the browser.",
+    });
+  }
+
+  if (badges.length === 0) {
+    return <span className="text-xs text-muted-foreground">Standard</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {badges.map((b) => (
+        <span
+          key={b.key}
+          title={b.title}
+          className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium border ${b.className}`}
+        >
+          {b.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // ─── Checkbox group ───────────────────────────────────────────────────────────
 
 interface CheckboxGroupProps {
@@ -45,6 +141,8 @@ interface CheckboxGroupProps {
   selected: string[];
   onChange: (v: string[]) => void;
   labelMap?: Record<string, string>;
+  /** Per-option explanatory text, rendered under the option. */
+  hintMap?: Record<string, string>;
 }
 
 function CheckboxGroup({
@@ -54,6 +152,7 @@ function CheckboxGroup({
   selected,
   onChange,
   labelMap,
+  hintMap,
 }: CheckboxGroupProps) {
   function toggle(opt: string) {
     if (selected.includes(opt)) {
@@ -73,24 +172,291 @@ function CheckboxGroup({
         id={id}
       >
         {options.map((opt) => (
-          <label
-            key={opt}
-            className="flex items-center gap-2.5 cursor-pointer hover:text-foreground transition-colors"
-          >
-            <input
-              type="checkbox"
-              checked={selected.includes(opt)}
-              onChange={() => toggle(opt)}
-              className="w-3.5 h-3.5 accent-cyan-400 cursor-pointer"
-              aria-label={labelMap?.[opt] ?? opt}
-            />
-            <span className="text-sm font-mono text-foreground/80">
-              {opt}
-            </span>
-          </label>
+          <div key={opt}>
+            <label className="flex items-center gap-2.5 cursor-pointer hover:text-foreground transition-colors">
+              <input
+                type="checkbox"
+                checked={selected.includes(opt)}
+                onChange={() => toggle(opt)}
+                className="w-3.5 h-3.5 accent-cyan-400 cursor-pointer"
+                aria-label={labelMap?.[opt] ?? opt}
+              />
+              <span className="text-sm font-mono text-foreground/80">
+                {opt}
+              </span>
+            </label>
+            {hintMap?.[opt] && (
+              <p className="ml-6 text-xs text-muted-foreground">
+                {hintMap[opt]}
+              </p>
+            )}
+          </div>
         ))}
       </div>
     </div>
+  );
+}
+
+// ─── X5.1 security posture fields ─────────────────────────────────────────────
+
+function Checkbox({
+  id,
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <div>
+      <label
+        htmlFor={id}
+        className="flex items-center gap-2.5 cursor-pointer hover:text-foreground transition-colors"
+      >
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="w-3.5 h-3.5 accent-cyan-400 cursor-pointer"
+        />
+        <span className="text-sm text-foreground/80">{label}</span>
+      </label>
+      {hint && <p className="ml-6 text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  );
+}
+
+interface PostureFieldsProps {
+  posture: ClientPosturePayload;
+  onChange: (patch: Partial<ClientPosturePayload>) => void;
+  /** Raw textarea value for thumbprints — one per line. */
+  thumbprintsRaw: string;
+  onThumbprintsRawChange: (v: string) => void;
+  idPrefix: string;
+}
+
+/**
+ * The X5.1 registration surface: profile, client authentication, and the
+ * sender-constraining switches.
+ *
+ * Fields are shown conditionally on the selected authentication method, since
+ * the backend's `validate_registration` refuses combinations that mix them —
+ * a `tls_client_auth` client with a JWKS registered and no certificate binding
+ * is not a client anybody meant to create.
+ *
+ * `dpop_require_nonce` has no control here: the backend refuses `true`
+ * (SEC-097 — nothing reads the stored value), so offering the switch would
+ * present a security control that does nothing.
+ */
+function PostureFields({
+  posture,
+  onChange,
+  thumbprintsRaw,
+  onThumbprintsRawChange,
+  idPrefix,
+}: PostureFieldsProps) {
+  const method = posture.token_endpoint_auth_method ?? "client_secret_post";
+  const profile = posture.profile ?? "standard";
+
+  return (
+    <fieldset className="space-y-4 rounded-md border border-input p-3">
+      <legend className="px-1 text-sm font-medium text-foreground/90">
+        Security Posture
+      </legend>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-profile`}>Client Profile</Label>
+        <select
+          id={`${idPrefix}-profile`}
+          value={profile}
+          onChange={(e) =>
+            onChange({ profile: e.target.value as ClientProfile })
+          }
+          className="w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm"
+        >
+          {CLIENT_PROFILES.map((p) => (
+            <option key={p} value={p}>
+              {PROFILE_LABELS[p] ?? p}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-muted-foreground">
+          <strong>FAPI 2.0</strong> turns on the whole constraint bundle at
+          once: the registration is refused unless it also requires PAR, uses a
+          strong authentication method, and sender-constrains its tokens.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-auth-method`}>
+          Token Endpoint Authentication
+        </Label>
+        <select
+          id={`${idPrefix}-auth-method`}
+          value={method}
+          onChange={(e) =>
+            onChange({
+              token_endpoint_auth_method: e.target.value as ClientAuthMethod,
+            })
+          }
+          className="w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm"
+        >
+          {CLIENT_AUTH_METHODS.map((m) => (
+            <option key={m} value={m}>
+              {AUTH_METHOD_LABELS[m] ?? m}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* RFC 8705 §2.1.2 — exactly one of the three may be set. */}
+      {method === "tls_client_auth" && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Register <strong>exactly one</strong> expected identity from the
+            client's certificate.
+          </p>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-tls-subject-dn`}>Subject DN</Label>
+            <Input
+              id={`${idPrefix}-tls-subject-dn`}
+              value={posture.tls_client_auth_subject_dn ?? ""}
+              onChange={(e) =>
+                onChange({ tls_client_auth_subject_dn: e.target.value })
+              }
+              placeholder="CN=payments,O=Example,C=GB"
+              className="font-mono"
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-tls-san-dns`}>SAN dNSName</Label>
+            <Input
+              id={`${idPrefix}-tls-san-dns`}
+              value={posture.tls_client_auth_san_dns ?? ""}
+              onChange={(e) =>
+                onChange({ tls_client_auth_san_dns: e.target.value })
+              }
+              placeholder="payments.example.com"
+              className="font-mono"
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-tls-san-uri`}>SAN URI</Label>
+            <Input
+              id={`${idPrefix}-tls-san-uri`}
+              value={posture.tls_client_auth_san_uri ?? ""}
+              onChange={(e) =>
+                onChange({ tls_client_auth_san_uri: e.target.value })
+              }
+              placeholder="https://payments.example.com"
+              className="font-mono"
+              autoComplete="off"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Shown for the method that uses them, and whenever any are already
+          registered under a method that does not. Thumbprints are validated
+          unconditionally (the backend does the same — a malformed value in the
+          row is a landmine for the day somebody switches method), so hiding a
+          field that can block the save would leave nothing to fix it in. */}
+      {(method === "self_signed_tls_client_auth" ||
+        thumbprintsRaw.trim() !== "") && (
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-thumbprints`}>
+            Certificate Thumbprints
+          </Label>
+          <Textarea
+            id={`${idPrefix}-thumbprints`}
+            value={thumbprintsRaw}
+            onChange={(e) => onThumbprintsRawChange(e.target.value)}
+            rows={3}
+            className="font-mono"
+            aria-label="Certificate thumbprints (one per line)"
+          />
+          <p className="text-xs text-muted-foreground">
+            base64url-unpadded SHA-256 digests of the DER certificate (the same{" "}
+            <code>x5t#S256</code> encoding as the <code>cnf</code> claim). One
+            per line — more than one permits an overlapping rotation.
+            {method !== "self_signed_tls_client_auth" &&
+              " Unused by the selected authentication method, but still validated and stored."}
+          </p>
+        </div>
+      )}
+
+      {method === "private_key_jwt" && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Register <strong>exactly one</strong> key source.
+          </p>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-jwks-uri`}>JWKS URI</Label>
+            <Input
+              id={`${idPrefix}-jwks-uri`}
+              value={posture.jwks_uri ?? ""}
+              onChange={(e) => onChange({ jwks_uri: e.target.value })}
+              placeholder="https://client.example.com/.well-known/jwks.json"
+              className="font-mono"
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              Must be absolute <code>https</code>. Fetched through the
+              SSRF-guarded JWKS cache, which refuses private and loopback
+              addresses.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-jwks`}>JWKS (inline)</Label>
+            <Textarea
+              id={`${idPrefix}-jwks`}
+              value={posture.jwks ?? ""}
+              onChange={(e) => onChange({ jwks: e.target.value })}
+              placeholder='{"keys":[...]}'
+              rows={4}
+              className="font-mono"
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Label>Sender Constraining</Label>
+        <div className="rounded-md border border-input bg-background/50 p-3 space-y-2">
+          <Checkbox
+            id={`${idPrefix}-mtls-bound`}
+            checked={posture.tls_client_certificate_bound_access_tokens ?? false}
+            onChange={(v) =>
+              onChange({ tls_client_certificate_bound_access_tokens: v })
+            }
+            label="Certificate-bound access tokens"
+            hint="RFC 8705 §3.4 — independent of the authentication method."
+          />
+          <Checkbox
+            id={`${idPrefix}-dpop-bound`}
+            checked={posture.dpop_bound_access_tokens ?? false}
+            onChange={(v) => onChange({ dpop_bound_access_tokens: v })}
+            label="DPoP-bound access tokens"
+            hint="RFC 9449 §5.2 — a token carrying both constraints must satisfy both."
+          />
+          <Checkbox
+            id={`${idPrefix}-require-par`}
+            checked={posture.require_par ?? false}
+            onChange={(v) => onChange({ require_par: v })}
+            label="Require pushed authorization requests (PAR)"
+            hint="RFC 9126 — authorization parameters are pushed to /oauth2/par rather than sent through the browser."
+          />
+        </div>
+      </div>
+    </fieldset>
   );
 }
 
@@ -103,12 +469,16 @@ interface ClientFormFieldsProps {
   scopes: string[];
   postLogoutRedirectUris: string;
   backchannelLogoutUri: string;
+  posture: ClientPosturePayload;
+  thumbprintsRaw: string;
   onNameChange: (v: string) => void;
   onGrantTypesChange: (v: string[]) => void;
   onRedirectUrisChange: (v: string) => void;
   onScopesChange: (v: string[]) => void;
   onPostLogoutRedirectUrisChange: (v: string) => void;
   onBackchannelLogoutUriChange: (v: string) => void;
+  onPostureChange: (patch: Partial<ClientPosturePayload>) => void;
+  onThumbprintsRawChange: (v: string) => void;
   idPrefix: string;
 }
 
@@ -119,12 +489,16 @@ function ClientFormFields({
   scopes,
   postLogoutRedirectUris,
   backchannelLogoutUri,
+  posture,
+  thumbprintsRaw,
   onNameChange,
   onGrantTypesChange,
   onRedirectUrisChange,
   onScopesChange,
   onPostLogoutRedirectUrisChange,
   onBackchannelLogoutUriChange,
+  onPostureChange,
+  onThumbprintsRawChange,
   idPrefix,
 }: ClientFormFieldsProps) {
   return (
@@ -169,6 +543,7 @@ function ClientFormFields({
         options={OAUTH2_SCOPES}
         selected={scopes}
         onChange={onScopesChange}
+        hintMap={OAUTH2_SCOPE_HINTS}
       />
 
       {/* B5 — session/logout settings */}
@@ -209,11 +584,37 @@ function ClientFormFields({
           a client that does not participate.
         </p>
       </div>
+
+      <PostureFields
+        posture={posture}
+        onChange={onPostureChange}
+        thumbprintsRaw={thumbprintsRaw}
+        onThumbprintsRawChange={onThumbprintsRawChange}
+        idPrefix={idPrefix}
+      />
     </>
   );
 }
 
 // ─── Main page ─────────────────────────────────────────────────────────────────
+
+/**
+ * The posture a form starts from. Mirrors the backend's `#[serde(default)]`
+ * values so an untouched Security Posture section registers the pre-X5.1
+ * client shape rather than a subtly different one.
+ */
+const DEFAULT_POSTURE: ClientPosturePayload = {
+  profile: "standard",
+  token_endpoint_auth_method: "client_secret_post",
+  tls_client_auth_subject_dn: "",
+  tls_client_auth_san_dns: "",
+  tls_client_auth_san_uri: "",
+  tls_client_certificate_bound_access_tokens: false,
+  jwks: "",
+  jwks_uri: "",
+  dpop_bound_access_tokens: false,
+  require_par: false,
+};
 
 function useClientFormState() {
   const [name, setName] = useState("");
@@ -222,7 +623,17 @@ function useClientFormState() {
   const [scopes, setScopes] = useState<string[]>(["openid", "profile"]);
   const [postLogoutRedirectUris, setPostLogoutRedirectUris] = useState("");
   const [backchannelLogoutUri, setBackchannelLogoutUri] = useState("");
+  // X5.1 — the defaults are exactly the backend's, so a form submitted without
+  // touching this section registers the same client it did before X5.1.
+  const [posture, setPosture] = useState<ClientPosturePayload>({
+    ...DEFAULT_POSTURE,
+  });
+  const [thumbprintsRaw, setThumbprintsRaw] = useState("");
   const [error, setError] = useState("");
+
+  function patchPosture(patch: Partial<ClientPosturePayload>) {
+    setPosture((prev) => ({ ...prev, ...patch }));
+  }
 
   function reset() {
     setName("");
@@ -231,6 +642,8 @@ function useClientFormState() {
     setScopes(["openid", "profile"]);
     setPostLogoutRedirectUris("");
     setBackchannelLogoutUri("");
+    setPosture({ ...DEFAULT_POSTURE });
+    setThumbprintsRaw("");
     setError("");
   }
 
@@ -245,6 +658,28 @@ function useClientFormState() {
     // until then.
     setPostLogoutRedirectUris((client.post_logout_redirect_uris ?? []).join("\n"));
     setBackchannelLogoutUri(client.backchannel_logout_uri ?? "");
+    // Each field falls back to the default rather than to `undefined`, so an
+    // edit dialog opened on a client the server answered without a posture
+    // (the create response DTO omits them) shows the effective values instead
+    // of blanks that would silently clear them on save.
+    setPosture({
+      profile: client.profile ?? DEFAULT_POSTURE.profile,
+      token_endpoint_auth_method:
+        client.token_endpoint_auth_method ??
+        DEFAULT_POSTURE.token_endpoint_auth_method,
+      tls_client_auth_subject_dn: client.tls_client_auth_subject_dn ?? "",
+      tls_client_auth_san_dns: client.tls_client_auth_san_dns ?? "",
+      tls_client_auth_san_uri: client.tls_client_auth_san_uri ?? "",
+      tls_client_certificate_bound_access_tokens:
+        client.tls_client_certificate_bound_access_tokens ?? false,
+      jwks: client.jwks ?? "",
+      jwks_uri: client.jwks_uri ?? "",
+      dpop_bound_access_tokens: client.dpop_bound_access_tokens ?? false,
+      require_par: client.require_par ?? false,
+    });
+    setThumbprintsRaw(
+      (client.self_signed_tls_client_auth_thumbprints ?? []).join("\n")
+    );
     setError("");
   }
 
@@ -261,10 +696,31 @@ function useClientFormState() {
     setPostLogoutRedirectUris,
     backchannelLogoutUri,
     setBackchannelLogoutUri,
+    posture,
+    patchPosture,
+    thumbprintsRaw,
+    setThumbprintsRaw,
     error,
     setError,
     reset,
     load,
+  };
+}
+
+/**
+ * Fold the raw thumbprint textarea into the posture and hand back a payload
+ * fragment ready to send.
+ *
+ * `parseUris` is reused for the line-splitting because the rule is the same —
+ * trim, drop blanks — and having two of them would let them drift.
+ */
+function posturePayload(
+  posture: ClientPosturePayload,
+  thumbprintsRaw: string
+): ClientPosturePayload {
+  return {
+    ...posture,
+    self_signed_tls_client_auth_thumbprints: parseUris(thumbprintsRaw),
   };
 }
 
@@ -321,6 +777,18 @@ export function OAuth2ClientsPage() {
       createForm.setError("Select at least one grant type.");
       return;
     }
+    const posture = posturePayload(
+      createForm.posture,
+      createForm.thumbprintsRaw
+    );
+    // The backend runs the authoritative check and would refuse this with a
+    // 400 anyway — running it here names the unmet constraint while the form
+    // is still open. See validateClientPosture.
+    const postureError = validateClientPosture(posture);
+    if (postureError) {
+      createForm.setError(postureError);
+      return;
+    }
     const payload: CreateOAuth2ClientPayload = {
       name: createForm.name.trim(),
       redirect_uris: parseUris(createForm.redirectUris),
@@ -328,6 +796,7 @@ export function OAuth2ClientsPage() {
       scopes: createForm.scopes.length > 0 ? createForm.scopes : undefined,
       post_logout_redirect_uris: parseUris(createForm.postLogoutRedirectUris),
       backchannel_logout_uri: createForm.backchannelLogoutUri.trim() || undefined,
+      ...posture,
     };
     createMutation.mutate(payload);
   }
@@ -371,6 +840,12 @@ export function OAuth2ClientsPage() {
       editForm.setError("Select at least one grant type.");
       return;
     }
+    const posture = posturePayload(editForm.posture, editForm.thumbprintsRaw);
+    const postureError = validateClientPosture(posture);
+    if (postureError) {
+      editForm.setError(postureError);
+      return;
+    }
     editMutation.mutate({
       id: editClient.id,
       payload: {
@@ -382,6 +857,10 @@ export function OAuth2ClientsPage() {
         // "" clears a previously registered URI, matching the backend's
         // Some("") semantics — trimming to empty is deliberate, not a bug.
         backchannel_logout_uri: editForm.backchannelLogoutUri.trim(),
+        // The same Some("") semantics apply to every optional posture string,
+        // so sending "" for an emptied field clears it rather than leaving the
+        // stored value behind.
+        ...posture,
       },
     });
   }
@@ -429,6 +908,11 @@ export function OAuth2ClientsPage() {
           ))}
         </div>
       ),
+    },
+    {
+      key: "posture",
+      header: "Posture",
+      render: (row) => <PostureBadges client={row} />,
     },
     {
       key: "redirect_uris",
@@ -520,12 +1004,16 @@ export function OAuth2ClientsPage() {
           scopes={createForm.scopes}
           postLogoutRedirectUris={createForm.postLogoutRedirectUris}
           backchannelLogoutUri={createForm.backchannelLogoutUri}
+          posture={createForm.posture}
+          thumbprintsRaw={createForm.thumbprintsRaw}
           onNameChange={createForm.setName}
           onGrantTypesChange={createForm.setGrantTypes}
           onRedirectUrisChange={createForm.setRedirectUris}
           onScopesChange={createForm.setScopes}
           onPostLogoutRedirectUrisChange={createForm.setPostLogoutRedirectUris}
           onBackchannelLogoutUriChange={createForm.setBackchannelLogoutUri}
+          onPostureChange={createForm.patchPosture}
+          onThumbprintsRawChange={createForm.setThumbprintsRaw}
           idPrefix="create"
         />
       </FormDialog>
@@ -548,12 +1036,16 @@ export function OAuth2ClientsPage() {
           scopes={editForm.scopes}
           postLogoutRedirectUris={editForm.postLogoutRedirectUris}
           backchannelLogoutUri={editForm.backchannelLogoutUri}
+          posture={editForm.posture}
+          thumbprintsRaw={editForm.thumbprintsRaw}
           onNameChange={editForm.setName}
           onGrantTypesChange={editForm.setGrantTypes}
           onRedirectUrisChange={editForm.setRedirectUris}
           onScopesChange={editForm.setScopes}
           onPostLogoutRedirectUrisChange={editForm.setPostLogoutRedirectUris}
           onBackchannelLogoutUriChange={editForm.setBackchannelLogoutUri}
+          onPostureChange={editForm.patchPosture}
+          onThumbprintsRawChange={editForm.setThumbprintsRaw}
           idPrefix="edit"
         />
       </FormDialog>

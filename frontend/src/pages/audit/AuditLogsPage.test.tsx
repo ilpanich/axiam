@@ -7,6 +7,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { AuditLogsPage } from "./AuditLogsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { useAuthStore, type AuthUser } from "@/stores/auth";
 
 const logs = [
   {
@@ -39,8 +40,25 @@ function page(items: unknown[], total: number) {
   return { items, total, offset: 0, limit: 20 };
 }
 
+/** The System tab is gated on audit_logs:list_system. */
+function asSystemAuditor(permissions = ["audit_logs:list", "audit_logs:list_system"]) {
+  const u: AuthUser = {
+    id: "admin",
+    username: "admin",
+    email: "admin@x.io",
+    permissions,
+    tenant_id: "t1",
+  };
+  useAuthStore.setState({ user: u, isAuthenticated: true, isInitializing: false });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isInitializing: false,
+  });
 });
 
 describe("AuditLogsPage", () => {
@@ -166,6 +184,71 @@ describe("AuditLogsPage", () => {
           String(url).includes("from=2026-01-01T00%3A00%3A00Z")
         )
       ).toBe(true)
+    );
+  });
+
+  // ─── System trail ──────────────────────────────────────────────────────────
+
+  it("hides the scope switch without audit_logs:list_system", async () => {
+    apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+    expect(
+      screen.queryByRole("tablist", { name: "Audit log scope" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("switches to the system endpoint and back", async () => {
+    asSystemAuditor();
+    apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
+    renderWithProviders(<AuditLogsPage />);
+
+    await screen.findByText("user.created");
+    expect(apiMock.get.mock.calls[0][0]).toContain("/api/v1/audit-logs?");
+
+    await userEvent.click(screen.getByRole("tab", { name: "System" }));
+    await waitFor(() =>
+      expect(
+        apiMock.get.mock.calls.some((c) =>
+          (c[0] as string).startsWith("/api/v1/audit-logs/system?")
+        )
+      ).toBe(true)
+    );
+    // The description follows the scope, so the page never claims the system
+    // trail is "performed in this tenant" — system entries carry no tenant.
+    expect(
+      screen.getByText(/unauthenticated and system requests/)
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Tenant" }));
+    await waitFor(() =>
+      expect(screen.getByText(/performed in this tenant/)).toBeInTheDocument()
+    );
+  });
+
+  it("resets to page 1 when the scope changes", async () => {
+    asSystemAuditor();
+    apiMock.get.mockResolvedValue(
+      res({ items: logs, total: 100, offset: 0, limit: 20 })
+    );
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+
+    await userEvent.click(screen.getByRole("button", { name: /Next/i }));
+    await waitFor(() =>
+      expect(
+        apiMock.get.mock.calls.some((c) => (c[0] as string).includes("offset=20"))
+      ).toBe(true)
+    );
+
+    apiMock.get.mockClear();
+    await userEvent.click(screen.getByRole("tab", { name: "System" }));
+
+    // The two trails do not share a page count, so carrying offset=20 across
+    // the switch would land the operator on a blank page.
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
+    expect(apiMock.get.mock.calls[0][0]).toContain(
+      "/api/v1/audit-logs/system?offset=0"
     );
   });
 });

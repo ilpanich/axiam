@@ -29,6 +29,28 @@ const clients = [
   },
 ];
 
+/**
+ * X5.1 — the posture block an untouched Security Posture section sends.
+ *
+ * Spread into every create/update assertion below rather than repeated: these
+ * are the backend's own `#[serde(default)]` values, so a form the operator
+ * never scrolled to still registers the pre-X5.1 client shape, and asserting
+ * that explicitly is the point.
+ */
+const DEFAULT_POSTURE = {
+  profile: "standard",
+  token_endpoint_auth_method: "client_secret_post",
+  tls_client_auth_subject_dn: "",
+  tls_client_auth_san_dns: "",
+  tls_client_auth_san_uri: "",
+  tls_client_certificate_bound_access_tokens: false,
+  jwks: "",
+  jwks_uri: "",
+  dpop_bound_access_tokens: false,
+  require_par: false,
+  self_signed_tls_client_auth_thumbprints: [],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -106,6 +128,7 @@ describe("OAuth2ClientsPage", () => {
         scopes: ["openid", "profile"],
         post_logout_redirect_uris: [],
         backchannel_logout_uri: undefined,
+        ...DEFAULT_POSTURE,
       })
     );
     const secret = await screen.findByRole("alertdialog");
@@ -147,6 +170,7 @@ describe("OAuth2ClientsPage", () => {
         scopes: undefined,
         post_logout_redirect_uris: [],
         backchannel_logout_uri: undefined,
+        ...DEFAULT_POSTURE,
       })
     );
   });
@@ -188,6 +212,7 @@ describe("OAuth2ClientsPage", () => {
         scopes: ["openid", "profile"],
         post_logout_redirect_uris: [],
         backchannel_logout_uri: "",
+        ...DEFAULT_POSTURE,
       })
     );
   });
@@ -270,8 +295,161 @@ describe("OAuth2ClientsPage", () => {
         scopes: undefined,
         post_logout_redirect_uris: ["https://x/logged-out"],
         backchannel_logout_uri: "https://x/backchannel-logout",
+        ...DEFAULT_POSTURE,
       })
     );
+  });
+
+  // ─── X5.1 security posture ─────────────────────────────────────────────────
+
+  it("badges a client's registered posture in the list", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        {
+          ...clients[0],
+          profile: "fapi2",
+          token_endpoint_auth_method: "private_key_jwt",
+          dpop_bound_access_tokens: true,
+          require_par: true,
+        },
+        clients[1],
+      ])
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+
+    expect(await screen.findByText("FAPI 2.0")).toBeInTheDocument();
+    expect(screen.getByText("Private Key JWT")).toBeInTheDocument();
+    expect(screen.getByText("DPoP")).toBeInTheDocument();
+    expect(screen.getByText("PAR")).toBeInTheDocument();
+    // A client with no hardening reads as plain "Standard" rather than a row
+    // of badges nobody needs to scan.
+    expect(screen.getByText("Standard")).toBeInTheDocument();
+  });
+
+  it("reveals the mTLS binding fields only for an mTLS auth method", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+
+    expect(within(dialog).queryByLabelText("Subject DN")).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "tls_client_auth"
+    );
+    expect(within(dialog).getByLabelText("Subject DN")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("SAN dNSName")).toBeInTheDocument();
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "private_key_jwt"
+    );
+    expect(within(dialog).queryByLabelText("Subject DN")).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("JWKS URI")).toBeInTheDocument();
+  });
+
+  it("names the unmet FAPI 2.0 constraint instead of posting a doomed registration", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "FAPI App");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Client Profile"),
+      "fapi2"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText(/must require pushed authorization requests/))
+      .toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("registers a complete fapi2 client", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockResolvedValue(
+      res({ ...clients[0], client_id: "c-fapi", client_secret: "s" })
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "FAPI App");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Client Profile"),
+      "fapi2"
+    );
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "private_key_jwt"
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText("JWKS URI"),
+      "https://client.example.com/jwks.json"
+    );
+    await userEvent.click(
+      within(dialog).getByLabelText(/DPoP-bound access tokens/)
+    );
+    await userEvent.click(
+      within(dialog).getByLabelText(/Require pushed authorization requests/)
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalled());
+    const body = apiMock.post.mock.calls[0][1] as Record<string, unknown>;
+    expect(body).toMatchObject({
+      profile: "fapi2",
+      token_endpoint_auth_method: "private_key_jwt",
+      jwks_uri: "https://client.example.com/jwks.json",
+      dpop_bound_access_tokens: true,
+      require_par: true,
+    });
+    // SEC-097: the backend refuses `true` and reads nothing, so the UI must
+    // not send the key at all.
+    expect(body).not.toHaveProperty("dpop_require_nonce");
+  });
+
+  it("offers uma_protection so a UMA resource server can be onboarded", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByRole("checkbox", { name: "uma_protection" })
+    ).toBeInTheDocument();
+  });
+
+  it("pre-fills the posture when editing a hardened client", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        {
+          ...clients[0],
+          profile: "fapi2",
+          token_endpoint_auth_method: "self_signed_tls_client_auth",
+          self_signed_tls_client_auth_thumbprints: ["a".repeat(43)],
+          tls_client_certificate_bound_access_tokens: true,
+          require_par: true,
+        },
+      ])
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Edit OAuth2 client Web App/ })
+    );
+    const dialog = screen.getByRole("dialog");
+
+    expect(within(dialog).getByLabelText("Client Profile")).toHaveValue("fapi2");
+    expect(
+      within(dialog).getByLabelText("Token Endpoint Authentication")
+    ).toHaveValue("self_signed_tls_client_auth");
+    expect(
+      within(dialog).getByLabelText("Certificate Thumbprints")
+    ).toHaveValue("a".repeat(43));
+    expect(
+      within(dialog).getByLabelText(/Certificate-bound access tokens/)
+    ).toBeChecked();
   });
 
   it("deletes a client after confirmation", async () => {

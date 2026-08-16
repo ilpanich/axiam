@@ -2,6 +2,8 @@ import { useParams, Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
+import { TenantEmailConfigPanel } from "./EmailConfigPanel";
+import { usePermissions } from "@/hooks/usePermissions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
@@ -9,6 +11,7 @@ import { formatDate } from "@/lib/utils";
 
 export function TenantDetailPage() {
   const { orgId, tenantId } = useParams<{ orgId: string; tenantId: string }>();
+  const { can } = usePermissions();
 
   const { data: org } = useQuery({
     queryKey: ["organizations", orgId],
@@ -132,6 +135,15 @@ export function TenantDetailPage() {
         </div>
       ) : (
         <p className="text-muted-foreground">Tenant not found.</p>
+      )}
+
+      {/* FUNC-03 / D-13 — the tenant's partial overrides on the org email
+          baseline. Gated on the read permission rather than rendered and
+          left to 403, so an operator without it sees no half-loaded panel. */}
+      {tenant && can("email_config:read") && (
+        <div className="mt-6">
+          <TenantEmailConfigPanel tenantId={tenantId} />
+        </div>
       )}
     </div>
   );

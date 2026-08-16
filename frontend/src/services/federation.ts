@@ -136,9 +136,31 @@ export interface UpdateFederationConfigRequest {
   token_exchange?: TokenExchangeTrust;
 }
 
+// ─── Federation links ─────────────────────────────────────────────────────────
+
+/**
+ * A user's established link to an external identity provider.
+ *
+ * Created by the OIDC/SAML callback when a federated login first resolves to
+ * an AXIAM user, and read back so an operator can answer "which IdP accounts
+ * can sign in as this user?" — and revoke one.
+ */
+export interface FederationLink {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  federation_config_id: string;
+  /** The `sub` (or SAML NameID) the IdP asserted for this user. */
+  external_subject: string;
+  external_email: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 const BASE = "/api/v1/federation-configs";
+const LINKS_BASE = "/api/v1/federation-links";
 
 export const federationService = {
   getAll: (): Promise<FederationConfig[]> =>
@@ -160,4 +182,18 @@ export const federationService = {
 
   remove: (id: string): Promise<void> =>
     api.delete(`${BASE}/${id}`).then(() => undefined),
+};
+
+export const federationLinkService = {
+  /** Gated on `federation:list` server-side. */
+  listForUser: (userId: string): Promise<FederationLink[]> =>
+    api
+      .get<FederationLink[] | { items: FederationLink[] }>(
+        `${LINKS_BASE}/user/${userId}`
+      )
+      .then((r) => unwrapList(r.data)),
+
+  /** Gated on `federation:delete` server-side. */
+  unlink: (id: string): Promise<void> =>
+    api.delete(`${LINKS_BASE}/${id}`).then(() => undefined),
 };

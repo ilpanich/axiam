@@ -141,3 +141,99 @@ impl From<MdsError> for axiam_core::error::AxiamError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::error::AxiamError;
+
+    /// The mapping's security posture, not its plumbing: every verification
+    /// failure must land on `Internal`, because those messages name which
+    /// security-relevant check the BLOB failed and are for the audit log rather
+    /// than for an end user. Only the two genuinely operational variants are
+    /// allowed out of that bucket.
+    #[test]
+    fn only_operational_variants_escape_the_internal_bucket() {
+        assert!(matches!(
+            AxiamError::from(MdsError::FetchFailed("connection reset".into())),
+            AxiamError::ServiceUnavailable(_)
+        ));
+        assert!(matches!(
+            AxiamError::from(MdsError::IngestionDisabled),
+            AxiamError::Validation { .. }
+        ));
+
+        // A representative from each verification stage — anchor, JWT shape,
+        // chain, identity, signature and payload. Each is a failure an operator
+        // investigates from the log, never a message a caller should act on.
+        let verification_failures = vec![
+            MdsError::RootAnchorUnparsable,
+            MdsError::RootAnchorDigestMismatch,
+            MdsError::MalformedJwt,
+            MdsError::InvalidHeaderEncoding,
+            MdsError::InvalidHeaderJson,
+            MdsError::UnsupportedAlgorithm("HS256".into()),
+            MdsError::MissingX5c,
+            MdsError::X5cTooLong,
+            MdsError::InvalidX5cEncoding,
+            MdsError::InvalidCertificate("bad der".into()),
+            MdsError::CertificateExpired,
+            MdsError::ChainVerifyFailed,
+            MdsError::IssuerNotCa,
+            MdsError::PathLenExceeded,
+            MdsError::LeafIsCa,
+            MdsError::LeafIdentityMismatch,
+            MdsError::SignatureInvalid,
+            MdsError::InvalidPayload("not an object".into()),
+            MdsError::InvalidNextUpdate("2026-13-45".into()),
+            MdsError::ResponseTooLarge(1024),
+            MdsError::InvalidEncoding,
+            MdsError::LocalFileRead("permission denied".into()),
+        ];
+
+        for err in verification_failures {
+            let rendered = err.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "every variant must render a diagnosable message"
+            );
+            match AxiamError::from(err) {
+                AxiamError::Internal(msg) => assert_eq!(
+                    msg, rendered,
+                    "the Internal message must preserve the variant's own text for the audit log"
+                ),
+                other => panic!("{rendered} escaped the Internal bucket as {other:?}"),
+            }
+        }
+    }
+
+    /// `FetchFailed` is the one variant whose text reaches a caller (through
+    /// ServiceUnavailable), so it carries the upstream detail rather than a
+    /// rendered wrapper — a caller retrying a 503 needs to know why.
+    #[test]
+    fn fetch_failed_passes_the_upstream_message_through_verbatim() {
+        match AxiamError::from(MdsError::FetchFailed("dns failure".into())) {
+            AxiamError::ServiceUnavailable(msg) => assert_eq!(msg, "dns failure"),
+            other => panic!("unexpected mapping: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameterised_variants_name_their_parameter() {
+        assert!(
+            MdsError::ResponseTooLarge(4096)
+                .to_string()
+                .contains("4096")
+        );
+        assert!(
+            MdsError::UnsupportedAlgorithm("none".into())
+                .to_string()
+                .contains("none")
+        );
+        assert!(
+            MdsError::InvalidNextUpdate("nope".into())
+                .to_string()
+                .contains("nope")
+        );
+    }
+}

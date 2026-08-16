@@ -629,6 +629,82 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // The error taxonomy itself
+    // -----------------------------------------------------------------
+
+    /// `reason_code` is what lands in audit records and metric labels, so it
+    /// must stay low-cardinality and STABLE: a dashboard or an alert rule keyed
+    /// on one of these strings breaks silently if a variant is renamed. Pinning
+    /// the exact literals is the point — a test that re-derived them from the
+    /// enum would accept the rename it exists to catch.
+    #[test]
+    fn reason_codes_are_stable_and_carry_no_token_detail() {
+        let cases = [
+            (ExternalSubjectError::IssuerNotTrusted, "issuer_not_trusted"),
+            (
+                ExternalSubjectError::Rejected("aud mismatch".into()),
+                "token_rejected",
+            ),
+            (ExternalSubjectError::SubjectNotLinked, "subject_not_linked"),
+            (ExternalSubjectError::UserNotActive, "user_not_active"),
+            (
+                ExternalSubjectError::Server("db down".into()),
+                "server_error",
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(err.reason_code(), want);
+            // Low cardinality: the code never interpolates the variant's
+            // payload, or every distinct rejection would become its own metric
+            // series.
+            assert!(!err.reason_code().contains(' '));
+        }
+    }
+
+    /// Display is for the audit record and the server log. The two variants
+    /// carrying a payload must surface it — an operator reading "external
+    /// subject token rejected" with no reason cannot act — while the three
+    /// payload-free variants must still render a diagnosable sentence.
+    #[test]
+    fn display_surfaces_the_payload_of_the_variants_that_carry_one() {
+        let rejected = ExternalSubjectError::rejected("aud does not name this AXIAM tenant");
+        let text = rejected.to_string();
+        assert!(
+            text.contains("aud does not name this AXIAM tenant"),
+            "{text}"
+        );
+
+        let server = ExternalSubjectError::Server("datastore unavailable".into());
+        assert_eq!(server.to_string(), "datastore unavailable");
+
+        for err in [
+            ExternalSubjectError::IssuerNotTrusted,
+            ExternalSubjectError::SubjectNotLinked,
+            ExternalSubjectError::UserNotActive,
+        ] {
+            let text = err.to_string();
+            assert!(text.len() > 10, "{text} is not a diagnosable message");
+        }
+    }
+
+    /// The split the doc comment promises: the token endpoint distinguishes
+    /// `IssuerNotTrusted` (an operator fixes the config) from everything else
+    /// (the caller fixes the token). Equality is what that dispatch relies on.
+    #[test]
+    fn issuer_not_trusted_is_distinguishable_from_every_other_refusal() {
+        let config_problem = ExternalSubjectError::IssuerNotTrusted;
+        for other in [
+            ExternalSubjectError::rejected("expired"),
+            ExternalSubjectError::SubjectNotLinked,
+            ExternalSubjectError::UserNotActive,
+            ExternalSubjectError::Server("x".into()),
+        ] {
+            assert_ne!(config_problem, other);
+            assert_ne!(config_problem.reason_code(), other.reason_code());
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Audience flattening
     // -----------------------------------------------------------------
 

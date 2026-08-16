@@ -976,12 +976,46 @@ containers_json() {
 #                  a broken client unless you can see it.
 # Prints "<VERDICT>\t<detail>" and always exits 0 — a verdict is data, not an
 # error condition for the caller's `set -e`.
+#
+# Two scenarios are graded differently, and the exception is narrow on
+# purpose — see EXPECTED_THROTTLE below.
 dry_verdict() {
-  local summary="$1" k6rc="$2" rescsv="$3"
-  python3 - "$summary" "$k6rc" "$rescsv" <<'PY' 2>/dev/null || echo -e "FAIL\tcould not evaluate the k6 summary (python3 missing or summary unreadable)"
+  local summary="$1" k6rc="$2" rescsv="$3" scenario="${4:-}"
+  python3 - "$summary" "$k6rc" "$rescsv" "$scenario" <<'PY' 2>/dev/null || echo -e "FAIL\tcould not evaluate the k6 summary (python3 missing or summary unreadable)"
 import json, os, sys
 
 summary, k6rc, rescsv = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+scenario = sys.argv[4] if len(sys.argv) > 4 else ""
+
+# Scenarios whose limiter family has a ceiling `rl=neutralized` CANNOT lift, so
+# a closed-loop `ramping-vus` probe is throttled at every posture by
+# construction. Both members are deliberate on the server's side:
+#
+#   grpc_infra    `INFRA_PER_SEC = 100` (axiam-api-grpc/src/middleware/
+#                 rate_limit.rs) is a hardcoded constant with NO env var —
+#                 "not configurable per instance" is stated in its doc
+#                 comment. scenarios/grpc_infra.js exists precisely to feed
+#                 `rl_prod_check.py` the RESOURCE_EXHAUSTED signal for that
+#                 family, and rl_prod_check.py derives the expected limit from
+#                 that same constant.
+#   device_verify The knob exists but `RateLimitConfig::validate` asserts the
+#                 OWASP user-code bound (charset^len / (rate x lifetime) >
+#                 10^6), capping it at 2559/min; past that the SERVER PANICS AT
+#                 STARTUP rather than booting with a guessable user code. See
+#                 the long note in targets/axiam/docker-compose.yml for why the
+#                 shipped 10/min is left alone instead of raised to 2559.
+#
+# For both, the client contract is "some requests are admitted, the rest are
+# rejected by the governor" — so grading them like capacity scenarios produced
+# permanent, unfixable FAILs (grpc_infra 18 651/19 058, device_verify
+# 33 612/33 622) that no posture change could ever clear.
+#
+# Do NOT add a scenario here to quiet a 429 you could have neutralized: an
+# un-neutralized family belongs in targets/axiam/docker-compose.yml's
+# rate-limit block, and silencing it here would hide exactly the bug this dry
+# run is for. The bar for this list is "no legal setting of any knob lets this
+# scenario measure the endpoint".
+EXPECTED_THROTTLE = {"grpc_infra", "device_verify"}
 
 def out(verdict, detail):
     print("%s\t%s" % (verdict, detail))
@@ -1006,13 +1040,25 @@ fallback, throttled = count("bench_fallback"), count("bench_throttled")
 p95 = (metrics.get("bench_op_latency_ms") or {}).get("p(95)")
 p95s = "p95=%.0fms" % p95 if isinstance(p95, (int, float)) else "p95=n/a"
 
+# For a fixed-ceiling family, a governor rejection is the CONTRACT, not a
+# failure — discount it from the fault accounting so what is left is the set of
+# genuinely wrong answers (a dial failure, a TLS mismatch, a 500). `ok == 0` is
+# still a FAIL below: if the governor admitted nothing at all, the client never
+# proved it can reach the surface.
+throttle_note = ""
+if scenario in EXPECTED_THROTTLE and throttled:
+    failed = max(0, failed - throttled)
+    fails = max(0, fails - throttled)
+    throttle_note = (" (+%d rejected by the fixed %s ceiling — expected, that "
+                     "family has no env knob to neutralize)" % (throttled, scenario))
+
 if ok == 0 and passes == 0:
     out("FAIL", "no operation completed at all (exit %d, %d failed) — the k6 "
                 "client could not reach the target or every response was rejected"
-                % (k6rc, failed))
+                % (k6rc, failed + throttled if scenario in EXPECTED_THROTTLE else failed))
 if failed or fails:
     detail = "%d/%d operations failed" % (failed or fails, (failed or fails) + ok)
-    if throttled:
+    if throttled and scenario not in EXPECTED_THROTTLE:
         detail += " (%d rate-limited: 429/RESOURCE_EXHAUSTED — check the rl= posture)" % throttled
     out("FAIL", detail + " — see the .dryrun.log for k6's check breakdown")
 if fallback:
@@ -1025,11 +1071,12 @@ if os.path.exists(rescsv):
     with open(rescsv) as fh:
         rows = sum(1 for _ in fh)
     if rows < 2:
-        out("WARN", "ok=%d, %s, but the resource sampler wrote no rows — the "
-                    "matrix would record no container CPU/mem for this cell" % (ok, p95s))
+        out("WARN", "ok=%d, %s%s, but the resource sampler wrote no rows — the "
+                    "matrix would record no container CPU/mem for this cell"
+                    % (ok, p95s, throttle_note))
 else:
-    out("WARN", "ok=%d, %s, but no resource CSV was written" % (ok, p95s))
-out("PASS", "ok=%d, %s" % (ok, p95s))
+    out("WARN", "ok=%d, %s%s, but no resource CSV was written" % (ok, p95s, throttle_note))
+out("PASS", "ok=%d, %s%s" % (ok, p95s, throttle_note))
 PY
 }
 
@@ -1143,7 +1190,7 @@ EOF
 
   if [ "$DRY_RUN" = "1" ]; then
     local verdict detail line
-    line="$(dry_verdict "$k6sum" "$k6rc" "$rescsv")"
+    line="$(dry_verdict "$k6sum" "$k6rc" "$rescsv" "$name")"
     verdict="${line%%$'\t'*}"; detail="${line#*$'\t'}"
     echo "[dry] $name: $verdict — $detail"
     record_dry "$name" "$verdict" "$detail"

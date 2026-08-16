@@ -342,7 +342,20 @@ bench-up:
     fi
     [ "$port_conflict" -eq 0 ] || exit 1
 
-    docker compose -f "$COMPOSE" $OVERRIDE_ARG $PROFILE_ARG up -d --wait $BUILD_ARG
+    # The diagnostic dump is on THIS path too, not just the readiness timeout
+    # below. `up --wait` fails fast when a container exits during startup, and
+    # that — a rejected config, a missing secret, a failed validate() — is the
+    # most common way a cell dies. It printed one line ("container
+    # bench-axiam-server exited (101)") and nothing else, while bench-dry-run's
+    # ledger promised "see the compose ps+logs dumped above". Diagnosing the
+    # alpha25 device-flow cell meant re-running bench-up by hand and reaching
+    # for `docker logs` to find the panic that had already happened twice.
+    if ! docker compose -f "$COMPOSE" $OVERRIDE_ARG $PROFILE_ARG up -d --wait $BUILD_ARG; then
+      echo "[bench-up] FAILED: a container did not start (see its last lines below)" >&2
+      docker compose -f "$COMPOSE" $PROFILE_ARG ps -a >&2 || true
+      docker compose -f "$COMPOSE" $PROFILE_ARG logs --tail 40 >&2 || true
+      exit 1
+    fi
 
     # --- Readiness gate --------------------------------------------------------
     # `up -d --wait` only blocks until each container is *running* (or, if it has

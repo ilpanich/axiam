@@ -35,10 +35,18 @@
 // (the bucket check runs before evaluation) but every call would measure the
 // short access-denied path rather than a genuine grant, which is not what
 // "what this grant costs" should mean. setup() therefore does what
-// `runner/seed.sh` already does for `bench-resource`: assign the seeded
-// `bench-reader` role (which grants `read`) to the bench user, scoped to the
-// UMA-registered resource this scenario mints tickets against — admin
-// REST provisioning in setup(), the same pattern `authz_check_rest.js` uses.
+// `runner/seed.sh` already does for `bench-resource`, but with a role of this
+// scenario's own (`bench-uma-reader`): create it, attach the seeded `read`
+// permission, and assign it to the bench user scoped to the UMA-registered
+// resource this scenario mints tickets against — admin REST provisioning in
+// setup(), the same pattern `authz_check_rest.js` uses.
+//
+// It must be a NEW role rather than the seeded `bench-reader`. Role
+// assignments are unique on (role, user) — `resource_id` is not part of the
+// key — and seed.sh has already assigned bench-reader to this user against
+// `bench-resource`, so reusing it returns 409 and grants nothing here. That
+// was the original defect: setup() reported success, every redemption answered
+// access_denied, and the cell failed 100%. See grantBenchUserRead().
 import { cfg, baseUrl, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
 import { doOp } from './lib/metrics.js';
 import { loginSession } from './lib/auth.js';
@@ -67,6 +75,14 @@ function formBody(obj) {
 
 const UMA_CLAIM_TOKEN_FORMAT = 'urn:ietf:params:oauth:token-type:access_token';
 const UMA_TICKET_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:uma-ticket';
+// This scenario's own role. It must NOT be the seeded `bench-reader` — see
+// grantBenchUserRead() for the (role, user) uniqueness collision that made
+// reusing it silently ineffective. Assigned to exactly one resource: the
+// resource set registerResourceSet() mints below. That is what makes the 409
+// on re-assignment benign here, and it holds because the harness tears each
+// cell down with `bench-down -v` (fresh volume per cell), so a stale
+// assignment pointing at a previous run's resource-set id cannot survive.
+const UMA_ROLE_NAME = 'bench-uma-reader';
 
 // --- setup()-only provisioning helpers (never measured) -------------------
 
@@ -163,26 +179,117 @@ function findIdByName(sess, path, value) {
   }
 }
 
+// Find a permission id by its `action`. Paginated like findIdByName: the
+// tenant's registry holds well over 200 permissions (every users:*, roles:*,
+// … the server seeds), so an unpaged first page does NOT contain the bench
+// `read` permission — a lookup that reads only page one silently yields "" and
+// the subsequent POST fails with a UUID parse error rather than a missing-role
+// message.
+function findPermissionIdByAction(sess, action) {
+  let off = 0;
+  for (;;) {
+    const res = http.get(`${baseUrl()}/api/v1/permissions?offset=${off}&limit=200`, {
+      headers: sess.headers,
+    });
+    if (res.status !== 200) return null;
+    let items;
+    try {
+      const parsed = res.json();
+      items = Array.isArray(parsed) ? parsed : parsed.items || [];
+    } catch (_e) {
+      return null;
+    }
+    const hit = items.find((p) => p && p.action === action);
+    if (hit) return hit.id;
+    if (items.length < 200) return null;
+    off += 200;
+  }
+}
+
+function postAdmin(sess, path, body) {
+  return http.post(`${baseUrl()}${path}`, JSON.stringify(body), {
+    headers: sess.headers,
+    cookies: sess.cookies,
+  });
+}
+
+// Give the bench user `read` on the UMA-registered resource — via a role of
+// this scenario's OWN, which is the part that has to be right.
+//
+// This used to reuse the seeded `bench-reader` role, and it could never work:
+// the role-assignment uniqueness key is (role, user) and does NOT include
+// `resource_id`. `runner/seed.sh` already assigns bench-reader -> benchuser
+// scoped to `bench-resource`, so re-assigning the SAME role scoped to the UMA
+// resource comes back
+//   409 {"error":"already_exists","message":"Entity already exists: role_assignment"}
+// and the old code treated 409 as "the assignment already exists, which is the
+// only property this setup step needs". It does exist — scoped to the WRONG
+// resource. The UMA grant was therefore never created, `exchange_ticket`
+// evaluated the requesting party against an empty grant set, and every
+// redemption answered UMA 2.0 §3.3.6 access_denied
+// (`uma.rpt_refused` in the audit log) while setup() reported success. The
+// cell failed 100% in every run for this reason, not for a rate-limit one.
+//
+// A dedicated role sidesteps the collision: distinct (role, user) pair, so the
+// resource-scoped assignment is accepted and `POST /api/v1/authz/check` for
+// `read` on the UMA resource flips from
+//   {"allowed":false,"reason":"no permission grants action 'read'"}
+// to {"allowed":true}. Verified live before this change was written.
 function grantBenchUserRead(sess, resourceId) {
-  const roleId = findIdByName(sess, '/api/v1/roles', 'bench-reader');
   const userId = __ENV.BENCH_SUBJECT_ID || '';
-  if (!roleId || !userId) {
+  if (!userId) {
+    throw new Error('uma_ticket_grant: BENCH_SUBJECT_ID is unset — run runner/seed.sh first.');
+  }
+
+  // Create-or-find, because bench-run may re-enter this against a live stack.
+  let roleId = findIdByName(sess, '/api/v1/roles', UMA_ROLE_NAME);
+  if (!roleId) {
+    const created = postAdmin(sess, '/api/v1/roles', {
+      name: UMA_ROLE_NAME,
+      description: 'uma_ticket_grant: read on the UMA-registered bench resource',
+      is_global: false,
+    });
+    if (created.status === 201 || created.status === 200) {
+      try { roleId = created.json().id; } catch (_e) { roleId = null; }
+    } else if (created.status !== 409) {
+      throw new Error(
+        `uma_ticket_grant: could not create the ${UMA_ROLE_NAME} role (status ${created.status}): ` +
+          String(created.body).slice(0, 200),
+      );
+    }
+    if (!roleId) roleId = findIdByName(sess, '/api/v1/roles', UMA_ROLE_NAME);
+  }
+  if (!roleId) throw new Error(`uma_ticket_grant: could not resolve the ${UMA_ROLE_NAME} role id`);
+
+  const permId = findPermissionIdByAction(sess, 'read');
+  if (!permId) {
     throw new Error(
-      'uma_ticket_grant: could not resolve the seeded bench-reader role id / BENCH_SUBJECT_ID — ' +
-        'run runner/seed.sh first.',
+      "uma_ticket_grant: could not resolve the seeded 'read' permission — run runner/seed.sh first.",
     );
   }
-  const res = http.post(
-    `${baseUrl()}/api/v1/roles/${roleId}/users`,
-    JSON.stringify({ user_id: userId, resource_id: resourceId }),
-    { headers: sess.headers, cookies: sess.cookies },
-  );
-  // 201 on first grant; a re-run against a live (not torn-down) stack that
-  // already holds this assignment gets a 409/200-idempotent response
-  // depending on server semantics — either way the assignment already exists,
-  // which is the only property this setup step needs.
-  if (res.status !== 201 && res.status !== 200 && res.status !== 409) {
-    throw new Error(`uma_ticket_grant: role grant failed (status ${res.status}): ${String(res.body).slice(0, 200)}`);
+
+  // 204 on first attach, 409 once it is already on the role.
+  const attach = postAdmin(sess, `/api/v1/roles/${roleId}/permissions`, { permission_id: permId });
+  if (![200, 201, 204, 409].includes(attach.status)) {
+    throw new Error(
+      `uma_ticket_grant: attaching 'read' to ${UMA_ROLE_NAME} failed (status ${attach.status}): ` +
+        String(attach.body).slice(0, 200),
+    );
+  }
+
+  // Here 409 IS benign: same role, same user, and this role is assigned to
+  // exactly one resource — this scenario's.
+  const assign = postAdmin(sess, `/api/v1/roles/${roleId}/users`, {
+    user_id: userId,
+    resource_id: resourceId,
+  });
+  // 204 is what this endpoint actually answers on a fresh grant (it returns no
+  // body); 201/200 are accepted too rather than pinning one, and 409 is the
+  // already-assigned case.
+  if (![200, 201, 204, 409].includes(assign.status)) {
+    throw new Error(
+      `uma_ticket_grant: role grant failed (status ${assign.status}): ${String(assign.body).slice(0, 200)}`,
+    );
   }
 }
 

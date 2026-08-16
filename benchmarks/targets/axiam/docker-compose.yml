@@ -87,6 +87,39 @@ services:
       # posture change: p2/p3 cells still exercise the shipped behaviour.
       AXIAM__AUTH__COOKIE_SECURE: "${BENCH_AXIAM_COOKIE_SECURE:-true}"
       AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS: "${AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS:-5}"
+      # --- Account lockout: NEUTRALIZED for benchmarking (D-06) -------------------
+      # The shipped posture is max_failed_login_attempts=5, lockout_duration_secs=900,
+      # backoff x2, capped at 3600 (crates/axiam-auth/src/config.rs). The harness has
+      # ONE seeded user, and `scenarios/grpc_admin_validate.js` deliberately drives
+      # `UserService/ValidateCredentials` with a WRONG password for that user ~10k
+      # times per cell — Argon2id cost is the whole point of that scenario. D-06
+      # accrual is always-on and shared by the REST and gRPC credential paths
+      # (crates/axiam-auth/src/lockout.rs), so at the shipped threshold the account
+      # locks about five iterations in. Two things then break:
+      #
+      #  1. COLLATERAL: every later login-based cell fails. In the alpha25 dry run
+      #     that was oauth2_password_login, token_exchange, token_refresh,
+      #     uma_ticket_grant, userinfo and userinfo_grpc — six cells reporting 401
+      #     "invalid credentials", which reads as a broken seed or a target bug. The
+      #     backoff escalates to an HOUR, so a re-seed inside the same stack does not
+      #     clear it (create_or_find finds the locked user and leaves it locked).
+      #  2. SELF-INVALIDATING: `validate_credentials` returns `invalid` BEFORE
+      #     `verify_password` once `locked_until > now` (services/user.rs). So after
+      #     the lock, grpc_admin_validate's remaining ~10k iterations skip Argon2id
+      #     entirely and it measures the lockout short-circuit while still reporting
+      #     gRPC OK — p95 2ms against the ~34ms a real Argon2id verify costs. The
+      #     scenario silently stopped measuring the CPU guard it exists to measure.
+      #
+      # Neutralizing the THRESHOLD is not disabling the accrual: the D-06 code path
+      # still runs on every failed check (that invariant is "never behind a config
+      # flag" and this does not put it behind one) — the counter simply never reaches
+      # a ceiling within a run. Same reasoning as login_per_min in the rate-limit
+      # block below: a single-account, closed-loop capacity probe must not be
+      # measuring an anti-abuse control sized for a human attacker.
+      #
+      # An operator who exports the real name wins, so `rl=prod`-style sensitivity
+      # passes can still put the shipped lockout back deliberately.
+      AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS: "${AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS:-1000000}"
       # --- Authz decision cache (D7) ----------------------------------------------
       # Default OFF (today's behavior). Flip ENABLED=true only for the labeled
       # cache-sensitivity pass — never for the head-to-head matrix.
@@ -169,6 +202,57 @@ services:
       AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN: "${AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__REVOKE_PER_MIN: "${AXIAM__RATE_LIMIT__REVOKE_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN: "${AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN:-1000000}"
+      # The eight families above were the whole neutralized posture until the
+      # alpha25 dry run, and that was a silent hole: RateLimitConfig has SIXTEEN
+      # per-family knobs, and every family this block forgot stayed at its
+      # SHIPPED default while the harness reported "rate limits: NEUTRALIZED".
+      # Since every scenario here is a closed-loop `ramping-vus` capacity probe,
+      # a forgotten family does not throttle a little — it throttles totally:
+      # device_authorization (12/min) and device_verify (10/min) spend the whole
+      # minute's quota in the first ~200ms, so `device_authorization`,
+      # `device_flow_poll` and `device_verify` measured nothing but the 429 path
+      # (33 612/33 622 rejected). token_exchange/uma/par/end_session/scim were
+      # the same bug waiting for their scenario to get far enough to hit it.
+      #
+      # Rule for whoever adds the seventeenth family: a knob that exists in
+      # rate_limit.rs and is missing here is a hole, not a default. Neutralizing
+      # is not a judgement about how the endpoint should be sized in production
+      # — `rl=prod` is what measures the shipped posture. These are deliberately
+      # neutralized despite their field docs saying "not sized from capacity"
+      # (device_*) or "never preset" (scim, end_session), for exactly the reason
+      # login_per_min is: at `rl=neutralized` the limiter must be out of the way
+      # so the number on the other side is the endpoint's, not the governor's.
+      AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN: "${AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__END_SESSION_PER_MIN: "${AXIAM__RATE_LIMIT__END_SESSION_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__PAR_PER_MIN: "${AXIAM__RATE_LIMIT__PAR_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN: "${AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN: "${AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN: "${AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__SCIM_PER_MIN: "${AXIAM__RATE_LIMIT__SCIM_PER_MIN:-1000000}"
+      # AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN is DELIBERATELY ABSENT — do not
+      # "complete" the list by adding it. `RateLimitConfig::validate` asserts the
+      # OWASP user-code bound, `charset^len / (rate x lifetime) > 10^6`, and with
+      # a 20-character alphabet, an 8-character code and a 600s grant that caps
+      # the knob at 2559/min. Setting it to 1000000 does not throttle the
+      # benchmark — it makes the SERVER REFUSE TO BOOT:
+      #
+      #   thread 'main' panicked at crates/axiam-api-rest/src/config/rate_limit.rs
+      #   device_verify_per_min=1000000 leaves only 2560 expected guesses against
+      #   a live user code over its 600s lifetime — below the 10^6 bar.
+      #
+      # That is the guard working, not a bug to route around. The endpoint is a
+      # brute-force surface against a space a human has to be able to type, so
+      # there is no setting at which `device_verify` becomes a capacity
+      # measurement, and the shipped 10/min is left in place so what the run
+      # records is the real ceiling. `runner/run-benchmark.sh`'s dry-run grader
+      # lists `device_verify` in EXPECTED_THROTTLE for this reason.
+      #
+      # 2559 (the largest legal value) was considered and rejected: it is still
+      # far below what a ramping-vus scenario offers, so it buys no measurement,
+      # and it would label a posture "neutralized" that matches neither the
+      # shipped configuration nor an unlimited one — the mixed-posture confusion
+      # AXIAM_BENCH_RL_POSTURE and report.py exist to prevent. It would also
+      # silently rot if USER_CODE_LEN, the charset or the grant lifetime moved.
       AXIAM__GRPC__GRPC_AUTHZ_PER_SEC: "${AXIAM__GRPC__GRPC_AUTHZ_PER_SEC:-1000000}"
       # I2: the gRPC limiter is per-method-family. Unset, identity derives as
       # 5x authz and admin as 1x authz inside the server; neutralized runs

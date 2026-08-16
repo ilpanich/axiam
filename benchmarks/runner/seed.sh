@@ -260,6 +260,26 @@ seed_axiam() {
   [ "$user_status" = "Active" ] || {
     echo "[seed/axiam] bench user '$BENCH_USERNAME' is '$user_status', expected 'Active'"; exit 1; }
 
+  # Same "make the fixture true, don't assume it" reasoning as the activation
+  # above, for the other latch that survives a re-seed: `locked_until`. Failed
+  # credential checks accrue a lockout (D-06, crates/axiam-auth/src/lockout.rs)
+  # escalating to an hour, `create_or_find` leaves an existing user's lock
+  # untouched, and `PUT /api/v1/users/<id>` cannot clear it — UpdateUserRequest
+  # carries only username/email/status/metadata. So a bench-up onto a volume
+  # that was NOT wiped by `bench-down -v` inherits the lock, and every smoke
+  # check and login-based cell fails "invalid credentials" with a healthy
+  # server and a correct password. `POST /users/<id>/unlock` is the only way
+  # out, and it is idempotent on an unlocked user.
+  #
+  # With AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS neutralized in the bench
+  # compose no new lock should form, but this also recovers volumes created
+  # BEFORE that neutralization — which is exactly how this was found.
+  echo "[seed/axiam] clearing any inherited lockout on the bench user"
+  local locked
+  locked=$(api_checked POST "/api/v1/users/$USER_ID/unlock" '{}' | jq -r '.is_locked // empty')
+  [ "$locked" != "true" ] || {
+    echo "[seed/axiam] bench user '$BENCH_USERNAME' is still locked after unlock"; exit 1; }
+
   echo "[seed/axiam] creating benchmark resource"
   RESOURCE_ID=$(create_or_find /api/v1/resources \
     '{"name":"bench-resource","resource_type":"bench"}' name "bench-resource")
@@ -319,17 +339,39 @@ seed_axiam() {
   api_checked POST "/api/v1/roles/$SCIM_ROLE_ID/users" \
     "{\"user_id\":\"$USER_ID\"}" >/dev/null
 
-  echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh)"
+  echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh+device_code+token-exchange)"
   local CLIENT_RESP
   # R5.2: 'uma_protection' alongside 'openid' so uma2_perm.js / uma_ticket_grant.js
   # can mint a Protection API Token (X2's ProtectionApiToken extractor requires
   # the scope on the token, not just on the client — see those scenarios'
   # mintPat()). Scopes have no server-side allow-list (unlike grant_types,
-  # which does — see token_exchange.js's header comment for the gap that
-  # leaves open), so widening this list is safe and does not need a matching
+  # which does), so widening that list is safe and does not need a matching
   # KNOWN_SCOPES change.
+  #
+  # grant_types carries the device-code and token-exchange URNs because the
+  # server checks REGISTRATION, not just the request: device_service.rs's
+  # `exchange`/device path answers
+  #   400 {"error":"unauthorized_client",
+  #        "error_description":"client is not registered for the device
+  #                             authorization grant"}
+  # and token_exchange.rs's `exchange()` has the same UnauthorizedClient guard.
+  # Omitting them made device_authorization, device_flow_poll and
+  # token_exchange fail 100% while looking like target bugs.
+  #
+  # This was blocked and is no longer: `KNOWN_GRANT_TYPES`
+  # (crates/axiam-api-rest/src/handlers/oauth2_clients.rs) used to be exactly
+  # ["authorization_code","client_credentials","refresh_token"], so REST-only
+  # provisioning could not register these. It now also carries
+  # DEVICE_CODE_GRANT_TYPE, the "device_code" alias and
+  # TOKEN_EXCHANGE_GRANT_TYPE. The header comment in scenarios/token_exchange.js
+  # still describes the old allow-list and the "expected 100% failure" it
+  # implied — that note is stale as of this change; the cell is expected green.
+  #
+  # Both spellings of the device grant are sent because the server accepts
+  # either (`g == DEVICE_CODE_GRANT_TYPE || g == "device_code"`) and registering
+  # both keeps the fixture working whichever one a future check standardises on.
   CLIENT_RESP=$(api POST /api/v1/oauth2-clients \
-    '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid","uma_protection"]}')
+    '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code","urn:ietf:params:oauth:grant-type:device_code","device_code","urn:ietf:params:oauth:grant-type:token-exchange"],"scopes":["openid","uma_protection"]}')
   CLIENT_ID=$(echo "$CLIENT_RESP" | jq -r '.client_id // empty')
   CLIENT_SECRET=$(echo "$CLIENT_RESP" | jq -r '.client_secret // empty')
   if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then

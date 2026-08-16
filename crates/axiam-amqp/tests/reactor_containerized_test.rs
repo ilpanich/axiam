@@ -52,16 +52,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axiam_amqp::messages::CURRENT_KEY_VERSION;
-use axiam_amqp::reactor::dispatcher::{DispatchFailure, run_chain};
-use axiam_amqp::reactor::protocol::{ReactorEventMessage, ReactorReply, ReplyDecision, queue_name};
+use axiam_amqp::reactor::dispatcher::{DispatchFailure, ReactorTransport, run_chain};
+use axiam_amqp::reactor::protocol::{
+    REACTOR_EXCHANGE, ReactorEventMessage, ReactorReply, ReplyDecision, queue_name, routing_key,
+};
 use axiam_amqp::reactor::transport::LapinReactorTransport;
 use axiam_amqp::{AmqpConfig, AmqpManager};
 use axiam_core::models::reactor::{FailurePolicy, Reactor, ReactorMode};
 use chrono::Utc;
 use futures_lite::StreamExt;
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
-    QueueDeleteOptions,
+    BasicAckOptions, BasicConsumeOptions, BasicGetOptions, BasicPublishOptions,
+    QueueDeclareOptions, QueueDeleteOptions,
 };
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel};
@@ -265,6 +267,55 @@ async fn cleanup(channel: &Channel, tenant: Uuid, reactor_ids: &[Uuid]) {
     }
 }
 
+/// Take one message off a queue, retrying briefly.
+///
+/// A publish is confirmed by the broker before it is *routed to and visible
+/// on* a queue, so a single `basic_get` immediately after one is a race. The
+/// retry is only for the positive case; [`expect_empty`] is the negative one
+/// and must not retry, or it would just be a slow way to observe the same
+/// thing.
+async fn get_one(channel: &Channel, queue: &str) -> Option<lapin::message::BasicGetMessage> {
+    for _ in 0..50 {
+        match channel
+            .basic_get(queue.into(), BasicGetOptions { no_ack: true })
+            .await
+        {
+            Ok(Some(msg)) => return Some(msg),
+            Ok(None) => tokio::time::sleep(Duration::from_millis(20)).await,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Assert a queue receives nothing, having given the broker time to have
+/// delivered it if it were going to.
+async fn expect_empty(channel: &Channel, queue: &str, why: &str) {
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let got = channel
+        .basic_get(queue.into(), BasicGetOptions { no_ack: true })
+        .await
+        .expect("basic_get");
+    assert!(got.is_none(), "{why}");
+}
+
+/// Publish a bare message through the reactor topic exchange, which is how a
+/// binding is observed: a bound queue receives it, an unbound one does not.
+async fn publish_through_exchange(channel: &Channel, tenant: Uuid, event: &str) {
+    channel
+        .basic_publish(
+            REACTOR_EXCHANGE.into(),
+            routing_key(tenant, event).into(),
+            BasicPublishOptions::default(),
+            b"binding-probe",
+            BasicProperties::default(),
+        )
+        .await
+        .expect("publish through the reactor exchange")
+        .await
+        .expect("publish confirm");
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -318,6 +369,194 @@ async fn the_server_declares_the_reactor_queue_and_the_actor_declares_nothing() 
         .expect("the queue must exist once the server has declared it");
 
     cleanup(&probe, tenant, &[r.id]).await;
+}
+
+/// A `listen` publish reaches the reactor and carries **no reply address**.
+///
+/// The missing `reply_to` is the wire-level statement of `ReactorMode::Listen`'s
+/// contract — "a listener cannot affect any outcome". A listener that was handed
+/// a reply queue would be one `basic_publish` away from answering, and the only
+/// thing standing between it and an accepted answer would be the dispatcher
+/// declining to wait.
+///
+/// Note what this does *not* claim: nothing in `axiam-server` calls
+/// `publish_listen` yet (`run_chain` filters listeners out and the gate returns
+/// early once the interceptor list is empty), which is why the REST layer
+/// refuses `listen` registrations. This test covers the transport half so that
+/// whoever wires the fan-out inherits a proven publish rather than an untested
+/// one.
+#[tokio::test]
+#[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
+            `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
+async fn a_listen_publish_reaches_the_reactor_carrying_no_reply_address() {
+    let (amqp, transport) = connected_transport().await;
+    let tenant = Uuid::new_v4();
+    let mut r = reactor(tenant, "token.pre_issue", 0, FailurePolicy::FailOpen);
+    r.mode = ReactorMode::Listen;
+
+    transport.declare_reactor_topology(&r).await.unwrap();
+    transport
+        .publish_listen(&r, "token.pre_issue", serde_json::json!({"sub": "alice"}))
+        .await
+        .expect("a listen publish must succeed over a live broker");
+
+    let probe = amqp.create_channel().await.unwrap();
+    let queue = queue_name(tenant, r.id);
+    let msg = get_one(&probe, &queue)
+        .await
+        .expect("the listener's queue must receive the event");
+
+    let event: ReactorEventMessage =
+        serde_json::from_slice(&msg.delivery.data).expect("decode listen event");
+    cleanup(&probe, tenant, &[r.id]).await;
+
+    assert!(
+        event.verify(MASTER),
+        "a listen event is signed exactly like an interception (§22.2)"
+    );
+    assert_eq!(event.event, "token.pre_issue");
+    assert_eq!(event.tenant_id, tenant);
+    assert!(
+        msg.delivery.properties.reply_to().is_none(),
+        "a listener must not be handed a reply address — it cannot affect an outcome"
+    );
+}
+
+/// Removing an event from a registration **unbinds** it.
+///
+/// The declare path is self-correcting in both directions, and this is the
+/// direction that is easy to leave out: an operator who removes
+/// `login.post_auth` from a registration has un-subscribed from it, and a
+/// binding left behind would keep delivering the event they just said they did
+/// not want. Observed the only way a binding can be — by publishing through the
+/// exchange and seeing whether the queue receives it.
+#[tokio::test]
+#[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
+            `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
+async fn removing_an_event_from_a_registration_unbinds_it() {
+    let (amqp, transport) = connected_transport().await;
+    let tenant = Uuid::new_v4();
+    let mut r = reactor(tenant, "token.pre_issue", 0, FailurePolicy::FailOpen);
+    r.events = vec!["token.pre_issue".into(), "login.post_auth".into()];
+
+    transport.declare_reactor_topology(&r).await.unwrap();
+
+    let probe = amqp.create_publisher_channel().await.unwrap();
+    let queue = queue_name(tenant, r.id);
+
+    publish_through_exchange(&probe, tenant, "login.post_auth").await;
+    assert!(
+        get_one(&probe, &queue).await.is_some(),
+        "a registered event must be bound to the reactor's queue"
+    );
+
+    // The operator drops `login.post_auth` from the registration.
+    r.events = vec!["token.pre_issue".into()];
+    transport
+        .declare_reactor_topology(&r)
+        .await
+        .expect("re-declaring a changed registration");
+
+    publish_through_exchange(&probe, tenant, "login.post_auth").await;
+    expect_empty(
+        &probe,
+        &queue,
+        "an un-subscribed event must no longer reach the reactor",
+    )
+    .await;
+
+    // …and the binding that survived still works, so the unbind was surgical
+    // rather than a queue-wide reset.
+    publish_through_exchange(&probe, tenant, "token.pre_issue").await;
+    let survived = get_one(&probe, &queue).await.is_some();
+    cleanup(&probe, tenant, &[r.id]).await;
+    assert!(
+        survived,
+        "removing one event must not unbind the ones that remain"
+    );
+}
+
+/// Losing the broker session **wakes an in-flight dispatch** instead of
+/// stranding it until its timeout.
+///
+/// The reactor here has a 5 s budget and nothing consuming its queue, so if
+/// `abandon_all_pending` did not run the round trip would sit for the full 5 s
+/// and then report a `Timeout`. Coming back in a fraction of that, with a
+/// transport error rather than a timeout, is the assertion — and the
+/// distinction matters downstream: `§22.8` resolves both through the failure
+/// policy, but only one of them is honest about what happened, and a fail-open
+/// login should not spend five seconds discovering the broker is gone.
+///
+/// **What this deliberately does not assert is recovery.** The supervisor
+/// rebuilds the *channel* on the `AmqpManager`'s existing connection — the same
+/// shape as `axiam-server`'s cache-invalidation consumer — so it heals a
+/// channel-level exception but cannot heal the closed *connection* this test
+/// creates, because nothing in `AmqpManager` redials. That limit is recorded
+/// here rather than papered over; see the note in the module-level review.
+#[tokio::test]
+#[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then \
+            `cargo test -p axiam-amqp --test reactor_containerized_test -- --ignored`"]
+async fn losing_the_broker_session_wakes_an_in_flight_dispatch() {
+    let (amqp, transport) = connected_transport().await;
+    let tenant = Uuid::new_v4();
+    let r = reactor(tenant, "login.post_auth", 0, FailurePolicy::FailClosed);
+
+    transport.declare_reactor_topology(&r).await.unwrap();
+    // No fake reactor at all: nothing will ever reply to this.
+
+    let dispatching = transport.clone();
+    let dispatched = r.clone();
+    let in_flight = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let result = dispatching
+            .round_trip(
+                &dispatched,
+                "login.post_auth",
+                Uuid::new_v4(),
+                serde_json::json!({"sub": "alice"}),
+                5_000,
+            )
+            .await;
+        (started.elapsed(), result)
+    });
+
+    // Let the publish land, then take the session away underneath it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    amqp.connection()
+        .close(200, "test: simulated broker loss".into())
+        .await
+        .expect("close the connection");
+
+    let (elapsed, result) = in_flight.await.expect("the dispatch task must not panic");
+
+    assert!(
+        matches!(result, Err(DispatchFailure::Transport(_))),
+        "a lost session is a transport failure, not a timeout — got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the dispatch must be woken when the session dies, not left to time out \
+         (took {elapsed:?} of a 5s budget)"
+    );
+
+    // The transport also stops advertising a session it no longer has, so a
+    // later dispatch fails fast instead of publishing into a dead channel.
+    for _ in 0..100 {
+        if !transport.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !transport.is_connected(),
+        "the transport must report itself down once its session is gone"
+    );
+
+    // This test killed its own connection, so cleanup needs a fresh one.
+    let fresh = AmqpManager::connect_with_retry(&test_amqp_config())
+        .await
+        .expect("reconnect for cleanup");
+    cleanup(&fresh.create_channel().await.unwrap(), tenant, &[r.id]).await;
 }
 
 /// Happy path: one interceptor, replies `allow`, over a real broker.

@@ -752,15 +752,25 @@ mod tests {
         }
     }
 
+    /// A transport with no broker session and no supervisor.
+    ///
+    /// Built by hand rather than through [`LapinReactorTransport::start`],
+    /// which would spawn a task that keeps trying to connect — these tests are
+    /// about what the transport does *while* there is nothing to talk to, and
+    /// a supervisor racing them would make that a timing question.
+    fn disconnected() -> LapinReactorTransport {
+        LapinReactorTransport {
+            shared: Arc::new(Shared::new()),
+            signing_key: Arc::new(b"k".to_vec()),
+        }
+    }
+
     /// The capability/health split (SEC-101): a transport that is merged but
     /// momentarily disconnected must still say it can dispatch, or a broker
     /// outage becomes a registration outage.
     #[tokio::test]
     async fn a_disconnected_transport_still_reports_that_it_can_dispatch() {
-        let t = LapinReactorTransport {
-            shared: Arc::new(Shared::new()),
-            signing_key: Arc::new(b"k".to_vec()),
-        };
+        let t = disconnected();
         assert!(t.can_dispatch());
         assert!(!t.is_connected());
     }
@@ -769,10 +779,7 @@ mod tests {
     /// reactor's whole budget waiting for a reply that cannot arrive.
     #[tokio::test]
     async fn a_dispatch_without_a_session_fails_at_once_rather_than_timing_out() {
-        let t = LapinReactorTransport {
-            shared: Arc::new(Shared::new()),
-            signing_key: Arc::new(b"k".to_vec()),
-        };
+        let t = disconnected();
         let r = reactor(&["token.pre_issue"]);
 
         let started = std::time::Instant::now();
@@ -795,6 +802,132 @@ mod tests {
             started.elapsed() < Duration::from_millis(100),
             "a disconnected transport must not burn the reactor's timeout budget"
         );
+    }
+
+    /// A `listen` publish takes the same fail-fast path as an interception.
+    /// It carries no reply and produces no outcome, but silently reporting
+    /// success for an event that was never published would make a listener's
+    /// absence indistinguishable from a listener with nothing to say.
+    #[tokio::test]
+    async fn a_listen_publish_without_a_session_also_fails_rather_than_reporting_success() {
+        let t = disconnected();
+        let mut r = reactor(&["token.pre_issue"]);
+        r.mode = ReactorMode::Listen;
+
+        let err = t
+            .publish_listen(&r, "token.pre_issue", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DispatchFailure::Transport(REACTOR_TRANSPORT_DISCONNECTED.to_string())
+        );
+    }
+
+    /// Declaring topology needs a channel, so it reports the disconnection
+    /// rather than pretending the queue is there. This is the arm the
+    /// registration path would hit if it declared at create/update time
+    /// during a broker outage.
+    #[tokio::test]
+    async fn declaring_topology_without_a_session_is_an_error_not_a_silent_success() {
+        let t = disconnected();
+        let err = t
+            .declare_reactor_topology(&reactor(&["token.pre_issue"]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AmqpError::Publish(ref m) if m == REACTOR_TRANSPORT_DISCONNECTED),
+            "expected a disconnected-transport error, got {err:?}"
+        );
+    }
+
+    /// A body that is not a reactor reply at all must be dropped without
+    /// disturbing anything waiting. The reply queue is exclusive to this
+    /// process, so this is mostly a broker or SDK bug rather than an attack —
+    /// but the consumer task must not die on it either way, because the task
+    /// dying takes every subsequent dispatch down with it.
+    #[test]
+    fn a_reply_body_that_is_not_json_is_discarded_without_disturbing_waiters() {
+        let shared = Shared::new();
+        let waiting = Uuid::new_v4();
+        let (tx, mut rx) = oneshot::channel();
+        shared.pending_map().insert(waiting, tx);
+
+        route_reply(&shared, b"this is not json".to_vec());
+        route_reply(&shared, serde_json::to_vec(&serde_json::json!({})).unwrap());
+        route_reply(
+            &shared,
+            serde_json::to_vec(&serde_json::json!({"correlation_id": "not-a-uuid"})).unwrap(),
+        );
+
+        assert_eq!(
+            shared.pending_map().len(),
+            1,
+            "an unreadable reply must not evict a waiting round trip"
+        );
+        assert!(rx.try_recv().is_err(), "the waiter must still be waiting");
+    }
+
+    /// Every lock in [`Shared`] recovers from poisoning rather than
+    /// propagating a panic.
+    ///
+    /// This matters more here than in most places: these locks sit on the
+    /// login path, and a `unwrap()` on a poisoned lock would turn one panicked
+    /// dispatch into every subsequent dispatch panicking — a single transient
+    /// fault escalated into a permanent, process-wide outage of exactly the
+    /// hook sites reactors guard.
+    #[test]
+    fn a_poisoned_lock_is_recovered_rather_than_propagated() {
+        let shared = Arc::new(Shared::new());
+
+        // The panic hook is silenced first so three *expected* panics do not
+        // print three backtraces into a passing test's output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let s = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _held = s.pending.lock().unwrap();
+            panic!("poison `pending` while holding it");
+        })
+        .join();
+
+        let s = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _held = s.declared.lock().unwrap();
+            panic!("poison `declared` while holding it");
+        })
+        .join();
+
+        let s = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _held = s.session.write().unwrap();
+            panic!("poison `session` while holding it");
+        })
+        .join();
+
+        std::panic::set_hook(hook);
+
+        // The premise: all three really are poisoned, so the assertions below
+        // are exercising the recovery and not a no-op.
+        assert!(shared.pending.is_poisoned());
+        assert!(shared.declared.is_poisoned());
+        assert!(shared.session.is_poisoned());
+
+        // …and all three accessors still work.
+        shared
+            .pending_map()
+            .insert(Uuid::new_v4(), oneshot::channel().0);
+        assert_eq!(shared.pending_map().len(), 1);
+
+        shared
+            .declared_map()
+            .insert(Uuid::new_v4(), vec!["e".into()]);
+        assert_eq!(shared.declared_map().len(), 1);
+
+        assert!(shared.session().is_none());
+        shared.set_session(None);
+        assert!(shared.session().is_none());
     }
 
     /// A reply nothing is waiting for is dropped, not applied — the server

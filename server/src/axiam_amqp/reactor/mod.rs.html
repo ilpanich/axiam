@@ -15,27 +15,30 @@
 <a href=#15 id=15 data-nosnippet>15</a>//! | [`protocol`] | The signed bodies and every rule for accepting a reply |
 <a href=#16 id=16 data-nosnippet>16</a>//! | [`dispatcher`] | What a chain of reactors *means* (order, merge, policy) |
 <a href=#17 id=17 data-nosnippet>17</a>//! | [`gate`] | What the five hook sites call: routing, cap, audit, metrics |
-<a href=#18 id=18 data-nosnippet>18</a>//! | [`metrics`] | The counters an operator reads |
-<a href=#19 id=19 data-nosnippet>19</a>
-<a href=#20 id=20 data-nosnippet>20</a></span><span class="kw">pub mod </span>dispatcher;
-<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>gate;
-<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>metrics;
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>protocol;
-<a href=#24 id=24 data-nosnippet>24</a>
-<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub use </span>dispatcher::{
-<a href=#26 id=26 data-nosnippet>26</a>    ChainResult, DEFAULT_MAX_IN_FLIGHT, DispatchFailure, InFlightLimiter, MAX_CHAIN_BUDGET_MS,
-<a href=#27 id=27 data-nosnippet>27</a>    NoopReactorGate, REACTOR_TRANSPORT_UNAVAILABLE, ReactorTransport, UnavailableReactorTransport,
-<a href=#28 id=28 data-nosnippet>28</a>    resolve_failure, run_chain,
-<a href=#29 id=29 data-nosnippet>29</a>};
-<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>gate::{
-<a href=#31 id=31 data-nosnippet>31</a>    AUDIT_ACTION_DENIED, AUDIT_ACTION_FAILURE, AUDIT_ACTION_MUTATED,
-<a href=#32 id=32 data-nosnippet>32</a>    DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS, DEFAULT_ROUTING_TTL,
-<a href=#33 id=33 data-nosnippet>33</a>    DispatchingReactorGate, EmptyReactorSource, NoopAuditSink, ReactorAuditSink, ReactorGateConfig,
-<a href=#34 id=34 data-nosnippet>34</a>    ReactorHealth, ReactorRoutingTable, ReactorSource, RepositoryAuditSink,
-<a href=#35 id=35 data-nosnippet>35</a>    RepositoryReactorSource, recent_health,
-<a href=#36 id=36 data-nosnippet>36</a>};
-<a href=#37 id=37 data-nosnippet>37</a><span class="kw">pub use </span>protocol::{
-<a href=#38 id=38 data-nosnippet>38</a>    REACTOR_EXCHANGE, ReactorEventMessage, ReactorReply, ReplyDecision, ReplyRejection, queue_name,
-<a href=#39 id=39 data-nosnippet>39</a>    routing_key,
-<a href=#40 id=40 data-nosnippet>40</a>};
+<a href=#18 id=18 data-nosnippet>18</a>//! | [`transport`] | The lapin RPC transport — the only part that knows AMQP |
+<a href=#19 id=19 data-nosnippet>19</a>//! | [`metrics`] | The counters an operator reads |
+<a href=#20 id=20 data-nosnippet>20</a>
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">pub mod </span>dispatcher;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>gate;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>metrics;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub mod </span>protocol;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub mod </span>transport;
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>dispatcher::{
+<a href=#28 id=28 data-nosnippet>28</a>    ChainResult, DEFAULT_MAX_IN_FLIGHT, DispatchFailure, InFlightLimiter, MAX_CHAIN_BUDGET_MS,
+<a href=#29 id=29 data-nosnippet>29</a>    NoopReactorGate, REACTOR_TRANSPORT_UNAVAILABLE, ReactorTransport, UnavailableReactorTransport,
+<a href=#30 id=30 data-nosnippet>30</a>    resolve_failure, run_chain,
+<a href=#31 id=31 data-nosnippet>31</a>};
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>gate::{
+<a href=#33 id=33 data-nosnippet>33</a>    AUDIT_ACTION_DENIED, AUDIT_ACTION_FAILURE, AUDIT_ACTION_MUTATED,
+<a href=#34 id=34 data-nosnippet>34</a>    DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS, DEFAULT_ROUTING_TTL,
+<a href=#35 id=35 data-nosnippet>35</a>    DispatchingReactorGate, EmptyReactorSource, NoopAuditSink, ReactorAuditSink, ReactorGateConfig,
+<a href=#36 id=36 data-nosnippet>36</a>    ReactorHealth, ReactorRoutingTable, ReactorSource, RepositoryAuditSink,
+<a href=#37 id=37 data-nosnippet>37</a>    RepositoryReactorSource, recent_health,
+<a href=#38 id=38 data-nosnippet>38</a>};
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">pub use </span>protocol::{
+<a href=#40 id=40 data-nosnippet>40</a>    REACTOR_EXCHANGE, ReactorEventMessage, ReactorReply, ReplyDecision, ReplyRejection, queue_name,
+<a href=#41 id=41 data-nosnippet>41</a>    routing_key,
+<a href=#42 id=42 data-nosnippet>42</a>};
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">pub use </span>transport::{LapinReactorTransport, REACTOR_TRANSPORT_DISCONNECTED};
 </code></pre></div></section></main></body></html>

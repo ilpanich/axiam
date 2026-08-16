@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The production lapin `ReactorTransport` (X1 / R2.4)."><title>axiam_amqp::reactor::transport - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_amqp" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module transport</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_amqp/index.html">axiam_<wbr>amqp</a><span class="version">1.0.0-alpha26</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module transport</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#topology-and-the-one-place-it-departs-from-a-literal-reading-of-221" title="Topology, and the one place it departs from a literal reading of §22.1">Topology, and the one place it departs from a literal reading of §22.1</a></li><li><a href="#reply-correlation" title="Reply correlation">Reply correlation</a></li><li><a href="#what-a-broker-outage-costs" title="What a broker outage costs">What a broker outage costs</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>amqp::<wbr>reactor</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_amqp</a>::<wbr><a href="../index.html">reactor</a></div><h1>Module <span>transport</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_amqp/reactor/transport.rs.html#1-1066">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The production lapin <a href="../dispatcher/trait.ReactorTransport.html" title="trait axiam_amqp::reactor::dispatcher::ReactorTransport"><code>ReactorTransport</code></a> (X1 / R2.4).</p>
+<p><code>dispatcher.rs</code> decides what a chain of reactors <em>means</em>; this module is the
+only part of X1 that knows a broker exists. It replaces
+<a href="../dispatcher/struct.UnavailableReactorTransport.html" title="struct axiam_amqp::reactor::dispatcher::UnavailableReactorTransport"><code>super::dispatcher::UnavailableReactorTransport</code></a>, which every deployment
+composed while this file did not exist and which resolved every dispatch
+through the registration’s failure policy.</p>
+<h2 id="topology-and-the-one-place-it-departs-from-a-literal-reading-of-221"><a class="doc-anchor" href="#topology-and-the-one-place-it-departs-from-a-literal-reading-of-221">§</a>Topology, and the one place it departs from a literal reading of §22.1</h2>
+<p><code>sdks/CONTRACT.md</code> §22.1 defines the topology this module declares:</p>
+<div><table><thead><tr><th>Element</th><th>Value</th></tr></thead><tbody>
+<tr><td>Exchange</td><td><a href="../protocol/constant.REACTOR_EXCHANGE.html" title="constant axiam_amqp::reactor::protocol::REACTOR_EXCHANGE"><code>REACTOR_EXCHANGE</code></a>, type <strong>topic</strong>, durable</td></tr>
+<tr><td>Routing key</td><td><a href="../protocol/fn.routing_key.html" title="fn axiam_amqp::reactor::protocol::routing_key"><code>routing_key</code></a> — <code>&lt;tenant_id&gt;.&lt;event&gt;</code></td></tr>
+<tr><td>Per-reactor queue</td><td><a href="../protocol/fn.queue_name.html" title="fn axiam_amqp::reactor::protocol::queue_name"><code>queue_name</code></a> — <code>axiam.reactor.q.&lt;tenant&gt;.&lt;reactor&gt;</code>, durable</td></tr>
+</tbody></table>
+</div>
+<p><strong>The server declares all three; an actor declares nothing.</strong> That is the
+rule §22.1 states and the reason it states it: a reactor that can bind is a
+reactor that can bind itself to <code>*.token.pre_issue</code> and read another
+tenant’s issuance events. <a href="struct.LapinReactorTransport.html#method.declare_reactor_topology" title="method axiam_amqp::reactor::transport::LapinReactorTransport::declare_reactor_topology"><code>LapinReactorTransport::declare_reactor_topology</code></a>
+is where the server holds that capability, and it is called on the dispatch
+path so a queue that was deleted out from under a live registration repairs
+itself rather than silently swallowing every event.</p>
+<p><strong>An <code>intercept</code> round trip publishes to the reactor’s queue directly (the
+default exchange), not through the topic exchange</strong>, and this is deliberate
+rather than a shortcut. The routing key is per <code>(tenant, event)</code>, so a
+publish through the exchange reaches <em>every</em> reactor registered for that
+event at once. <a href="../dispatcher/fn.run_chain.html" title="fn axiam_amqp::reactor::dispatcher::run_chain"><code>run_chain</code></a> dispatches
+sequentially in priority order, each reactor seeing what the previous ones
+patched, and it correlates exactly one reply per event. Fanning one
+<code>correlation_id</code> out to the whole chain would mean the first reply to arrive
+is consumed as the reply of whichever reactor the chain is currently
+waiting on — priority order decided by message timing, and a low-priority
+reactor able to answer in a high-priority reactor’s place. Addressing the
+queue is what makes the dispatch 1:1 and the ordering the declared one.</p>
+<p>The exchange and the bindings are still declared, for every registration and
+every event it names, because §22.1 says the server owns them and because
+<a href="struct.LapinReactorTransport.html#method.publish_listen" title="method axiam_amqp::reactor::transport::LapinReactorTransport::publish_listen"><code>LapinReactorTransport::publish_listen</code></a>’s fan-out and any operator
+inspecting the topology both depend on them existing.</p>
+<h2 id="reply-correlation"><a class="doc-anchor" href="#reply-correlation">§</a>Reply correlation</h2>
+<p>One <strong>exclusive, broker-named reply queue per process</strong>, one consumer task,
+and a <code>correlation_id → oneshot::Sender</code> map. A round trip costs one publish
+and one map insert; it does not declare a queue. (A reply queue per round
+trip — what <code>tests/reactor_containerized_test.rs</code>’s test-only transport did
+before this module existed — is fine for five ignored tests and is a queue
+churn of one declare, one consume and one delete per login in production.)</p>
+<p>Replies are routed by the <code>correlation_id</code> <strong>inside the body</strong>, which is
+what §22.1 says the server authenticates, rather than by the AMQP property.
+Routing is not trust: the chain re-checks the correlation, the tenant, the
+event and the HMAC in <a href="../protocol/struct.ReactorReply.html#method.into_outcome" title="method axiam_amqp::reactor::protocol::ReactorReply::into_outcome"><code>ReactorReply::into_outcome</code></a>, so the worst a reactor
+can do by naming a correlation it was not given is fail a round trip that
+its own failure policy then resolves.</p>
+<h2 id="what-a-broker-outage-costs"><a class="doc-anchor" href="#what-a-broker-outage-costs">§</a>What a broker outage costs</h2>
+<p>Nothing is retried at this layer and nothing is queued. A dispatch while the
+transport has no live session fails <strong>immediately</strong> as
+<a href="../dispatcher/enum.DispatchFailure.html#variant.Transport" title="variant axiam_amqp::reactor::dispatcher::DispatchFailure::Transport"><code>DispatchFailure::Transport</code></a> rather than burning the reactor’s whole
+<code>timeout_ms</code> waiting for a reply that cannot arrive — the registration’s
+<code>failure_policy</code> then decides, which is the same closed set §22.8 puts a
+timeout in. A supervisor task re-establishes the session with backoff in the
+background.</p>
+<p><a href="../dispatcher/trait.ReactorTransport.html#method.can_dispatch" title="method axiam_amqp::reactor::dispatcher::ReactorTransport::can_dispatch"><code>ReactorTransport::can_dispatch</code></a> stays <code>true</code> throughout, including while
+disconnected. It reports the transport’s <em>capability</em>, not its health; a
+<code>false</code> on a broker blip would refuse reactor registrations for the duration
+of the outage, turning a broker problem into an admin-API problem.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LapinReactorTransport.html" title="struct axiam_amqp::reactor::transport::LapinReactorTransport">Lapin<wbr>Reactor<wbr>Transport</a></dt><dd>The lapin <a href="../dispatcher/trait.ReactorTransport.html" title="trait axiam_amqp::reactor::dispatcher::ReactorTransport"><code>ReactorTransport</code></a> <code>axiam-server</code> composes.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.REACTOR_TRANSPORT_DISCONNECTED.html" title="constant axiam_amqp::reactor::transport::REACTOR_TRANSPORT_DISCONNECTED">REACTOR_<wbr>TRANSPORT_<wbr>DISCONNECTED</a></dt><dd>The failure text a dispatch carries when the transport has no live broker
+session. Named so an operator can grep for it, exactly as
+<a href="../dispatcher/constant.REACTOR_TRANSPORT_UNAVAILABLE.html" title="constant axiam_amqp::reactor::dispatcher::REACTOR_TRANSPORT_UNAVAILABLE"><code>super::dispatcher::REACTOR_TRANSPORT_UNAVAILABLE</code></a> is.</dd></dl></section></div></main></body></html>

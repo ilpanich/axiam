@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["dispatcher","gate","metrics","protocol"],"struct":["NoopReactorGate"]};
+window.SIDEBAR_ITEMS = {"mod":["dispatcher","gate","metrics","protocol","transport"],"struct":["NoopReactorGate"]};

@@ -20,6 +20,26 @@ export interface Permission {
  */
 export type PermissionEffect = "allow" | "deny";
 
+/**
+ * Whether a permission grants materially more than its name suggests, and
+ * should be visually marked before an operator grants it.
+ *
+ * Keyed off the backend description carrying `WARNING:` rather than a
+ * hard-coded list of actions. The registry
+ * (`crates/axiam-api-rest/src/permissions.rs`) is where the security argument
+ * for each of these lives — `scim:provision` confers tenant-wide account
+ * takeover because RFC 7643 makes `password` a writable SCIM attribute, which
+ * no native `users:*` permission allows — and a list here would be a second
+ * copy of that judgement, drifting from the first the moment a permission is
+ * added.
+ *
+ * Case-insensitive so a future registry entry that writes "Warning:" is not
+ * silently un-flagged.
+ */
+export function isElevatedPermission(permission: Permission): boolean {
+  return (permission.description ?? "").toUpperCase().includes("WARNING:");
+}
+
 /** A permission together with its scope constraints, as returned by role grants. */
 export interface PermissionGrant {
   permission: Permission;

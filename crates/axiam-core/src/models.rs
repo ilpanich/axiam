@@ -24,6 +24,7 @@ pub mod pgp_key;
 pub mod reactor;
 pub mod resource;
 pub mod role;
+pub mod scim_token;
 pub mod scope;
 pub mod service_account;
 pub mod session;

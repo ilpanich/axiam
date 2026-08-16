@@ -135,6 +135,9 @@ use crate::handlers;
         // Audit Logs
         handlers::audit::list,
         handlers::audit::list_system,
+        handlers::scim_tokens::create,
+        handlers::scim_tokens::list,
+        handlers::scim_tokens::revoke,
         // Service Accounts
         handlers::service_accounts::create,
         handlers::service_accounts::list,
@@ -322,6 +325,10 @@ use crate::handlers;
         axiam_core::models::certificate::GeneratedCertificate,
         axiam_core::models::certificate::CertificateType,
         axiam_core::models::certificate::BindCertificate,
+        axiam_core::models::scim_token::ScimTokenStatus,
+        handlers::scim_tokens::CreateScimTokenRequest,
+        handlers::scim_tokens::ScimTokenResponse,
+        handlers::scim_tokens::CreateScimTokenResponse,
         axiam_core::models::certificate::CertificateBinding,
         axiam_core::models::certificate::DeviceAuthResponse,
         // PGP Keys

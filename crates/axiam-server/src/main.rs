@@ -562,6 +562,17 @@ async fn main() -> std::io::Result<()> {
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
+    // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
+    // on /scim/v2 into the tenant user it is bound to. Registered as its own
+    // app_data (rather than reached through AppState) for the same reason
+    // `session_validator` is — `ScimPrincipal`'s FromRequest impl is
+    // non-generic and cannot name `AppState<C>`.
+    // See `claude_dev/scim-provisioning-token-design.md`.
+    let scim_token_resolver: std::sync::Arc<dyn axiam_api_rest::ScimTokenResolver> =
+        std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
+            axiam_db::SurrealScimTokenRepository::new(pool.handle_for_repo()),
+            axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
+        ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo());
     let ca_cert_repo = SurrealCaCertificateRepository::new(pool.handle_for_repo());
     let federation_link_repo_for_auth =
@@ -1917,6 +1928,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
             // lives on this one AppState<C> value (see above).

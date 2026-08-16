@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, RotateCw, FileKey } from "lucide-react";
 import {
@@ -457,6 +458,28 @@ export function ServiceAccountsPage() {
           </Button>
         }
       />
+
+      {/* A service account cannot hold RBAC permissions at all: the has_role
+          edge is scoped to the `user` table (RoleRepository::assign_to_user),
+          so one created for SCIM silently authenticates and then 403s on every
+          call. Operators reach for this page first because machine-to-machine
+          is what it is for, so the dead end is named here rather than
+          discovered. */}
+      <div
+        role="note"
+        className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-300/90"
+      >
+        <strong className="font-medium">Setting up SCIM provisioning?</strong>{" "}
+        Service accounts cannot hold roles or permissions, so one created for an
+        Okta or Entra integration will authenticate and then be refused. Use{" "}
+        <Link
+          to="/scim-tokens"
+          className="underline underline-offset-2 hover:text-amber-200"
+        >
+          SCIM Provisioning
+        </Link>{" "}
+        instead, which issues a long-lived token bound to a provisioner user.
+      </div>
 
       {/* Search */}
       <div className="mb-4">

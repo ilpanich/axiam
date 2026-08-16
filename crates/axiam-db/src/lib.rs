@@ -56,11 +56,11 @@ pub use repository::{
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 
 /// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because

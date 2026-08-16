@@ -727,6 +727,16 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/audit-logs/system")
                     .route(web::get().to(handlers::audit::list_system::<C>)),
             )
+            // --- SCIM provisioning tokens ---
+            .service(
+                web::resource("/scim-tokens")
+                    .route(web::post().to(handlers::scim_tokens::create::<C>))
+                    .route(web::get().to(handlers::scim_tokens::list::<C>)),
+            )
+            .service(
+                web::resource("/scim-tokens/{id}")
+                    .route(web::delete().to(handlers::scim_tokens::revoke::<C>)),
+            )
             // --- Service Accounts ---
             .service(
                 web::resource("/service-accounts")

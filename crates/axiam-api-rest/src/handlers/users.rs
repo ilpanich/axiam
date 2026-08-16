@@ -5,7 +5,7 @@ use axiam_auth::policy::check_complexity;
 use axiam_core::error::AxiamError;
 use axiam_core::models::settings::PasswordPolicy;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
-use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
+use axiam_core::repository::{PaginatedResult, Pagination, ScimTokenRepository, UserRepository};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -389,6 +389,28 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     let target_id = path.into_inner();
     state.user_repo.delete(user.tenant_id, target_id).await?;
+
+    // A SCIM provisioning token authenticates *as* this user, so deleting them
+    // without clearing their tokens would leave a year-long credential naming a
+    // principal that no longer exists. The resolver would refuse it on the
+    // bound-user check, but relying on that would make the credential's
+    // liveness depend on a lookup rather than on the row being gone.
+    // Best-effort: a delete that already succeeded must not be reported as a
+    // failure because the cleanup did not.
+    if let Err(e) = state
+        .scim_token_repo
+        .delete_for_user(user.tenant_id, target_id)
+        .await
+    {
+        tracing::warn!(
+            target: "axiam::audit",
+            event = "scim.token_cleanup_failed",
+            tenant_id = %user.tenant_id,
+            user_id = %target_id,
+            error = %e,
+            "could not remove SCIM provisioning tokens for a deleted user"
+        );
+    }
 
     // D7 (REVOCATION — security critical): the subject no longer exists, so every
     // cached `Allow` naming it is now a decision about a deleted principal. Flush

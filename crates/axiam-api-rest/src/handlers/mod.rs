@@ -22,6 +22,7 @@ pub mod pgp_keys;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;
 pub mod settings;

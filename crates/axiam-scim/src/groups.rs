@@ -28,10 +28,9 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use axiam_api_rest::authz::AuthzData;
-use axiam_api_rest::extractors::auth::AuthenticatedUser;
 use axiam_api_rest::state::AppState;
 
-use crate::auth::require_scim_provision;
+use crate::auth::{ScimPrincipal, require_scim_provision};
 use crate::error::ScimError;
 use crate::patch::{GroupPatchDelta, MemberAction, PatchRequest, parse_group_patch};
 use crate::schema::GROUP_SCHEMA;
@@ -152,7 +151,7 @@ fn build_scim_metadata(external_id: &Option<String>) -> Value {
 /// `GET /scim/v2/Groups`
 pub async fn list<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<ScimListQuery>,
@@ -167,11 +166,11 @@ pub async fn list<C: Connection + Clone>(
         None => {
             let result = state
                 .group_repo
-                .list(user.tenant_id, Pagination { offset, limit })
+                .list(user.tenant_id(), Pagination { offset, limit })
                 .await?;
             let mut resources = Vec::with_capacity(result.items.len());
             for g in &result.items {
-                let members = scim_members(&state, user.tenant_id, g.id).await?;
+                let members = scim_members(&state, user.tenant_id(), g.id).await?;
                 resources.push(ScimGroup::build(g, members, &http_req));
             }
             return Ok(HttpResponse::Ok().json(ScimListResponse::new(
@@ -187,7 +186,7 @@ pub async fn list<C: Connection + Clone>(
             let all = state
                 .group_repo
                 .list(
-                    user.tenant_id,
+                    user.tenant_id(),
                     Pagination {
                         offset: 0,
                         limit: MEMBER_EMBED_CAP,
@@ -211,7 +210,7 @@ pub async fn list<C: Connection + Clone>(
         .skip(offset as usize)
         .take(limit as usize)
     {
-        let members = scim_members(&state, user.tenant_id, g.id).await?;
+        let members = scim_members(&state, user.tenant_id(), g.id).await?;
         resources.push(ScimGroup::build(&g, members, &http_req));
     }
     Ok(HttpResponse::Ok().json(ScimListResponse::new(resources, total, start_index)))
@@ -220,22 +219,22 @@ pub async fn list<C: Connection + Clone>(
 /// `GET /scim/v2/Groups/{id}`
 pub async fn get<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    let group = state.group_repo.get_by_id(user.tenant_id, id).await?;
-    let members = scim_members(&state, user.tenant_id, id).await?;
+    let group = state.group_repo.get_by_id(user.tenant_id(), id).await?;
+    let members = scim_members(&state, user.tenant_id(), id).await?;
     Ok(HttpResponse::Ok().json(ScimGroup::build(&group, members, &http_req)))
 }
 
 /// `POST /scim/v2/Groups`
 pub async fn create<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<ScimGroupWrite>,
@@ -246,7 +245,7 @@ pub async fn create<C: Connection + Clone>(
     let created = state
         .group_repo
         .create(CreateGroup {
-            tenant_id: user.tenant_id,
+            tenant_id: user.tenant_id(),
             name: req.display_name.clone(),
             description: String::new(),
             metadata: Some(build_scim_metadata(&req.external_id)),
@@ -263,11 +262,11 @@ pub async fn create<C: Connection + Clone>(
     for member in &req.members {
         state
             .group_repo
-            .add_member(user.tenant_id, member.value, created.id)
+            .add_member(user.tenant_id(), member.value, created.id)
             .await?;
     }
 
-    let members = scim_members(&state, user.tenant_id, created.id).await?;
+    let members = scim_members(&state, user.tenant_id(), created.id).await?;
     let scim_group = ScimGroup::build(&created, members, &http_req);
     let location = scim_group.meta.location.clone();
     Ok(HttpResponse::Created()
@@ -281,7 +280,7 @@ pub async fn create<C: Connection + Clone>(
 /// set.
 pub async fn replace<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -289,7 +288,7 @@ pub async fn replace<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    let current = state.group_repo.get_by_id(user.tenant_id, id).await?;
+    let current = state.group_repo.get_by_id(user.tenant_id(), id).await?;
     let req = body.into_inner();
 
     let mut metadata = current.metadata.clone();
@@ -303,7 +302,7 @@ pub async fn replace<C: Connection + Clone>(
     let updated = state
         .group_repo
         .update(
-            user.tenant_id,
+            user.tenant_id(),
             id,
             UpdateGroup {
                 name: Some(req.display_name.clone()),
@@ -316,7 +315,7 @@ pub async fn replace<C: Connection + Clone>(
     let current_member_ids: std::collections::HashSet<Uuid> = state
         .group_repo
         .get_members(
-            user.tenant_id,
+            user.tenant_id(),
             id,
             Pagination {
                 offset: 0,
@@ -334,17 +333,17 @@ pub async fn replace<C: Connection + Clone>(
     for to_add in requested_ids.difference(&current_member_ids) {
         state
             .group_repo
-            .add_member(user.tenant_id, *to_add, id)
+            .add_member(user.tenant_id(), *to_add, id)
             .await?;
     }
     for to_remove in current_member_ids.difference(&requested_ids) {
         state
             .group_repo
-            .remove_member(user.tenant_id, *to_remove, id)
+            .remove_member(user.tenant_id(), *to_remove, id)
             .await?;
     }
 
-    let members = scim_members(&state, user.tenant_id, id).await?;
+    let members = scim_members(&state, user.tenant_id(), id).await?;
     Ok(HttpResponse::Ok().json(ScimGroup::build(&updated, members, &http_req)))
 }
 
@@ -357,7 +356,7 @@ fn group_patch_is_noop(u: &UpdateGroup, actions: &[MemberAction]) -> bool {
 /// single-member-removal shape.
 pub async fn patch<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -365,7 +364,7 @@ pub async fn patch<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    let current = state.group_repo.get_by_id(user.tenant_id, id).await?;
+    let current = state.group_repo.get_by_id(user.tenant_id(), id).await?;
     let delta: GroupPatchDelta = parse_group_patch(&body.into_inner())?;
 
     let mut metadata_update: Option<Value> = None;
@@ -384,7 +383,10 @@ pub async fn patch<C: Connection + Clone>(
     let group = if group_patch_is_noop(&update, &delta.member_actions) {
         current
     } else if update.name.is_some() || update.metadata.is_some() {
-        state.group_repo.update(user.tenant_id, id, update).await?
+        state
+            .group_repo
+            .update(user.tenant_id(), id, update)
+            .await?
     } else {
         current
     };
@@ -394,20 +396,20 @@ pub async fn patch<C: Connection + Clone>(
             MemberAction::Add(member_id) => {
                 state
                     .group_repo
-                    .add_member(user.tenant_id, *member_id, id)
+                    .add_member(user.tenant_id(), *member_id, id)
                     .await?;
             }
             MemberAction::Remove(member_id) => {
                 state
                     .group_repo
-                    .remove_member(user.tenant_id, *member_id, id)
+                    .remove_member(user.tenant_id(), *member_id, id)
                     .await?;
             }
             MemberAction::RemoveAll => {
                 let existing = state
                     .group_repo
                     .get_members(
-                        user.tenant_id,
+                        user.tenant_id(),
                         id,
                         Pagination {
                             offset: 0,
@@ -418,20 +420,20 @@ pub async fn patch<C: Connection + Clone>(
                 for member in existing.items {
                     state
                         .group_repo
-                        .remove_member(user.tenant_id, member.id, id)
+                        .remove_member(user.tenant_id(), member.id, id)
                         .await?;
                 }
             }
         }
     }
 
-    let members = scim_members(&state, user.tenant_id, id).await?;
+    let members = scim_members(&state, user.tenant_id(), id).await?;
     Ok(HttpResponse::Ok().json(ScimGroup::build(&group, members, &http_req)))
 }
 
 /// `DELETE /scim/v2/Groups/{id}`
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -445,6 +447,6 @@ pub async fn delete<C: Connection + Clone>(
     // SCIM-local copy of that check would have been the second of four: the
     // native `/api/v1/groups/{id}` handler needed the same fix, and the third
     // and fourth copies arrive with the next two resource types.
-    state.group_repo.delete(user.tenant_id, id).await?;
+    state.group_repo.delete(user.tenant_id(), id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

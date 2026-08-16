@@ -36,11 +36,10 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use axiam_api_rest::authz::AuthzData;
-use axiam_api_rest::extractors::auth::AuthenticatedUser;
 use axiam_api_rest::extractors::client_info::{client_ip, user_agent};
 use axiam_api_rest::state::AppState;
 
-use crate::auth::require_scim_provision;
+use crate::auth::{ScimPrincipal, require_scim_provision};
 use crate::error::ScimError;
 use crate::patch::{PatchRequest, UserPatchDelta, parse_user_patch};
 use crate::schema::{SCIM_LIST_RESPONSE_SCHEMA, USER_SCHEMA};
@@ -253,7 +252,7 @@ pub(crate) fn clamp_count(count: Option<u64>) -> u64 {
 /// `GET /scim/v2/Users`
 pub async fn list<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<ScimListQuery>,
@@ -273,7 +272,7 @@ pub async fn list<C: Connection + Clone>(
         "username" => {
             let (items, total) = match state
                 .user_repo
-                .get_by_username(user.tenant_id, &filter.value)
+                .get_by_username(user.tenant_id(), &filter.value)
                 .await
             {
                 Ok(u) if offset == 0 && limit > 0 => (vec![u], 1),
@@ -291,7 +290,7 @@ pub async fn list<C: Connection + Clone>(
             let all = state
                 .user_repo
                 .list(
-                    user.tenant_id,
+                    user.tenant_id(),
                     Pagination {
                         offset: 0,
                         limit: EXTERNAL_ID_SCAN_CAP,
@@ -322,7 +321,7 @@ pub async fn list<C: Connection + Clone>(
 
 async fn list_unfiltered<C: Connection + Clone>(
     http_req: &HttpRequest,
-    user: &AuthenticatedUser,
+    user: &ScimPrincipal,
     state: &web::Data<AppState<C>>,
     offset: u64,
     limit: u64,
@@ -333,7 +332,7 @@ async fn list_unfiltered<C: Connection + Clone>(
         let probe = state
             .user_repo
             .list(
-                user.tenant_id,
+                user.tenant_id(),
                 Pagination {
                     offset: 0,
                     limit: 1,
@@ -348,7 +347,7 @@ async fn list_unfiltered<C: Connection + Clone>(
     }
     let result = state
         .user_repo
-        .list(user.tenant_id, Pagination { offset, limit })
+        .list(user.tenant_id(), Pagination { offset, limit })
         .await?;
     let resources: Vec<ScimUser> = result
         .items
@@ -361,7 +360,7 @@ async fn list_unfiltered<C: Connection + Clone>(
 /// `GET /scim/v2/Users/{id}`
 pub async fn get<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -369,7 +368,7 @@ pub async fn get<C: Connection + Clone>(
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let target = state
         .user_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(user.tenant_id(), path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(ScimUser::from_user(&target, &http_req)))
 }
@@ -403,7 +402,7 @@ fn random_password() -> String {
 /// `POST /scim/v2/Users`
 pub async fn create<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<ScimUserWrite>,
@@ -421,7 +420,7 @@ pub async fn create<C: Connection + Clone>(
     let password = req.password.clone().unwrap_or_else(random_password);
 
     let input = CreateUser {
-        tenant_id: user.tenant_id,
+        tenant_id: user.tenant_id(),
         username: req.user_name.clone(),
         email,
         password,
@@ -452,7 +451,7 @@ pub async fn create<C: Connection + Clone>(
     let final_user = state
         .user_repo
         .update(
-            user.tenant_id,
+            user.tenant_id(),
             created.id,
             UpdateUser {
                 status: Some(final_status),
@@ -479,7 +478,7 @@ pub async fn create<C: Connection + Clone>(
 /// `PUT /scim/v2/Users/{id}` — full replace (RFC 7644 §3.5.1).
 pub async fn replace<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -487,7 +486,7 @@ pub async fn replace<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    let current = state.user_repo.get_by_id(user.tenant_id, id).await?;
+    let current = state.user_repo.get_by_id(user.tenant_id(), id).await?;
     let req = body.into_inner();
 
     let email = primary_email(&req.emails).ok_or_else(|| {
@@ -521,7 +520,7 @@ pub async fn replace<C: Connection + Clone>(
     let updated = state
         .user_repo
         .update(
-            user.tenant_id,
+            user.tenant_id(),
             id,
             UpdateUser {
                 username: Some(req.user_name.clone()),
@@ -538,13 +537,13 @@ pub async fn replace<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, id)
+        .invalidate_subject(user.tenant_id(), id)
         .await?;
 
     // SEC-098: a PUT carrying `active: false` is the RFC 7644 §3.5.1 spelling
     // of a deactivation and must revoke on the same terms as the PATCH one.
     if status == UserStatus::Inactive {
-        revoke_live_credentials(&state, user.tenant_id, id, "scim.deactivated").await;
+        revoke_live_credentials(&state, user.tenant_id(), id, "scim.deactivated").await;
     }
 
     state
@@ -657,7 +656,7 @@ fn apply_user_delta_metadata(current: &Value, delta: &UserPatchDelta) -> Option<
 /// [`crate::patch`].
 pub async fn patch<C: Connection + Clone>(
     http_req: HttpRequest,
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
@@ -665,7 +664,7 @@ pub async fn patch<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    let current = state.user_repo.get_by_id(user.tenant_id, id).await?;
+    let current = state.user_repo.get_by_id(user.tenant_id(), id).await?;
     let delta = parse_user_patch(&body.into_inner())?;
 
     // Hash with the server-configured pepper, exactly as the bootstrap and login
@@ -713,14 +712,14 @@ pub async fn patch<C: Connection + Clone>(
     let updated = if user_patch_is_noop(&update) {
         current
     } else {
-        let u = state.user_repo.update(user.tenant_id, id, update).await?;
+        let u = state.user_repo.update(user.tenant_id(), id, update).await?;
         authz
             .get_ref()
             .as_ref()
-            .invalidate_subject(user.tenant_id, id)
+            .invalidate_subject(user.tenant_id(), id)
             .await?;
         if let Some(reason) = revocation_reason {
-            revoke_live_credentials(&state, user.tenant_id, id, reason).await;
+            revoke_live_credentials(&state, user.tenant_id(), id, reason).await;
         }
         state
             .emit_webhook(
@@ -737,28 +736,28 @@ pub async fn patch<C: Connection + Clone>(
 
 /// `DELETE /scim/v2/Users/{id}`
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    user: ScimPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
-    state.user_repo.delete(user.tenant_id, id).await?;
+    state.user_repo.delete(user.tenant_id(), id).await?;
 
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, id)
+        .invalidate_subject(user.tenant_id(), id)
         .await?;
 
     // SEC-098: `DELETE /Users/{id}` is a soft delete to `Inactive`, so without
     // this the offboarded account keeps a live session and a spendable refresh
     // token. This is the endpoint an IdP calls when someone leaves.
-    revoke_live_credentials(&state, user.tenant_id, id, "scim.deleted").await;
+    revoke_live_credentials(&state, user.tenant_id(), id, "scim.deleted").await;
 
     state
-        .emit_webhook(user.tenant_id, "user.deleted", json!({ "id": id }))
+        .emit_webhook(user.tenant_id(), "user.deleted", json!({ "id": id }))
         .await;
 
     Ok(HttpResponse::NoContent().finish())

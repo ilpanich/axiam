@@ -65,11 +65,11 @@ use axiam_db::{
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -274,6 +274,11 @@ pub struct AppState<C: Connection + Clone> {
     pub permission_repo: SurrealPermissionRepository<C>,
     pub resource_repo: SurrealResourceRepository<C>,
     pub scope_repo: SurrealScopeRepository<C>,
+    /// SCIM provisioning tokens (`claude_dev/scim-provisioning-token-design.md`).
+    /// Read on every `/scim/v2/*` request that presents a provisioning handle
+    /// rather than a JWT, and written by the `/api/v1/scim-tokens` admin
+    /// endpoints.
+    pub scim_token_repo: SurrealScimTokenRepository<C>,
     pub service_account_repo: SurrealServiceAccountRepository<C>,
     pub auth_service: AuthServiceT<C>,
     pub webauthn_service: WebauthnServiceT<C>,
@@ -703,6 +708,7 @@ impl<C: Connection + Clone> AppState<C> {
             permission_repo: SurrealPermissionRepository::new(db.clone()),
             resource_repo: SurrealResourceRepository::new(db.clone()),
             scope_repo: SurrealScopeRepository::new(db.clone()),
+            scim_token_repo: SurrealScimTokenRepository::new(db.clone()),
             service_account_repo: service_account_repo.clone(),
             auth_service,
             webauthn_service,

@@ -357,19 +357,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?required}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?required}"
-      # A6: AMQPS listener on 5671, plaintext listener off — same shape as
-      # docker-compose.prod.yml. `just bench-up` mints the material.
-      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: >-
-        -rabbit listeners.tcp []
-        -rabbit listeners.ssl.default 5671
-        -rabbit ssl_options.cacertfile "/etc/rabbitmq/tls/ca.pem"
-        -rabbit ssl_options.certfile   "/etc/rabbitmq/tls/server.pem"
-        -rabbit ssl_options.keyfile    "/etc/rabbitmq/tls/server.key"
-        -rabbit ssl_options.verify verify_none
-        -rabbit ssl_options.fail_if_no_peer_cert false
-        -rabbit ssl_options.versions ['tlsv1.3']
     volumes:
+      # A6: AMQPS-only listener, plaintext listener off — the same config file
+      # the dev, e2e and CI brokers use. `just bench-up` mints the material.
       - ../../../docker/.secrets/broker-tls:/etc/rabbitmq/tls:ro
+      - ../../../docker/rabbitmq-tls.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
       interval: 5s

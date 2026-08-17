@@ -7,6 +7,12 @@ name: SDK Artifact Drift (cross-repo)
 #   sdks/openapi.json      -> <sdk repo>/openapi.json
 #   proto/axiam/v1/*.proto -> <sdk repo>/proto/axiam/v1/*.proto
 #
+# A second job runs the §8b enforcement gate (scripts/check-sdk-amqps.py). That
+# is the same shape of problem one layer down: this job asks whether the SDKs
+# have the current contract, and that one asks whether they actually DO what it
+# says — a distinction §8b rule 7 exists because of, after three SDKs were found
+# asserting `amqps://` in a doc comment attached to code that accepted anything.
+#
 # `sdk-openapi-drift.yml` and `sdk-buf-gates.yml` guard the SOURCES. Until this
 # job existed, nothing detected a stale COPY downstream — §8 names that as "the
 # single sharpest edge introduced by the multi-repo split", because a silently
@@ -65,6 +71,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/check-sdk-artifact-drift.py'
+      - 'scripts/check-sdk-amqps.py'
       - '.github/workflows/sdk-artifact-drift.yml'
 
 permissions:
@@ -102,3 +109,54 @@ jobs:
           SDK_DRIFT_TOKEN: ${{ secrets.SDK_SYNC_READ_TOKEN || secrets.GITHUB_TOKEN }}
           GITHUB_ORG: ${{ github.repository_owner }}
         run: python3 scripts/check-sdk-artifact-drift.py
+
+  amqps-enforcement:
+    name: SDKs enforce §8b amqps:// (contract 1.23 rule 7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: axiam
+
+      # PR path: the cross-repo token is unavailable, so the fleet cannot be
+      # checked and saying otherwise would manufacture the confidence this whole
+      # workflow exists to refuse. Check the checker instead — the same posture
+      # the artifact-drift job above takes, and the reason the script exits 2
+      # ("could not run") rather than 0 when it finds no SDK to inspect.
+      - name: Checker is well-formed (PR only)
+        if: github.event_name == 'pull_request'
+        working-directory: axiam
+        run: |
+          python3 -m py_compile scripts/check-sdk-amqps.py
+          # With no SDKs checked out, exit 2 is the correct outcome. A 0 here
+          # would mean "nothing was checked" reported as "nothing is wrong".
+          set +e
+          python3 scripts/check-sdk-amqps.py
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then
+            echo "::error::checker exited $code with no SDKs present; expected 2 (could not run)"
+            exit 1
+          fi
+          echo "checker compiles and refuses to pass vacuously"
+
+      - name: Check out the SDK repos that speak AMQP
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ secrets.SDK_SYNC_READ_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::SDK_SYNC_READ_TOKEN is unset — the §8b gate cannot read the SDK repos."
+            echo "See this workflow's ONE-TIME SETUP notes; a vacuous pass is not an option."
+            exit 2
+          fi
+          for sdk in rust typescript python go php kotlin java csharp; do
+            git clone --depth 1 --quiet \
+              "https://x-access-token:$TOKEN@github.com/${{ github.repository_owner }}/axiam-$sdk-sdk.git" \
+              "axiam-$sdk-sdk"
+          done
+
+      - name: SDKs enforce amqps:// in code, not in prose
+        if: github.event_name != 'pull_request'
+        working-directory: axiam
+        run: python3 scripts/check-sdk-amqps.py

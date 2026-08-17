@@ -11,6 +11,15 @@
 //! every permit is held, further callers fail fast with a 503 backpressure
 //! error rather than queueing unboundedly (which turns a memory problem into
 //! a tail-latency problem).
+//!
+//! "Process-wide" is a claim about the *semaphore instance*, not about this
+//! module: the bound only holds if every transport that verifies a password
+//! shares the one `Arc<Semaphore>` built at the composition root. It is
+//! therefore `pub`, not `pub(crate)` — `axiam-api-grpc`'s
+//! `UserService/ValidateCredentials` runs the same Argon2id verify as the REST
+//! login path and must acquire from the same instance. It did not, until the
+//! `grpc_admin_validate` benchmark cell drove 50 concurrent verifications
+//! through the ungated path and returned ~44% `INTERNAL`.
 
 use std::time::Duration;
 
@@ -27,7 +36,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 /// * A closed semaphore (never happens in practice — the gate is never
 ///   closed) maps to [`AxiamError::Internal`], matching the prior behaviour of
 ///   the untimed `acquire()` call sites.
-pub(crate) async fn acquire_hash_permit(
+pub async fn acquire_hash_permit(
     semaphore: &Semaphore,
     timeout: Duration,
 ) -> AxiamResult<SemaphorePermit<'_>> {

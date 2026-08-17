@@ -196,8 +196,13 @@ COPY --from=builder /rootfs/ /
 COPY --from=builder --chown=65532:65532 \
     /build/target/release/axiam-server /usr/local/bin/axiam-server
 
-# Switch to non-root user (distroless nonroot = UID 65532)
-USER nonroot
+# Switch to non-root user (distroless nonroot = UID 65532).
+# Numeric, not the `nonroot` alias (hadolint DL3066): a username has to be
+# resolved against the image's /etc/passwd, which Kubernetes cannot do when it
+# enforces `runAsNonRoot` — it fails the pod closed rather than guess. The
+# numeric form is also what the COPY --chown above already uses, so the binary's
+# owner and the running user are stated the same way in both places.
+USER 65532:65532
 
 # Default environment
 ENV RUST_LOG=axiam=info

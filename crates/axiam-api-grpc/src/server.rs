@@ -41,6 +41,7 @@ use axiam_core::repository::{
 };
 use axiam_db::DbHandle;
 use surrealdb::Connection;
+use tokio::sync::Semaphore;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use uuid::Uuid;
 
@@ -135,6 +136,12 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // MUST be read from the same gate `axiam-api-rest` holds, so the two
     // admin surfaces refuse (or accept) the same registrations.
     reactor_dispatch_available: bool,
+    // B1 — the process-wide Argon2id gate. MUST be a clone of the same
+    // `Arc<Semaphore>` `AppState::crypto_semaphore` holds: the permit count
+    // bounds peak concurrent ~19 MiB hash arenas for the WHOLE process, so a
+    // listener with its own instance would silently double the bound.
+    // `UserService/ValidateCredentials` is this listener's only consumer.
+    crypto_semaphore: Arc<Semaphore>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -201,7 +208,7 @@ where
     // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
     // as AuthorizationService so every gRPC call requires a verified bearer JWT.
     let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(user_repo.clone(), auth_config.clone()),
+        UserServiceImpl::new(user_repo.clone(), auth_config.clone(), crypto_semaphore),
         AuthInterceptor::new(auth_config.clone()),
     );
     // UserInfoService: OIDC-style self lookup — identity derived entirely from

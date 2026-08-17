@@ -31,6 +31,17 @@ fn auth_config() -> AuthConfig {
     }
 }
 
+/// B1 — the Argon2id gate `UserServiceImpl` acquires before verifying a
+/// password. Sized from the same config knob production resolves
+/// (`0` = auto → `min(available_parallelism, 4)`), so these tests exercise the
+/// real acquire path rather than an always-available stub. A test that wants to
+/// observe backpressure passes `Semaphore::new(0)` instead.
+fn test_crypto_gate() -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(
+        auth_config().resolved_max_concurrent_hashes(),
+    ))
+}
+
 fn token_for(tenant_id: Uuid) -> String {
     issue_access_token(
         Uuid::new_v4(),
@@ -557,7 +568,11 @@ impl UserRepository for MockUserRepo {
 
 #[tokio::test]
 async fn get_user_missing_claims_unauthenticated() {
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let req = Request::new(GetUserRequest {
         tenant_id: Uuid::new_v4().to_string(),
         user_id: Uuid::new_v4().to_string(),
@@ -568,7 +583,11 @@ async fn get_user_missing_claims_unauthenticated() {
 
 #[tokio::test]
 async fn get_user_tenant_mismatch_permission_denied() {
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(GetUserRequest {
         tenant_id: Uuid::new_v4().to_string(),
         user_id: Uuid::new_v4().to_string(),
@@ -587,6 +606,7 @@ async fn get_user_success() {
             user: Some(user.clone()),
         },
         auth_config(),
+        test_crypto_gate(),
     );
     let mut req = Request::new(GetUserRequest {
         tenant_id: tenant.to_string(),
@@ -601,7 +621,11 @@ async fn get_user_success() {
 #[tokio::test]
 async fn get_user_not_found() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(GetUserRequest {
         tenant_id: tenant.to_string(),
         user_id: Uuid::new_v4().to_string(),
@@ -614,7 +638,11 @@ async fn get_user_not_found() {
 #[tokio::test]
 async fn get_user_invalid_uuid_argument() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(GetUserRequest {
         tenant_id: "not-a-uuid".into(),
         user_id: Uuid::new_v4().to_string(),
@@ -634,6 +662,7 @@ async fn validate_credentials_success() {
             user: Some(user.clone()),
         },
         auth_config(),
+        test_crypto_gate(),
     );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
@@ -651,7 +680,11 @@ async fn validate_credentials_wrong_password_records_failure() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(MockUserRepo { user: Some(user) }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
         username_or_email: "alice".into(),
@@ -665,7 +698,11 @@ async fn validate_credentials_wrong_password_records_failure() {
 #[tokio::test]
 async fn validate_credentials_unknown_user_is_invalid() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
         username_or_email: "ghost".into(),
@@ -678,7 +715,11 @@ async fn validate_credentials_unknown_user_is_invalid() {
 
 #[tokio::test]
 async fn validate_credentials_tenant_mismatch_denied() {
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: Uuid::new_v4().to_string(),
         username_or_email: "alice".into(),
@@ -695,7 +736,11 @@ async fn validate_credentials_inactive_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.status = UserStatus::Inactive;
-    let svc = UserServiceImpl::new(MockUserRepo { user: Some(user) }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
         username_or_email: "alice".into(),
@@ -789,6 +834,7 @@ async fn get_user_renders_all_status_variants() {
                 user: Some(user.clone()),
             },
             auth_config(),
+            test_crypto_gate(),
         );
         let mut req = Request::new(GetUserRequest {
             tenant_id: tenant.to_string(),
@@ -810,6 +856,7 @@ async fn get_user_internal_error_maps_to_internal() {
             ..Default::default()
         },
         auth_config(),
+        test_crypto_gate(),
     );
     let mut req = Request::new(GetUserRequest {
         tenant_id: tenant.to_string(),
@@ -822,7 +869,11 @@ async fn get_user_internal_error_maps_to_internal() {
 
 #[tokio::test]
 async fn validate_credentials_missing_claims_is_unauthenticated() {
-    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let req = Request::new(ValidateCredentialsRequest {
         tenant_id: Uuid::new_v4().to_string(),
         username_or_email: "alice".into(),
@@ -847,6 +898,7 @@ async fn validate_credentials_with_pepper_succeeds() {
             user: Some(user.clone()),
         },
         cfg,
+        test_crypto_gate(),
     );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
@@ -858,13 +910,135 @@ async fn validate_credentials_with_pepper_succeeds() {
     assert!(resp.valid);
 }
 
+/// B1 — `ValidateCredentials` MUST acquire an Argon2id permit before verifying.
+///
+/// Regression test for the defect the `grpc_admin_validate` benchmark cell
+/// found: this handler called `verify_password` directly, so
+/// `AXIAM__AUTH__MAX_CONCURRENT_HASHES` bounded the REST login path only and
+/// this RPC — an online-password-guessing surface — could run unbounded
+/// concurrent ~19 MiB hash arenas. At 50 VUs the cell returned ~44% INTERNAL.
+///
+/// A zero-permit semaphore stands in for "every permit is held". The assertion
+/// is on the STATUS, not just on failure: UNAVAILABLE (mirroring the REST
+/// path's 503) says "server at capacity, retry"; INTERNAL — what an ungated
+/// handler surfaces when it falls over instead — says "server bug, don't
+/// retry", and RESOURCE_EXHAUSTED is already this listener's rate-limit
+/// rejection. Conflating any two of those misdirects every caller that reads
+/// the code to decide whether to back off.
+#[tokio::test]
+async fn validate_credentials_saturated_hash_gate_is_unavailable_not_internal() {
+    let tenant = Uuid::new_v4();
+    let mut cfg = auth_config();
+    // Fail the acquire on its first poll — keeps the test instant rather than
+    // sleeping out a real backpressure timeout.
+    cfg.hash_acquire_timeout_secs = 0;
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let user = active_user(tenant, hash);
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        cfg,
+        // Zero permits: the gate is saturated, nothing can be acquired.
+        std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+    );
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unavailable,
+        "a saturated hash gate must be transient-capacity backpressure, not INTERNAL"
+    );
+}
+
+/// The companion to the test above: with permits available the handler still
+/// completes normally, so the gate cannot be "passing" by rejecting everything.
+#[tokio::test]
+async fn validate_credentials_succeeds_when_hash_gate_has_capacity() {
+    let tenant = Uuid::new_v4();
+    let mut cfg = auth_config();
+    cfg.hash_acquire_timeout_secs = 0;
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let user = active_user(tenant, hash);
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        cfg,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+    );
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let resp = svc.validate_credentials(req).await.unwrap().into_inner();
+    assert!(resp.valid);
+}
+
+/// The permit is RELEASED before the handler's lockout write, not held across
+/// it — otherwise a datastore round-trip would occupy a scarce hash permit and
+/// shrink effective verify concurrency to the datastore's latency.
+///
+/// A single-permit gate makes this observable: the failed-credential path takes
+/// the permit, and the second call can only succeed if the first gave it back.
+#[tokio::test]
+async fn validate_credentials_releases_hash_permit_after_verify() {
+    let tenant = Uuid::new_v4();
+    let mut cfg = auth_config();
+    cfg.hash_acquire_timeout_secs = 0;
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let user = active_user(tenant, hash);
+    let svc = UserServiceImpl::new(
+        MockUserRepo {
+            user: Some(user.clone()),
+        },
+        cfg,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+    );
+    let mut wrong = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: "definitely-not-the-password".into(),
+    });
+    wrong.extensions_mut().insert(claims_for(tenant));
+    assert!(
+        !svc.validate_credentials(wrong)
+            .await
+            .unwrap()
+            .into_inner()
+            .valid
+    );
+
+    let mut right = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    right.extensions_mut().insert(claims_for(tenant));
+    assert!(
+        svc.validate_credentials(right)
+            .await
+            .unwrap()
+            .into_inner()
+            .valid,
+        "the permit taken by the first call was never released"
+    );
+}
+
 /// A malformed stored password hash surfaces as an INTERNAL error from the
 /// verifier rather than a silent `valid: false`.
 #[tokio::test]
 async fn validate_credentials_bad_hash_maps_to_internal() {
     let tenant = Uuid::new_v4();
     let user = active_user(tenant, "not-a-valid-phc-hash".into());
-    let svc = UserServiceImpl::new(MockUserRepo { user: Some(user) }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
         username_or_email: "alice".into(),
@@ -889,6 +1063,7 @@ async fn validate_credentials_failed_login_record_error_maps_to_internal() {
             ..Default::default()
         },
         auth_config(),
+        test_crypto_gate(),
     );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
@@ -906,7 +1081,11 @@ async fn validate_credentials_locked_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.locked_until = Some(Utc::now() + chrono::Duration::hours(1));
-    let svc = UserServiceImpl::new(MockUserRepo { user: Some(user) }, auth_config());
+    let svc = UserServiceImpl::new(
+        MockUserRepo { user: Some(user) },
+        auth_config(),
+        test_crypto_gate(),
+    );
     let mut req = Request::new(ValidateCredentialsRequest {
         tenant_id: tenant.to_string(),
         username_or_email: "alice".into(),

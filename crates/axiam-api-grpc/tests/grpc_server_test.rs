@@ -186,6 +186,9 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         reactor_routing_invalidator,
         // SEC-101: the test double's transport can dispatch.
         true,
+        // B1: in production this is a clone of `AppState`'s process-wide gate;
+        // these tests only need the boot path to accept one.
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -256,6 +259,9 @@ async fn start_grpc_server_boots_in_tls_mode() {
         reactor_routing_invalidator,
         // SEC-101: the test double's transport can dispatch.
         true,
+        // B1: in production this is a clone of `AppState`'s process-wide gate;
+        // these tests only need the boot path to accept one.
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -350,6 +356,9 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         reactor_routing_invalidator,
         // SEC-101: the test double's transport can dispatch.
         true,
+        // B1: in production this is a clone of `AppState`'s process-wide gate;
+        // these tests only need the boot path to accept one.
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     )
     .await;
 }
@@ -407,6 +416,9 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         reactor_routing_invalidator,
         // SEC-101: the test double's transport can dispatch.
         true,
+        // B1: in production this is a clone of `AppState`'s process-wide gate;
+        // these tests only need the boot path to accept one.
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     )
     .await;
 }

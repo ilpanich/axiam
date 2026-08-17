@@ -39,7 +39,9 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5
 # from the pinned Alpine 3.23 branch at build time so the scanned image is clean
 # on BOTH architectures. Must run as root (the base image's default user is the
 # unprivileged 101); the final `USER 101` below restores the non-root guarantee.
-USER root
+# Numeric `0` rather than the `root` alias (hadolint DL3066) — same reason the
+# final `USER 101` is numeric: no /etc/passwd lookup needed to know who this is.
+USER 0
 RUN apk upgrade --no-cache
 
 # Copy built assets from builder

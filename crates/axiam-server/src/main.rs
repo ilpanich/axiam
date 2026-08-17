@@ -1695,6 +1695,11 @@ async fn main() -> std::io::Result<()> {
     } else {
         None
     };
+    // B1 — the gRPC listener shares the ONE crypto semaphore built above (and
+    // handed to `AppState` below), not a second instance: the permit count
+    // bounds peak concurrent ~19 MiB Argon2id arenas process-wide, and
+    // `UserService/ValidateCredentials` verifies passwords just like REST login.
+    let grpc_crypto_semaphore = Arc::clone(&crypto_semaphore);
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -1710,6 +1715,7 @@ async fn main() -> std::io::Result<()> {
             grpc_reactor_audit_repo,
             grpc_reactor_routing_invalidator,
             grpc_reactor_dispatch_available,
+            grpc_crypto_semaphore,
         )
         .await
         {

@@ -872,6 +872,7 @@ boot, which is easy to misread as an unrelated infrastructure fault.
 | `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA, **added to** the platform roots (not substituted — see above). Unset = platform roots only. |
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
+| `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
 
 ## Outbound SSRF guard — same-network IdPs (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`)
 

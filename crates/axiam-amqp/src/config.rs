@@ -118,6 +118,22 @@ pub struct AmqpConfig {
     pub reconnect_delay_ms: u64,
     /// Maximum number of connection retries before giving up.
     pub max_retries: u32,
+    /// How long a single connection attempt may take before it is abandoned,
+    /// in milliseconds (A6).
+    ///
+    /// lapin has no connect timeout of its own, and the `amqps://` handshake
+    /// gave that omission teeth: a broker whose port is published but whose
+    /// TLS listener never answers — or a client-side fault in the handshake
+    /// itself — leaves `Connection::connect_with_config` pending forever.
+    /// [`AmqpManager::connect_with_retry`]'s budget cannot help there, because
+    /// the future it would retry has not resolved; the process simply stops,
+    /// with no error and no log line. Bounding each attempt turns that into a
+    /// [`AmqpError::ConnectTimeout`] the retry loop can act on and an operator
+    /// can read.
+    ///
+    /// [`AmqpManager::connect_with_retry`]: crate::AmqpManager::connect_with_retry
+    /// [`AmqpError::ConnectTimeout`]: crate::AmqpError::ConnectTimeout
+    pub connect_timeout_ms: u64,
     /// HMAC-SHA256 master signing key for authenticating AMQP message
     /// payloads (SEC-022/055, SECHRD-08). Set via
     /// `AXIAM__AMQP__SIGNING_KEY` (hex-encoded key). Signing is mandatory —
@@ -149,6 +165,10 @@ impl Default for AmqpConfig {
             prefetch_count: 10,
             reconnect_delay_ms: 5000,
             max_retries: 5,
+            // Generous enough that a loaded broker or a slow TLS handshake is
+            // never mistaken for a stall, short enough that five attempts plus
+            // their backoff stay inside any sensible startup budget.
+            connect_timeout_ms: 30_000,
             signing_key: None,
             replay_skew_secs: default_replay_skew_secs(),
         }

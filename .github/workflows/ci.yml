@@ -347,17 +347,25 @@ jobs:
       # --workspace` above must not require a broker in every environment
       # that runs it. This job has one, so run it explicitly here.
       #
-      # timeout-minutes because lapin has no connect timeout: against a
-      # published port that nothing is accepting on, `Connection::connect`
-      # never returns and `connect_with_retry`'s retry budget never fires,
-      # because the future it would retry has not resolved. That hung this step
-      # for 25 minutes before the listener assertion above existed to catch the
-      # cause. The assertion should make this unreachable; the bound is here so
-      # that if it ever is reached, it costs ten minutes rather than six hours.
+      # `--nocapture` and `RUST_BACKTRACE` are not decoration here. This step
+      # has twice been killed at its timeout having printed exactly
+      # `running 10 tests` and nothing else: libtest buffers per-test output
+      # when stdout is a pipe, so a suite that stalls names neither the test it
+      # stalled in nor the reason. The second time, the reason was a rustls
+      # `CryptoProvider` panic on lapin's own IO thread — a panic the caller
+      # never sees, on a thread nobody was reading — and ten minutes of silence
+      # was the entire diagnostic. `--nocapture` streams it as it happens.
+      #
+      # `timeout-minutes` stays as the outer bound. `AmqpConfig`'s
+      # `connect_timeout_ms` should now make an unbounded dial impossible, so
+      # this should never be what stops the step; it is here for the failure
+      # that has not been thought of yet.
       - timeout-minutes: 10
+        env:
+          RUST_BACKTRACE: "1"
         run: |
           cargo test -p axiam-amqp --test reactor_containerized_test \
-            -- --ignored --test-threads=1
+            -- --ignored --test-threads=1 --nocapture
 
   frontend-quality:
     name: Frontend Lint + Type Check

@@ -821,3 +821,526 @@ fn extract_attestation_metadata(attested: &AttestedPasskey) -> (Option<Uuid>, Op
         _ => (None, None),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// This module's ceremony entry points cannot be unit-tested without a real
+// authenticator, but the STATE TOKEN machinery underneath them can be, and it
+// is where this module's security properties actually live. A WebAuthn state
+// token is the only thing carrying ceremony state between the two halves of a
+// registration or authentication, across a boundary the browser controls — so
+// what matters is not that a round trip works, but everything the decoder
+// REFUSES.
+//
+// Four refusals are load-bearing, and each has a test below that fails if the
+// check is removed:
+//
+//  * A token minted for one ceremony must not be redeemable in the other
+//    (`purpose`). Without it, a registration state could be replayed into
+//    `finish_authentication`.
+//  * A token signed by any other key must not verify.
+//  * A token from another issuer must not verify.
+//  * An expired token must not verify.
+//
+// And one confidentiality property: the ceremony state is ENCRYPTED inside the
+// JWT, not merely signed. A JWT payload is public — base64, not a secret — so
+// a signed-only state would publish the challenge to anyone holding the token.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::error::{AxiamError, AxiamResult};
+    use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
+    use serde_json::json;
+
+    // The Ed25519 pair the rest of this crate's tests use.
+    const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
+    const PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n-----END PUBLIC KEY-----";
+
+    const KEY: [u8; 32] = [7u8; 32];
+
+    /// The repo is never reached by any test here — every one of them stops
+    /// inside the token/crypto helpers — so the doubles return errors rather
+    /// than plausible rows. A test that accidentally reaches storage should
+    /// fail loudly instead of quietly passing on fabricated data.
+    #[derive(Clone)]
+    struct UnusedRepo;
+
+    impl WebauthnCredentialRepository for UnusedRepo {
+        async fn create(&self, _i: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+        async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<WebauthnCredential>> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+        async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+        async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
+            Err(AxiamError::Internal("repo must not be reached".into()))
+        }
+    }
+
+    fn config() -> AuthConfig {
+        AuthConfig {
+            jwt_private_key_pem: PRIV_PEM.into(),
+            jwt_public_key_pem: PUB_PEM.into(),
+            jwt_issuer: "axiam-test".into(),
+            mfa_encryption_key: Some(KEY),
+            mfa_challenge_lifetime_secs: 300,
+            webauthn_rp_id: "localhost".into(),
+            webauthn_rp_origin: "http://localhost:8090".into(),
+            webauthn_rp_name: "AXIAM-Test".into(),
+            ..AuthConfig::default()
+        }
+    }
+
+    fn service() -> WebauthnService<UnusedRepo> {
+        WebauthnService::new(UnusedRepo, config()).expect("service builds from a valid config")
+    }
+
+    fn ids() -> (Uuid, Uuid, Uuid) {
+        (
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+        )
+    }
+
+    // -- construction ------------------------------------------------------
+
+    #[test]
+    fn new_rejects_an_unparseable_rp_origin() {
+        let cfg = AuthConfig {
+            webauthn_rp_origin: "not a url".into(),
+            ..config()
+        };
+        let err = WebauthnService::new(UnusedRepo, cfg)
+            .err()
+            .expect("an unparseable RP origin must not build a service");
+        assert!(
+            matches!(err, AuthError::Crypto(ref m) if m.contains("RP origin")),
+            "expected an RP-origin Crypto error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn new_rejects_an_rp_id_that_does_not_match_the_origin() {
+        // webauthn-rs enforces the RP ID / origin relationship itself. Pinning
+        // it here means a config that would silently produce a service unable
+        // to complete any ceremony fails at construction instead.
+        let cfg = AuthConfig {
+            webauthn_rp_id: "example.com".into(),
+            webauthn_rp_origin: "http://localhost:8090".into(),
+            ..config()
+        };
+        assert!(WebauthnService::new(UnusedRepo, cfg).is_err());
+    }
+
+    // -- the encryption key ------------------------------------------------
+
+    #[test]
+    fn an_absent_mfa_encryption_key_is_an_error_not_a_plaintext_fallback() {
+        // The state is encrypted with this key. If a missing key degraded to
+        // "store the state in the clear", the ceremony would keep working and
+        // nothing would signal that the challenge had become public.
+        let cfg = AuthConfig {
+            mfa_encryption_key: None,
+            ..config()
+        };
+        let svc = WebauthnService::new(UnusedRepo, cfg).unwrap();
+        let (u, t, o) = ids();
+
+        assert!(svc.require_encryption_key().is_err());
+        let err = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({"a": 1}))
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Crypto(_)));
+    }
+
+    // -- round trip --------------------------------------------------------
+
+    #[test]
+    fn a_state_token_round_trips_its_ids_and_state() {
+        let svc = service();
+        let (u, t, o) = ids();
+        let state = json!({"challenge": "abc", "nested": {"n": 1}});
+
+        let token = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", state.clone())
+            .unwrap();
+        let (gu, gt, go, gs) = svc
+            .decode_state_token_json(&token, "webauthn_register")
+            .unwrap();
+
+        assert_eq!((gu, gt, go), (u, t, o));
+        assert_eq!(gs, state);
+    }
+
+    #[test]
+    fn encode_state_token_accepts_any_serializable_state() {
+        // The typed wrapper over the JSON primitive: same round trip, but
+        // through `T: Serialize` / `T: DeserializeOwned`.
+        let svc = service();
+        let (u, t, o) = ids();
+        let state = vec!["a".to_string(), "b".to_string()];
+
+        let token = svc
+            .encode_state_token(u, t, o, "webauthn_authenticate", &state)
+            .unwrap();
+        let (_, _, _, got): (Uuid, Uuid, Uuid, Vec<String>) = svc
+            .decode_state_token(&token, "webauthn_authenticate")
+            .unwrap();
+        assert_eq!(got, state);
+    }
+
+    // -- the four refusals -------------------------------------------------
+
+    #[test]
+    fn a_registration_state_cannot_be_redeemed_as_an_authentication_state() {
+        // The purpose check. Without it a captured registration token could be
+        // fed to finish_authentication, which is the whole reason `purpose` is
+        // in the claims rather than implied by the endpoint that receives it.
+        let svc = service();
+        let (u, t, o) = ids();
+        let token = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({"c": 1}))
+            .unwrap();
+
+        let err = svc
+            .decode_state_token_json(&token, "webauthn_authenticate")
+            .unwrap_err();
+        assert!(matches!(err, AuthError::WebauthnStateInvalid));
+
+        // ...and the same token is still valid for its own ceremony, so the
+        // rejection is the purpose mismatch and not a broken token.
+        assert!(
+            svc.decode_state_token_json(&token, "webauthn_register")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_signature_is_bound_to_the_payload_it_was_made_over() {
+        // The forged-signature case, done WITHOUT embedding a second private
+        // key in the repository. Splicing a genuine signature from one token
+        // onto another token's header and payload is the stronger property
+        // anyway: the signature here is real, produced by the legitimate key,
+        // and must still be refused because it was made over different claims.
+        // A verifier that merely checked "a well-formed signature is present"
+        // would accept this.
+        let svc = service();
+        let (u, t, o) = ids();
+        let other_user = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+
+        let mine = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({"c": 1}))
+            .unwrap();
+        let theirs = svc
+            .encode_state_token_json(other_user, t, o, "webauthn_register", json!({"c": 2}))
+            .unwrap();
+
+        let mut parts: Vec<&str> = mine.split('.').collect();
+        let borrowed_signature = theirs.split('.').nth(2).unwrap();
+        parts[2] = borrowed_signature;
+        let spliced = parts.join(".");
+
+        assert!(matches!(
+            svc.decode_state_token_json(&spliced, "webauthn_register"),
+            Err(AuthError::WebauthnStateInvalid)
+        ));
+
+        // Both halves of the splice are individually valid, so the rejection is
+        // the binding and not a broken input.
+        assert!(
+            svc.decode_state_token_json(&mine, "webauthn_register")
+                .is_ok()
+        );
+        assert!(
+            svc.decode_state_token_json(&theirs, "webauthn_register")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_corrupted_signature_is_refused() {
+        let svc = service();
+        let (u, t, o) = ids();
+        let token = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({}))
+            .unwrap();
+
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let sig = parts[2].to_string();
+        // Flip one base64url character of the signature.
+        let mut chars: Vec<char> = sig.chars().collect();
+        chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+        let corrupted: String = chars.into_iter().collect();
+        parts[2] = &corrupted;
+
+        assert!(matches!(
+            svc.decode_state_token_json(&parts.join("."), "webauthn_register"),
+            Err(AuthError::WebauthnStateInvalid)
+        ));
+    }
+
+    #[test]
+    fn a_token_from_another_issuer_is_refused() {
+        let issued_elsewhere = AuthConfig {
+            jwt_issuer: "some-other-idp".into(),
+            ..config()
+        };
+        let other = WebauthnService::new(UnusedRepo, issued_elsewhere).unwrap();
+        let (u, t, o) = ids();
+        let token = other
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({}))
+            .unwrap();
+
+        let err = service()
+            .decode_state_token_json(&token, "webauthn_register")
+            .unwrap_err();
+        assert!(matches!(err, AuthError::WebauthnStateInvalid));
+    }
+
+    #[test]
+    fn an_expired_token_is_refused() {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let svc = service();
+        let (u, t, o) = ids();
+
+        // Well past jsonwebtoken's default 60s leeway, so this asserts expiry
+        // rather than clock tolerance.
+        let past = chrono::Utc::now().timestamp() - 7200;
+        let claims = WebauthnStateClaims {
+            sub: u.to_string(),
+            tenant_id: t.to_string(),
+            org_id: o.to_string(),
+            purpose: "webauthn_register".into(),
+            state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+            iss: "axiam-test".into(),
+            iat: past,
+            exp: past + 300,
+        };
+        let stale = jsonwebtoken::encode(
+            &Header::new(Algorithm::EdDSA),
+            &claims,
+            &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.decode_state_token_json(&stale, "webauthn_register"),
+            Err(AuthError::WebauthnStateInvalid)
+        ));
+        // state_token_purpose validates BEFORE reading the claim, so it must
+        // refuse the same token rather than classify it.
+        assert!(matches!(
+            svc.state_token_purpose(&stale),
+            Err(AuthError::WebauthnStateInvalid)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_uuid_claim_is_refused_rather_than_defaulted() {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let svc = service();
+
+        for (sub, tenant, org) in [
+            (
+                "not-a-uuid",
+                "22222222-2222-2222-2222-222222222222",
+                "33333333-3333-3333-3333-333333333333",
+            ),
+            (
+                "11111111-1111-1111-1111-111111111111",
+                "not-a-uuid",
+                "33333333-3333-3333-3333-333333333333",
+            ),
+            (
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+                "not-a-uuid",
+            ),
+        ] {
+            let claims = WebauthnStateClaims {
+                sub: sub.into(),
+                tenant_id: tenant.into(),
+                org_id: org.into(),
+                purpose: "webauthn_register".into(),
+                state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+                iss: "axiam-test".into(),
+                iat: chrono::Utc::now().timestamp(),
+                exp: chrono::Utc::now().timestamp() + 300,
+            };
+            let token = jsonwebtoken::encode(
+                &Header::new(Algorithm::EdDSA),
+                &claims,
+                &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    svc.decode_state_token_json(&token, "webauthn_register"),
+                    Err(AuthError::WebauthnStateInvalid)
+                ),
+                "a token whose scope claims do not parse must be refused, never \
+                 silently scoped to the nil UUID"
+            );
+        }
+    }
+
+    // -- confidentiality ---------------------------------------------------
+
+    #[test]
+    fn the_ceremony_state_is_encrypted_in_the_payload_not_merely_signed() {
+        // A JWT payload is base64, not a secret. This decodes the middle
+        // segment exactly as any holder of the token could and asserts the
+        // challenge is not sitting there in the clear.
+        use base64::Engine;
+        let svc = service();
+        let (u, t, o) = ids();
+        let secret_challenge = "challenge-that-must-not-leak";
+
+        let token = svc
+            .encode_state_token_json(
+                u,
+                t,
+                o,
+                "webauthn_register",
+                json!({ "challenge": secret_challenge }),
+            )
+            .unwrap();
+
+        let payload_b64 = token.split('.').nth(1).expect("a JWT has three segments");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .expect("the payload is base64url");
+        let payload = String::from_utf8(payload).unwrap();
+
+        assert!(
+            !payload.contains(secret_challenge),
+            "the ceremony state must be encrypted before it enters the JWT"
+        );
+        // The scope claims ARE public, and are meant to be.
+        assert!(payload.contains(&t.to_string()));
+    }
+
+    #[test]
+    fn a_state_sealed_under_a_different_key_will_not_open() {
+        // Rotating mfa_encryption_key must invalidate outstanding ceremonies
+        // rather than yield a corrupted state that deserializes into something.
+        let svc = service();
+        let (u, t, o) = ids();
+        let token = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({"c": 1}))
+            .unwrap();
+
+        let rotated = WebauthnService::new(
+            UnusedRepo,
+            AuthConfig {
+                mfa_encryption_key: Some([9u8; 32]),
+                ..config()
+            },
+        )
+        .unwrap();
+        assert!(
+            rotated
+                .decode_state_token_json(&token, "webauthn_register")
+                .is_err()
+        );
+    }
+
+    // -- passkey decryption ------------------------------------------------
+
+    #[test]
+    fn decrypt_passkey_rejects_every_shape_of_bad_ciphertext() {
+        let svc = service();
+
+        // Not valid AES-256-GCM output at all.
+        assert!(svc.decrypt_passkey(&KEY, "not-base64-ciphertext").is_err());
+
+        // Decrypts, but the plaintext is not UTF-8.
+        let non_utf8 = totp::encrypt_secret(&KEY, &[0xff, 0xfe, 0xfd]).unwrap();
+        assert!(matches!(
+            svc.decrypt_passkey(&KEY, &non_utf8),
+            Err(AuthError::Crypto(ref m)) if m.contains("UTF-8")
+        ));
+
+        // Valid UTF-8, but not a Passkey.
+        let not_a_passkey = totp::encrypt_secret(&KEY, b"{\"unrelated\":true}").unwrap();
+        assert!(matches!(
+            svc.decrypt_passkey(&KEY, &not_a_passkey),
+            Err(AuthError::Crypto(ref m)) if m.contains("deserialize")
+        ));
+
+        // Sealed under a different key.
+        let other_key = totp::encrypt_secret(&[1u8; 32], b"{}").unwrap();
+        assert!(svc.decrypt_passkey(&KEY, &other_key).is_err());
+    }
+
+    // -- purpose introspection ---------------------------------------------
+
+    #[test]
+    fn state_token_purpose_reports_the_purpose_of_a_valid_token() {
+        let svc = service();
+        let (u, t, o) = ids();
+
+        for purpose in ["webauthn_register", "webauthn_authenticate"] {
+            let token = svc
+                .encode_state_token_json(u, t, o, purpose, json!({}))
+                .unwrap();
+            assert_eq!(svc.state_token_purpose(&token).unwrap(), purpose);
+        }
+    }
+
+    #[test]
+    fn state_token_purpose_refuses_a_tampered_token_rather_than_classifying_it() {
+        // This is the routing input for finish_registration_for_policy. If it
+        // read `purpose` from an unverified token, an attacker would choose
+        // which ceremony branch runs.
+        let svc = service();
+        let (u, t, o) = ids();
+        let token = svc
+            .encode_state_token_json(u, t, o, "webauthn_register", json!({}))
+            .unwrap();
+
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let forged_payload = {
+            use base64::Engine;
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .unwrap();
+            let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            v["purpose"] = json!("webauthn_authenticate");
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&v).unwrap())
+        };
+        parts[1] = &forged_payload;
+        let tampered = parts.join(".");
+
+        assert!(matches!(
+            svc.state_token_purpose(&tampered),
+            Err(AuthError::WebauthnStateInvalid)
+        ));
+    }
+
+    #[test]
+    fn a_structurally_invalid_token_is_refused_by_every_entry_point() {
+        let svc = service();
+        for junk in ["", "not-a-jwt", "a.b", "a.b.c.d", "aaa.bbb.ccc"] {
+            assert!(svc.state_token_purpose(junk).is_err(), "purpose: {junk:?}");
+            assert!(
+                svc.decode_state_token_json(junk, "webauthn_register")
+                    .is_err(),
+                "decode: {junk:?}"
+            );
+        }
+    }
+}

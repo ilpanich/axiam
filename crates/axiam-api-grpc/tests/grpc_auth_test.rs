@@ -237,7 +237,14 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
     // SECFIX-01: UserService and TokenService are registered behind the same
     // AuthInterceptor chokepoint as AuthorizationService — mirrors server.rs.
     let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(user_repo, auth_config.clone()),
+        UserServiceImpl::new(
+            user_repo,
+            auth_config.clone(),
+            // B1: in production this is a clone of `AppState`'s process-wide
+            // Argon2id gate; these interceptor tests never reach the verify,
+            // so any non-zero permit count works.
+            std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        ),
         AuthInterceptor::new(auth_config.clone()),
     );
     let token_svc = TokenServiceServer::with_interceptor(

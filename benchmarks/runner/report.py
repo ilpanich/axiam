@@ -157,6 +157,12 @@ def load_k6_summary(path):
     ok_count = counter_count("bench_ok")
     failed_count = counter_count("bench_failed")
     fallback_count = counter_count("bench_fallback")
+    # Iterations the server rejected with 429 / RESOURCE_EXHAUSTED
+    # (scenarios/lib/metrics.js's bench_throttled). Already counted inside
+    # bench_failed — this is the *reason* breakdown, and it is what lets
+    # expected_throttle() below tell "the limiter did its job" apart from "the
+    # endpoint broke", which are indistinguishable in error_rate alone.
+    throttled_count = counter_count("bench_throttled")
     # Iteration-count proxy for classify_fallback()'s heuristic: bench_ok +
     # bench_failed already accounts for every measured iteration for both
     # REST and gRPC scenarios alike (scenarios/lib/metrics.js), so reuse them
@@ -176,6 +182,7 @@ def load_k6_summary(path):
         # client_credentials, or a userinfo setup() that fell back) rather than
         # the labelled logical op.
         "fallback_count": fallback_count,
+        "throttled_count": throttled_count,
         # Report labeling polish: which of the two very different situations
         # above this cell's bench_fallback count represents — see
         # classify_fallback().
@@ -438,6 +445,47 @@ CLAMP_SENSITIVE_SCENARIOS = {
 }
 
 
+# Scenarios whose limiter family has a ceiling NO rate-limit posture can lift,
+# so a closed-loop `ramping-vus` probe is throttled at every posture by
+# construction. This set MUST stay identical to `EXPECTED_THROTTLE` in
+# runner/run-benchmark.sh's dry_verdict() — that function is the source of
+# truth and carries the full per-member justification. Summarised:
+#
+#   grpc_infra     `INFRA_PER_SEC = 100` (axiam-api-grpc/src/middleware/
+#                  rate_limit.rs) is a hardcoded constant with NO env var.
+#   device_verify  the knob exists, but `RateLimitConfig::validate` asserts the
+#                  OWASP user-code bound and caps it at 2559/min; past that the
+#                  server PANICS AT STARTUP rather than boot with a guessable
+#                  user code.
+#
+# Why this is a *labeling* fix and not an exemption: these cells stay INVALID.
+# Their throughput and latency describe the governor's reject path, not the
+# endpoint, so admitting them to a median or a head-to-head table would be
+# strictly worse than excluding them. What changes is the REASON. Before this,
+# they were excluded as "error_rate 0.999 > 0.05" + "k6 threshold breach" —
+# wording indistinguishable from a broken run, which repeatedly sent readers
+# hunting for a fault that does not exist (it is the first thing anyone asks
+# about after a run). Now they say so explicitly.
+#
+# Do NOT add a scenario here to quiet a 429 you could have neutralized: an
+# un-neutralized family belongs in targets/axiam/docker-compose.yml's
+# rate-limit block. The bar for membership is "no legal setting of any knob
+# lets this scenario measure the endpoint".
+EXPECTED_THROTTLE = {"grpc_infra", "device_verify"}
+
+
+def expected_throttle(scenario, perf):
+    """True when `scenario` is a structurally-unmeasurable limiter family AND
+    this cell's failures actually are throttle rejections.
+
+    The `throttled_count` half is load-bearing: membership alone would relabel
+    a genuinely broken `grpc_infra` cell (connection refused, TLS failure, a
+    setup() that threw — all of which produce failures with ZERO
+    bench_throttled) as "expected", which is precisely the kind of silencing
+    the run-benchmark.sh note warns against."""
+    return scenario in EXPECTED_THROTTLE and perf.get("throttled_count", 0) > 0
+
+
 def settle_timeout_applies(meta):
     """True only when settle_timeout:true AND this scenario is one the H2
     clamp map actually implicates (see CLAMP_SENSITIVE_SCENARIOS above).
@@ -557,12 +605,25 @@ def collect_dir(results_dir, max_error, min_samples):
                 der = derive(perf, res)
                 der_server = derive_server_only(perf, res, meta.get("target", target))
                 reasons = []
-                if perf["error_rate"] > max_error:
-                    reasons.append(f"error_rate {perf['error_rate']:.3f} > {max_error}")
+                is_expected_throttle = expected_throttle(meta["scenario"], perf)
+                if is_expected_throttle:
+                    # Still invalid — but say WHY honestly. The error_rate and
+                    # k6-exit-code gates below would both fire here and both
+                    # would describe a fault; this cell has none. See
+                    # EXPECTED_THROTTLE's note.
+                    reasons.append(
+                        f"expected throttle: the {meta['scenario']} limiter family has a "
+                        f"ceiling no rate-limit posture can lift, so this cell measures the "
+                        f"governor's reject path, not the endpoint "
+                        f"({perf['throttled_count']:.0f} throttled iterations). "
+                        f"Not a fault — see EXPECTED_THROTTLE in runner/run-benchmark.sh")
+                else:
+                    if perf["error_rate"] > max_error:
+                        reasons.append(f"error_rate {perf['error_rate']:.3f} > {max_error}")
+                    if meta.get("k6_exit_code", 0) != 0:
+                        reasons.append("k6 threshold breach")
                 if res["samples"] < min_samples:
                     reasons.append(f"only {res['samples']} resource samples")
-                if meta.get("k6_exit_code", 0) != 0:
-                    reasons.append("k6 threshold breach")
                 # H1 item 5: settle_timeout:true means the post-seed settle
                 # gate (run-benchmark.sh's settle_gate()) never cleared its
                 # BENCH_SETTLE_PROBE_THR/BENCH_SETTLE_PROBE_P50_MS bar before
@@ -590,6 +651,7 @@ def collect_dir(results_dir, max_error, min_samples):
                     # classify_fallback().
                     "is_fallback": perf["fallback_class"] == "fallback-op",
                     "valid": not reasons, "reasons": reasons,
+                    "expected_throttle": is_expected_throttle,
                 })
     return cells
 
@@ -610,7 +672,7 @@ RUN_DIR_RE = re.compile(r"run-\d+")
 # cpu, mem"), plus the other numeric perf/res/host fields for consistency.
 PERF_MEDIAN_FIELDS = [
     "throughput", "ok_count", "failed_count", "error_rate",
-    "p50", "p95", "p99", "avg", "fallback_count",
+    "p50", "p95", "p99", "avg", "fallback_count", "throttled_count",
     "grpc_status_avg", "grpc_status_max",
 ]
 RES_MEDIAN_FIELDS = ["cpu_cores_avg", "cpu_cores_p95", "mem_mib_avg", "mem_mib_p95", "samples"]
@@ -714,8 +776,29 @@ def aggregate_cell(runs):
     der_server = derive_server_only(perf, res, target)
 
     reasons = []
-    if n_valid < 2:
+    # An expected-throttle cell can never accumulate valid runs, so "only 0/3
+    # valid run(s)" is a true but useless restatement of the same structural
+    # fact. Lead with the fact itself; the run tally still shows in the
+    # `runs(valid/n)` column either way.
+    is_expected_throttle = any(r.get("expected_throttle") for r in runs)
+    if is_expected_throttle:
+        reasons.append(next(
+            (r for run in runs for r in run["reasons"] if r.startswith("expected throttle")),
+            f"expected throttle: {scenario} is a structurally-unmeasurable limiter family"))
+    elif n_valid < 2:
         reasons.append(f"only {n_valid}/{n_total} valid run(s) (need >=2 for a median)")
+        # When NO run was valid, "only 0/N valid" alone says a cell failed but
+        # not how — the reader has to go open the raw run trees to find out,
+        # which is exactly the detour that makes a real defect (e.g. a cell
+        # returning 44% gRPC INTERNAL) look the same as a bookkeeping shortfall.
+        # Carry the underlying per-run reasons up, deduplicated and order-stable.
+        if n_valid == 0:
+            seen = {}
+            for run in runs:
+                for r in run["reasons"]:
+                    seen.setdefault(r, None)
+            if seen:
+                reasons.append("run reason(s): " + "; ".join(seen))
     # H1 item 5: same refusal as collect_dir() above, recombined across ALL
     # raw runs (not just `basis`) the same way settle_wait_secs/settle_timeout
     # themselves are recombined a few lines up — one run hitting the settle
@@ -733,6 +816,7 @@ def aggregate_cell(runs):
         "is_fallback": perf["fallback_class"] == "fallback-op",
         "valid": n_valid >= 2 and not reasons,
         "reasons": reasons,
+        "expected_throttle": is_expected_throttle,
         "n_valid_runs": n_valid, "n_runs": n_total, "thr_spread_pct": thr_spread_pct,
     }
 
@@ -804,7 +888,10 @@ def build_report(cells, multi_run=False):
         f"- Targets: {', '.join(targets) or '—'}",
         f"- Profiles: {', '.join(profiles) or '—'}",
         f"- Scenarios: {', '.join(scenarios) or '—'}",
-        f"- Valid cells: {len(valid)} / {len(cells)}",
+        f"- Valid cells: {len(valid)} / {len(cells)}"
+        + (f" ({sum(1 for c in cells if c.get('expected_throttle'))} excluded by design — "
+           f"expected throttle, see below)"
+           if any(c.get("expected_throttle") for c in cells) else ""),
         "",
         "> Efficiency headline: **throughput_per_core** (req/s per CPU core) and "
         "**cpu_ms_per_request** answer *can AXIAM match competitors at lower cost?* "
@@ -1305,12 +1392,39 @@ def build_report(cells, multi_run=False):
             ["target", "profile", "representative scenario", "AXIAM__ var", "value"],
             rows), ""]
 
-    # 5. Excluded
-    if invalid:
+    # 5. Excluded — split so a structurally-unmeasurable cell is never read as
+    # a run that went wrong. Both groups are equally excluded; only one is
+    # something a person could act on.
+    throttle_excluded = [c for c in invalid if c.get("expected_throttle")]
+    fault_excluded = [c for c in invalid if not c.get("expected_throttle")]
+    if fault_excluded:
         lines += ["## Excluded (invalid) cells", ""]
         rows = [[c["target"], c["profile"], c["scenario"], "; ".join(c["reasons"])]
-                for c in invalid]
+                for c in fault_excluded]
         lines += [md_table(["target", "profile", "scenario", "reason"], rows), ""]
+    if throttle_excluded:
+        lines += [
+            "## Excluded by design (expected throttle)", "",
+            "These scenarios drive a limiter family whose ceiling **no "
+            "rate-limit posture can lift** — `grpc_infra`'s `INFRA_PER_SEC` is "
+            "a hardcoded constant with no env var, and `device_verify`'s knob "
+            "is capped by `RateLimitConfig::validate`'s OWASP user-code bound "
+            "(raising it past 2559/min makes the server refuse to boot). A "
+            "closed-loop probe against them is throttled by construction, so "
+            "their throughput and latency describe the governor's reject path "
+            "rather than the endpoint, and they are excluded from every median "
+            "and head-to-head table above.", "",
+            "**Nothing here is a fault or a regression.** They are listed "
+            "separately from the table above precisely so a run's genuine "
+            "problems stay visible. See `EXPECTED_THROTTLE` in "
+            "`runner/run-benchmark.sh` for the full justification.", "",
+        ]
+        rows = [[c["target"], c["profile"], c["scenario"],
+                 f"{c['perf'].get('throttled_count', 0):.0f}",
+                 f"{c['perf']['ok_count']:.0f}"]
+                for c in throttle_excluded]
+        lines += [md_table(
+            ["target", "profile", "scenario", "throttled", "admitted"], rows), ""]
 
     lines += ["---", "_Generated by runner/report.py. See docs/methodology.md for "
               "metric definitions and validity gates._"]

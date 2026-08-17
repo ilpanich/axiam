@@ -300,8 +300,15 @@ jobs:
           docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
             rabbitmq-diagnostics -q listeners
           echo "::endgroup::"
+          # Order-agnostic on purpose: `listeners` prints "port: 5671,
+          # protocol: amqp/ssl" — port BEFORE protocol. The first version of
+          # this assertion grepped 'amqp/ssl.*5671' and so failed a broker
+          # whose listener was perfectly fine, which is the same shape of
+          # defect as the one this whole change is about: a check that reads
+          # like a guarantee and does not hold.
           if ! docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
-              rabbitmq-diagnostics -q listeners | grep -qi 'amqp/ssl.*5671'; then
+              rabbitmq-diagnostics -q listeners \
+              | grep -qiE '(port: *5671.*amqp/ssl|amqp/ssl.*5671)'; then
             echo "::error::the broker is running but has no AMQPS listener on 5671"
             docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
             exit 1

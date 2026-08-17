@@ -8,6 +8,7 @@ import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { TotpSetupPanel, type TotpSetupPanelData } from "@/components/auth/TotpSetupPanel";
 import type { AxiosError } from "axios";
+import { redactSecrets } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
@@ -102,10 +103,11 @@ export function MfaSetupPage() {
         setState("enroll-error");
         return;
       }
-      const msg =
+      const msg = redactSecrets(
         axiosErr.response?.data?.message ??
-        axiosErr.response?.data?.error ??
-        "Invalid or expired code. Please try again.";
+          axiosErr.response?.data?.error ??
+          "Invalid or expired code. Please try again."
+      );
       setConfirmError(msg);
     } finally {
       setIsConfirming(false);

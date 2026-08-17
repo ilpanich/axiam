@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import type { AxiosError } from "axios";
+import { redactSecrets } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
@@ -75,10 +76,11 @@ export function ResetPasswordPage() {
       } catch (err) {
         window.history.replaceState({}, document.title, window.location.pathname);
         const axiosErr = err as AxiosError<ErrorResponse>;
-        const msg =
+        const msg = redactSecrets(
           axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "This reset link is invalid or has expired. Please request a new one.";
+            axiosErr.response?.data?.error ??
+            "This reset link is invalid or has expired. Please request a new one."
+        );
         return { error: msg, success: false };
       }
     },

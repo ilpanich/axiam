@@ -286,10 +286,26 @@ jobs:
         run: |
           bash scripts/gen-broker-tls.sh
           docker compose -f docker/docker-compose.ci-broker.yml up -d --wait
-        # A failed `--wait` prints "dependency failed to start" and nothing about
-        # why, so dump the broker's own log. The first time this configuration
-        # broke, "container is not running" was the only signal and it cost
-        # three CI rounds to get behind it.
+          # `--wait` only proves the node is running. The healthcheck is
+          # `rabbitmq-diagnostics check_running`, which says nothing about
+          # whether the AMQPS listener BOUND — and a bad certificate path or an
+          # unsupported TLS version makes the listener fail while the node stays
+          # up and healthy. That combination is the worst possible failure for a
+          # caller: the port is published either way, so lapin (which has no
+          # connect timeout) hangs on a socket nothing is accepting, and the
+          # test sits there until the job is killed. It did, for 25 minutes.
+          #
+          # So assert the listener is really there, and print what is bound.
+          echo "::group::rabbitmq listeners"
+          docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+            rabbitmq-diagnostics -q listeners
+          echo "::endgroup::"
+          if ! docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+              rabbitmq-diagnostics -q listeners | grep -qi 'amqp/ssl.*5671'; then
+            echo "::error::the broker is running but has no AMQPS listener on 5671"
+            docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
+            exit 1
+          fi
       - name: Broker log on failure
         if: failure()
         run: docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
@@ -318,13 +334,21 @@ jobs:
       # ReactorAdminService integration tests (X1 / R2.3) — same `client`-feature
       # gate as the two above (generated client stubs).
       - run: cargo test -p axiam-api-grpc --features client --test grpc_reactor_test
-      # X1 / R2.4 — containerized-reactor integration test against the SAME
-      # live RabbitMQ this job already runs as a service container (see the
-      # `rabbitmq:` service block above). `#[ignore]`d for the same reason
+      # X1 / R2.4 — containerized-reactor integration test against the AMQPS
+      # broker this job started above. `#[ignore]`d for the same reason
       # `webhook_consumer_test.rs`'s live-broker test is: `cargo test
       # --workspace` above must not require a broker in every environment
       # that runs it. This job has one, so run it explicitly here.
-      - run: |
+      #
+      # timeout-minutes because lapin has no connect timeout: against a
+      # published port that nothing is accepting on, `Connection::connect`
+      # never returns and `connect_with_retry`'s retry budget never fires,
+      # because the future it would retry has not resolved. That hung this step
+      # for 25 minutes before the listener assertion above existed to catch the
+      # cause. The assertion should make this unreachable; the bound is here so
+      # that if it ever is reached, it costs ten minutes rather than six hours.
+      - timeout-minutes: 10
+        run: |
           cargo test -p axiam-amqp --test reactor_containerized_test \
             -- --ignored --test-threads=1
 

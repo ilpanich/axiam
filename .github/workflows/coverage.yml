@@ -74,10 +74,26 @@ jobs:
         run: |
           bash scripts/gen-broker-tls.sh
           docker compose -f docker/docker-compose.ci-broker.yml up -d --wait
-        # A failed `--wait` prints "dependency failed to start" and nothing about
-        # why, so dump the broker's own log. The first time this configuration
-        # broke, "container is not running" was the only signal and it cost
-        # three CI rounds to get behind it.
+          # `--wait` only proves the node is running. The healthcheck is
+          # `rabbitmq-diagnostics check_running`, which says nothing about
+          # whether the AMQPS listener BOUND — and a bad certificate path or an
+          # unsupported TLS version makes the listener fail while the node stays
+          # up and healthy. That combination is the worst possible failure for a
+          # caller: the port is published either way, so lapin (which has no
+          # connect timeout) hangs on a socket nothing is accepting, and the
+          # test sits there until the job is killed. It did, for 25 minutes.
+          #
+          # So assert the listener is really there, and print what is bound.
+          echo "::group::rabbitmq listeners"
+          docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+            rabbitmq-diagnostics -q listeners
+          echo "::endgroup::"
+          if ! docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+              rabbitmq-diagnostics -q listeners | grep -qi 'amqp/ssl.*5671'; then
+            echo "::error::the broker is running but has no AMQPS listener on 5671"
+            docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
+            exit 1
+          fi
       - name: Broker log on failure
         if: failure()
         run: docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq

@@ -851,7 +851,7 @@ fn extract_attestation_metadata(attested: &AttestedPasskey) -> (Option<Uuid>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiam_core::error::{AxiamError, AxiamResult};
+    use axiam_core::error::AxiamResult;
     use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
     use serde_json::json;
 
@@ -862,31 +862,30 @@ mod tests {
     const KEY: [u8; 32] = [7u8; 32];
 
     /// The repo is never reached by any test here — every one of them stops
-    /// inside the token/crypto helpers — so the doubles return errors rather
-    /// than plausible rows. A test that accidentally reaches storage should
+    /// inside the token/crypto helpers — so the doubles panic rather than
+    /// return plausible rows. A test that accidentally reaches storage should
     /// fail loudly instead of quietly passing on fabricated data.
+    ///
+    /// Each body is a single expression on purpose: these methods are never
+    /// called, so every line they occupy is a line coverage counts as
+    /// unexecuted. Compact bodies keep a test double from denting the metric
+    /// the tests around it exist to improve.
     #[derive(Clone)]
     struct UnusedRepo;
 
     impl WebauthnCredentialRepository for UnusedRepo {
-        async fn create(&self, _i: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
-        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
-        async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<WebauthnCredential>> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
-        async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
-        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
-        async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
-            Err(AxiamError::Internal("repo must not be reached".into()))
-        }
+        #[rustfmt::skip]
+        async fn create(&self, _i: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<WebauthnCredential>> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!("storage must not be reached") }
     }
 
     fn config() -> AuthConfig {

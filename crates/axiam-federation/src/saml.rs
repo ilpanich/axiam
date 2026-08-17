@@ -3045,3 +3045,328 @@ mod bearer_confirmation_tests {
         assert!(call(None, Some("a-different-request")).is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Claim extraction and attribute mapping
+// ---------------------------------------------------------------------------
+//
+// These run on every successful SSO, after the signature and the confirmation
+// checks have passed, and they decide WHO the caller is. The fixture-driven
+// tests above exercise them only through whole assertions that happen to be
+// well-shaped; what is pinned here is the behaviour on the shapes real IdPs
+// actually vary in — multiple AttributeStatements, friendlyName-only
+// attributes, multi-valued attributes, and an attribute_map that names a claim
+// the IdP did not send.
+
+#[cfg(test)]
+mod claim_extraction_tests {
+    use super::*;
+    use samael::attribute::{Attribute, AttributeValue};
+    use samael::schema::{AttributeStatement, AuthnStatement, Subject, SubjectNameID};
+    use serde_json::json;
+
+    fn value(v: &str) -> AttributeValue {
+        AttributeValue {
+            attribute_type: None,
+            value: Some(v.into()),
+        }
+    }
+
+    fn attribute(name: Option<&str>, friendly: Option<&str>, values: &[&str]) -> Attribute {
+        Attribute {
+            friendly_name: friendly.map(str::to_owned),
+            name: name.map(str::to_owned),
+            name_format: None,
+            values: values.iter().map(|v| value(v)).collect(),
+        }
+    }
+
+    fn assertion(
+        name_id: Option<&str>,
+        authn: Option<Vec<AuthnStatement>>,
+        attrs: Option<Vec<AttributeStatement>>,
+    ) -> samael::schema::Assertion {
+        samael::schema::Assertion {
+            id: "a-1".into(),
+            issue_instant: chrono::Utc::now(),
+            version: "2.0".into(),
+            issuer: samael::schema::Issuer {
+                value: Some("https://idp.example".into()),
+                ..Default::default()
+            },
+            signature: None,
+            subject: name_id.map(|v| Subject {
+                name_id: Some(SubjectNameID {
+                    format: None,
+                    value: v.into(),
+                }),
+                subject_confirmations: None,
+            }),
+            conditions: None,
+            authn_statements: authn,
+            attribute_statements: attrs,
+        }
+    }
+
+    fn authn_statement(session_index: Option<&str>) -> AuthnStatement {
+        AuthnStatement {
+            authn_instant: None,
+            session_index: session_index.map(str::to_owned),
+            session_not_on_or_after: None,
+            subject_locality: None,
+            authn_context: None,
+        }
+    }
+
+    #[test]
+    fn an_assertion_without_a_name_id_identifies_nobody_and_is_refused() {
+        // The NameID is the federated identity. Defaulting it — to the empty
+        // string, or to the issuer — would let an assertion that names no one
+        // resolve to *some* account.
+        let err = extract_assertion_claims(&assertion(None, None, None)).unwrap_err();
+        assert!(err.to_string().contains("missing Subject/NameID"));
+
+        // Present-but-subjectless is the same failure.
+        let mut a = assertion(Some("u"), None, None);
+        a.subject = Some(Subject {
+            name_id: None,
+            subject_confirmations: None,
+        });
+        assert!(extract_assertion_claims(&a).is_err());
+    }
+
+    #[test]
+    fn the_session_index_comes_from_the_first_authn_statement() {
+        // It is what Single Logout later correlates on, so an assertion
+        // carrying several statements must not silently pick a later one.
+        let claims = extract_assertion_claims(&assertion(
+            Some("user@example.test"),
+            Some(vec![
+                authn_statement(Some("session-A")),
+                authn_statement(Some("session-B")),
+            ]),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(claims.name_id, "user@example.test");
+        assert_eq!(claims.session_index.as_deref(), Some("session-A"));
+    }
+
+    #[test]
+    fn an_absent_session_index_is_none_rather_than_an_error() {
+        // SLO is optional; an IdP that omits SessionIndex must still log in.
+        for authn in [None, Some(vec![]), Some(vec![authn_statement(None)])] {
+            let claims = extract_assertion_claims(&assertion(Some("u"), authn, None)).unwrap();
+            assert!(claims.session_index.is_none());
+        }
+    }
+
+    #[test]
+    fn attributes_are_keyed_by_name_and_fall_back_to_friendly_name() {
+        let claims = extract_assertion_claims(&assertion(
+            Some("u"),
+            None,
+            Some(vec![AttributeStatement {
+                attributes: vec![
+                    attribute(
+                        Some("urn:oid:0.9.2342.19200300.100.1.3"),
+                        Some("mail"),
+                        &["a@x.test"],
+                    ),
+                    // name absent — friendlyName is the key instead.
+                    attribute(None, Some("displayName"), &["Ada"]),
+                    // neither — the documented "unknown" bucket.
+                    attribute(None, None, &["orphan"]),
+                ],
+            }]),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            claims.attributes.get("urn:oid:0.9.2342.19200300.100.1.3"),
+            Some(&vec!["a@x.test".to_string()])
+        );
+        assert_eq!(
+            claims.attributes.get("displayName"),
+            Some(&vec!["Ada".to_string()])
+        );
+        assert_eq!(
+            claims.attributes.get("unknown"),
+            Some(&vec!["orphan".to_string()])
+        );
+    }
+
+    #[test]
+    fn repeated_attributes_accumulate_across_statements() {
+        // Group membership is the case that matters: an IdP may emit one
+        // `memberOf` per group, spread over several AttributeStatements. Taking
+        // only the last would silently drop a user's groups.
+        let claims = extract_assertion_claims(&assertion(
+            Some("u"),
+            None,
+            Some(vec![
+                AttributeStatement {
+                    attributes: vec![attribute(Some("memberOf"), None, &["admins"])],
+                },
+                AttributeStatement {
+                    attributes: vec![attribute(Some("memberOf"), None, &["auditors", "staff"])],
+                },
+            ]),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            claims.attributes.get("memberOf"),
+            Some(&vec![
+                "admins".to_string(),
+                "auditors".to_string(),
+                "staff".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn valueless_attribute_entries_are_dropped_not_turned_into_empty_strings() {
+        let claims = extract_assertion_claims(&assertion(
+            Some("u"),
+            None,
+            Some(vec![AttributeStatement {
+                attributes: vec![Attribute {
+                    friendly_name: None,
+                    name: Some("mail".into()),
+                    name_format: None,
+                    values: vec![
+                        AttributeValue {
+                            attribute_type: None,
+                            value: None,
+                        },
+                        value("a@x.test"),
+                    ],
+                }],
+            }]),
+        ))
+        .unwrap();
+        assert_eq!(
+            claims.attributes.get("mail"),
+            Some(&vec!["a@x.test".to_string()])
+        );
+    }
+
+    // -- attribute_map ------------------------------------------------------
+
+    fn claims_with(pairs: &[(&str, &[&str])]) -> SamlAssertionClaims {
+        SamlAssertionClaims {
+            name_id: "u".into(),
+            session_index: None,
+            attributes: pairs
+                .iter()
+                .map(|(k, vs)| {
+                    (
+                        (*k).to_string(),
+                        vs.iter().map(|v| (*v).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_attribute_map_resolves_email_and_display_name() {
+        let claims = claims_with(&[("mail", &["a@x.test"]), ("displayName", &["Ada"])]);
+        let (email, name) =
+            apply_attribute_map(&claims, &json!({"email": "mail", "name": "displayName"}));
+        assert_eq!(email.as_deref(), Some("a@x.test"));
+        assert_eq!(name.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn display_name_falls_back_to_the_display_name_key() {
+        // Two spellings are accepted for the same thing; `name` wins when both
+        // are configured.
+        let claims = claims_with(&[("dn", &["Ada"]), ("cn", &["Ada Lovelace"])]);
+
+        let (_, only_fallback) = apply_attribute_map(&claims, &json!({"displayName": "cn"}));
+        assert_eq!(only_fallback.as_deref(), Some("Ada Lovelace"));
+
+        let (_, both) = apply_attribute_map(&claims, &json!({"name": "dn", "displayName": "cn"}));
+        assert_eq!(both.as_deref(), Some("Ada"), "`name` takes precedence");
+    }
+
+    #[test]
+    fn a_map_naming_an_attribute_the_idp_did_not_send_yields_none() {
+        // Not an error: the caller decides whether a missing email is fatal.
+        // Inventing one here would be worse than returning nothing.
+        let claims = claims_with(&[("mail", &["a@x.test"])]);
+        let (email, name) = apply_attribute_map(
+            &claims,
+            &json!({"email": "someOtherAttribute", "name": "alsoMissing"}),
+        );
+        assert!(email.is_none());
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn a_non_string_or_absent_mapping_is_ignored_rather_than_coerced() {
+        let claims = claims_with(&[("mail", &["a@x.test"]), ("42", &["nope"])]);
+        for map in [
+            json!({}),
+            json!({"email": 42}),
+            json!({"email": null}),
+            json!([]),
+        ] {
+            let (email, _) = apply_attribute_map(&claims, &map);
+            assert!(email.is_none(), "map {map} must not resolve an email");
+        }
+    }
+
+    #[test]
+    fn only_the_first_value_of_a_multi_valued_attribute_is_used() {
+        let claims = claims_with(&[("mail", &["first@x.test", "second@x.test"])]);
+        let (email, _) = apply_attribute_map(&claims, &json!({"email": "mail"}));
+        assert_eq!(email.as_deref(), Some("first@x.test"));
+    }
+
+    // -- serialization helpers ---------------------------------------------
+
+    #[test]
+    fn xml_escape_replaces_the_ampersand_first() {
+        // Ordering is the whole correctness content of this function: if `&`
+        // were replaced after `<`, the `&` introduced by `&lt;` would itself be
+        // escaped and the output would read `&amp;lt;`.
+        assert_eq!(xml_escape("<a>"), "&lt;a&gt;");
+        assert_eq!(xml_escape("a & b"), "a &amp; b");
+        assert_eq!(
+            xml_escape(r#"<tag attr="v" o='p'>x & y</tag>"#),
+            "&lt;tag attr=&quot;v&quot; o=&apos;p&apos;&gt;x &amp; y&lt;/tag&gt;"
+        );
+        // The escaped form must be a fixed point in the sense that escaping
+        // never produces a bare `&` for a later pass to double-escape.
+        assert!(!xml_escape("<&>").contains("&amp;lt;"));
+        assert_eq!(xml_escape(""), "");
+        assert_eq!(xml_escape("nothing to do"), "nothing to do");
+    }
+
+    #[test]
+    fn deflate_encode_produces_raw_deflate_that_inflates_back() {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+
+        let original =
+            b"<samlp:AuthnRequest xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\"/>";
+        let compressed = deflate_encode(original).unwrap();
+
+        // Raw deflate, no zlib header — the HTTP-Redirect binding requires it,
+        // and a zlib-wrapped payload would be rejected by every IdP.
+        assert_ne!(
+            compressed.first(),
+            Some(&0x78),
+            "zlib header must be absent"
+        );
+
+        let mut out = Vec::new();
+        DeflateDecoder::new(&compressed[..])
+            .read_to_end(&mut out)
+            .expect("raw deflate round-trips");
+        assert_eq!(out, original);
+    }
+}

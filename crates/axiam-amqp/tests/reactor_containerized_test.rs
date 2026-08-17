@@ -38,8 +38,9 @@
 //! # Running
 //!
 //! Requires a live RabbitMQ broker at `AXIAM__AMQP__URL` (default
-//! `amqp://axiam:axiam@localhost:5672`, matches `just dev-up`) — `#[ignore]`d
-//! by default, same convention as `webhook_consumer_test.rs`:
+//! `amqps://axiam:axiam@localhost:5671`, matches `just dev-up`) — `#[ignore]`d
+//! by default, same convention as `webhook_consumer_test.rs`. AMQP is TLS-only,
+//! so `just dev-up` mints the broker certificate first; see `test_amqp_config`:
 //!
 //! ```text
 //! just dev-up
@@ -197,29 +198,39 @@ fn reactor(tenant: Uuid, event: &str, priority: i32, policy: FailurePolicy) -> R
     }
 }
 
-/// Broker URL for the test. `AmqpConfig::default()` is NOT usable here and the
-/// header's claim that it "matches `just dev-up`" was wrong on two counts —
-/// neither was caught because this file had never been executed:
+/// Broker URL and trust anchor for the test, matching what `just dev-up`
+/// stands up.
 ///
-///  * its `url` is `amqp://localhost:5672` with no credentials, so it dials as
-///    `guest`, while `docker/docker-compose.dev.yml` provisions the broker with
-///    `RABBITMQ_DEFAULT_USER/PASS = axiam/axiam` (and `guest` is refused
-///    non-locally by RabbitMQ anyway);
-///  * `allow_plaintext` defaults to `false`, and `AmqpConfig::validate` turns a
-///    plaintext `amqp://` URL under that setting into `AmqpError::Config`,
-///    which `connect_with_retry` deliberately does NOT retry — so the test
-///    failed before dialling, with a message about TLS rather than about the
-///    broker.
+/// `AmqpConfig::default()` is not usable here on its own: it carries no
+/// credentials, so it would dial as `guest`, while
+/// `docker/docker-compose.dev.yml` provisions the broker with
+/// `RABBITMQ_DEFAULT_USER/PASS = axiam/axiam` (and RabbitMQ refuses `guest`
+/// non-locally anyway).
 ///
-/// `AXIAM__AMQP__URL` is honoured (that part of the header was the intent), and
-/// the default now matches what `just dev-up` actually stands up.
+/// AMQP is TLS-only, so this dials `amqps://…:5671` and verifies the broker
+/// against the private CA `scripts/gen-broker-tls.sh` minted — the same one
+/// `just dev-up` mounts into the container. The generated certificate carries
+/// `DNS:localhost` and `IP:127.0.0.1` in its SAN precisely so a test running on
+/// the host can verify the broker the compose network knows as `rabbitmq`.
+///
+/// `AXIAM__AMQP__URL` and `AXIAM__AMQP__TLS__CA_CERT_PATH` are both honoured,
+/// for a broker that lives somewhere else.
 fn test_amqp_config() -> AmqpConfig {
     AmqpConfig {
         url: std::env::var("AXIAM__AMQP__URL")
-            .unwrap_or_else(|_| "amqp://axiam:axiam@localhost:5672".to_string()),
-        // A local throwaway dev broker over loopback. The production guard is
-        // exactly right; this is the documented escape hatch for it.
-        allow_plaintext: true,
+            .unwrap_or_else(|_| "amqps://axiam:axiam@localhost:5671".to_string()),
+        tls: axiam_amqp::AmqpTlsConfig {
+            ca_cert_path: Some(
+                std::env::var("AXIAM__AMQP__TLS__CA_CERT_PATH").unwrap_or_else(|_| {
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../docker/.secrets/broker-tls/ca.pem"
+                    )
+                    .to_string()
+                }),
+            ),
+            ..Default::default()
+        },
         ..AmqpConfig::default()
     }
 }

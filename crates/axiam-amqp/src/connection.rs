@@ -197,46 +197,38 @@ impl AmqpManager {
     ///
     /// # Transport security (A6)
     ///
-    /// The URL scheme selects the transport, and the posture is enforced
-    /// **before** any socket is opened
-    /// ([`AmqpConfig::validate_transport_security`]): an unrecognised scheme,
-    /// half a client identity, or a plaintext URL in a release build without
-    /// `AXIAM__AMQP__ALLOW_PLAINTEXT` all fail here rather than at connect
+    /// AMQP is TLS-only, and the posture is enforced **before** any socket is
+    /// opened ([`AmqpConfig::validate_transport_security`]): any scheme but
+    /// `amqps://`, or half a client identity, fails here rather than at connect
     /// time with a lapin error nobody can act on.
     ///
-    /// There is **no silent plaintext fallback**. An `amqps://` URL whose CA
-    /// bundle is missing, whose certificate is expired, or whose hostname does
-    /// not match returns an error; it does not retry without TLS. That is the
-    /// entire point — a fallback would make the failure invisible exactly when
-    /// it matters.
+    /// There is exactly one connect path below, and that is deliberate. While
+    /// there were two, the plaintext one was reachable from configuration —
+    /// which is how four of this project's own stacks came to use it. An
+    /// `amqps://` URL whose CA bundle is missing, whose certificate is expired,
+    /// or whose hostname does not match returns an error; there is no longer a
+    /// second path for it to fall back to even in principle.
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
         config
             .validate_transport_security()
             .map_err(|e| AmqpError::Config(e.to_string()))?;
 
-        let tls = config.is_tls();
-        info!(tls, "Connecting to RabbitMQ");
+        info!(tls = true, "Connecting to RabbitMQ");
 
-        let connection = if tls {
-            let tls_config = build_tls_config(config)?;
-            // `connect_with_config` is the only entry point that takes TLS
-            // material, and it also requires an explicit runtime — so resolve
-            // the same default runtime `Connection::connect` would have picked
-            // rather than introducing a second runtime story for the TLS path.
-            let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
-            Connection::connect_with_config(
-                &config.url,
-                connection_properties(),
-                tls_config,
-                runtime,
-            )
-            .await
-            .map_err(AmqpError::Connection)?
-        } else {
-            Connection::connect(&config.url, connection_properties())
-                .await
-                .map_err(AmqpError::Connection)?
-        };
+        let tls_config = build_tls_config(config)?;
+        // `connect_with_config` is the only entry point that takes TLS
+        // material, and it also requires an explicit runtime — so resolve
+        // the same default runtime `Connection::connect` would have picked
+        // rather than introducing a second runtime story.
+        let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
+        let connection = Connection::connect_with_config(
+            &config.url,
+            connection_properties(),
+            tls_config,
+            runtime,
+        )
+        .await
+        .map_err(AmqpError::Connection)?;
 
         let channel = connection
             .create_channel()
@@ -267,7 +259,7 @@ impl AmqpManager {
             match Self::connect(config).await {
                 Ok(manager) => return Ok(manager),
                 // A6: a configuration fault is not a transient one. Retrying a
-                // missing CA mount or an unset AXIAM__AMQP__ALLOW_PLAINTEXT
+                // missing CA mount or a plaintext `amqp://` URL
                 // `max_retries` times only delays the same error by
                 // `max_retries × reconnect_delay_ms` and buries the actionable
                 // message under identical warnings.

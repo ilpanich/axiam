@@ -823,35 +823,55 @@ the broker with **mutual TLS** (`AXIAM__AMQP__TLS__CLIENT_CERT_PATH` +
 `..._KEY_PATH`), which is a stronger statement than root pinning and is what
 the `rabbitmq-broker-tls` Secret above is already shaped for.
 
-### Dev, e2e and bench stay plaintext, deliberately
+### Every stack is TLS, including dev, e2e and bench
 
-`docker/docker-compose.dev.yml`, the e2e stack and the benchmark target still
-use `amqp://`. **A release binary refuses a plaintext broker URL** unless
-`AXIAM__AMQP__ALLOW_PLAINTEXT=true` is set, which logs a prominent warning
-naming exactly what is now readable on the wire — so all three set that flag
-explicitly, each with a comment giving its own reason.
+There is no plaintext AMQP anywhere, and no configuration that produces any.
+`amqps://` or the server refuses to start — in a debug build exactly as in a
+release one.
 
-Note that the flag is genuinely required there. These stacks run the *published
-release image*, not a debug build, so the guard applies to them exactly as it
-applies to production; being "only dev" earns no exemption from it. The
-`cfg!(debug_assertions)` pass-through covers `cargo test` and `cargo run`, which
-is why the CI test and coverage jobs need no flag.
+This replaced an earlier posture worth recording, because the earlier one is
+the shape this failure usually takes. A release binary used to refuse plaintext
+*unless* `AXIAM__AMQP__ALLOW_PLAINTEXT=true` was set, and the flag logged a
+prominent warning naming what was readable on the wire. Four stacks set it —
+dev compose, the e2e stack, the benchmark target and CI — and each had a
+genuinely reasonable local argument: throwaway data on a compose network, an
+ephemeral broker carrying synthetic fixtures for one job, a hop the benchmark
+harness is trying to measure rather than encrypt. None of those arguments was
+wrong. The aggregate was: "AMQP is TLS-only" described the production compose
+file and the k8s manifests, and nothing else this repository actually runs.
+
+What it costs now, in full:
+
+- `just dev-up` calls `scripts/gen-broker-tls.sh` before starting the broker
+  (idempotent — existing material is left alone, so it will not rotate a cert
+  out from under a running container);
+- CI's test and coverage jobs start RabbitMQ with `docker run` rather than as a
+  `services:` container, because a service container starts before any step
+  could mint the certificate it needs to mount;
+- the E2E and examples-smoke jobs mint a throwaway CA per run;
+- `just bench-up` mints stable bench material — and **AMQP-carrying benchmark
+  figures are not directly comparable across this change**, since that hop was
+  plaintext through run 5. Re-baseline rather than extending a trend line.
+
+The generated broker certificate carries `rabbitmq`, `localhost` and
+`127.0.0.1` in its SAN, so one set of material serves both the compose network
+and a `cargo test -- --ignored` run on the host.
 
 `scripts/check-amqp-transport.py` enforces this at PR time, and CI runs it in
-the Security Scan job. It does not require TLS — plaintext on an ephemeral CI
-broker is a reasonable trade — only that a stack using `amqp://` says so
-explicitly. Without it the sole symptom of a missed stack is a container that
-refuses to boot, which is easy to misread as an unrelated infrastructure fault.
+the Security Scan job. It now requires `amqps://` outright, and also reports a
+leftover `AXIAM__AMQP__ALLOW_PLAINTEXT` anywhere it survives — a stale copy of
+an old snippet is how the plaintext URL that went with it comes back. Without
+this check the sole symptom of a missed stack is a container that refuses to
+boot, which is easy to misread as an unrelated infrastructure fault.
 
 ### Configuration reference
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AXIAM__AMQP__URL` | `amqp://localhost:5672` | `amqps://` selects TLS (port 5671). |
+| `AXIAM__AMQP__URL` | `amqps://localhost:5671` | **Must** be `amqps://`. Every other scheme is refused before a socket is opened. |
 | `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA, **added to** the platform roots (not substituted — see above). Unset = platform roots only. |
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
-| `AXIAM__AMQP__ALLOW_PLAINTEXT` | `false` | Permit `amqp://` in a release build. |
 
 ## Outbound SSRF guard — same-network IdPs (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`)
 

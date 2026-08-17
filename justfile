@@ -1,10 +1,27 @@
 # AXIAM development commands
 
 # Start development dependencies (SurrealDB, RabbitMQ)
-dev-up:
+#
+# A6: AMQP is TLS-only, so the dev broker needs a certificate before it can
+# serve anyone. gen-broker-tls.sh is idempotent — it leaves existing material
+# alone — so running it on every `dev-up` costs a second on the first run and
+# nothing afterwards, and it will never rotate a cert out from under a broker
+# that is already up.
+dev-up: dev-broker-certs
     docker compose -f docker/docker-compose.dev.yml up -d
     @echo "SurrealDB: http://localhost:8000"
+    @echo "RabbitMQ:  amqps://localhost:5671 (axiam/axiam, TLS 1.3)"
     @echo "RabbitMQ Management: http://localhost:15672 (axiam/axiam)"
+
+# A6: (re)generate the private CA + broker certificate the dev AMQPS listener
+# needs. `dev-up` calls this automatically; run it directly to rotate (delete
+# docker/.secrets/broker-tls first).
+#
+# The same directory backs `prod-up`, and the generated SAN covers `rabbitmq`,
+# `localhost` and `127.0.0.1` — so one set of material serves the compose
+# network and any `cargo test -- --ignored` running on the host.
+dev-broker-certs:
+    bash scripts/gen-broker-tls.sh
 
 # Stop development dependencies
 dev-down:
@@ -102,8 +119,13 @@ run-local:
     export AXIAM__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
     # D-18: cookies must work over plain http://localhost in local dev. NEVER false in prod.
     export AXIAM__AUTH__COOKIE_SECURE="false"
-    # dev-up RabbitMQ runs as axiam/axiam with the default guest user disabled.
-    export AXIAM__AMQP__URL="${AXIAM__AMQP__URL:-amqp://axiam:axiam@localhost:5672}"
+    # dev-up RabbitMQ runs as axiam/axiam with the default guest user disabled,
+    # and listens on 5671 (AMQPS) only — A6: AMQP is TLS-only in every build
+    # profile, so there is no plaintext listener for this to fall back to. The
+    # CA is the one `just dev-broker-certs` minted, and its SAN covers
+    # `localhost`, which is what makes this work from the host.
+    export AXIAM__AMQP__URL="${AXIAM__AMQP__URL:-amqps://axiam:axiam@localhost:5671}"
+    export AXIAM__AMQP__TLS__CA_CERT_PATH="${AXIAM__AMQP__TLS__CA_CERT_PATH:-$SECRETS_DIR/broker-tls/ca.pem}"
     RUST_LOG="${RUST_LOG:-axiam=debug}" cargo run --bin axiam-server --no-default-features
 
 # Start frontend dev server

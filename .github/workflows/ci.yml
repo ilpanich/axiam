@@ -197,10 +197,10 @@ jobs:
       # already report a missing file as an error — putting this check earlier
       # would turn one real finding into five confusing ones.
       #
-      # This does not require TLS. It requires that a stack using plaintext
-      # amqp:// says so via AXIAM__AMQP__ALLOW_PLAINTEXT, because a release
-      # image otherwise refuses to boot and the only symptom is a container
-      # that never starts — which is how it last took the E2E job down.
+      # This requires TLS. AMQP is amqps://-only in every build profile, so a
+      # stack that says otherwise does not fail a test — it fails to boot, and
+      # the only symptom is a container that never starts, which is how it last
+      # took the E2E job down.
       - name: AMQP transport posture
         run: python3 scripts/check-amqp-transport.py
 
@@ -236,22 +236,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:4-management-alpine
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics check_running"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # A6: RabbitMQ is deliberately NOT a `services:` container here. AMQP is
+    # TLS-only, so the broker needs a certificate mounted at startup, and a
+    # service container starts before any step runs — there is no point at
+    # which a step-generated cert could reach it. Starting it with `docker run`
+    # in a step instead is the same pattern this job already uses for
+    # SurrealDB, and it is what lets the cert be minted first.
     env:
       AXIAM__DB__URL: "ws://localhost:8000"
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
-      AXIAM__AMQP__URL: "amqp://localhost:5672"
+      AXIAM__AMQP__URL: "amqps://axiam:axiam@localhost:5671"
       # target/ for the workspace test build plus the two feature-gated relinks
       # at the end of this job no longer fits on an ubuntu-latest runner. It
       # failed as `ld terminated with signal 7 [Bus error]` while linking the
@@ -283,6 +278,25 @@ jobs:
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
           done
+      # A6: AMQP is TLS-only, so this broker listens on 5671 (AMQPS) and has no
+      # plaintext listener at all — the same shape as docker-compose.prod.yml.
+      # The certificate is minted here, per run and thrown away with the runner;
+      # its SAN covers `localhost`, which is what the tests below connect to.
+      - name: Start RabbitMQ (AMQPS)
+        run: |
+          bash scripts/gen-broker-tls.sh
+          docker run -d --name rabbitmq -p 5671:5671 -p 15672:15672 \
+            -e RABBITMQ_DEFAULT_USER=axiam \
+            -e RABBITMQ_DEFAULT_PASS=axiam \
+            -e RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS="-rabbit listeners.tcp [] -rabbit listeners.ssl.default 5671 -rabbit ssl_options.cacertfile \"/etc/rabbitmq/tls/ca.pem\" -rabbit ssl_options.certfile \"/etc/rabbitmq/tls/server.pem\" -rabbit ssl_options.keyfile \"/etc/rabbitmq/tls/server.key\" -rabbit ssl_options.verify verify_none -rabbit ssl_options.fail_if_no_peer_cert false -rabbit ssl_options.versions ['tlsv1.3']" \
+            -v "$PWD/docker/.secrets/broker-tls:/etc/rabbitmq/tls:ro" \
+            rabbitmq:4-management-alpine
+          for i in $(seq 1 30); do
+            docker exec rabbitmq rabbitmq-diagnostics check_running 2>/dev/null && break || sleep 2
+          done
+          # Fail loudly here rather than 30 confusing lines into a test run: a
+          # broker that never came up is a setup fault, not a test failure.
+          docker exec rabbitmq rabbitmq-diagnostics check_running
       # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
       # (→ samael → libxmlsec1), which is on by default. Without them the
       # samael build script fails ("xmlsec1-config not found").
@@ -482,6 +496,12 @@ jobs:
           # starts from an empty database, so no v2 hash outlives the run.
           AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
           export AXIAM__AUTH__PEPPER
+          # A6: AMQP is TLS-only, so the broker needs a certificate before it
+          # can serve anyone — there is no plaintext listener and no flag that
+          # brings one back. A throwaway CA per run is correct here for the same
+          # reason a fresh pepper is: the stack starts empty and is torn down
+          # with the job, so nothing outlives the material.
+          bash scripts/gen-broker-tls.sh
           docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
         # The release build alone now takes ~14-15 min (grown with recent phases:
         # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,

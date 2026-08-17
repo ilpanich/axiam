@@ -11,6 +11,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nested-resource authorization depth benchmark — `just bench-nested` (N1)
 
+### Changed
+
+- **BREAKING: AMQP is TLS-only.** `AXIAM__AMQP__URL` must be `amqps://`; every
+  other scheme is refused before a socket is opened, in a debug build exactly
+  as in a release one. `AXIAM__AMQP__ALLOW_PLAINTEXT` is **removed** — it is no
+  longer read, and `scripts/check-amqp-transport.py` reports it as a stale
+  leftover wherever it survives. The default `AXIAM__AMQP__URL` changes from
+  `amqp://localhost:5672` to `amqps://localhost:5671`.
+
+  The flag did what an escape hatch does. Four stacks reached for it — dev
+  compose, the e2e stack, the benchmark target and CI — each with a sound local
+  argument (throwaway data, an ephemeral broker carrying synthetic fixtures, a
+  hop the harness is trying to measure rather than encrypt). The aggregate was
+  that "AMQP is TLS-only" described the production compose file and the k8s
+  manifests, and nothing else this repository runs. Broker traffic carries
+  authorization requests, audit events and mail payloads across service
+  boundaries, and HMAC signing (§8) gives those authenticity and replay
+  protection but not confidentiality.
+
+  **To upgrade:** point `AXIAM__AMQP__URL` at your broker's TLS listener and,
+  for a privately-issued broker certificate, set
+  `AXIAM__AMQP__TLS__CA_CERT_PATH`. `scripts/gen-broker-tls.sh` mints a CA and
+  broker certificate if you have no PKI to hand; `just dev-up` and
+  `just bench-up` now call it for you. There is still deliberately no
+  verification-skip option.
+
+- All four remaining plaintext stacks moved to an AMQPS broker: dev compose,
+  the e2e stack, the benchmark target, and CI's test/coverage jobs. CI starts
+  RabbitMQ with `docker run` rather than as a `services:` container, because a
+  service container starts before any step could mint the certificate it would
+  need to mount.
+
+- **Benchmark comparability:** the AXIAM target's broker hop was plaintext
+  through run 5 and is now TLS. AMQP-carrying figures (async authz, audit
+  ingestion) are not directly comparable across this change, and the Keycloak
+  comparison target is unaffected by it. Re-baseline rather than extending a
+  trend line through it.
+
 ## [1.0.0-alpha26] - 2026-08-16
 
 ### Added

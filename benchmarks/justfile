@@ -124,6 +124,12 @@ bench-up:
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
       export RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-bench-local-only-pw}"
+      # A6: AMQP is TLS-only, so the bench broker needs a certificate before it
+      # can serve the server. Idempotent and stable across runs, like the hex
+      # secrets above — a rotated CA mid-matrix would only add a variable.
+      # NOTE: this hop was plaintext through run 5; AMQP-carrying figures are
+      # not directly comparable across that boundary (see the target compose).
+      (cd .. && bash scripts/gen-broker-tls.sh)
       # Rate-limit posture (see `rl` at the top of this file). Neutralized is the
       # default so a single-IP k6 run measures endpoint capacity. The prod values
       # mirror the server defaults in crates/axiam-api-rest/src/config/rate_limit.rs

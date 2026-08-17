@@ -32,12 +32,25 @@ use std::time::Duration;
 
 use axiam_amqp::{AmqpConfig, AmqpManager};
 
-/// Matches `docker/docker-compose.dev.yml`.
+/// Matches `docker/docker-compose.dev.yml`: `amqps://` on 5671, verified
+/// against the private CA `scripts/gen-broker-tls.sh` minted (AMQP is
+/// TLS-only — there is no plaintext listener to fall back to).
 fn test_amqp_config() -> AmqpConfig {
     AmqpConfig {
         url: std::env::var("AXIAM__AMQP__URL")
-            .unwrap_or_else(|_| "amqp://axiam:axiam@localhost:5672".to_string()),
-        allow_plaintext: true,
+            .unwrap_or_else(|_| "amqps://axiam:axiam@localhost:5671".to_string()),
+        tls: axiam_amqp::AmqpTlsConfig {
+            ca_cert_path: Some(
+                std::env::var("AXIAM__AMQP__TLS__CA_CERT_PATH").unwrap_or_else(|_| {
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../docker/.secrets/broker-tls/ca.pem"
+                    )
+                    .to_string()
+                }),
+            ),
+            ..Default::default()
+        },
         ..AmqpConfig::default()
     }
 }

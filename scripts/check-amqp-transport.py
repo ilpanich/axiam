@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
-"""A6 — assert every deployment artifact states an AMQP transport posture explicitly.
+"""A6 -- assert every deployment artifact talks to the broker over TLS.
 
-Why this exists: a release build refuses a plaintext ``amqp://`` broker URL
-unless ``AXIAM__AMQP__ALLOW_PLAINTEXT=true`` is set. That guard is deliberate --
-broker traffic carries authorization requests, audit events and mail payloads,
-and HMAC signing protects their authenticity but not their confidentiality.
+Why this exists: the server refuses any broker URL that is not ``amqps://``,
+in every build profile. Broker traffic carries authorization requests, audit
+events and mail payloads across service boundaries, and HMAC signing protects
+their authenticity but not their confidentiality.
 
-It also has an unfriendly failure mode. A stack that violates it does not fail a
-test; it fails to *boot*, and only once something actually starts the container.
-That is exactly how it went wrong: the dev, e2e and benchmark stacks were all
-assumed to be exempt debug builds, all three actually run the published release
-image, and nobody found out until the E2E job's server panicked at startup and
-took 108 unrelated Playwright tests down with it as collateral.
+It also has an unfriendly failure mode. A stack that violates the rule does not
+fail a test; it fails to *boot*, and only once something actually starts the
+container. That is exactly how it went wrong once already: the dev, e2e and
+benchmark stacks were all assumed to be exempt debug builds, all three actually
+run the published release image, and nobody found out until the E2E job's
+server panicked at startup and took 108 unrelated Playwright tests down with it
+as collateral.
 
 This check moves that discovery to PR time. For every service that sets
-``AXIAM__AMQP__URL`` it requires one of:
+``AXIAM__AMQP__URL``, the URL must be ``amqps://``.
 
-  * ``amqps://``  -- TLS, no flag needed; or
-  * ``amqp://``   -- plus an explicit ``AXIAM__AMQP__ALLOW_PLAINTEXT``.
+**This check used to be weaker, and the history is the point.** It previously
+accepted plaintext ``amqp://`` as long as the service also set
+``AXIAM__AMQP__ALLOW_PLAINTEXT``, on the reasoning that a stack should merely
+have to *state* its posture rather than justify it -- plaintext on an ephemeral
+CI broker carrying synthetic fixtures being a reasonable trade, and the
+benchmark harness having a real interest in not measuring TLS it did not ask
+for. Every one of those arguments was locally sound. Collectively they meant
+four of this project's five stacks ran plaintext, and "AMQP is TLS-only"
+described the production compose file and nothing else. The flag is gone from
+the server, so it is gone from here.
 
-Note what it does NOT do: it never demands TLS. Plaintext on an ephemeral CI
-broker carrying synthetic fixtures is a perfectly reasonable trade, and the
-benchmark stack has a good reason to avoid putting TLS on a hop it is trying to
-measure. What it demands is that the choice be *written down* at the point of
-use, so a stack cannot inherit a posture nobody picked.
-
-Exit 0 = every service states a posture. Exit 1 = at least one does not, named.
+Exit 0 = every service uses amqps://. Exit 1 = at least one does not, named.
 """
 
 import os
@@ -68,7 +71,10 @@ ComposeLoader.add_multi_constructor("", _passthrough)
 SEARCH_DIRS = ("docker", "benchmarks", "k8s")
 
 URL_KEY = "AXIAM__AMQP__URL"
-ALLOW_KEY = "AXIAM__AMQP__ALLOW_PLAINTEXT"
+# The retired plaintext escape hatch. Still named here so that a stack which
+# copies an old snippet gets told the flag is gone, rather than silently
+# carrying a variable the server no longer reads.
+RETIRED_ALLOW_KEY = "AXIAM__AMQP__ALLOW_PLAINTEXT"
 
 
 def yaml_files():
@@ -120,10 +126,6 @@ def env_mappings(node):
             yield from env_mappings(item)
 
 
-def truthy(value):
-    return str(value).strip().strip("\"'").lower() in {"true", "1", "yes", "on"}
-
-
 def main():
     findings = []
     checked = 0
@@ -139,6 +141,17 @@ def main():
 
         for doc in docs:
             for env in env_mappings(doc):
+                # The retired flag is worth reporting wherever it appears, even
+                # on a service that has already moved to amqps:// — a leftover
+                # here is a stale copy of an old snippet, and the next thing
+                # copied from it will be the amqp:// URL that went with it.
+                if RETIRED_ALLOW_KEY in env:
+                    findings.append(
+                        f"{rel}: {RETIRED_ALLOW_KEY} is set, but that flag no longer "
+                        f"exists — AMQP is TLS-only in every build profile. Remove the "
+                        f"variable; the server does not read it."
+                    )
+
                 if URL_KEY not in env:
                     continue
                 checked += 1
@@ -147,24 +160,17 @@ def main():
                 if url.startswith("amqps://"):
                     continue
                 if url.startswith("amqp://"):
-                    if ALLOW_KEY not in env:
-                        findings.append(
-                            f"{rel}: {URL_KEY} is plaintext amqp:// but {ALLOW_KEY} is "
-                            f"not set. A release image will refuse to start. Either "
-                            f"move to amqps:// or set {ALLOW_KEY} with a comment "
-                            f"saying why plaintext is acceptable for this stack."
-                        )
-                    elif not truthy(env[ALLOW_KEY]):
-                        findings.append(
-                            f"{rel}: {URL_KEY} is plaintext amqp:// and {ALLOW_KEY} is "
-                            f"set to {env[ALLOW_KEY]!r}, which is not truthy. A release "
-                            f"image will refuse to start."
-                        )
+                    findings.append(
+                        f"{rel}: {URL_KEY} is plaintext amqp://. AMQP is TLS-only and "
+                        f"there is no flag that changes that — the server refuses this "
+                        f"before opening a socket, in a debug build as in a release "
+                        f"one. Move to amqps:// on port 5671 and give the broker a "
+                        f"certificate (scripts/gen-broker-tls.sh mints one)."
+                    )
                 else:
                     findings.append(
-                        f"{rel}: {URL_KEY} is {env[URL_KEY]!r}, which is neither "
-                        f"amqps:// nor amqp://. The server rejects unrecognised "
-                        f"schemes before opening a socket."
+                        f"{rel}: {URL_KEY} is {env[URL_KEY]!r}, which is not amqps://. "
+                        f"The server rejects every other scheme before opening a socket."
                     )
 
     if findings:
@@ -177,7 +183,7 @@ def main():
         )
         return 1
 
-    print(f"AMQP transport posture OK: {checked} service(s) setting {URL_KEY} all state one.")
+    print(f"AMQP transport posture OK: {checked} service(s) setting {URL_KEY}, all amqps://.")
     return 0
 
 

@@ -2696,3 +2696,352 @@ mod tests {
         assert_eq!(escaped, "a&amp;b&quot;c&apos;d&lt;e&gt;f");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bearer SubjectConfirmation — SAML 2.0 Web-Browser-SSO profile §4.1.4.2
+// ---------------------------------------------------------------------------
+//
+// The existing tests in this file drive whole responses through fixtures, which
+// proves the happy path and the signature handling but leaves the bearer
+// confirmation checks reachable only in combination. These build the
+// `SubjectConfirmation` values directly so each REJECTION can be pinned on its
+// own — and every branch in `check_bearer_confirmation_data` is a rejection.
+//
+// Two of them are the ones an attacker actually needs:
+//
+//  * `@Recipient` mismatch — an assertion the IdP minted for a DIFFERENT
+//    service provider. Without this check, a malicious (or merely
+//    multi-tenant) SP could forward an assertion it legitimately received and
+//    log in as that user here.
+//  * `@InResponseTo` missing or mismatched — an assertion that does not answer
+//    an AuthnRequest AXIAM actually sent. That is the unsolicited /
+//    IdP-initiated flow, which is exactly how a stolen assertion is replayed.
+
+#[cfg(test)]
+mod bearer_confirmation_tests {
+    use super::*;
+    use samael::schema::{Subject, SubjectConfirmation, SubjectConfirmationData};
+
+    fn ts(s: &str) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("fixture timestamp parses")
+            .with_timezone(&Utc)
+    }
+
+    /// "Now" for every case below; the validity windows are written around it.
+    fn now() -> chrono::DateTime<Utc> {
+        ts("2026-06-01T12:00:00Z")
+    }
+
+    /// A confirmation that satisfies every constraint — each test then breaks
+    /// exactly one field, so a failure names the check that fired.
+    fn valid_data() -> SubjectConfirmationData {
+        SubjectConfirmationData {
+            not_before: None,
+            not_on_or_after: Some(ts("2026-06-01T12:05:00Z")),
+            recipient: Some("https://axiam.example/acs".into()),
+            in_response_to: Some("req-123".into()),
+            address: None,
+            content: None,
+        }
+    }
+
+    fn bearer(data: Option<SubjectConfirmationData>) -> SubjectConfirmation {
+        SubjectConfirmation {
+            method: Some(SUBJECT_CONFIRMATION_METHOD_BEARER.into()),
+            name_id: None,
+            subject_confirmation_data: data,
+        }
+    }
+
+    fn check(
+        data: Option<SubjectConfirmationData>,
+        in_response_to: Option<&str>,
+        recipient: Option<&str>,
+    ) -> Result<(), FederationError> {
+        check_bearer_confirmation_data(&bearer(data), now(), in_response_to, recipient)
+    }
+
+    #[test]
+    fn a_fully_conforming_confirmation_is_accepted() {
+        assert!(
+            check(
+                Some(valid_data()),
+                Some("req-123"),
+                Some("https://axiam.example/acs")
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_assertion_minted_for_another_service_provider_is_refused() {
+        let err = check(
+            Some(SubjectConfirmationData {
+                recipient: Some("https://someone-else.example/acs".into()),
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Recipient mismatch"), "{msg}");
+        // The message names both sides, so an operator debugging a federation
+        // rollout can see which SP the IdP actually addressed.
+        assert!(msg.contains("someone-else.example"), "{msg}");
+    }
+
+    #[test]
+    fn recipient_must_be_present_even_when_the_caller_cannot_compare_it() {
+        // The public first-time-SSO path passes `None` because it has no ACS
+        // URL to compare against. Presence is still REQUIRED by §4.1.4.2, so a
+        // missing or empty Recipient is refused on that path too — otherwise
+        // "we don't know our own URL" would silently become "any recipient".
+        for recipient in [None, Some(String::new())] {
+            let err = check(
+                Some(SubjectConfirmationData {
+                    recipient,
+                    ..valid_data()
+                }),
+                Some("req-123"),
+                None,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("missing required Recipient"));
+        }
+    }
+
+    #[test]
+    fn an_expired_confirmation_is_refused_with_no_leeway() {
+        // NotOnOrAfter is exclusive: at exactly the boundary the assertion is
+        // already invalid, and there is deliberately no clock skew allowance.
+        let err = check(
+            Some(SubjectConfirmationData {
+                not_on_or_after: Some(now()),
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn a_missing_not_on_or_after_is_refused_rather_than_treated_as_unbounded() {
+        let err = check(
+            Some(SubjectConfirmationData {
+                not_on_or_after: None,
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing required NotOnOrAfter"));
+    }
+
+    #[test]
+    fn a_not_yet_valid_confirmation_is_refused() {
+        // §4.1.4.2 says NotBefore MUST NOT be present, but real IdPs emit it.
+        // The posture is to honour it rather than reject its presence.
+        let err = check(
+            Some(SubjectConfirmationData {
+                not_before: Some(ts("2026-06-01T12:01:00Z")),
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not yet valid"));
+
+        // A NotBefore already in the past is fine — presence alone is not a
+        // rejection.
+        assert!(
+            check(
+                Some(SubjectConfirmationData {
+                    not_before: Some(ts("2026-06-01T11:59:00Z")),
+                    ..valid_data()
+                }),
+                Some("req-123"),
+                Some("https://axiam.example/acs"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unsolicited_assertion_is_refused_when_a_request_id_is_expected() {
+        let err = check(
+            Some(SubjectConfirmationData {
+                in_response_to: None,
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing InResponseTo"), "{msg}");
+        assert!(msg.contains("IdP-initiated"), "{msg}");
+    }
+
+    #[test]
+    fn an_assertion_answering_a_different_request_is_refused() {
+        let err = check(
+            Some(SubjectConfirmationData {
+                in_response_to: Some("some-other-request".into()),
+                ..valid_data()
+            }),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("InResponseTo mismatch"));
+    }
+
+    #[test]
+    fn in_response_to_is_not_checked_when_the_caller_expects_none() {
+        // The caller decides whether a request id is required; when it passes
+        // None, an assertion carrying any InResponseTo (or none) still passes
+        // this particular check.
+        assert!(check(Some(valid_data()), None, Some("https://axiam.example/acs")).is_ok());
+        assert!(
+            check(
+                Some(SubjectConfirmationData {
+                    in_response_to: None,
+                    ..valid_data()
+                }),
+                None,
+                Some("https://axiam.example/acs"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_confirmation_with_no_data_element_is_refused() {
+        let err = check(None, Some("req-123"), Some("https://axiam.example/acs")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing required SubjectConfirmationData")
+        );
+    }
+
+    // -- the assertion-level wrapper ---------------------------------------
+
+    fn assertion_with(subject: Option<Subject>) -> samael::schema::Assertion {
+        samael::schema::Assertion {
+            id: "assertion-1".into(),
+            issue_instant: now(),
+            version: "2.0".into(),
+            issuer: samael::schema::Issuer {
+                value: Some("https://idp.example".into()),
+                ..Default::default()
+            },
+            signature: None,
+            subject,
+            conditions: None,
+            authn_statements: None,
+            attribute_statements: None,
+        }
+    }
+
+    fn validate(subject: Option<Subject>) -> Result<(), FederationError> {
+        validate_bearer_subject_confirmation(
+            &assertion_with(subject),
+            now(),
+            Some("req-123"),
+            Some("req-123"),
+            Some("https://axiam.example/acs"),
+            true,
+        )
+    }
+
+    #[test]
+    fn an_assertion_with_no_subject_is_refused() {
+        let err = validate(None).unwrap_err();
+        assert!(err.to_string().contains("missing required Subject"));
+    }
+
+    #[test]
+    fn an_assertion_with_no_bearer_confirmation_is_refused() {
+        // A holder-of-key confirmation is a valid SAML construct, but it is not
+        // the Web-Browser-SSO profile and must not authenticate a browser flow.
+        let holder_of_key = SubjectConfirmation {
+            method: Some("urn:oasis:names:tc:SAML:2.0:cm:holder-of-key".into()),
+            name_id: None,
+            subject_confirmation_data: Some(valid_data()),
+        };
+        for confirmations in [Some(vec![]), None, Some(vec![holder_of_key])] {
+            let err = validate(Some(Subject {
+                name_id: None,
+                subject_confirmations: confirmations,
+            }))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no bearer SubjectConfirmation"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_satisfying_confirmation_among_several_is_enough() {
+        // §4.1.4.2 requires only that ONE bearer confirmation satisfy the
+        // profile. An IdP that emits a stale one alongside a good one must not
+        // be rejected — but the good one has to actually be there.
+        let stale = bearer(Some(SubjectConfirmationData {
+            not_on_or_after: Some(ts("2026-06-01T11:00:00Z")),
+            ..valid_data()
+        }));
+        let good = bearer(Some(valid_data()));
+
+        assert!(
+            validate(Some(Subject {
+                name_id: None,
+                subject_confirmations: Some(vec![stale.clone(), good]),
+            }))
+            .is_ok()
+        );
+
+        // With only the stale one, the rejection names the concrete violation
+        // rather than a generic "nothing matched".
+        let err = validate(Some(Subject {
+            name_id: None,
+            subject_confirmations: Some(vec![stale]),
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("expired"), "got: {err}");
+    }
+
+    #[test]
+    fn the_response_in_response_to_is_the_fallback_when_no_request_id_is_stored() {
+        // The public first-time-SSO path has no stored request id, so the
+        // Response's own InResponseTo becomes the required value — the
+        // confirmation must still answer the same request, not any request.
+        let subject = Some(Subject {
+            name_id: None,
+            subject_confirmations: Some(vec![bearer(Some(valid_data()))]),
+        });
+        let call = |expected_request_id, response_in_response_to| {
+            validate_bearer_subject_confirmation(
+                &assertion_with(subject.clone()),
+                now(),
+                response_in_response_to,
+                expected_request_id,
+                Some("https://axiam.example/acs"),
+                true,
+            )
+        };
+
+        assert!(call(None, Some("req-123")).is_ok());
+        assert!(
+            call(Some(""), Some("req-123")).is_ok(),
+            "an empty stored id falls back too"
+        );
+        assert!(call(None, Some("a-different-request")).is_err());
+    }
+}

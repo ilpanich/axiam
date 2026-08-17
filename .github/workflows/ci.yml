@@ -285,19 +285,32 @@ jobs:
       - name: Start RabbitMQ (AMQPS)
         run: |
           bash scripts/gen-broker-tls.sh
-          docker run -d --name rabbitmq -p 5671:5671 -p 15672:15672 \
+          # Create-copy-start rather than `docker run -v`.
+          #
+          # Bind-mounting into /etc/rabbitmq made the broker die in prelaunch
+          # with `Error when reading /var/lib/rabbitmq/.erlang.cookie: eacces`
+          # — the mounts disturb the ownership the entrypoint sets up before it
+          # drops privileges, and the symptom lands somewhere unrelated to the
+          # thing that was mounted. `docker cp` into a created-but-not-started
+          # container leaves the image's own filesystem ownership alone.
+          #
+          # The TLS settings go in conf.d/ rather than replacing rabbitmq.conf,
+          # so the entrypoint's own 10-defaultuser.conf — which is how
+          # RABBITMQ_DEFAULT_USER/PASS reach the broker — still applies.
+          docker create --name rabbitmq -p 5671:5671 -p 15672:15672 \
             -e RABBITMQ_DEFAULT_USER=axiam \
             -e RABBITMQ_DEFAULT_PASS=axiam \
-            -v "$PWD/docker/.secrets/broker-tls:/etc/rabbitmq/tls:ro" \
-            -v "$PWD/docker/rabbitmq-tls.conf:/etc/rabbitmq/rabbitmq.conf:ro" \
             rabbitmq:4-management-alpine
+          docker cp docker/.secrets/broker-tls/. rabbitmq:/etc/rabbitmq/tls/
+          docker cp docker/rabbitmq-tls.conf rabbitmq:/etc/rabbitmq/conf.d/20-tls.conf
+          docker start rabbitmq
           for i in $(seq 1 30); do
             docker exec rabbitmq rabbitmq-diagnostics check_running 2>/dev/null && break || sleep 2
           done
           # Fail loudly here rather than 30 confusing lines into a test run: a
           # broker that never came up is a setup fault, not a test failure.
           # Dump its log first — "container is not running" on its own says
-          # nothing about WHY, which cost a CI round the first time this broke.
+          # nothing about WHY, which cost two CI rounds the first time this broke.
           if ! docker exec rabbitmq rabbitmq-diagnostics check_running; then
             echo "::group::rabbitmq container log"
             docker logs rabbitmq || true

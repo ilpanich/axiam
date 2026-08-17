@@ -361,7 +361,7 @@ services:
       # A6: AMQPS-only listener, plaintext listener off — the same config file
       # the dev, e2e and CI brokers use. `just bench-up` mints the material.
       - ../../../docker/.secrets/broker-tls:/etc/rabbitmq/tls:ro
-      - ../../../docker/rabbitmq-tls.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ../../../docker/rabbitmq-tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
       interval: 5s

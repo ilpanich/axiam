@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha27] - 2026-08-17
+
+### Added
+
+- AMQP is TLS-only, server side and in every stack
+- Long-lived provisioning tokens, and two SCIM setup traps closed
+- Close the residual admin-interface gaps before beta
+- Nested-resource authorization depth sweep (N1)
+
+### Changed
+
+- §8b rules 7 and 8, and a gate that checks them (contract 1.23)
+- Cover SAML claim extraction and attribute mapping
+- Cover the WebAuthn state-token machinery and the SAML bearer-confirmation checks
+- §22.14 declarative reactor handler binding (contract 1.22)
+- Regenerate openapi.json for the SCIM token endpoints
+- Cover the SCIM and MDS error taxonomies, and the token-exchange refusal codes
+
+### Fixed
+
+- Install the rustls CryptoProvider before dialling amqps://
+- The listener assertion had its own fields backwards
+- Assert the AMQPS listener bound, and bound the test that needs it
+- The broker's TLS config was never valid Erlang args
+- Copy the broker's TLS material in rather than bind-mounting it
+- Configure the AMQPS broker with a file, not mangled erl args
+- Stop error messages from rendering credentials
+- Construct AppState with scim_token_repo, and record the new surface
+- Define the scim_token table instead of relying on implicit creation
+
 ## [Unreleased]
 
 ### Added

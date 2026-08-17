@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["SCIM_PROVISION_PERMISSION"],"fn":["require_scim_provision"]};
+window.SIDEBAR_ITEMS = {"constant":["SCIM_PROVISION_PERMISSION"],"enum":["ScimPrincipal"],"fn":["require_scim_provision"]};

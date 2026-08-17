@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_LIFETIME_DAYS","SCIM_PROVISION_ACTION","SCIM_TOKEN_ENTROPY_BYTES","SCIM_TOKEN_PREFIX"],"enum":["ScimTokenStatus"],"struct":["CreateScimToken","ScimToken"]};

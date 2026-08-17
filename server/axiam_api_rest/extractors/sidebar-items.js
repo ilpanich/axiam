@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["auth","cert_auth","client_info","rate_limit","tenant"]};
+window.SIDEBAR_ITEMS = {"mod":["auth","cert_auth","client_info","rate_limit","scim_token","tenant"]};

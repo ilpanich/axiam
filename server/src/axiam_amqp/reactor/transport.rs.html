@@ -1057,10 +1057,10 @@
 <a href=#1057 id=1057 data-nosnippet>1057</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>changed = r.clone();
 <a href=#1058 id=1058 data-nosnippet>1058</a>        changed.events = <span class="macro">vec!</span>[<span class="string">"token.pre_issue"</span>.into()];
 <a href=#1059 id=1059 data-nosnippet>1059</a>        <span class="macro">assert!</span>(
-<a href=#1060 id=1060 data-nosnippet>1060</a>            !shared
+<a href=#1060 id=1060 data-nosnippet>1060</a>            shared
 <a href=#1061 id=1061 data-nosnippet>1061</a>                .declared_map()
 <a href=#1062 id=1062 data-nosnippet>1062</a>                .get(<span class="kw-2">&amp;</span>changed.id)
-<a href=#1063 id=1063 data-nosnippet>1063</a>                .is_some_and(|have| <span class="kw-2">*</span>have == changed.events)
+<a href=#1063 id=1063 data-nosnippet>1063</a>                .is_none_or(|have| <span class="kw-2">*</span>have != changed.events)
 <a href=#1064 id=1064 data-nosnippet>1064</a>        );
 <a href=#1065 id=1065 data-nosnippet>1065</a>    }
 <a href=#1066 id=1066 data-nosnippet>1066</a>}

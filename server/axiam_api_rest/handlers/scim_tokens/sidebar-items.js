@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","list","revoke"],"struct":["CreateScimTokenRequest","CreateScimTokenResponse","ScimTokenResponse"]};

@@ -180,6 +180,9 @@ jobs:
           export AXIAM__AMQP__SIGNING_KEY
           AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
           export AXIAM__AUTH__PEPPER
+          # A6: AMQP is TLS-only — mint the broker's throwaway CA and
+          # certificate before compose starts, the same as ci.yml's E2E job.
+          bash scripts/gen-broker-tls.sh
           # --build for the same reason ci.yml gives (W8): a pre-built registry
           # image would not contain this PR's source and would produce
           # false-green example runs.

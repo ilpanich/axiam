@@ -23,22 +23,15 @@ jobs:
   rust-coverage:
     name: cargo-llvm-cov (server workspace) -> Coveralls
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:4-management-alpine
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics check_running"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # A6: RabbitMQ is started with `docker run` in a step below rather than as a
+    # `services:` container, for the same reason as ci.yml's test job — AMQP is
+    # TLS-only, and a service container starts before any step could mint the
+    # certificate it would need to mount.
     env:
       AXIAM__DB__URL: "ws://localhost:8000"
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
-      AXIAM__AMQP__URL: "amqp://localhost:5672"
+      AXIAM__AMQP__URL: "amqps://axiam:axiam@localhost:5671"
       # The instrumented `cargo llvm-cov --workspace` build links every test
       # binary with full `debuginfo=2`, which grew past the runner's free disk
       # once the coverage suite expanded — `ld` then SIGBUSes on a truncated
@@ -75,6 +68,42 @@ jobs:
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
           done
+
+      # A6: AMQPS-only broker, mirroring ci.yml's test job.
+      - name: Start RabbitMQ (AMQPS)
+        run: |
+          bash scripts/gen-broker-tls.sh
+          docker compose -f docker/docker-compose.ci-broker.yml up -d --wait
+          # `--wait` only proves the node is running. The healthcheck is
+          # `rabbitmq-diagnostics check_running`, which says nothing about
+          # whether the AMQPS listener BOUND — and a bad certificate path or an
+          # unsupported TLS version makes the listener fail while the node stays
+          # up and healthy. That combination is the worst possible failure for a
+          # caller: the port is published either way, so lapin (which has no
+          # connect timeout) hangs on a socket nothing is accepting, and the
+          # test sits there until the job is killed. It did, for 25 minutes.
+          #
+          # So assert the listener is really there, and print what is bound.
+          echo "::group::rabbitmq listeners"
+          docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+            rabbitmq-diagnostics -q listeners
+          echo "::endgroup::"
+          # Order-agnostic on purpose: `listeners` prints "port: 5671,
+          # protocol: amqp/ssl" — port BEFORE protocol. The first version of
+          # this assertion grepped 'amqp/ssl.*5671' and so failed a broker
+          # whose listener was perfectly fine, which is the same shape of
+          # defect as the one this whole change is about: a check that reads
+          # like a guarantee and does not hold.
+          if ! docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+              rabbitmq-diagnostics -q listeners \
+              | grep -qiE '(port: *5671.*amqp/ssl|amqp/ssl.*5671)'; then
+            echo "::error::the broker is running but has no AMQPS listener on 5671"
+            docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
+            exit 1
+          fi
+      - name: Broker log on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
 
       # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
       # (→ samael → libxmlsec1), which is on by default. Without them the

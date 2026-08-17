@@ -42,15 +42,19 @@ services:
       AXIAM__DB__NAMESPACE: "axiam"
       # Aligned with docker/docker-compose.prod.yml (was "main").
       AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-axiam}"
-      AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5672"
-      # A6: same release-image guard as AXIAM__AMQP__SIGNING_KEY below — plaintext
-      # amqp:// fails closed. Kept plaintext deliberately: the broker is on the
-      # bench compose network with synthetic load-test data, and putting TLS on
-      # this hop would tax the very numbers the harness exists to measure, so a
-      # run would no longer be comparable to run 5 or to the Keycloak target.
-      # If a future run measures the cost of broker TLS, that is a deliberate
-      # change of this line, not a default.
-      AXIAM__AMQP__ALLOW_PLAINTEXT: "true"
+      AXIAM__AMQP__URL: "amqps://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5671"
+      AXIAM__AMQP__TLS__CA_CERT_PATH: "/etc/axiam/broker-tls/ca.pem"
+      # A6: TLS on the broker hop, because AMQP is TLS-only and there is no
+      # longer a flag that says otherwise.
+      #
+      # READ THIS BEFORE COMPARING A RUN ACROSS THIS CHANGE. This hop was
+      # deliberately plaintext through run 5, on the reasoning that encrypting
+      # synthetic load-test traffic taxes the very numbers the harness exists to
+      # measure. That reasoning was not wrong, and the cost did not disappear —
+      # it is now paid, and paid by the AXIAM target only, since the Keycloak
+      # comparison target is unaffected by this file. Any AMQP-carrying figure
+      # (async authz, audit ingestion) is therefore NOT directly comparable to
+      # run 5 or earlier. Re-baseline before drawing a trend line through it.
       # AMQP master signing key (SECHRD-08 / D-05c): the release image mandates it
       # at startup (no unsigned code path), so this fails closed if unset. `just
       # bench-up` generates a stable hex key under docker/.secrets/ automatically.
@@ -262,6 +266,9 @@ services:
       AXIAM__GRPC__GRPC_IDENTITY_PER_SEC: "${AXIAM__GRPC__GRPC_IDENTITY_PER_SEC:-5000000}"
       AXIAM__GRPC__GRPC_ADMIN_PER_SEC: "${AXIAM__GRPC__GRPC_ADMIN_PER_SEC:-1000000}"
       RUST_LOG: "${RUST_LOG:-axiam=warn}"
+    volumes:
+      # A6: read-only CA bundle for verifying the broker certificate.
+      - ../../../docker/.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro
     depends_on:
       surrealdb: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -350,6 +357,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?required}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?required}"
+    volumes:
+      # A6: AMQPS-only listener, plaintext listener off — the same config file
+      # the dev, e2e and CI brokers use. `just bench-up` mints the material.
+      - ../../../docker/.secrets/broker-tls:/etc/rabbitmq/tls:ro
+      - ../../../docker/rabbitmq-tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
       interval: 5s

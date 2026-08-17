@@ -197,10 +197,10 @@ jobs:
       # already report a missing file as an error — putting this check earlier
       # would turn one real finding into five confusing ones.
       #
-      # This does not require TLS. It requires that a stack using plaintext
-      # amqp:// says so via AXIAM__AMQP__ALLOW_PLAINTEXT, because a release
-      # image otherwise refuses to boot and the only symptom is a container
-      # that never starts — which is how it last took the E2E job down.
+      # This requires TLS. AMQP is amqps://-only in every build profile, so a
+      # stack that says otherwise does not fail a test — it fails to boot, and
+      # the only symptom is a container that never starts, which is how it last
+      # took the E2E job down.
       - name: AMQP transport posture
         run: python3 scripts/check-amqp-transport.py
 
@@ -236,22 +236,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:4-management-alpine
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics check_running"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # A6: RabbitMQ is deliberately NOT a `services:` container here. AMQP is
+    # TLS-only, so the broker needs a certificate mounted at startup, and a
+    # service container starts before any step runs — there is no point at
+    # which a step-generated cert could reach it. Starting it with `docker run`
+    # in a step instead is the same pattern this job already uses for
+    # SurrealDB, and it is what lets the cert be minted first.
     env:
       AXIAM__DB__URL: "ws://localhost:8000"
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
-      AXIAM__AMQP__URL: "amqp://localhost:5672"
+      AXIAM__AMQP__URL: "amqps://axiam:axiam@localhost:5671"
       # target/ for the workspace test build plus the two feature-gated relinks
       # at the end of this job no longer fits on an ubuntu-latest runner. It
       # failed as `ld terminated with signal 7 [Bus error]` while linking the
@@ -283,6 +278,44 @@ jobs:
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
           done
+      # A6: AMQP is TLS-only, so this broker listens on 5671 (AMQPS) and has no
+      # plaintext listener at all — the same shape as docker-compose.prod.yml.
+      # The certificate is minted here, per run and thrown away with the runner;
+      # its SAN covers `localhost`, which is what the tests below connect to.
+      - name: Start RabbitMQ (AMQPS)
+        run: |
+          bash scripts/gen-broker-tls.sh
+          docker compose -f docker/docker-compose.ci-broker.yml up -d --wait
+          # `--wait` only proves the node is running. The healthcheck is
+          # `rabbitmq-diagnostics check_running`, which says nothing about
+          # whether the AMQPS listener BOUND — and a bad certificate path or an
+          # unsupported TLS version makes the listener fail while the node stays
+          # up and healthy. That combination is the worst possible failure for a
+          # caller: the port is published either way, so lapin (which has no
+          # connect timeout) hangs on a socket nothing is accepting, and the
+          # test sits there until the job is killed. It did, for 25 minutes.
+          #
+          # So assert the listener is really there, and print what is bound.
+          echo "::group::rabbitmq listeners"
+          docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+            rabbitmq-diagnostics -q listeners
+          echo "::endgroup::"
+          # Order-agnostic on purpose: `listeners` prints "port: 5671,
+          # protocol: amqp/ssl" — port BEFORE protocol. The first version of
+          # this assertion grepped 'amqp/ssl.*5671' and so failed a broker
+          # whose listener was perfectly fine, which is the same shape of
+          # defect as the one this whole change is about: a check that reads
+          # like a guarantee and does not hold.
+          if ! docker compose -f docker/docker-compose.ci-broker.yml exec -T rabbitmq \
+              rabbitmq-diagnostics -q listeners \
+              | grep -qiE '(port: *5671.*amqp/ssl|amqp/ssl.*5671)'; then
+            echo "::error::the broker is running but has no AMQPS listener on 5671"
+            docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
+            exit 1
+          fi
+      - name: Broker log on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.ci-broker.yml logs rabbitmq
       # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
       # (→ samael → libxmlsec1), which is on by default. Without them the
       # samael build script fails ("xmlsec1-config not found").
@@ -308,15 +341,31 @@ jobs:
       # ReactorAdminService integration tests (X1 / R2.3) — same `client`-feature
       # gate as the two above (generated client stubs).
       - run: cargo test -p axiam-api-grpc --features client --test grpc_reactor_test
-      # X1 / R2.4 — containerized-reactor integration test against the SAME
-      # live RabbitMQ this job already runs as a service container (see the
-      # `rabbitmq:` service block above). `#[ignore]`d for the same reason
+      # X1 / R2.4 — containerized-reactor integration test against the AMQPS
+      # broker this job started above. `#[ignore]`d for the same reason
       # `webhook_consumer_test.rs`'s live-broker test is: `cargo test
       # --workspace` above must not require a broker in every environment
       # that runs it. This job has one, so run it explicitly here.
-      - run: |
+      #
+      # `--nocapture` and `RUST_BACKTRACE` are not decoration here. This step
+      # has twice been killed at its timeout having printed exactly
+      # `running 10 tests` and nothing else: libtest buffers per-test output
+      # when stdout is a pipe, so a suite that stalls names neither the test it
+      # stalled in nor the reason. The second time, the reason was a rustls
+      # `CryptoProvider` panic on lapin's own IO thread — a panic the caller
+      # never sees, on a thread nobody was reading — and ten minutes of silence
+      # was the entire diagnostic. `--nocapture` streams it as it happens.
+      #
+      # `timeout-minutes` stays as the outer bound. `AmqpConfig`'s
+      # `connect_timeout_ms` should now make an unbounded dial impossible, so
+      # this should never be what stops the step; it is here for the failure
+      # that has not been thought of yet.
+      - timeout-minutes: 10
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
           cargo test -p axiam-amqp --test reactor_containerized_test \
-            -- --ignored --test-threads=1
+            -- --ignored --test-threads=1 --nocapture
 
   frontend-quality:
     name: Frontend Lint + Type Check
@@ -482,6 +531,12 @@ jobs:
           # starts from an empty database, so no v2 hash outlives the run.
           AXIAM__AUTH__PEPPER="$(openssl rand -hex 32)"
           export AXIAM__AUTH__PEPPER
+          # A6: AMQP is TLS-only, so the broker needs a certificate before it
+          # can serve anyone — there is no plaintext listener and no flag that
+          # brings one back. A throwaway CA per run is correct here for the same
+          # reason a fresh pepper is: the stack starts empty and is torn down
+          # with the job, so nothing outlives the material.
+          bash scripts/gen-broker-tls.sh
           docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
         # The release build alone now takes ~14-15 min (grown with recent phases:
         # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,

@@ -548,8 +548,8 @@ export const DOC_PAGES: DocPage[] = [
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
             "AXIAM__AMQP__URL",
-            "RabbitMQ AMQP connection string. Assembled from the broker credentials at the deployment layer.",
-            "amqp://user:pass@rabbitmq:5672",
+            "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup.",
+            "amqps://user:pass@rabbitmq:5671",
           ],
           [
             "AXIAM__SERVER__HOST",

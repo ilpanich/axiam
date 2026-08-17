@@ -103,33 +103,37 @@ impl AmqpTlsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AmqpConfig {
-    /// AMQP connection URI.
+    /// AMQP connection URI. **Must** be `amqps://host:5671` (A6).
     ///
-    /// `amqps://host:5671` selects TLS (see [`AmqpConfig::is_tls`]);
-    /// `amqp://host:5672` is plaintext and, in a release build, must be
-    /// explicitly permitted via [`AmqpConfig::allow_plaintext`].
+    /// There is no plaintext option: see
+    /// [`AmqpConfig::validate_transport_security`], which refuses every scheme
+    /// but `amqps://` in every build profile.
     pub url: String,
-    /// TLS material for an `amqps://` connection (A6). Ignored for `amqp://`.
+    /// TLS material for the `amqps://` connection (A6).
     #[serde(default)]
     pub tls: AmqpTlsConfig,
-    /// Permit a plaintext `amqp://` broker URL in a **release** build (A6).
-    ///
-    /// Set via `AXIAM__AMQP__ALLOW_PLAINTEXT`. Default `false`, and the
-    /// failure is deliberate: broker traffic carries authorization requests,
-    /// audit events and outbound mail payloads across service boundaries, and
-    /// the AMQP layer's HMAC gives those **authenticity and replay protection
-    /// but not confidentiality** — plaintext means they cross the wire
-    /// readable. This mirrors [`DEV_DEFAULT_SIGNING_KEY`]'s posture exactly:
-    /// convenient in a debug build, an explicit operator decision in a release
-    /// one.
-    #[serde(default)]
-    pub allow_plaintext: bool,
     /// Channel prefetch count for consumers.
     pub prefetch_count: u16,
     /// Delay between reconnection attempts in milliseconds.
     pub reconnect_delay_ms: u64,
     /// Maximum number of connection retries before giving up.
     pub max_retries: u32,
+    /// How long a single connection attempt may take before it is abandoned,
+    /// in milliseconds (A6).
+    ///
+    /// lapin has no connect timeout of its own, and the `amqps://` handshake
+    /// gave that omission teeth: a broker whose port is published but whose
+    /// TLS listener never answers — or a client-side fault in the handshake
+    /// itself — leaves `Connection::connect_with_config` pending forever.
+    /// [`AmqpManager::connect_with_retry`]'s budget cannot help there, because
+    /// the future it would retry has not resolved; the process simply stops,
+    /// with no error and no log line. Bounding each attempt turns that into a
+    /// [`AmqpError::ConnectTimeout`] the retry loop can act on and an operator
+    /// can read.
+    ///
+    /// [`AmqpManager::connect_with_retry`]: crate::AmqpManager::connect_with_retry
+    /// [`AmqpError::ConnectTimeout`]: crate::AmqpError::ConnectTimeout
+    pub connect_timeout_ms: u64,
     /// HMAC-SHA256 master signing key for authenticating AMQP message
     /// payloads (SEC-022/055, SECHRD-08). Set via
     /// `AXIAM__AMQP__SIGNING_KEY` (hex-encoded key). Signing is mandatory —
@@ -156,12 +160,15 @@ fn default_replay_skew_secs() -> u64 {
 impl Default for AmqpConfig {
     fn default() -> Self {
         Self {
-            url: "amqp://localhost:5672".into(),
+            url: "amqps://localhost:5671".into(),
             tls: AmqpTlsConfig::default(),
-            allow_plaintext: false,
             prefetch_count: 10,
             reconnect_delay_ms: 5000,
             max_retries: 5,
+            // Generous enough that a loaded broker or a slow TLS handshake is
+            // never mistaken for a stall, short enough that five attempts plus
+            // their backoff stay inside any sensible startup budget.
+            connect_timeout_ms: 30_000,
             signing_key: None,
             replay_skew_secs: default_replay_skew_secs(),
         }
@@ -203,13 +210,14 @@ impl AmqpConfig {
         }
     }
 
-    /// Whether [`Self::url`] selects a TLS connection (A6).
+    /// Whether [`Self::url`] names the one accepted transport (A6).
     ///
     /// Scheme-based, case-insensitive, and deliberately strict about the
-    /// separator: `amqps://` is TLS, `amqp://` is not, and anything else is
-    /// neither — [`Self::validate_transport_security`] rejects it rather than
-    /// guessing. Matching on `amqps` without the `://` would classify a
-    /// hypothetical `amqpsomething://` as TLS.
+    /// separator: only `amqps://` is TLS, and everything else —
+    /// `amqp://` included — is not, so
+    /// [`Self::validate_transport_security`] refuses it rather than guessing.
+    /// Matching on `amqps` without the `://` would classify a hypothetical
+    /// `amqpsomething://` as TLS.
     pub fn is_tls(&self) -> bool {
         self.url.trim().to_ascii_lowercase().starts_with("amqps://")
     }
@@ -217,73 +225,56 @@ impl AmqpConfig {
     /// Enforce the transport-security posture before any connection is
     /// attempted (A6).
     ///
-    /// Rules, in order:
+    /// Two rules, and neither has an exception:
     ///
-    /// 1. An unrecognised scheme fails — better a clear error at startup than
-    ///    an unclear one from lapin at connect time.
+    /// 1. The URL scheme **must** be `amqps://`. Every other scheme — plaintext
+    ///    `amqp://` included — is refused, in a debug build exactly as in a
+    ///    release one.
     /// 2. TLS material that is internally inconsistent fails
     ///    ([`AmqpTlsConfig::validate`]).
-    /// 3. A plaintext URL fails in a **release** build unless
-    ///    [`Self::allow_plaintext`] is set, and logs a prominent warning when
-    ///    it is. Debug builds allow plaintext silently-ish so `just dev-up`
-    ///    keeps working.
+    ///
+    /// # Why there is no plaintext escape hatch any more
+    ///
+    /// There used to be one: `AXIAM__AMQP__ALLOW_PLAINTEXT` permitted `amqp://`
+    /// in a release build, and a debug build permitted it unconditionally. Both
+    /// are gone, because the flag did what an escape hatch does. Four of the
+    /// project's own stacks reached for it — dev compose, e2e compose, the
+    /// benchmark target and CI — and every one of them recorded a locally sound
+    /// reason (throwaway data, an ephemeral CI broker, a hop the benchmark is
+    /// trying to measure). Sound reasons are what an exception collects; the net
+    /// effect was that "AMQP is TLS-only" described no deployment artifact in
+    /// the repository except the production compose file and the k8s manifests.
     ///
     /// The project standard is "TLS 1.3 minimum for all external
-    /// communication", and six SDKs consume AMQP directly, so broker traffic
-    /// crosses service boundaries by design. Failing closed here is what makes
-    /// that standard true of the broker rather than aspirational about it.
+    /// communication", and broker traffic carries authorization requests, audit
+    /// events and outbound mail payloads across service boundaries by design.
+    /// HMAC signing (§8) gives those authenticity and replay protection but
+    /// **not** confidentiality. Failing closed here — with no build profile and
+    /// no environment variable that changes the answer — is what makes the
+    /// standard true of the broker rather than aspirational about it, and it is
+    /// the same posture the SDK reactor dialers already enforce on the other end
+    /// of the same link (CONTRACT.md §8b rules 1 and 5).
+    ///
+    /// The cost is real and was accepted deliberately: every stack now needs
+    /// broker TLS material before it boots. `scripts/gen-broker-tls.sh` mints
+    /// it, `just dev-up` and `just e2e-up` call that script, and
+    /// `docs/deployment/README.md` documents bringing your own certificate
+    /// instead.
     pub fn validate_transport_security(&self) -> Result<(), AxiamError> {
-        let url = self.url.trim().to_ascii_lowercase();
-        let is_plaintext = url.starts_with("amqp://");
-
-        if !self.is_tls() && !is_plaintext {
+        if !self.is_tls() {
             return Err(AxiamError::ServiceUnavailable(format!(
-                "AXIAM__AMQP__URL must start with amqps:// or amqp:// (got {:?})",
+                "AXIAM__AMQP__URL must use amqps:// (port 5671) — got {:?}. AMQP is \
+                 TLS-only: broker traffic carries authorization requests, audit events \
+                 and mail payloads across service boundaries, and HMAC signing protects \
+                 their authenticity but not their confidentiality. There is no plaintext \
+                 option and no build profile in which one exists; run \
+                 `scripts/gen-broker-tls.sh` to mint broker TLS material, or point \
+                 AXIAM__AMQP__TLS__CA_CERT_PATH at your own CA bundle.",
                 self.url
             )));
         }
 
-        self.tls.validate()?;
-
-        if self.is_tls() {
-            return Ok(());
-        }
-
-        // Plaintext from here down.
-        if !self.tls.is_empty() {
-            tracing::warn!(
-                "AMQP TLS material is configured but the URL is plaintext amqp:// — \
-                 the certificates will NOT be used. Switch the URL to amqps:// (port 5671)."
-            );
-        }
-
-        if cfg!(debug_assertions) {
-            tracing::debug!(
-                "AMQP transport is plaintext (debug build) — broker payloads cross the \
-                 wire readable; use amqps:// in any deployment"
-            );
-            return Ok(());
-        }
-
-        if self.allow_plaintext {
-            tracing::warn!(
-                "AMQP transport is PLAINTEXT and explicitly permitted via \
-                 AXIAM__AMQP__ALLOW_PLAINTEXT. Authorization requests, audit events and \
-                 outbound mail payloads cross the wire readable. HMAC signing gives \
-                 authenticity and replay protection, NOT confidentiality — it is not a \
-                 substitute for TLS."
-            );
-            return Ok(());
-        }
-
-        Err(AxiamError::ServiceUnavailable(
-            "AMQP transport is plaintext (amqp://) in a release build. Broker traffic \
-             carries authorization requests, audit events and mail payloads across \
-             service boundaries, and HMAC signing protects their authenticity but not \
-             their confidentiality. Use amqps:// (port 5671), or set \
-             AXIAM__AMQP__ALLOW_PLAINTEXT=true to accept the exposure deliberately."
-                .to_string(),
-        ))
+        self.tls.validate()
     }
 
     /// Resolve the configured freshness skew to a `chrono::Duration` for the
@@ -355,6 +346,16 @@ mod tests {
         }
     }
 
+    /// The default must be usable as-is only over TLS: a config nobody
+    /// configured is the one most likely to reach a deployment by accident.
+    #[test]
+    fn the_default_url_is_tls() {
+        assert!(AmqpConfig::default().is_tls());
+        AmqpConfig::default()
+            .validate_transport_security()
+            .expect("the default config must satisfy the transport rule it enforces");
+    }
+
     #[test]
     fn scheme_selects_the_transport() {
         assert!(tls().is_tls());
@@ -378,19 +379,30 @@ mod tests {
         );
     }
 
+    /// Everything that is not `amqps://` is refused, and the error names the
+    /// scheme the operator should have used — an error that only says "no" is
+    /// an error someone reads twice.
     #[test]
-    fn an_unrecognised_scheme_is_rejected() {
-        let cfg = AmqpConfig {
-            url: "http://broker:5672".into(),
-            ..AmqpConfig::default()
-        };
-        let err = cfg
-            .validate_transport_security()
-            .expect_err("an unrecognised scheme must fail at startup, not at dial time");
-        assert!(
-            format!("{err}").contains("amqps://"),
-            "the error must name the scheme the operator should use, got: {err}"
-        );
+    fn every_scheme_but_amqps_is_rejected() {
+        for url in [
+            "http://broker:5672",
+            "amqp://broker:5672",
+            // A scheme that merely STARTS with "amqps" is not amqps: the `://`
+            // separator is load-bearing.
+            "amqpsomething://broker:5671",
+            "broker:5671",
+            "",
+        ] {
+            let cfg = AmqpConfig {
+                url: url.into(),
+                ..AmqpConfig::default()
+            };
+            let err = cfg.validate_transport_security().unwrap_err();
+            assert!(
+                format!("{err}").contains("amqps://"),
+                "the error for {url:?} must name the scheme to use, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -429,55 +441,40 @@ mod tests {
         assert!(key_only.validate().is_err(), "…and so must the mirror case");
     }
 
-    /// The whole point of the flag: a release binary must not quietly send
-    /// authorization requests, audit events and mail payloads in the clear.
+    /// The rule the whole section exists for: plaintext is refused in **every**
+    /// build profile, not merely in a release one.
     ///
-    /// This test asserts the behaviour of the build it runs in. `cargo test`
-    /// is a debug build, so the assertion it can make here is the debug half
-    /// (plaintext permitted for `just dev-up`); the release half is asserted
-    /// by the same `cfg!` the code branches on, so the two cannot disagree.
+    /// This test runs in a debug build (`cargo test` always does), which is
+    /// precisely the profile that used to permit plaintext — so it asserts the
+    /// half of the old behaviour that actually changed. There is no `cfg!`
+    /// branch left for the two profiles to disagree about.
     #[test]
-    fn plaintext_posture_follows_the_build_profile() {
-        let result = plaintext().validate_transport_security();
+    fn plaintext_is_refused_in_every_build_profile() {
+        let err = plaintext()
+            .validate_transport_security()
+            .expect_err("plaintext must be refused, debug build included");
+        assert!(
+            format!("{err}").contains("TLS-only"),
+            "the error must say the transport is TLS-only rather than merely \
+             discouraged, got: {err}"
+        );
+    }
 
-        if cfg!(debug_assertions) {
+    /// A tripwire on the config surface: the plaintext escape hatch is gone and
+    /// must not grow back under another name. Re-adding a field here would fail
+    /// this test, which is the point.
+    #[test]
+    fn there_is_no_plaintext_escape_hatch() {
+        let rendered = format!("{:?}", AmqpConfig::default()).to_ascii_lowercase();
+        for forbidden in ["plaintext", "allow_insecure", "insecure"] {
             assert!(
-                result.is_ok(),
-                "a debug build must keep plaintext working for local dev"
-            );
-        } else {
-            let err = result.expect_err("a release build must refuse unflagged plaintext");
-            assert!(
-                format!("{err}").contains("AXIAM__AMQP__ALLOW_PLAINTEXT"),
-                "the error must name the escape hatch, got: {err}"
+                !rendered.contains(forbidden),
+                "AmqpConfig must not grow a {forbidden:?}-shaped field: four of this \
+                 project's own stacks reached for the last one, each with a locally \
+                 sound reason, and between them they left `AMQP is TLS-only` true of \
+                 almost no deployment artifact in the repository"
             );
         }
-    }
-
-    #[test]
-    fn explicitly_allowed_plaintext_is_accepted_in_any_build() {
-        let cfg = AmqpConfig {
-            allow_plaintext: true,
-            ..plaintext()
-        };
-        cfg.validate_transport_security()
-            .expect("an operator who set the flag has made the decision");
-    }
-
-    /// TLS material on a plaintext URL is a misconfiguration worth warning
-    /// about — the certificates are silently unused — but it is not fatal,
-    /// because the URL is what actually decides and it is unambiguous.
-    #[test]
-    fn tls_material_on_a_plaintext_url_still_validates() {
-        let cfg = AmqpConfig {
-            allow_plaintext: true,
-            tls: AmqpTlsConfig {
-                ca_cert_path: Some("/etc/axiam/broker-ca.pem".into()),
-                ..Default::default()
-            },
-            ..plaintext()
-        };
-        assert!(cfg.validate_transport_security().is_ok());
     }
 
     /// A malformed client identity must fail even on a TLS URL — this is the

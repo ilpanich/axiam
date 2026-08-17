@@ -1,0 +1,52 @@
+# AMQPS-only RabbitMQ for CI's test and coverage jobs (A6).
+#
+# Why a compose file rather than `docker run`
+# -------------------------------------------
+#
+# The broker needs TLS material that is minted by a step (`gen-broker-tls.sh`),
+# so it cannot be a `services:` container — those start before any step runs.
+# The obvious alternative, `docker run -v ...`, was tried and is a worse fit: it
+# duplicates the listener configuration in a second form, and its failures are
+# harder to read than compose's (`dependency failed to start` names the service;
+# `container ... is not running` names nothing).
+#
+# So CI uses the same mechanism as every other stack here, with the same
+# `rabbitmq-tls.conf`. One shape to understand, one file to change.
+#
+# Usage, from the repository root:
+#
+#   bash scripts/gen-broker-tls.sh
+#   docker compose -f docker/docker-compose.ci-broker.yml up -d --wait
+#
+# The generated certificate's SAN covers `localhost` and `127.0.0.1`, which is
+# what the test process — running directly on the runner, not in a container —
+# connects to.
+
+name: axiam-ci-broker
+
+services:
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: rabbitmq
+    ports:
+      # 5671 (AMQPS) only. There is no plaintext listener to publish.
+      - "5671:5671"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: axiam
+      RABBITMQ_DEFAULT_PASS: axiam
+    volumes:
+      # Certificates, and the AMQPS listener configuration shared with the dev,
+      # e2e, benchmark and production stacks. The config is a conf.d *fragment*
+      # rather than a replacement for rabbitmq.conf, so the image entrypoint's
+      # own 10-defaultuser.conf — which is how the credentials above reach the
+      # broker — still applies.
+      - ./.secrets/broker-tls:/etc/rabbitmq/tls:ro
+      - ./rabbitmq-tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"

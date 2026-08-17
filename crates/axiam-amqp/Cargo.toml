@@ -19,6 +19,10 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 lapin = { workspace = true }
+# A6: not for building a TLS config — lapin does that — but to install the
+# process-level `CryptoProvider` the `amqps://` handshake resolves. `ring`,
+# matching axiam-server. See `connection::ensure_crypto_provider`.
+rustls = { workspace = true, features = ["ring"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

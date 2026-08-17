@@ -31,7 +31,7 @@
 //! math, it proves the AMQP consumer wiring built in Tasks 1-2 of this plan.
 
 use axiam_amqp::connection::queues;
-use axiam_amqp::{AmqpConfig, AmqpManager, WebhookMessage, WebhookPublisher};
+use axiam_amqp::{AmqpConfig, AmqpManager, AmqpTlsConfig, WebhookMessage, WebhookPublisher};
 use axiam_api_rest::webhook::WebhookDeliveryService;
 use axiam_api_rest::webhook_consumer::{
     WebhookRetryConfig, backoff_ttl_ms, start_webhook_consumer,
@@ -54,6 +54,34 @@ use uuid::Uuid;
 /// Fixed AES-256-GCM key for the encrypted-at-rest webhook secret (mirrors
 /// `webhook_test.rs::TEST_WEBHOOK_ENC_KEY` — test-only, never used in prod).
 const TEST_WEBHOOK_ENC_KEY: [u8; 32] = [0x42u8; 32];
+
+/// Broker URL and trust anchor matching `just dev-up`.
+///
+/// AMQP is TLS-only, so `AmqpConfig::default()` alone will not connect here:
+/// it carries neither the `axiam:axiam` credentials the dev broker is
+/// provisioned with nor the private CA that signed the broker certificate.
+/// `scripts/gen-broker-tls.sh` mints both, and its certificate carries
+/// `DNS:localhost` in the SAN so a test on the host verifies the same broker
+/// the compose network calls `rabbitmq`.
+fn test_amqp_config() -> AmqpConfig {
+    AmqpConfig {
+        url: std::env::var("AXIAM__AMQP__URL")
+            .unwrap_or_else(|_| "amqps://axiam:axiam@localhost:5671".to_string()),
+        tls: AmqpTlsConfig {
+            ca_cert_path: Some(
+                std::env::var("AXIAM__AMQP__TLS__CA_CERT_PATH").unwrap_or_else(|_| {
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../docker/.secrets/broker-tls/ca.pem"
+                    )
+                    .to_string()
+                }),
+            ),
+            ..Default::default()
+        },
+        ..AmqpConfig::default()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Non-ignored, broker-free assertions
@@ -171,8 +199,11 @@ async fn setup_db() -> (surrealdb::Surreal<TestDb>, Uuid, Uuid) {
 ///    (`webhook.delivery_failed`) audit records are written (D-09).
 ///
 /// Requires a live RabbitMQ broker at `AXIAM__AMQP__URL` (default
-/// `amqp://localhost:5672`, matches `just dev-up`). Not run in CI/sandboxed
-/// environments without a broker — `#[ignore]`d by default.
+/// `amqps://axiam:axiam@localhost:5671`, matches `just dev-up`). AMQP is
+/// TLS-only, so the broker is verified against the private CA
+/// `scripts/gen-broker-tls.sh` minted — `just dev-up` calls that script and
+/// mounts the result. Not run in CI/sandboxed environments without a broker —
+/// `#[ignore]`d by default.
 #[actix_rt::test]
 #[ignore = "requires a live RabbitMQ broker — run via `just dev-up` then `cargo test -p axiam-api-rest --test webhook_consumer_test -- --ignored`"]
 async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
@@ -210,7 +241,7 @@ async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
 
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
 
-    let amqp = AmqpManager::connect_with_retry(&AmqpConfig::default())
+    let amqp = AmqpManager::connect_with_retry(&test_amqp_config())
         .await
         .expect("connect to live RabbitMQ (just dev-up)");
     amqp.declare_webhook_topology()

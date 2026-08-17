@@ -29,10 +29,39 @@ pub enum AmqpError {
     /// a typo in a mount path.
     #[error("AMQP configuration is unusable: {0}")]
     Config(String),
+
+    /// A6: a single connection attempt exceeded
+    /// [`AmqpConfig::connect_timeout_ms`] and was abandoned.
+    ///
+    /// There is no underlying `lapin::Error` here, and that is the point:
+    /// lapin has no connect timeout, so an attempt that never resolves
+    /// produces no error at all. Everything downstream of it — the retry
+    /// budget, the supervisor, the operator watching the log — is waiting on a
+    /// future that will not complete. This variant is what makes that state
+    /// observable.
+    ///
+    /// Retryable: unlike [`Self::Config`], a stalled broker may well answer on
+    /// the next attempt.
+    ///
+    /// [`AmqpConfig::connect_timeout_ms`]: crate::AmqpConfig::connect_timeout_ms
+    #[error(
+        "AMQP connection attempt to {url} timed out after {timeout_ms}ms. The broker's port \
+         accepted a socket but the connection never completed — check that an amqps:// listener \
+         is actually bound there (`rabbitmq-diagnostics listeners`) and that its certificate \
+         chains to the configured CA bundle."
+    )]
+    ConnectTimeout { url: String, timeout_ms: u64 },
 }
 
 impl AmqpError {
     /// Extract the underlying `lapin::Error` from connection-related variants.
+    ///
+    /// Only the variants that wrap one. [`Self::Config`] and
+    /// [`Self::ConnectTimeout`] have no lapin error to extract — both are
+    /// raised before or instead of one — and
+    /// [`AmqpManager::connect_with_retry`] diverts them before reaching here.
+    ///
+    /// [`AmqpManager::connect_with_retry`]: crate::AmqpManager::connect_with_retry
     pub(crate) fn into_lapin_error(self) -> lapin::Error {
         match self {
             Self::Connection(e) | Self::Channel(e) | Self::Declaration(e) => e,

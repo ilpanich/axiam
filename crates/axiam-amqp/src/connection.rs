@@ -79,6 +79,55 @@ fn build_tls_config(config: &AmqpConfig) -> Result<OwnedTLSConfig, AmqpError> {
     })
 }
 
+/// Install the process-level rustls [`CryptoProvider`] the `amqps://`
+/// handshake resolves, if nothing has installed one yet (A6 / REQ-15 AC-1).
+///
+/// # Why a library does this at all
+///
+/// rustls 0.23 refuses to pick a default provider when a process links more
+/// than one, and this workspace links two: `ring` (explicitly, for the REST
+/// listener) and `aws-lc-rs` (transitively — `rustls-platform-verifier`,
+/// `hyper-rustls`, `futures-rustls`). Any code that resolves the *default*
+/// provider then panics with "Could not automatically determine the
+/// process-level CryptoProvider from Rustls crate features".
+///
+/// `axiam-server`'s `main()` already installs `ring` for exactly this reason,
+/// and until A6 that was enough, because the only rustls consumers were
+/// server-side listeners inside that binary. The `amqps://` client is not:
+/// lapin reaches rustls through `tcp-stream` → `rustls-connector` →
+/// `ClientConfig::builder()`, which resolves the process default. So every
+/// process that dials AXIAM's broker without being `axiam-server` — every
+/// integration-test binary, and any downstream embedder of this crate — hit
+/// the panic.
+///
+/// # Why the failure was a hang rather than a crash
+///
+/// The panic happens on lapin's `lapin-io-loop` thread, not on the caller's
+/// task. The caller is awaiting a future that thread was going to resolve, and
+/// once it is gone nothing ever does: `Connection::connect_with_config` stays
+/// pending forever, [`AmqpManager::connect_with_retry`]'s budget never fires
+/// because there is no error to retry, and the process produces one panic line
+/// on a thread nobody is reading and then silence. In CI that is a job killed
+/// at its step timeout with no failing assertion to point at; the
+/// `connect_timeout_ms` bound in [`AmqpManager::connect`] exists so that shape
+/// of fault is at least reported, whatever causes it next time.
+///
+/// `ring`, to match `axiam-server` and `tls::build_rustls_server_config`.
+/// Idempotent — `Err` means someone (usually that `main()`) got there first,
+/// which is the intended outcome and not a problem.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            tracing::debug!("rustls default CryptoProvider was already installed");
+        }
+    });
+}
+
 /// The `ConnectionProperties` every AXIAM AMQP connection is dialled with.
 ///
 /// # Why `enable_auto_recover` rather than `default()`
@@ -197,46 +246,50 @@ impl AmqpManager {
     ///
     /// # Transport security (A6)
     ///
-    /// The URL scheme selects the transport, and the posture is enforced
-    /// **before** any socket is opened
-    /// ([`AmqpConfig::validate_transport_security`]): an unrecognised scheme,
-    /// half a client identity, or a plaintext URL in a release build without
-    /// `AXIAM__AMQP__ALLOW_PLAINTEXT` all fail here rather than at connect
+    /// AMQP is TLS-only, and the posture is enforced **before** any socket is
+    /// opened ([`AmqpConfig::validate_transport_security`]): any scheme but
+    /// `amqps://`, or half a client identity, fails here rather than at connect
     /// time with a lapin error nobody can act on.
     ///
-    /// There is **no silent plaintext fallback**. An `amqps://` URL whose CA
-    /// bundle is missing, whose certificate is expired, or whose hostname does
-    /// not match returns an error; it does not retry without TLS. That is the
-    /// entire point — a fallback would make the failure invisible exactly when
-    /// it matters.
+    /// There is exactly one connect path below, and that is deliberate. While
+    /// there were two, the plaintext one was reachable from configuration —
+    /// which is how four of this project's own stacks came to use it. An
+    /// `amqps://` URL whose CA bundle is missing, whose certificate is expired,
+    /// or whose hostname does not match returns an error; there is no longer a
+    /// second path for it to fall back to even in principle.
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
         config
             .validate_transport_security()
             .map_err(|e| AmqpError::Config(e.to_string()))?;
 
-        let tls = config.is_tls();
-        info!(tls, "Connecting to RabbitMQ");
+        info!(tls = true, "Connecting to RabbitMQ");
 
-        let connection = if tls {
-            let tls_config = build_tls_config(config)?;
-            // `connect_with_config` is the only entry point that takes TLS
-            // material, and it also requires an explicit runtime — so resolve
-            // the same default runtime `Connection::connect` would have picked
-            // rather than introducing a second runtime story for the TLS path.
-            let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
+        // Before anything touches rustls — see `ensure_crypto_provider`.
+        ensure_crypto_provider();
+
+        let tls_config = build_tls_config(config)?;
+        // `connect_with_config` is the only entry point that takes TLS
+        // material, and it also requires an explicit runtime — so resolve
+        // the same default runtime `Connection::connect` would have picked
+        // rather than introducing a second runtime story.
+        let runtime = lapin::runtime::default_runtime().map_err(AmqpError::Connection)?;
+        // Bounded, because lapin's is not: see `AmqpConfig::connect_timeout_ms`
+        // for what an unbounded dial costs.
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_millis(config.connect_timeout_ms),
             Connection::connect_with_config(
                 &config.url,
                 connection_properties(),
                 tls_config,
                 runtime,
-            )
-            .await
-            .map_err(AmqpError::Connection)?
-        } else {
-            Connection::connect(&config.url, connection_properties())
-                .await
-                .map_err(AmqpError::Connection)?
-        };
+            ),
+        )
+        .await
+        .map_err(|_| AmqpError::ConnectTimeout {
+            url: config.url.clone(),
+            timeout_ms: config.connect_timeout_ms,
+        })?
+        .map_err(AmqpError::Connection)?;
 
         let channel = connection
             .create_channel()
@@ -267,7 +320,7 @@ impl AmqpManager {
             match Self::connect(config).await {
                 Ok(manager) => return Ok(manager),
                 // A6: a configuration fault is not a transient one. Retrying a
-                // missing CA mount or an unset AXIAM__AMQP__ALLOW_PLAINTEXT
+                // missing CA mount or a plaintext `amqp://` URL
                 // `max_retries` times only delays the same error by
                 // `max_retries × reconnect_delay_ms` and buries the actionable
                 // message under identical warnings.
@@ -277,6 +330,19 @@ impl AmqpManager {
                 }
                 Err(e) => {
                     if attempt == total_attempts {
+                        // A timeout carries no lapin error to wrap — there is
+                        // none, which is exactly what it reports — so it is
+                        // returned as itself rather than flattened into
+                        // `MaxRetriesExhausted`, whose message would then have
+                        // to invent a cause.
+                        if let AmqpError::ConnectTimeout { .. } = e {
+                            tracing::error!(
+                                error = %e,
+                                attempts = total_attempts,
+                                "Failed to connect to RabbitMQ after all retries"
+                            );
+                            return Err(e);
+                        }
                         let lapin_err = e.into_lapin_error();
                         tracing::error!(
                             error = %lapin_err,

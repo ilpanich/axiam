@@ -93,11 +93,17 @@ services:
     image: rabbitmq:4-management-alpine
     container_name: axiam-e2e-rabbitmq
     ports:
-      - "5672:5672"
+      # A6: 5671 (AMQPS) only — there is no plaintext listener to publish.
+      - "5671:5671"
       - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: axiam
       RABBITMQ_DEFAULT_PASS: axiam
+    volumes:
+      # A6: throwaway CA + broker certificate minted per run by the E2E job,
+      # plus the AMQPS-only listener config shared with every other stack.
+      - ./.secrets/broker-tls:/etc/rabbitmq/tls:ro
+      - ./rabbitmq-tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
       interval: 10s
@@ -125,17 +131,14 @@ services:
       AXIAM__DB__URL: "surrealdb:8000"
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
-      AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
-      # A6: this stack runs the RELEASE image, where plaintext amqp:// fails
-      # closed. Accepted deliberately here rather than given TLS: the broker is
-      # ephemeral, reachable only on the compose network, carries synthetic
-      # fixture traffic for one CI run, and is torn down with the job. Issuing
-      # and mounting a certificate per E2E run would slow and destabilise the
-      # job to encrypt data that is invented at setup and discarded at teardown.
-      # Production is the opposite case and gets the opposite treatment —
-      # docker-compose.prod.yml is amqps:// on 5671 with the plaintext listener
-      # off and no such flag, and so are the k8s manifests.
-      AXIAM__AMQP__ALLOW_PLAINTEXT: "true"
+      # A6: TLS to the broker. This stack used to run plaintext on the reasoning
+      # that its broker is ephemeral, on the compose network, carrying synthetic
+      # fixtures for one CI run — a fair argument that stopped being available
+      # when the plaintext escape hatch was removed. The cost turned out to be
+      # small: `scripts/e2e-bootstrap.sh` mints a throwaway CA and broker
+      # certificate in about a second, and the job is otherwise unchanged.
+      AXIAM__AMQP__URL: "amqps://axiam:axiam@rabbitmq:5671"
+      AXIAM__AMQP__TLS__CA_CERT_PATH: "/etc/axiam/broker-tls/ca.pem"
       # Bind on all interfaces so the published port is reachable from the host
       # (the in-code default is 127.0.0.1, which only the in-container Docker
       # healthcheck can reach — the host bootstrap probe to :8090 gets 000).
@@ -184,6 +187,9 @@ services:
       # (OIDC Core §2) — and the stack publishes the server on localhost:8090,
       # which is also what the examples use as AXIAM_URL.
       AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-http://localhost:8090}"
+    volumes:
+      # A6: read-only CA bundle for verifying the broker certificate.
+      - ./.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s

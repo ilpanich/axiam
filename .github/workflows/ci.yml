@@ -41,6 +41,29 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # F1 -- the workspace's crate graph is a design decision, so it gets a gate
+  # rather than a convention. Deliberately its own job: it needs no toolchain
+  # and finishes in about a second, so it reports an architectural regression
+  # long before the compile jobs have finished telling you the code is fine.
+  layering:
+    name: Crate Layering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # The self-test runs FIRST and against fixtures, not the workspace. A
+      # gate whose only evidence is "the repo it guards is currently clean"
+      # cannot distinguish working from broken -- a check-everything script
+      # with an inverted comparison passes every day until the day it matters.
+      - name: Self-test (fixtures)
+        run: python3 scripts/check-crate-layering.py --self-test
+      - name: Dependencies point inward
+        run: python3 scripts/check-crate-layering.py
+      # Printed unconditionally so a failure above lands next to the table it
+      # was checked against, instead of sending the reader to the source.
+      - name: Layer table
+        if: always()
+        run: python3 scripts/check-crate-layering.py --graph
+
   build:
     name: Build
     runs-on: ubuntu-latest

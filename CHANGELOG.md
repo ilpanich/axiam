@@ -43,6 +43,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`AccessTokenSpec`: one description of a token, one signer (F4).** Access-token
+  issuance had grown into twelve public functions in three telescoping chains,
+  each tier existing only to add one parameter to the tier below
+  (`issue_access_token` -> `_bound` adds `cnf` -> `_enriched` adds `ext`). Five
+  carried `#[allow(clippy::too_many_arguments)]`; `issue_id_token` takes ten
+  positional parameters. Adding one claim meant adding one function per chain,
+  so a module whose entire job is "describe a token and sign it" was closed to
+  extension — and the signing tail was copied six times, which meant "AXIAM
+  signs with EdDSA" could have changed in five of them.
+
+  `AccessTokenSpec` describes a token once; `sign_claims` signs it once. The
+  four constructors (`user`, `oauth2_client`, `service_account`, `exchanged`)
+  each stamp the `aud`/`sub_kind` pairing that belongs to that principal, which
+  is what §4.3 / SEC-006 route narrowing reads and what §17.2 residual 1 was a
+  case of getting out of step.
+
+  **All twelve names keep their signatures** as thin delegations, so no caller
+  changes. Token bytes, claim order, `jti` policy and every default are
+  unchanged, which is what the pre-existing token suites assert. Rationale in
+  `claude_dev/token-issuance-spec.md`.
+
 - **UNIQUE-violation detection lives in one place, and CI now says so (F5).**
   Deciding "was this a conflict?" means matching substrings in a SurrealDB
   error message, and that match is a security outcome: at the three replay

@@ -332,6 +332,347 @@ impl ActClaim {
 /// attacker can re-exchange.
 pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
 
+// ---------------------------------------------------------------------------
+// Signing — one tail, one place (F4)
+// ---------------------------------------------------------------------------
+
+/// Sign `claims` with the tenant-independent AXIAM Ed25519 signing key.
+///
+/// Every token this module issues ended with a byte-identical copy of this:
+/// resolve the pre-parsed key or fall back to parsing the PEM, build an EdDSA
+/// header, encode. Five copies, and the algorithm choice repeated in each --
+/// so "AXIAM signs with EdDSA" was a fact you had to confirm five times and
+/// could have changed in four.
+///
+/// Generic over the claim type so the ID token, whose claims are a different
+/// struct entirely, signs through the same path as the access tokens rather
+/// than past it.
+///
+/// # Cost
+///
+/// None. `config.jwt_encoding_key` is the same pre-parsed key cache (CQ-B14)
+/// the inline copies read; the PEM fallback is unchanged and still only taken
+/// when the cache is absent.
+fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, AuthError> {
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, claims, key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// AccessTokenSpec — one description of a token, one way to mint it (F4)
+// ---------------------------------------------------------------------------
+
+/// When an access token expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expiry {
+    /// `iat + config.access_token_lifetime_secs` — the ordinary grants.
+    FromConfig,
+    /// `iat + n`, for a caller that computed its own ceiling (the UMA RPT
+    /// takes the minimum of the subject token's remaining life, the
+    /// deployment ceiling and the protocol default).
+    Lifetime(i64),
+    /// An absolute instant, for RFC 8693 exchange, where the new token must
+    /// not outlive what authorised it.
+    At(i64),
+}
+
+/// Everything an AXIAM access token can carry, described once.
+///
+/// # Why this exists
+///
+/// Token issuance had grown into twelve functions in three telescoping chains:
+///
+/// ```text
+/// issue_access_token -> _bound -> _enriched
+/// issue_client_credentials_token -> _bound -> _enriched
+/// issue_service_account_client_credentials_token -> _enriched
+/// ```
+///
+/// Each tier existed only to add one parameter to the tier below.
+/// `issue_access_token_bound` is a one-line delegation that adds `cnf`;
+/// `_enriched` is a one-line delegation that adds `ext`. Five of the twelve
+/// carried `#[allow(clippy::too_many_arguments)]`, and `issue_id_token` takes
+/// ten positional parameters, five of them `Option`.
+///
+/// The shape had a cost beyond looking untidy: **adding one claim meant adding
+/// one function per chain**, so a module whose entire job is "describe a token
+/// and sign it" was closed to extension. It also meant five copies of the
+/// signing tail and five copies of the `scopes.join(" ")` dance, each free to
+/// drift.
+///
+/// A spec plus [`sign_claims`] replaces that. New claims become new builder
+/// methods with a default, and every grant reaches the signer through one
+/// path.
+///
+/// # Cost
+///
+/// None at runtime. The spec is a stack value, monomorphised away, and it
+/// performs exactly the allocations the inline versions did (`scope`,
+/// `aud`, the id strings). The twelve named functions remain as thin
+/// delegations, so no caller had to change and no token changed shape --
+/// which is what the existing token suites assert.
+///
+/// # Example
+///
+/// ```ignore
+/// let token = AccessTokenSpec::user(user_id, tenant_id, org_id, session.id.to_string())
+///     .scopes(&granted)
+///     .cnf(certificate_binding_for(&client, &proofs)?)
+///     .issue(&config)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct AccessTokenSpec {
+    sub: String,
+    sub_kind: SubjectKind,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scope: Option<String>,
+    jti: String,
+    aud: String,
+    expiry: Expiry,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+    act: Option<ActClaim>,
+    permissions: Option<Vec<RptPermission>>,
+    ext_exchange: Option<ExtExchangeClaim>,
+}
+
+impl AccessTokenSpec {
+    fn new(
+        sub: String,
+        sub_kind: SubjectKind,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        jti: String,
+        aud: &str,
+    ) -> Self {
+        Self {
+            sub,
+            sub_kind,
+            tenant_id,
+            org_id,
+            scope: None,
+            jti,
+            aud: aud.to_owned(),
+            expiry: Expiry::FromConfig,
+            cnf: None,
+            ext: None,
+            act: None,
+            permissions: None,
+            ext_exchange: None,
+        }
+    }
+
+    /// A token for a logged-in user, audience [`AUD_USER`].
+    ///
+    /// `jti` should be the issuing `session.id`, which is what makes D-15's
+    /// stateless revocation check possible without a datastore read.
+    pub fn user(user_id: Uuid, tenant_id: Uuid, org_id: Uuid, jti: impl Into<String>) -> Self {
+        Self::new(
+            user_id.to_string(),
+            SubjectKind::User,
+            tenant_id,
+            org_id,
+            jti.into(),
+            AUD_USER,
+        )
+    }
+
+    /// A token for the OAuth2 client-credentials grant, audience [`AUD_M2M`].
+    ///
+    /// `sub` is the `client_id`, and `jti` is a fresh UUIDv4: there is no
+    /// session row behind a machine token, so the `jti` is a uniqueness marker
+    /// inside an already-signed JWT rather than a record id.
+    pub fn oauth2_client(client_id: &str, tenant_id: Uuid, org_id: Uuid) -> Self {
+        Self::new(
+            client_id.to_owned(),
+            SubjectKind::OAuth2Client,
+            tenant_id,
+            org_id,
+            Uuid::new_v4().to_string(),
+            AUD_M2M,
+        )
+    }
+
+    /// A token for a service account, audience [`AUD_M2M`].
+    ///
+    /// Both service-account paths -- mTLS device auth and client credentials --
+    /// mint this shape, so the audience describes what kind of principal holds
+    /// the token rather than which endpoint issued it (§17.2 residual 1).
+    pub fn service_account(
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        jti: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            user_id.to_string(),
+            SubjectKind::ServiceAccount,
+            tenant_id,
+            org_id,
+            jti.into(),
+            AUD_M2M,
+        )
+    }
+
+    /// A token minted by an RFC 8693 exchange, where the caller decides the
+    /// subject, its kind and the audience.
+    pub fn exchanged(
+        subject: &str,
+        sub_kind: SubjectKind,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        jti: impl Into<String>,
+        aud: &str,
+    ) -> Self {
+        Self::new(
+            subject.to_owned(),
+            sub_kind,
+            tenant_id,
+            org_id,
+            jti.into(),
+            aud,
+        )
+    }
+
+    /// Stamp a space-separated `scope` claim. An empty slice omits the claim.
+    #[must_use]
+    pub fn scopes(mut self, scopes: &[String]) -> Self {
+        self.scope = if scopes.is_empty() {
+            None
+        } else {
+            Some(scopes.join(" "))
+        };
+        self
+    }
+
+    /// Override the audience.
+    #[must_use]
+    pub fn aud(mut self, aud: &str) -> Self {
+        self.aud = aud.to_owned();
+        self
+    }
+
+    /// Sender-constrain the token (RFC 8705 §3 / RFC 9449). `None` leaves it
+    /// unbound and reproduces the token a client that registered no binding
+    /// has always received.
+    #[must_use]
+    pub fn cnf(mut self, cnf: Option<CnfClaim>) -> Self {
+        self.cnf = cnf;
+        self
+    }
+
+    /// Carry the `ext` claims a `token.pre_issue` reactor contributed (X1).
+    ///
+    /// This must be the **rendered** map from `ext_claims_from_patch`, not a
+    /// raw reactor patch: neither this builder nor [`sign_claims`] knows about
+    /// the allow-list, and neither must be the place anyone thinks it is
+    /// enforced.
+    #[must_use]
+    pub fn ext(mut self, ext: Option<std::collections::BTreeMap<String, String>>) -> Self {
+        self.ext = ext;
+        self
+    }
+
+    /// Name the party acting on the subject's behalf (RFC 8693 §4.1,
+    /// delegation only).
+    #[must_use]
+    pub fn act(mut self, act: Option<ActClaim>) -> Self {
+        self.act = act;
+        self
+    }
+
+    /// Record that the subject arrived from an external issuer (X4).
+    #[must_use]
+    pub fn ext_exchange(mut self, ext_exchange: Option<ExtExchangeClaim>) -> Self {
+        self.ext_exchange = ext_exchange;
+        self
+    }
+
+    /// Make this an RPT by attaching the UMA permission set (X2).
+    ///
+    /// Deliberately does not also stamp `scope`: two places to read authority
+    /// from, only one of which was evaluated, is a resource server's worst
+    /// case.
+    #[must_use]
+    pub fn permissions(mut self, permissions: Vec<RptPermission>) -> Self {
+        self.permissions = Some(permissions);
+        self
+    }
+
+    /// Expire `secs` after issuance instead of after
+    /// `config.access_token_lifetime_secs`.
+    #[must_use]
+    pub fn lifetime_secs(mut self, secs: i64) -> Self {
+        self.expiry = Expiry::Lifetime(secs);
+        self
+    }
+
+    /// Expire at an absolute instant. Issuing refuses if it has already
+    /// passed, because a token that is born expired is a caller bug rather
+    /// than a short-lived credential.
+    #[must_use]
+    pub fn expires_at(mut self, unix_ts: i64) -> Self {
+        self.expiry = Expiry::At(unix_ts);
+        self
+    }
+
+    /// Build the claim set as of `now`.
+    ///
+    /// Split out from [`Self::issue`] so the tests can pin the clock and
+    /// compare two tokens byte for byte; `issue` is the only public way in,
+    /// and it always reads the real clock. An auth library that let a caller
+    /// choose `iat` would be handing out a backdating primitive.
+    fn claims_at(&self, config: &AuthConfig, now: i64) -> Result<AccessTokenClaims, AuthError> {
+        let exp = match self.expiry {
+            Expiry::FromConfig => now + config.access_token_lifetime_secs as i64,
+            Expiry::Lifetime(secs) => now + secs,
+            Expiry::At(ts) => {
+                if ts <= now {
+                    return Err(AuthError::Crypto(
+                        "exchanged token would already be expired".into(),
+                    ));
+                }
+                ts
+            }
+        };
+        Ok(AccessTokenClaims {
+            sub: self.sub.clone(),
+            tenant_id: self.tenant_id.to_string(),
+            org_id: self.org_id.to_string(),
+            iss: config.effective_issuer().to_owned(),
+            iat: now,
+            exp,
+            jti: self.jti.clone(),
+            aud: Some(self.aud.clone()),
+            scope: self.scope.clone(),
+            sub_kind: self.sub_kind,
+            act: self.act.clone(),
+            permissions: self.permissions.clone(),
+            ext_exchange: self.ext_exchange.clone(),
+            cnf: self.cnf.clone(),
+            ext: self.ext.clone(),
+        })
+    }
+
+    /// Mint and sign the token.
+    pub fn issue(&self, config: &AuthConfig) -> Result<String, AuthError> {
+        let claims = self.claims_at(config, Utc::now().timestamp())?;
+        sign_claims(&claims, config)
+    }
+}
+
 /// Issue a signed EdDSA (Ed25519) JWT access token.
 ///
 /// `jti` should be the `session.id` of the issuing session (pass
@@ -411,44 +752,12 @@ pub fn issue_access_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-    let scope = if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
-    };
-
-    let claims = AccessTokenClaims {
-        sub: user_id.to_string(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: now + config.access_token_lifetime_secs as i64,
-        jti,
-        aud: Some(aud.to_string()),
-        scope,
-        sub_kind: SubjectKind::User,
-        act: None,
-        permissions: None,
-        ext_exchange: None,
-        cnf,
-        ext,
-    };
-
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
+        .aud(aud)
+        .scopes(scopes)
+        .cnf(cnf)
+        .ext(ext)
+        .issue(config)
 }
 
 /// Read the `iss` claim of a JWT **without verifying anything** (X4).
@@ -528,54 +837,15 @@ pub fn issue_exchanged_token(
     ext_exchange: Option<ExtExchangeClaim>,
     cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-    if expires_at <= now {
-        return Err(AuthError::Crypto(
-            "exchanged token would already be expired".into(),
-        ));
-    }
-    let scope = if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
-    };
-
-    let claims = AccessTokenClaims {
-        sub: subject.to_string(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: expires_at,
-        jti,
-        aud: Some(aud.to_string()),
-        scope,
-        sub_kind,
-        act,
-        // An exchanged token is not an RPT. A UMA permission set is minted by
-        // the uma-ticket grant against a consumed ticket, and re-stamping it
-        // through an exchange would carry a decision past the ticket that
-        // authorised it.
-        permissions: None,
-        ext_exchange,
+    AccessTokenSpec::exchanged(subject, sub_kind, tenant_id, org_id, jti, aud)
+        .scopes(scopes)
+        .expires_at(expires_at)
+        .act(act)
+        .ext_exchange(ext_exchange)
         // SEC-096: the exchanging client's OWN constraint, never the subject
-        // token's — see the function's doc comment.
-        cnf,
-        ext: None,
-    };
-
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // token's -- see the function's doc comment.
+        .cnf(cnf)
+        .issue(config)
 }
 
 /// Issue a JWT access token for OAuth2 Client Credentials grant (M2M).
@@ -630,46 +900,11 @@ pub fn issue_client_credentials_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-    let scope = if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
-    };
-
-    let claims = AccessTokenClaims {
-        sub: client_id.to_owned(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: now + config.access_token_lifetime_secs as i64,
-        // Not `new_id()`: a jti is a uniqueness marker inside an already-signed
-        // JWT, not a record id, so key locality is irrelevant here.
-        jti: Uuid::new_v4().to_string(),
-        aud: Some(AUD_M2M.to_string()),
-        scope,
-        sub_kind: SubjectKind::OAuth2Client,
-        act: None,
-        permissions: None,
-        ext_exchange: None,
-        cnf,
-        ext,
-    };
-
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    AccessTokenSpec::oauth2_client(client_id, tenant_id, org_id)
+        .scopes(scopes)
+        .cnf(cnf)
+        .ext(ext)
+        .issue(config)
 }
 
 /// Issue an RPT — the requesting party token of the UMA 2.0 grant (X2).
@@ -697,51 +932,19 @@ pub fn issue_rpt(
     config: &AuthConfig,
     cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-
-    let claims = AccessTokenClaims {
-        sub: subject_id.to_string(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: now + lifetime_secs,
-        // No session row backs an RPT — it is minted from a ticket, not a
-        // login — so `jti` is a plain uniqueness marker, as it is for M2M.
-        jti: Uuid::new_v4().to_string(),
-        aud: Some(AUD_USER.to_string()),
+    AccessTokenSpec::user(subject_id, tenant_id, org_id, Uuid::new_v4().to_string())
         // The `permissions` claim carries the authority. Stamping an OAuth2
         // `scope` too would give a resource server two disagreeing places to
-        // read authority from, and only one of them was evaluated.
-        scope: None,
-        sub_kind: SubjectKind::User,
-        act: None,
-        permissions: Some(permissions),
-        // An RPT is minted from a ticket, never from an exchange. If the
-        // subject token that bought the ticket was itself cross-domain, that
-        // fact belongs to *that* token and its audit record; re-stamping it
-        // here would attribute this decision to a provenance it does not have.
-        ext_exchange: None,
+        // read authority from, and only one of them was evaluated -- so this
+        // spec deliberately never calls `.scopes()`.
+        .permissions(permissions)
+        .lifetime_secs(lifetime_secs)
         // SEC-096: the RPT carries the constraint the *redeeming client*
         // proved at the token endpoint, on the same terms as every other
         // grant. `None` for a client that registered no binding, which
         // reproduces the pre-SEC-096 bytes.
-        cnf,
-        ext: None,
-    };
-
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        .cnf(cnf)
+        .issue(config)
 }
 
 /// Issue a JWT access token for a service account authenticated via mTLS
@@ -779,40 +982,10 @@ pub fn issue_service_account_token(
     jti: String,
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-
-    let claims = AccessTokenClaims {
-        sub: user_id.to_string(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: now + config.access_token_lifetime_secs as i64,
-        jti,
-        // §17.2 residual 1: was AUD_USER. See the breaking-change note above.
-        aud: Some(AUD_M2M.to_string()),
-        scope: None,
-        sub_kind: SubjectKind::ServiceAccount,
-        act: None,
-        permissions: None,
-        ext_exchange: None,
-        cnf: None,
-        ext: None,
-    };
-
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    // §17.2 residual 1: this used to stamp AUD_USER. See the breaking-change
+    // note above; `AccessTokenSpec::service_account` stamps AUD_M2M, which is
+    // what makes both service-account paths agree.
+    AccessTokenSpec::service_account(user_id, tenant_id, org_id, jti).issue(config)
 }
 
 /// Mint a service-account access token for the **OAuth2 client-credentials**
@@ -873,43 +1046,15 @@ pub fn issue_service_account_client_credentials_token_enriched(
     config: &AuthConfig,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
-    let now = Utc::now().timestamp();
-    let scope = if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
-    };
-
-    let claims = AccessTokenClaims {
-        sub: service_account_id.to_string(),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        iss: config.effective_issuer().to_owned(),
-        iat: now,
-        exp: now + config.access_token_lifetime_secs as i64,
-        jti: Uuid::new_v4().to_string(),
-        aud: Some(AUD_M2M.to_string()),
-        scope,
-        sub_kind: SubjectKind::ServiceAccount,
-        act: None,
-        permissions: None,
-        ext_exchange: None,
-        cnf: None,
-        ext,
-    };
-
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("failed to encode token: {e}")))
+    AccessTokenSpec::service_account(
+        service_account_id,
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+    )
+    .scopes(scopes)
+    .ext(ext)
+    .issue(config)
 }
 
 /// OIDC ID Token claims per OpenID Connect Core 1.0 section 2.
@@ -992,19 +1137,7 @@ pub fn issue_id_token(
         },
     };
 
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    sign_claims(&claims, config)
 }
 
 /// Decode and verify an EdDSA JWT access token.
@@ -2213,5 +2346,256 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             json.get("cnf").is_none(),
             "an unbound token must not carry a cnf key at all, got {json}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AccessTokenSpec (F4) — the named functions and the spec are one path
+    // -----------------------------------------------------------------------
+
+    /// Decode without verifying signature/expiry: these tests are about the
+    /// claim set, and a validation failure would mask a claim difference.
+    fn decode_claims(token: &str, config: &AuthConfig) -> AccessTokenClaims {
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.validate_aud = false;
+        validation.required_spec_claims.clear();
+        let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes())
+            .expect("test public key parses");
+        jsonwebtoken::decode::<AccessTokenClaims>(token, &key, &validation)
+            .expect("token decodes")
+            .claims
+    }
+
+    /// Assert two tokens carry the same claims, ignoring only the two fields
+    /// that move with the wall clock. `exp - iat` IS compared, because the
+    /// lifetime is a property of the spec rather than of when it ran.
+    fn assert_same_claims(left: &AccessTokenClaims, right: &AccessTokenClaims) {
+        assert_eq!(left.sub, right.sub, "sub");
+        assert_eq!(left.tenant_id, right.tenant_id, "tenant_id");
+        assert_eq!(left.org_id, right.org_id, "org_id");
+        assert_eq!(left.iss, right.iss, "iss");
+        assert_eq!(left.aud, right.aud, "aud");
+        assert_eq!(left.scope, right.scope, "scope");
+        assert_eq!(left.sub_kind, right.sub_kind, "sub_kind");
+        assert_eq!(left.act, right.act, "act");
+        assert_eq!(left.permissions, right.permissions, "permissions");
+        assert_eq!(left.ext_exchange, right.ext_exchange, "ext_exchange");
+        assert_eq!(left.cnf, right.cnf, "cnf");
+        assert_eq!(left.ext, right.ext, "ext");
+        assert_eq!(left.exp - left.iat, right.exp - right.iat, "lifetime");
+    }
+
+    #[test]
+    fn spec_and_issue_access_token_agree() {
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let jti = Uuid::new_v4().to_string();
+        let scopes = vec!["openid".to_string(), "profile".to_string()];
+
+        let named = issue_access_token(user, tenant, org, &scopes, &config, jti.clone(), AUD_USER)
+            .expect("named issuer");
+        let spec = AccessTokenSpec::user(user, tenant, org, jti)
+            .scopes(&scopes)
+            .issue(&config)
+            .expect("spec issuer");
+
+        assert_same_claims(
+            &decode_claims(&named, &config),
+            &decode_claims(&spec, &config),
+        );
+    }
+
+    #[test]
+    fn spec_and_issue_client_credentials_token_agree_except_for_the_random_jti() {
+        let config = test_config();
+        let (tenant, org) = (Uuid::new_v4(), Uuid::new_v4());
+        let scopes = vec!["api:read".to_string()];
+
+        let named = issue_client_credentials_token("svc-1", tenant, org, &scopes, &config)
+            .expect("named issuer");
+        let spec = AccessTokenSpec::oauth2_client("svc-1", tenant, org)
+            .scopes(&scopes)
+            .issue(&config)
+            .expect("spec issuer");
+
+        let (a, b) = (
+            decode_claims(&named, &config),
+            decode_claims(&spec, &config),
+        );
+        assert_same_claims(&a, &b);
+        // Both mint a fresh jti — a machine token has no session row behind it.
+        assert_ne!(a.jti, b.jti, "each call must mint its own jti");
+    }
+
+    #[test]
+    fn an_empty_scope_slice_omits_the_claim_entirely() {
+        // Not cosmetic: `"scope": ""` and an absent `scope` are different
+        // answers to "what was granted", and a resource server that splits on
+        // whitespace sees one empty scope rather than none.
+        let config = test_config();
+        let token = AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+            .scopes(&[])
+            .issue(&config)
+            .expect("issues");
+        assert_eq!(decode_claims(&token, &config).scope, None);
+    }
+
+    #[test]
+    fn the_default_lifetime_comes_from_the_config() {
+        let config = test_config();
+        let claims = decode_claims(
+            &AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+                .issue(&config)
+                .expect("issues"),
+            &config,
+        );
+        assert_eq!(
+            claims.exp - claims.iat,
+            config.access_token_lifetime_secs as i64
+        );
+    }
+
+    #[test]
+    fn lifetime_secs_overrides_the_config_default() {
+        // What the UMA RPT needs: an RPT must never outlive the token that
+        // authorised it, so its ceiling is computed by the caller.
+        let config = test_config();
+        let claims = decode_claims(
+            &AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+                .lifetime_secs(60)
+                .issue(&config)
+                .expect("issues"),
+            &config,
+        );
+        assert_eq!(claims.exp - claims.iat, 60);
+    }
+
+    #[test]
+    fn expires_at_in_the_past_is_refused_rather_than_issued() {
+        // A token that is born expired is a caller bug, not a short-lived
+        // credential. The message is the one issue_exchanged_token has always
+        // returned, because callers match on it.
+        let config = test_config();
+        let err = AccessTokenSpec::exchanged(
+            "sub",
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "j",
+            AUD_USER,
+        )
+        .expires_at(Utc::now().timestamp() - 1)
+        .issue(&config)
+        .expect_err("an already-expired instant must be refused");
+        assert!(
+            err.to_string().contains("already be expired"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn every_named_issuer_stamps_the_audience_and_subject_kind_it_documents() {
+        // One table, six entry points. The pairing of `aud` with `sub_kind` is
+        // what §4.3 / SEC-006 route narrowing reads, and §17.2 residual 1 was
+        // exactly a case of these two disagreeing.
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let none: Vec<String> = vec![];
+
+        let cases: Vec<(&str, String, &str, SubjectKind)> = vec![
+            (
+                "issue_access_token",
+                issue_access_token(user, tenant, org, &none, &config, "j".into(), AUD_USER)
+                    .unwrap(),
+                AUD_USER,
+                SubjectKind::User,
+            ),
+            (
+                "issue_client_credentials_token",
+                issue_client_credentials_token("c", tenant, org, &none, &config).unwrap(),
+                AUD_M2M,
+                SubjectKind::OAuth2Client,
+            ),
+            (
+                "issue_service_account_token",
+                issue_service_account_token(user, tenant, org, "j".into(), &config).unwrap(),
+                AUD_M2M,
+                SubjectKind::ServiceAccount,
+            ),
+            (
+                "issue_service_account_client_credentials_token",
+                issue_service_account_client_credentials_token(user, tenant, org, &none, &config)
+                    .unwrap(),
+                AUD_M2M,
+                SubjectKind::ServiceAccount,
+            ),
+            (
+                "issue_rpt",
+                issue_rpt(user, tenant, org, vec![], 300, &config, None).unwrap(),
+                AUD_USER,
+                SubjectKind::User,
+            ),
+        ];
+
+        for (name, token, expected_aud, expected_kind) in cases {
+            let claims = decode_claims(&token, &config);
+            assert_eq!(claims.aud.as_deref(), Some(expected_aud), "{name}: aud");
+            assert_eq!(claims.sub_kind, expected_kind, "{name}: sub_kind");
+            assert_eq!(claims.iss, config.effective_issuer(), "{name}: iss");
+        }
+    }
+
+    #[test]
+    fn an_rpt_carries_permissions_and_never_a_scope() {
+        // Two places to read authority from, only one of which was evaluated,
+        // is a resource server's worst case — so `permissions()` deliberately
+        // does not also stamp `scope`.
+        let config = test_config();
+        let claims = decode_claims(
+            &issue_rpt(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                vec![],
+                300,
+                &config,
+                None,
+            )
+            .expect("issues"),
+            &config,
+        );
+        assert!(claims.permissions.is_some(), "an RPT carries permissions");
+        assert_eq!(claims.scope, None, "an RPT must never carry a scope claim");
+    }
+
+    #[test]
+    fn ext_and_cnf_default_to_absent() {
+        // The pre-X1 / pre-SEC-096 bytes: a spec that adds neither must
+        // reproduce the token every existing caller already receives.
+        let config = test_config();
+        let claims = decode_claims(
+            &AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+                .issue(&config)
+                .expect("issues"),
+            &config,
+        );
+        assert!(claims.cnf.is_none());
+        assert!(claims.ext.is_none());
+        assert!(claims.act.is_none());
+        assert!(claims.ext_exchange.is_none());
+        assert!(claims.permissions.is_none());
+    }
+
+    #[test]
+    fn sign_claims_is_the_only_signer_and_it_uses_eddsa() {
+        // The header is what a verifier reads first; six inline copies of this
+        // choice meant "AXIAM signs with EdDSA" could have changed in five of
+        // them.
+        let config = test_config();
+        let token = AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+            .issue(&config)
+            .expect("issues");
+        let header = jsonwebtoken::decode_header(&token).expect("header decodes");
+        assert_eq!(header.alg, Algorithm::EdDSA);
     }
 }

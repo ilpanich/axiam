@@ -244,9 +244,9 @@ macro_rules! test_app {
                     // QUAL-07: OidcFederationService is a hoisted AppState
                     // singleton; build it with the same test-only encryption
                     // key, http_client, and jwks_cache used elsewhere here.
-                    state.oidc_federation_service = Some(OidcFederationService::new(
-                        state.federation_config_repo.clone(),
-                        state.federation_link_repo.clone(),
+                    state.federation.oidc_federation_service = Some(OidcFederationService::new(
+                        state.federation.federation_config_repo.clone(),
+                        state.federation.federation_link_repo.clone(),
                         state.user_repo.clone(),
                         state.http_client.clone(),
                         std::sync::Arc::clone(&state.jwks_cache),

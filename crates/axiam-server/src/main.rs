@@ -36,6 +36,7 @@ use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublishe
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::state::AppState;
+use axiam_api_rest::state::bundles;
 use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
@@ -1818,77 +1819,91 @@ async fn main() -> std::io::Result<()> {
         scim_token_repo: scim_token_repo.clone(),
         service_account_repo: service_account_repo.clone(),
         auth_service: auth_service.clone(),
-        webauthn_service: webauthn_service.clone(),
         mfa_method_service: mfa_method_service.clone(),
-        webauthn_credential_repo: webauthn_cred_repo.clone(),
-        webauthn_attestation_policy_repo: webauthn_attestation_policy_repo.clone(),
-        mds_repo: mds_repo.clone(),
-        attestation_metadata_source: attestation_metadata_source.clone(),
-        attestation_ca_cache: Arc::clone(&attestation_ca_cache),
-        pki_config: pki_config.clone(),
-        mail_outbound_publisher: Arc::new(mail_outbound_publisher.clone())
-            as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
         session_repo: session_repo.clone(),
         session_validator: session_validator.clone(),
         refresh_token_repo: handler_refresh_token_repo.clone(),
         password_history_repo: password_history_repo.clone(),
-        consent_repo: consent_repo.clone(),
-        account_deletion_repo: account_deletion_repo.clone(),
-        export_job_repo: export_job_repo.clone(),
-        erasure_proof_repo: erasure_proof_repo.clone(),
-        email_encryption_key: config.email_encryption_key,
-        ca_service: ca_service.clone(),
-        cert_service: cert_service.clone(),
-        cert_repo: cert_repo.clone(),
-        device_auth_service: device_auth_service.clone(),
-        pgp_service: pgp_service.clone(),
-        reactor_repo: reactor_repo.clone(),
-        // X1 — the REST-side hooks (`user.pre_create`, `user.pre_update`,
-        // `grant.pre_assign`) call the same gate the two services hold.
-        reactor_gate: Arc::clone(&reactor_gate),
-        reactor_routing_invalidator: Some(Arc::clone(&reactor_routing_invalidator)),
-        webhook_repo: webhook_repo.clone(),
-        webhook_delivery: webhook_delivery.clone(),
-        // CQ-B22: hand the delivery publisher to AppState so handlers can
-        // dispatch domain events via `state.emit_webhook(...)`.
-        webhook_publisher: Some(std::sync::Arc::new(webhook_publisher.clone())),
-        notification_rule_repo: notification_rule_repo.clone(),
         oauth2_client_repo: oauth2_client_repo.clone(),
-        authorize_service: authorize_service.clone(),
-        token_service: token_service.clone(),
-        device_authorization_service: device_authorization_service.clone(),
-        token_exchange_service: token_exchange_service.clone(),
-        par_service: par_service.clone(),
-        // X2 — UMA 2.0. The repository rather than an assembled service,
-        // because the service also needs the `AuthzChecker`, which is
-        // registered as its own `web::Data`; handlers compose the two with
-        // `AppState::uma_service`.
-        permission_ticket_repo: permission_ticket_repo.clone(),
-        rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
-        session_client_repo: session_client_repo.clone(),
-        device_grant_repo: device_grant_repo.clone(),
         // The device endpoints size their own governors from this (see
         // `server.rs`), so the handlers need the same numbers the middleware
         // was built from — not a second default that could disagree.
         rate_limit_cfg: config.rate_limit.clone(),
         settings_repo: settings_repo.clone(),
-        federation_config_repo: federation_config_repo.clone(),
-        federation_link_repo: federation_link_repo.clone(),
-        assertion_replay_repo: assertion_replay_repo.clone(),
-        proof_replay_repo: proof_replay_repo.clone(),
-        federation_login_state_repo: federation_login_state_repo.clone(),
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),
-        oauth2_jwks_cache: oauth2_jwks_cache.clone(),
-        oauth2_jwks_cache_config: config.oauth2.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
-        email_config_repo: email_config_repo.clone(),
         shared_rate_limit: shared_rate_limit_counter.clone(),
-        password_reset_service: password_reset_service.clone(),
-        email_verification_service: email_verification_service.clone(),
-        oidc_federation_service: oidc_federation_service.clone(),
-        #[cfg(feature = "saml")]
-        saml_federation_service: saml_federation_service.clone(),
+        pki: bundles::PkiState {
+            ca_service: ca_service.clone(),
+            cert_service: cert_service.clone(),
+            cert_repo: cert_repo.clone(),
+            pgp_service: pgp_service.clone(),
+            device_auth_service: device_auth_service.clone(),
+        },
+        webauthn: bundles::WebauthnState {
+            webauthn_service: webauthn_service.clone(),
+            webauthn_credential_repo: webauthn_cred_repo.clone(),
+            webauthn_attestation_policy_repo: webauthn_attestation_policy_repo.clone(),
+            mds_repo: mds_repo.clone(),
+            attestation_metadata_source: attestation_metadata_source.clone(),
+            attestation_ca_cache: Arc::clone(&attestation_ca_cache),
+            pki_config: pki_config.clone(),
+        },
+        gdpr: bundles::GdprState {
+            consent_repo: consent_repo.clone(),
+            account_deletion_repo: account_deletion_repo.clone(),
+            export_job_repo: export_job_repo.clone(),
+            erasure_proof_repo: erasure_proof_repo.clone(),
+        },
+        mail: bundles::MailState {
+            mail_outbound_publisher: Arc::new(mail_outbound_publisher.clone())
+                as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
+            email_config_repo: email_config_repo.clone(),
+            email_encryption_key: config.email_encryption_key,
+            email_verification_service: email_verification_service.clone(),
+            password_reset_service: password_reset_service.clone(),
+        },
+        events: bundles::EventsState {
+            reactor_repo: reactor_repo.clone(),
+            // X1 — the REST-side hooks (`user.pre_create`, `user.pre_update`,
+            // `grant.pre_assign`) call the same gate the two services hold.
+            reactor_gate: Arc::clone(&reactor_gate),
+            reactor_routing_invalidator: Some(Arc::clone(&reactor_routing_invalidator)),
+            webhook_repo: webhook_repo.clone(),
+            webhook_delivery: webhook_delivery.clone(),
+            // CQ-B22: hand the delivery publisher to AppState so handlers can
+            // dispatch domain events via `state.emit_webhook(...)`.
+            webhook_publisher: Some(std::sync::Arc::new(webhook_publisher.clone())),
+            notification_rule_repo: notification_rule_repo.clone(),
+        },
+        oauth2: bundles::OAuth2State {
+            authorize_service: authorize_service.clone(),
+            token_service: token_service.clone(),
+            device_authorization_service: device_authorization_service.clone(),
+            token_exchange_service: token_exchange_service.clone(),
+            par_service: par_service.clone(),
+            // X2 — UMA 2.0. The repository rather than an assembled service,
+            // because the service also needs the `AuthzChecker`, which is
+            // registered as its own `web::Data`; handlers compose the two with
+            // `AppState::uma_service`.
+            permission_ticket_repo: permission_ticket_repo.clone(),
+            rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
+            session_client_repo: session_client_repo.clone(),
+            device_grant_repo: device_grant_repo.clone(),
+            proof_replay_repo: proof_replay_repo.clone(),
+            oauth2_jwks_cache: oauth2_jwks_cache.clone(),
+            oauth2_jwks_cache_config: config.oauth2.clone(),
+        },
+        federation: bundles::FederationState {
+            federation_config_repo: federation_config_repo.clone(),
+            federation_link_repo: federation_link_repo.clone(),
+            federation_login_state_repo: federation_login_state_repo.clone(),
+            assertion_replay_repo: assertion_replay_repo.clone(),
+            oidc_federation_service: oidc_federation_service.clone(),
+            #[cfg(feature = "saml")]
+            saml_federation_service: saml_federation_service.clone(),
+        },
     };
 
     // X4 — accept subject tokens from trusted external IdPs.

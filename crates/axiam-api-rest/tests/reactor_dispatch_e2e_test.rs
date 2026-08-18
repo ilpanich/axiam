@@ -271,9 +271,13 @@ fn state_with_gate(env: &Env, reactor: Arc<ScriptedReactor>, ttl: Duration) -> A
 
     let mut state = AppState::for_test(env.db.clone(), env.auth.clone());
     state.auth_service = state.auth_service.clone().with_reactor_gate(gate.clone());
-    state.token_service = state.token_service.clone().with_reactor_gate(gate.clone());
-    state.reactor_gate = gate;
-    state.reactor_routing_invalidator = Some(Arc::new(move |tenant_id| {
+    state.oauth2.token_service = state
+        .oauth2
+        .token_service
+        .clone()
+        .with_reactor_gate(gate.clone());
+    state.events.reactor_gate = gate;
+    state.events.reactor_routing_invalidator = Some(Arc::new(move |tenant_id| {
         routing.invalidate_tenant(tenant_id)
     }));
     state

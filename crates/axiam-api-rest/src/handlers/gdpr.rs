@@ -289,6 +289,7 @@ pub async fn request_account_export<C: Connection + Clone>(
     // CQ-B39: Deduplicate concurrent export requests — reject if a queued
     // export already exists for this user to avoid duplicate processing.
     if state
+        .gdpr
         .export_job_repo
         .has_pending_for_user(auth_user.tenant_id, target_id)
         .await?
@@ -301,6 +302,7 @@ pub async fn request_account_export<C: Connection + Clone>(
 
     // Create a queued export job.
     state
+        .gdpr
         .export_job_repo
         .create(CreateExportJob {
             tenant_id: auth_user.tenant_id,
@@ -351,6 +353,7 @@ pub async fn download_account_export<C: Connection + Clone>(
     let token_hash = sha256_hex(&token);
 
     let job = state
+        .gdpr
         .export_job_repo
         .find_by_download_token_hash(auth_user.tenant_id, &token_hash)
         .await?
@@ -395,6 +398,7 @@ pub async fn download_account_export<C: Connection + Clone>(
         }
     };
     let key = state
+        .mail
         .email_encryption_key
         .as_ref()
         .ok_or_else(|| AxiamError::Internal("export encryption key not configured".into()))?;
@@ -406,6 +410,7 @@ pub async fn download_account_export<C: Connection + Clone>(
     // If 0 rows were updated the token was already consumed (TOCTTOU-safe,
     // D-13 / CQ-B38 / REQ-14 AC-5).
     let consumed = state
+        .gdpr
         .export_job_repo
         .consume_ready_and_delete(job.id)
         .await?;
@@ -481,6 +486,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
     // strand the user in deletion_pending=true with no account_deletion row
     // to hold a cancellable token (CQ-B39 residual / uncancellable purge).
     state
+        .gdpr
         .account_deletion_repo
         .create_with_pending_flag(
             auth_user.tenant_id,
@@ -526,7 +532,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
         attempt_count: 0,
         enqueued_at: Utc::now(),
     };
-    if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
+    if let Err(e) = state.mail.mail_outbound_publisher.publish(msg).await {
         tracing::warn!(error = %e, "failed to enqueue delete-cancel email; continuing");
     }
 
@@ -572,6 +578,7 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
 
     // Global lookup by token hash (no auth context — public endpoint, D-09).
     let deletion = state
+        .gdpr
         .account_deletion_repo
         .find_by_token_hash_global(&token_hash)
         .await?
@@ -600,6 +607,7 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
 
     // Abort deletion: mark cancelled (single-use) + re-enable account.
     state
+        .gdpr
         .account_deletion_repo
         .mark_cancelled(deletion.tenant_id, deletion.id)
         .await?;

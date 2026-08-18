@@ -73,6 +73,7 @@ pub async fn generate<C: Connection + Clone>(
         .map(|v| v as u32);
 
     let result = state
+        .pki
         .cert_service
         .generate(user.org_id, input, max_validity)
         .await?;
@@ -101,6 +102,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .pki
         .cert_service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -128,7 +130,7 @@ pub async fn get<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let result = state.cert_service.get(user.tenant_id, id).await?;
+    let result = state.pki.cert_service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -153,7 +155,7 @@ pub async fn revoke<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    state.cert_service.revoke(user.tenant_id, id).await?;
+    state.pki.cert_service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
@@ -184,6 +186,7 @@ pub async fn bind<C: Connection + Clone>(
 
     // Verify the certificate belongs to the same tenant.
     let cert = state
+        .pki
         .cert_repo
         .get_by_id(user.tenant_id, input.certificate_id)
         .await?;
@@ -196,6 +199,7 @@ pub async fn bind<C: Connection + Clone>(
         .await?;
 
     state
+        .pki
         .cert_repo
         .bind_to_service_account(user.tenant_id, cert.id, sa_id)
         .await?;

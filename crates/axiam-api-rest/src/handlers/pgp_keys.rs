@@ -57,7 +57,7 @@ pub async fn generate<C: Connection + Clone>(
         algorithm: req.algorithm,
         email: req.email,
     };
-    let result = state.pgp_service.generate(input).await?;
+    let result = state.pki.pgp_service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
 }
 
@@ -83,6 +83,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .pki
         .pgp_service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -110,7 +111,7 @@ pub async fn get<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let result = state.pgp_service.get(user.tenant_id, id).await?;
+    let result = state.pki.pgp_service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -135,7 +136,7 @@ pub async fn revoke<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    state.pgp_service.revoke(user.tenant_id, id).await?;
+    state.pki.pgp_service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
@@ -196,6 +197,7 @@ pub async fn sign_audit_batch<C: Connection + Clone>(
     }
 
     let result = state
+        .pki
         .pgp_service
         .sign_audit_batch(user.tenant_id, entries)
         .await?;
@@ -235,6 +237,7 @@ pub async fn encrypt<C: Connection + Clone>(
     })?;
 
     let result = state
+        .pki
         .pgp_service
         .encrypt_for_export(user.tenant_id, key_id, &plaintext)
         .await?;

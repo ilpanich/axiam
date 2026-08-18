@@ -134,18 +134,18 @@ macro_rules! test_app {
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new({
                     let mut state = AppState::for_test($db.clone(), $auth.clone());
-                    state.device_auth_service =
+                    state.pki.device_auth_service =
                         DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
-                    state.ca_service =
+                    state.pki.ca_service =
                         CaService::new(ca_repo.clone(), pki_config.clone(), sem.clone());
-                    state.cert_service = CertService::new(
+                    state.pki.cert_service = CertService::new(
                         ca_repo,
                         cert_repo.clone(),
                         pki_config.clone(),
                         sem.clone(),
                     );
-                    state.cert_repo = cert_repo;
-                    state.pgp_service = PgpService::new(pgp_repo, pki_config, sem);
+                    state.pki.cert_repo = cert_repo;
+                    state.pki.pgp_service = PgpService::new(pgp_repo, pki_config, sem);
                     state
                 }))
                 .app_data(web::Data::new(

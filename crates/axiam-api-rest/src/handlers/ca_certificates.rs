@@ -69,7 +69,7 @@ pub async fn generate<C: Connection + Clone>(
         key_algorithm: req.key_algorithm,
         validity_days: req.validity_days,
     };
-    let result = state.ca_service.generate(input).await?;
+    let result = state.pki.ca_service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
 }
 
@@ -112,6 +112,7 @@ pub async fn list<C: Connection + Clone>(
     }
 
     let result = state
+        .pki
         .ca_service
         .list(org_id, pagination.into_inner())
         .await?;
@@ -154,7 +155,7 @@ pub async fn get<C: Connection + Clone>(
         ));
     }
 
-    let result = state.ca_service.get(org_id, id).await?;
+    let result = state.pki.ca_service.get(org_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -194,6 +195,6 @@ pub async fn revoke<C: Connection + Clone>(
         ));
     }
 
-    state.ca_service.revoke(org_id, id).await?;
+    state.pki.ca_service.revoke(org_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }

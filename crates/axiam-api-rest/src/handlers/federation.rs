@@ -378,6 +378,7 @@ pub async fn create<C: Connection + Clone>(
 
     // Store with empty legacy plaintext (field required by schema; nulled by set_encrypted_secret).
     let config = state
+        .federation
         .federation_config_repo
         .create(CreateFederationConfig {
             tenant_id: user.tenant_id,
@@ -395,6 +396,7 @@ pub async fn create<C: Connection + Clone>(
 
     // Write the encrypted secret columns (overwrites the empty plaintext row).
     state
+        .federation
         .federation_config_repo
         .set_encrypted_secret(
             user.tenant_id,
@@ -407,6 +409,7 @@ pub async fn create<C: Connection + Clone>(
 
     // Reload to return the canonical state (with ciphertext set, plaintext empty).
     let config = state
+        .federation
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
@@ -436,6 +439,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .federation
         .federation_config_repo
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -476,6 +480,7 @@ pub async fn get<C: Connection + Clone>(
         .await?;
     let id = path.into_inner();
     let config = state
+        .federation
         .federation_config_repo
         .get_by_id(user.tenant_id, id)
         .await?;
@@ -544,6 +549,7 @@ pub async fn update<C: Connection + Clone>(
         && t.enabled
     {
         let existing = state
+            .federation
             .federation_config_repo
             .get_by_id(user.tenant_id, id)
             .await?;
@@ -561,6 +567,7 @@ pub async fn update<C: Connection + Clone>(
     // Update non-secret fields via the standard update path (client_secret = None means
     // "no change to secret columns").
     let config = state
+        .federation
         .federation_config_repo
         .update(
             user.tenant_id,
@@ -593,6 +600,7 @@ pub async fn update<C: Connection + Clone>(
                 )))
             })?;
         state
+            .federation
             .federation_config_repo
             .set_encrypted_secret(
                 user.tenant_id,
@@ -606,6 +614,7 @@ pub async fn update<C: Connection + Clone>(
 
     // Reload to return canonical state.
     let config = state
+        .federation
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
@@ -635,6 +644,7 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     let id = path.into_inner();
     state
+        .federation
         .federation_config_repo
         .delete(user.tenant_id, id)
         .await?;
@@ -687,11 +697,15 @@ pub async fn oidc_authorize<C: Connection + Clone>(
     // QUAL-07: OidcFederationService is now a hoisted AppState singleton
     // (Option — None when the federation encryption key is unconfigured,
     // resolved once at startup instead of per-request).
-    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
-        AxiamApiError(AxiamError::Validation {
-            message: "federation encryption key not configured".into(),
-        })
-    })?;
+    let service = state
+        .federation
+        .oidc_federation_service
+        .as_ref()
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
 
     // SECHRD-07/D-04: generate a server-side nonce and persist it in
     // FederationLoginState keyed by `req.state`. `req.nonce` (client-supplied)
@@ -712,6 +726,7 @@ pub async fn oidc_authorize<C: Connection + Clone>(
         .map_err(axiam_core::error::AxiamError::from)?;
 
     state
+        .federation
         .federation_login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: req.state,
@@ -762,17 +777,22 @@ pub async fn oidc_callback<C: Connection + Clone>(
     }
 
     // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
-    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
-        AxiamApiError(AxiamError::Validation {
-            message: "federation encryption key not configured".into(),
-        })
-    })?;
+    let service = state
+        .federation
+        .oidc_federation_service
+        .as_ref()
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
 
     // SECHRD-07/D-04: consume the server-side login state and derive
     // expected_nonce from it — req.nonce (client/attacker-supplied) is
     // IGNORED entirely for verification. Mirrors `oidc_callback_public`
     // (:1254-1267).
     let login_state = state
+        .federation
         .federation_login_state_repo
         .consume_by_state(&req.state)
         .await?
@@ -828,6 +848,7 @@ pub async fn list_user_links<C: Connection + Clone>(
         .await?;
     let target_user_id = path.into_inner();
     let links = state
+        .federation
         .federation_link_repo
         .get_by_user_id(user.tenant_id, target_user_id)
         .await?;
@@ -861,6 +882,7 @@ pub async fn delete_link<C: Connection + Clone>(
         .await?;
     let id = path.into_inner();
     state
+        .federation
         .federation_link_repo
         .delete(user.tenant_id, id)
         .await?;
@@ -967,6 +989,7 @@ pub async fn saml_authn_request<C: Connection + Clone>(
 
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     let result = state
+        .federation
         .saml_federation_service
         .build_authn_request(user.tenant_id, req.config_id, &req.acs_url, req.relay_state)
         .await
@@ -1013,6 +1036,7 @@ pub async fn saml_acs<C: Connection + Clone>(
 
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     let result = state
+        .federation
         .saml_federation_service
         .handle_saml_response(
             user.tenant_id,
@@ -1073,6 +1097,7 @@ pub async fn saml_metadata<C: Connection + Clone>(
 
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     let xml = state
+        .federation
         .saml_federation_service
         .generate_sp_metadata(user.tenant_id, query.config_id, &query.acs_url)
         .await
@@ -1355,11 +1380,15 @@ pub async fn oidc_start_public<C: Connection + Clone>(
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
 
     // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
-    let service = app_state.oidc_federation_service.as_ref().ok_or_else(|| {
-        AxiamApiError(AxiamError::Validation {
-            message: "federation encryption key not configured".into(),
-        })
-    })?;
+    let service = app_state
+        .federation
+        .oidc_federation_service
+        .as_ref()
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
 
     let auth_url = service
         .build_authorization_url(
@@ -1374,6 +1403,7 @@ pub async fn oidc_start_public<C: Connection + Clone>(
 
     // Persist the state row (single-use, 10-min TTL).
     app_state
+        .federation
         .federation_login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: state.clone(),
@@ -1430,6 +1460,7 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
 
     // Atomically consume the state row (single-use; expired → None → 401).
     let login_state = state
+        .federation
         .federation_login_state_repo
         .consume_by_state(&b.state)
         .await?
@@ -1446,11 +1477,15 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
     let spa_redirect_uri = login_state.redirect_uri.clone();
 
     // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
-    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
-        AxiamApiError(AxiamError::Validation {
-            message: "federation encryption key not configured".into(),
-        })
-    })?;
+    let service = state
+        .federation
+        .oidc_federation_service
+        .as_ref()
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
 
     // The redirect_uri we pass to the IdP token endpoint is the AXIAM ACS
     // URL.  Since we built the authorize URL using the SPA redirect_uri as
@@ -1605,6 +1640,7 @@ pub async fn saml_login_public<C: Connection + Clone>(
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     // Pass state as RelayState so the IdP echoes it back in the SAML response.
     let result = app_state
+        .federation
         .saml_federation_service
         .build_authn_request(tenant_id, b.federation_config_id, "", Some(state.clone()))
         .await
@@ -1613,6 +1649,7 @@ pub async fn saml_login_public<C: Connection + Clone>(
     // Persist state row (nonce = "" for SAML — unused but required by schema).
     // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
     app_state
+        .federation
         .federation_login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: state.clone(),
@@ -1671,6 +1708,7 @@ pub async fn saml_acs_public<C: Connection + Clone>(
 
     // Atomically consume the state row (single-use; expired → 401).
     let login_state = state
+        .federation
         .federation_login_state_repo
         .consume_by_state(&b.relay_state)
         .await?
@@ -1687,6 +1725,7 @@ pub async fn saml_acs_public<C: Connection + Clone>(
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     // Run the verified SAML flow (04-03): signature verify + replay check.
     let callback_result = state
+        .federation
         .saml_federation_service
         .handle_saml_response(
             tenant_id,

@@ -60,6 +60,7 @@ pub async fn verify_email<C: Connection + Clone>(
 
     // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
     state
+        .mail
         .email_verification_service
         .verify_email(req.tenant_id, &req.token)
         .await?;
@@ -90,6 +91,7 @@ pub async fn resend_verification<C: Connection + Clone>(
 
     // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
     match state
+        .mail
         .email_verification_service
         .resend_verification(req.tenant_id, &req.email)
         .await
@@ -134,7 +136,7 @@ pub async fn resend_verification<C: Connection + Clone>(
                 enqueued_at: Utc::now(),
             };
 
-            if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
+            if let Err(e) = state.mail.mail_outbound_publisher.publish(msg).await {
                 // D-15: log warn but do NOT propagate — uniform 200 regardless
                 tracing::warn!(
                     error = %e,

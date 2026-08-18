@@ -160,6 +160,7 @@ pub async fn get_policy<C: Connection + Clone>(
     tenant_scope_check(&user, tenant_id)?;
 
     let policy = state
+        .webauthn
         .webauthn_attestation_policy_repo
         .get_by_tenant(tenant_id)
         .await?
@@ -200,6 +201,7 @@ pub async fn set_policy<C: Connection + Clone>(
     validate_attestation_policy(&input)?;
 
     let saved = state
+        .webauthn
         .webauthn_attestation_policy_repo
         .set(tenant_id, input)
         .await?;
@@ -210,7 +212,7 @@ pub async fn set_policy<C: Connection + Clone>(
     // structured audit event (D11); this HTTP mutation is additionally
     // captured by the generic per-request `AuditMiddleware` wired in
     // `axiam-server/src/main.rs` (method + path + actor + outcome).
-    state.attestation_ca_cache.invalidate();
+    state.webauthn.attestation_ca_cache.invalidate();
 
     Ok(HttpResponse::Ok().json(saved))
 }
@@ -243,12 +245,14 @@ pub async fn compliance_report<C: Connection + Clone>(
     tenant_scope_check(&user, tenant_id)?;
 
     let policy = state
+        .webauthn
         .webauthn_attestation_policy_repo
         .get_by_tenant(tenant_id)
         .await?
         .unwrap_or_default();
 
     let credentials = state
+        .webauthn
         .webauthn_credential_repo
         .list_by_tenant(tenant_id)
         .await?;
@@ -259,7 +263,7 @@ pub async fn compliance_report<C: Connection + Clone>(
             &policy,
             cred.aaguid,
             cred.attestation_format.as_deref(),
-            &state.attestation_metadata_source,
+            &state.webauthn.attestation_metadata_source,
         )
         .await?;
 

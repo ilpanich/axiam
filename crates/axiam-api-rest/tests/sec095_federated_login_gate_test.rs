@@ -255,17 +255,21 @@ fn state_with_gate(
         .build()
         .unwrap();
     state.jwks_cache = jwks_cache;
-    state.oidc_federation_service = Some(OidcFederationService::new(
-        state.federation_config_repo.clone(),
-        state.federation_link_repo.clone(),
+    state.federation.oidc_federation_service = Some(OidcFederationService::new(
+        state.federation.federation_config_repo.clone(),
+        state.federation.federation_link_repo.clone(),
         state.user_repo.clone(),
         state.http_client.clone(),
         Arc::clone(&state.jwks_cache),
         TEST_FED_ENC_KEY,
     ));
     state.auth_service = state.auth_service.clone().with_reactor_gate(gate.clone());
-    state.token_service = state.token_service.clone().with_reactor_gate(gate.clone());
-    state.reactor_gate = gate;
+    state.oauth2.token_service = state
+        .oauth2
+        .token_service
+        .clone()
+        .with_reactor_gate(gate.clone());
+    state.events.reactor_gate = gate;
     state
 }
 
@@ -567,6 +571,7 @@ mod saml {
         // id the fixture's signed `@InResponseTo` names.
         let relay_state = "sec095-relay-state";
         state
+            .federation
             .federation_login_state_repo
             .insert(&FederationLoginState {
                 state: relay_state.into(),

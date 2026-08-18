@@ -299,7 +299,7 @@ async fn resend_verification_pending_user_enqueues_mail() {
     let recorder = RecordingPublisher::default();
     let sent_handle = recorder.sent.clone();
     let mut state = AppState::for_test(f.db.clone(), auth.clone());
-    state.mail_outbound_publisher = Arc::new(recorder);
+    state.mail.mail_outbound_publisher = Arc::new(recorder);
 
     let app = test::init_service(
         App::new()
@@ -356,7 +356,7 @@ async fn resend_verification_already_active_user_sends_without_enqueue() {
     let recorder = RecordingPublisher::default();
     let sent_handle = recorder.sent.clone();
     let mut state = AppState::for_test(f.db.clone(), auth.clone());
-    state.mail_outbound_publisher = Arc::new(recorder);
+    state.mail.mail_outbound_publisher = Arc::new(recorder);
 
     let app = test::init_service(
         App::new()

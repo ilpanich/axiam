@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`AppState` split into seven cohesive sub-states (F3).** The REST
+  composition root carried **75 public fields**, nearly all concrete
+  `Surreal*Repository<C>` values, and every handler received all of them.
+  A scan found that **46 of the 75 are referenced by exactly one handler module
+  each**; those move into `PkiState`, `WebauthnState`, `GdprState`,
+  `MailState`, `EventsState`, `OAuth2State` and `FederationState`, taking the
+  root from 75 members to 36.
+
+  **This is a field-grouping change, not a dispatch change.** Boxing the
+  repositories behind `Arc<dyn …>` would have collapsed the `C` parameter too,
+  and would have put vtable dispatch on the authorization hot path — what a
+  service mesh calls on every request — for a cosmetic gain. Every type,
+  monomorphisation and generated instruction is what it was; what changes is
+  who can see what.
+
+  `state.rs` becomes `state/mod.rs` + `state/bundles.rs`. Migration was
+  mechanical and compiler-verified: `state.foo` → `state.<bundle>.foo` at 131
+  call sites across 19 files. No handler logic, route, wire format or test
+  expectation changed. Rationale in `claude_dev/appstate-substates.md`.
+
 - **Documentation is enforced, one crate at a time (F6).**
   `[workspace.lints.rust] missing_docs = "warn"` now exists and `axiam-authz`
   opts into it, with its ten undocumented items written up. The lint is a

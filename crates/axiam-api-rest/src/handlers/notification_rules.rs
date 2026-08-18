@@ -102,6 +102,7 @@ pub async fn create<C: Connection + Clone>(
     validate_recipient_emails(&req.recipient_emails)?;
 
     let rule = state
+        .events
         .notification_rule_repo
         .create(CreateNotificationRule {
             tenant_id: user.tenant_id,
@@ -136,6 +137,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .events
         .notification_rule_repo
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -175,6 +177,7 @@ pub async fn get<C: Connection + Clone>(
         .await?;
     let id = path.into_inner();
     let rule = state
+        .events
         .notification_rule_repo
         .get_by_id(user.tenant_id, id)
         .await?;
@@ -218,6 +221,7 @@ pub async fn update<C: Connection + Clone>(
     }
 
     let rule = state
+        .events
         .notification_rule_repo
         .update(
             user.tenant_id,
@@ -256,6 +260,7 @@ pub async fn delete<C: Connection + Clone>(
         .await?;
     let id = path.into_inner();
     state
+        .events
         .notification_rule_repo
         .delete(user.tenant_id, id)
         .await?;

@@ -110,9 +110,10 @@ pub async fn create<C: Connection + Clone>(
     // D-01/D-02: encrypt before persisting — fails closed with a 503 when
     // no encryption key is configured, rather than ever storing the
     // plaintext secret.
-    let encrypted_secret = state.webhook_delivery.encrypt_secret(&req.secret)?;
+    let encrypted_secret = state.events.webhook_delivery.encrypt_secret(&req.secret)?;
 
     let webhook = state
+        .events
         .webhook_repo
         .create(CreateWebhook {
             tenant_id: user.tenant_id,
@@ -147,6 +148,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .events
         .webhook_repo
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -185,7 +187,11 @@ pub async fn get<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let webhook = state.webhook_repo.get_by_id(user.tenant_id, id).await?;
+    let webhook = state
+        .events
+        .webhook_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
     Ok(HttpResponse::Ok().json(WebhookResponse::from(webhook)))
 }
 
@@ -229,10 +235,11 @@ pub async fn update<C: Connection + Clone>(
         Some(ref s) if s.is_empty() => {
             return Err(validation_err("secret must not be empty"));
         }
-        Some(ref s) => Some(state.webhook_delivery.encrypt_secret(s)?),
+        Some(ref s) => Some(state.events.webhook_delivery.encrypt_secret(s)?),
         None => None,
     };
     let webhook = state
+        .events
         .webhook_repo
         .update(
             user.tenant_id,
@@ -270,7 +277,7 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    state.webhook_repo.delete(user.tenant_id, id).await?;
+    state.events.webhook_repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

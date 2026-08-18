@@ -42,6 +42,8 @@
 //! once in `main.rs` purely to build `password_reset_service` /
 //! `email_verification_service` and do not need their own `AppState` field.
 
+pub mod bundles;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -250,6 +252,19 @@ pub type SamlFederationServiceT<C> = SamlFederationService<
 /// individual fields (e.g. swap `authz_checker`... see note above: that one
 /// stays outside `AppState`, but e.g. a test overriding `health_checker`)
 /// after calling [`AppState::for_test`].
+///
+/// # Shape (F3)
+///
+/// Twenty-nine fields that most of the crate reads — the tenant and user
+/// repositories, the auth config, the session machinery — plus **seven
+/// cohesive sub-states** for the forty-six that a single handler module each
+/// reads. Before that split this struct had seventy-five fields and every
+/// handler saw all of them.
+///
+/// The sub-states are a *field-grouping* change and nothing more: every type
+/// is what it was and monomorphisation is what it was, so the authorization
+/// hot path is untouched. See [`bundles`] for why boxing them behind trait
+/// objects would have been the wrong fix.
 #[derive(Clone)]
 pub struct AppState<C: Connection + Clone> {
     pub authz_config: AuthzConfig,
@@ -281,137 +296,20 @@ pub struct AppState<C: Connection + Clone> {
     pub scim_token_repo: SurrealScimTokenRepository<C>,
     pub service_account_repo: SurrealServiceAccountRepository<C>,
     pub auth_service: AuthServiceT<C>,
-    pub webauthn_service: WebauthnServiceT<C>,
     pub mfa_method_service: MfaMethodServiceT<C>,
-    /// X3 wave 3: direct access to WebAuthn credentials for the tenant-wide
-    /// compliance report (D9) — `webauthn_service` only exposes per-user
-    /// ceremony operations, not a tenant-wide listing.
-    pub webauthn_credential_repo: SurrealWebauthnCredentialRepository<C>,
-    /// X3 (D5): tenant WebAuthn attestation policy. Resolved by REST
-    /// handlers on every registration ceremony start/finish (an absent row
-    /// means `WebauthnAttestationPolicy::default()`, i.e. today's `mode:
-    /// none` behavior) and by the policy admin/compliance-report endpoints.
-    pub webauthn_attestation_policy_repo: SurrealWebauthnAttestationPolicyRepository<C>,
-    /// X3 (D10): server-global FIDO MDS3 metadata storage, read by the
-    /// `GET /api/v1/mds/status` / `POST /api/v1/mds/refresh` admin endpoints.
-    pub mds_repo: SurrealMdsRepository<C>,
-    /// X3 (W2-D4): the small, data-only view over `mds_repo` that
-    /// `axiam-auth`'s attestation enforcement and compliance evaluation
-    /// consume, keeping `axiam-auth` free of a hard `axiam-db` dependency.
-    pub attestation_metadata_source: MdsAttestationMetadataSource<SurrealMdsRepository<C>>,
-    /// X3 (W2-D3): process-wide cache of built `AttestationCaList`s.
-    /// `Arc`-shared (mirrors `tenant_org_cache`) so every worker/request
-    /// sees the same cache, and so it can be invalidated from the MDS
-    /// refresh and attestation-policy-update endpoints (and the background
-    /// MDS refresh job in `axiam-server`) without threading a second
-    /// `web::Data` registration through every call site.
-    pub attestation_ca_cache: Arc<AttestationCaCache>,
-    /// X3 (D10): FIDO MDS3 ingestion configuration (`mds_enabled`,
-    /// `mds_blob_url`/`mds_blob_path`, `mds_leaf_dns`). `POST
-    /// /api/v1/mds/refresh` reads this to decide whether ingestion is
-    /// enabled at all and which source to fetch from — `encryption_key`
-    /// here is unused by the REST layer (PKI-service construction in
-    /// `axiam-server` keeps its own copy for that).
-    pub pki_config: PkiConfig,
-    pub mail_outbound_publisher: Arc<dyn DynMailPublisher>,
     pub session_repo: SurrealSessionRepository<C>,
     pub session_validator: Arc<dyn SessionValidator>,
     pub refresh_token_repo: SurrealRefreshTokenRepository<C>,
     pub password_history_repo: SurrealPasswordHistoryRepository<C>,
-    pub consent_repo: SurrealConsentRepository<C>,
-    pub account_deletion_repo: SurrealAccountDeletionRepository<C>,
-    pub export_job_repo: SurrealExportJobRepository<C>,
-    pub erasure_proof_repo: SurrealErasureProofRepository<C>,
-    /// D-17: AES-256-GCM key for email-provider secrets. Absent (`None`)
-    /// means email-config admin endpoints and mail delivery stay disabled
-    /// (fail-closed) — mirrors the pre-existing behavior exactly.
-    pub email_encryption_key: Option<[u8; 32]>,
-    pub ca_service: CaServiceT<C>,
-    pub cert_service: CertServiceT<C>,
-    pub cert_repo: SurrealCertificateRepository<C>,
-    pub device_auth_service: DeviceAuthServiceT<C>,
-    pub pgp_service: PgpServiceT<C>,
-    pub reactor_repo: SurrealReactorRepository<C>,
-    /// X1 — the interceptor chain the `user.pre_create`, `user.pre_update` and
-    /// `grant.pre_assign` handlers call.
-    ///
-    /// `axiam-auth` and `axiam-oauth2` hold their own clone of the same gate
-    /// (they own the `login.post_auth` and `token.pre_issue` sites), so all
-    /// five hooks share one routing table, one per-tenant concurrency bound and
-    /// one audit sink. A deployment without AMQP holds
-    /// [`axiam_core::models::reactor::NoopReactorGate`] here — never `None`,
-    /// because a call site that branches on the feature is a call site where
-    /// the two builds can drift.
-    pub reactor_gate: axiam_core::models::reactor::SharedReactorGate,
-    /// X1 — invalidates the gate's routing table when a reactor registration
-    /// changes, so the change is live on this replica immediately rather than
-    /// at the end of the TTL.
-    ///
-    /// A closure rather than the routing table itself because the table is
-    /// generic over its source, and `AppState<C>` is already generic over one
-    /// parameter too many. `None` when no gate is composed.
-    pub reactor_routing_invalidator: Option<Arc<dyn Fn(uuid::Uuid) + Send + Sync>>,
-    pub webhook_repo: SurrealWebhookRepository<C>,
-    pub webhook_delivery: WebhookDeliveryServiceT<C>,
-    /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
-    /// events onto the durable webhook queue (CQ-B22). `None` in tests and when
-    /// AMQP is unavailable — `emit_webhook` becomes a no-op rather than failing
-    /// the originating request (webhook delivery is a best-effort side effect).
-    pub webhook_publisher: Option<Arc<axiam_amqp::WebhookPublisher>>,
-    pub notification_rule_repo: SurrealNotificationRuleRepository<C>,
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
-    pub authorize_service: AuthorizeServiceT<C>,
-    pub token_service: TokenServiceT<C>,
-    /// B2 — device authorization grant (RFC 8628).
-    pub device_authorization_service: DeviceAuthorizationServiceT<C>,
-    /// B3 — token exchange (RFC 8693).
-    pub token_exchange_service: TokenExchangeServiceT<C>,
-    /// B5 — pushed authorization requests (RFC 9126).
-    pub par_service: ParServiceT<C>,
-    /// X2 — UMA 2.0 permission tickets.
-    ///
-    /// The repository rather than an assembled `UmaService`, because the
-    /// service also needs the [`crate::authz::AuthzChecker`], which is a
-    /// separate `web::Data` and not part of this state. Handlers assemble the
-    /// service with [`AppState::uma_service`].
-    pub permission_ticket_repo: SurrealPermissionTicketRepository<C>,
-    /// X2 — deployment ceiling on RPT lifetime, in seconds. The effective
-    /// lifetime is the minimum of this, the protocol default (300 s), and the
-    /// subject token's own remaining life.
-    pub rpt_max_lifetime_secs: i64,
-    /// B5 — which clients joined which session, for the back-channel logout
-    /// fan-out.
-    pub session_client_repo: SurrealSessionClientRepository<C>,
-    pub device_grant_repo: SurrealDeviceGrantRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
-    pub federation_config_repo: SurrealFederationConfigRepository<C>,
-    pub federation_link_repo: SurrealFederationLinkRepository<C>,
-    pub assertion_replay_repo: SurrealAssertionReplayRepository<C>,
-    /// X5.1 — single-use `jti` store for RFC 7523 client assertions and
-    /// RFC 9449 DPoP proofs. Decides replay by a `UNIQUE` index violation
-    /// rather than by reading first; see the repository's module docs.
-    pub proof_replay_repo: SurrealProofReplayRepository<C>,
-    pub federation_login_state_repo: SurrealFederationLoginStateRepository<C>,
     pub http_client: reqwest::Client,
     /// Federation JWKS cache: caches REMOTE identity providers' JWKS
     /// documents fetched during OIDC federation login. NOT related to
     /// `oauth2_jwks_cache` below -- see `axiam_oauth2::jwks_cache` module
     /// docs for the distinction.
     pub jwks_cache: Arc<JwksCache>,
-    /// B3: in-process cache + ETag for AXIAM's OWN `GET /oauth2/jwks`
-    /// response (the signing keys AXIAM serves to relying parties).
-    /// Constructed once at startup and shared via this `Arc` so all workers
-    /// hit the same cache instead of each maintaining its own.
-    pub oauth2_jwks_cache: Arc<Oauth2JwksCache>,
-    /// B3: `Cache-Control` max-age (and header rendering) for the
-    /// `GET /oauth2/jwks` response. Configured via
-    /// `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS` (default 300s).
-    pub oauth2_jwks_cache_config: Oauth2JwksCacheConfig,
     pub crypto_semaphore: Arc<Semaphore>,
-    /// D-02: `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is unset — the six
-    /// email-config routes fail closed rather than silently using a
-    /// constant/zero key.
-    pub email_config_repo: Option<SurrealEmailConfigRepository<C>>,
     /// Process-wide write-behind shared rate-limit counter used by
     /// [`crate::middleware::rate_limit_shared::RateLimitShared`]
     /// (SECHRD-03 / D-01a; H2 performance fix).
@@ -433,27 +331,37 @@ pub struct AppState<C: Connection + Clone> {
     /// here instead.
     pub rate_limit_cfg: crate::config::rate_limit::RateLimitConfig,
 
-    // -- QUAL-07: hoisted per-request service constructions (13 call sites) --
-    pub password_reset_service: PasswordResetServiceT<C>,
-    pub email_verification_service: EmailVerificationServiceT<C>,
-    /// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
-    /// OIDC federation encryption key is baked into `OidcFederationService`
-    /// at construction, so absence is resolved once at startup rather than
-    /// per-request (identical fail-closed error at the 4 call sites).
-    pub oidc_federation_service: Option<OidcFederationServiceT<C>>,
-    /// Constructed unconditionally (SamlFederationService::new needs no
-    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
-    /// gated. Why: `axiam_federation::saml` only exists when
-    /// axiam-federation's OWN `saml` Cargo feature is on, and
-    /// axiam-api-rest's `saml` feature intentionally forwards to it so
-    /// `cargo build -p axiam-server --no-default-features` can still build
-    /// without the `samael`/`libxml2` dependency chain (documented escape
-    /// hatch for hosts with an incompatible system libxml2 — see
-    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
-    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
-    /// `axiam-federation/saml` on unconditionally and break that hatch.
-    #[cfg(feature = "saml")]
-    pub saml_federation_service: SamlFederationServiceT<C>,
+    // ---------------------------------------------------------------
+    // Cohesive sub-states (F3) — see `state/bundles.rs`
+    // ---------------------------------------------------------------
+    /// Certificate authority, X.509 issuance, PGP and device certificate auth.
+    ///
+    /// See [`bundles::PkiState`].
+    pub pki: bundles::PkiState<C>,
+    /// WebAuthn ceremonies, attestation policy and FIDO MDS metadata.
+    ///
+    /// See [`bundles::WebauthnState`].
+    pub webauthn: bundles::WebauthnState<C>,
+    /// Consent records, account deletion, data export and erasure proofs.
+    ///
+    /// See [`bundles::GdprState`].
+    pub gdpr: bundles::GdprState<C>,
+    /// Outbound mail, provider configuration and the two token-mail services.
+    ///
+    /// See [`bundles::MailState`].
+    pub mail: bundles::MailState<C>,
+    /// Reactors, webhooks and notification rules — everything AXIAM emits outward.
+    ///
+    /// See [`bundles::EventsState`].
+    pub events: bundles::EventsState<C>,
+    /// The OAuth2 authorization server and OIDC provider.
+    ///
+    /// See [`bundles::OAuth2State`].
+    pub oauth2: bundles::OAuth2State<C>,
+    /// Inbound SAML and OIDC federation.
+    ///
+    /// See [`bundles::FederationState`].
+    pub federation: bundles::FederationState<C>,
 }
 
 impl<C: Connection + Clone> AppState<C> {
@@ -471,7 +379,7 @@ impl<C: Connection + Clone> AppState<C> {
     /// enabled, so a caller can log the posture instead of guessing at it.
     #[must_use = "the return value says whether the external path is actually live"]
     pub fn enable_external_token_exchange(&mut self) -> bool {
-        let Some(federation) = self.oidc_federation_service.clone() else {
+        let Some(federation) = self.federation.oidc_federation_service.clone() else {
             return false;
         };
         let (resolver, authority) = crate::token_exchange::external_collaborators(
@@ -483,7 +391,8 @@ impl<C: Connection + Clone> AppState<C> {
         // rebuilt rather than mutated in place — the service is a handful of
         // cheap handles, so this costs nothing and keeps the "both or
         // neither" pairing enforced by the type.
-        self.token_exchange_service = self
+        self.oauth2.token_exchange_service = self
+            .oauth2
             .token_exchange_service
             .clone()
             .with_external_subjects(resolver, authority);
@@ -507,10 +416,10 @@ impl<C: Connection + Clone> AppState<C> {
         crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>>,
     > {
         axiam_oauth2::uma::UmaService::new(
-            self.permission_ticket_repo.clone(),
+            self.oauth2.permission_ticket_repo.clone(),
             crate::uma::EngineEvaluator::new(authz),
             crate::uma::ResourceScopeCatalog::new(self.scope_repo.clone()),
-            self.rpt_max_lifetime_secs,
+            self.oauth2.rpt_max_lifetime_secs,
         )
     }
 
@@ -526,7 +435,7 @@ impl<C: Connection + Clone> AppState<C> {
     /// replica picks the change up when its own routing entry expires, which is
     /// the bound the acceptance test asserts.
     pub fn invalidate_reactor_routing(&self, tenant_id: uuid::Uuid) {
-        if let Some(invalidate) = &self.reactor_routing_invalidator {
+        if let Some(invalidate) = &self.events.reactor_routing_invalidator {
             invalidate(tenant_id);
         }
     }
@@ -542,8 +451,9 @@ impl<C: Connection + Clone> AppState<C> {
         event_type: &str,
         payload: serde_json::Value,
     ) {
-        if let Some(publisher) = &self.webhook_publisher {
-            self.webhook_delivery
+        if let Some(publisher) = &self.events.webhook_publisher {
+            self.events
+                .webhook_delivery
                 .emit(publisher, tenant_id, event_type.to_string(), payload)
                 .await;
         }
@@ -711,66 +621,16 @@ impl<C: Connection + Clone> AppState<C> {
             scim_token_repo: SurrealScimTokenRepository::new(db.clone()),
             service_account_repo: service_account_repo.clone(),
             auth_service,
-            webauthn_service,
             mfa_method_service,
-            webauthn_credential_repo: webauthn_cred_repo.clone(),
-            webauthn_attestation_policy_repo,
-            mds_repo,
-            attestation_metadata_source,
-            attestation_ca_cache: Arc::new(AttestationCaCache::new()),
-            pki_config,
-            mail_outbound_publisher: Arc::new(NoopMailPublisher),
             session_repo,
             session_validator: Arc::new(SurrealSessionRepository::new(db.clone())),
             refresh_token_repo,
             password_history_repo,
-            consent_repo: axiam_db::SurrealConsentRepository::new(db.clone()),
-            account_deletion_repo: SurrealAccountDeletionRepository::new(db.clone()),
-            export_job_repo: SurrealExportJobRepository::new(db.clone()),
-            erasure_proof_repo: SurrealErasureProofRepository::new(db.clone()),
-            email_encryption_key: None,
-            ca_service,
-            cert_service,
-            cert_repo,
-            device_auth_service,
-            pgp_service,
-            reactor_repo,
-            // A test harness gets the no-op gate, which is also what a
-            // production deployment without AMQP gets — so a handler test
-            // exercises exactly the composition an un-hooked deployment runs.
-            // A test that needs a live gate overrides this field (the same
-            // pattern `email_encryption_key` documents above).
-            reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
-            reactor_routing_invalidator: None,
-            webhook_repo,
-            webhook_delivery,
-            webhook_publisher: None,
-            notification_rule_repo: SurrealNotificationRuleRepository::new(db.clone()),
             oauth2_client_repo,
-            authorize_service,
-            token_service,
-            device_authorization_service,
-            par_service,
-            permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
-            // X2: the protocol default is the ceiling until an operator lowers
-            // it. Raising it past `DEFAULT_RPT_MAX_LIFETIME_SECS` buys nothing
-            // — the effective lifetime is a minimum over all three bounds.
-            rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
-            session_client_repo,
-            token_exchange_service,
-            device_grant_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),
-            federation_config_repo: federation_config_repo.clone(),
-            federation_link_repo: federation_link_repo.clone(),
-            assertion_replay_repo: assertion_replay_repo.clone(),
-            proof_replay_repo,
-            federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),
-            oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
-            oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
             crypto_semaphore,
-            email_config_repo: None,
             // Tests get a real, env-configured counter over the same
             // in-memory DB, so the shared-store layer behaves in tests
             // exactly as it does in production. A test that wants
@@ -781,17 +641,81 @@ impl<C: Connection + Clone> AppState<C> {
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),
-            password_reset_service,
-            email_verification_service,
-            oidc_federation_service: None,
-            #[cfg(feature = "saml")]
-            saml_federation_service: SamlFederationService::new(
-                federation_config_repo,
-                federation_link_repo,
-                user_repo,
-                assertion_replay_repo,
-                reqwest::Client::new(),
-            ),
+            pki: bundles::PkiState {
+                ca_service,
+                cert_service,
+                cert_repo,
+                pgp_service,
+                device_auth_service,
+            },
+            webauthn: bundles::WebauthnState {
+                webauthn_service,
+                webauthn_credential_repo: webauthn_cred_repo.clone(),
+                webauthn_attestation_policy_repo,
+                mds_repo,
+                attestation_metadata_source,
+                attestation_ca_cache: Arc::new(AttestationCaCache::new()),
+                pki_config,
+            },
+            gdpr: bundles::GdprState {
+                consent_repo: axiam_db::SurrealConsentRepository::new(db.clone()),
+                account_deletion_repo: SurrealAccountDeletionRepository::new(db.clone()),
+                export_job_repo: SurrealExportJobRepository::new(db.clone()),
+                erasure_proof_repo: SurrealErasureProofRepository::new(db.clone()),
+            },
+            mail: bundles::MailState {
+                mail_outbound_publisher: Arc::new(NoopMailPublisher),
+                email_config_repo: None,
+                email_encryption_key: None,
+                email_verification_service,
+                password_reset_service,
+            },
+            events: bundles::EventsState {
+                reactor_repo,
+                // A test harness gets the no-op gate, which is also what a
+                // production deployment without AMQP gets — so a handler test
+                // exercises exactly the composition an un-hooked deployment runs.
+                // A test that needs a live gate overrides this field (the same
+                // pattern `email_encryption_key` documents above).
+                reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+                reactor_routing_invalidator: None,
+                webhook_repo,
+                webhook_delivery,
+                webhook_publisher: None,
+                notification_rule_repo: SurrealNotificationRuleRepository::new(db.clone()),
+            },
+            oauth2: bundles::OAuth2State {
+                authorize_service,
+                token_service,
+                device_authorization_service,
+                token_exchange_service,
+                par_service,
+                permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
+                // X2: the protocol default is the ceiling until an operator lowers
+                // it. Raising it past `DEFAULT_RPT_MAX_LIFETIME_SECS` buys nothing
+                // — the effective lifetime is a minimum over all three bounds.
+                rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
+                session_client_repo,
+                device_grant_repo,
+                proof_replay_repo,
+                oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
+                oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
+            },
+            federation: bundles::FederationState {
+                federation_config_repo: federation_config_repo.clone(),
+                federation_link_repo: federation_link_repo.clone(),
+                federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
+                assertion_replay_repo: assertion_replay_repo.clone(),
+                oidc_federation_service: None,
+                #[cfg(feature = "saml")]
+                saml_federation_service: SamlFederationService::new(
+                    federation_config_repo,
+                    federation_link_repo,
+                    user_repo,
+                    assertion_replay_repo,
+                    reqwest::Client::new(),
+                ),
+            },
         }
     }
 }

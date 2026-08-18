@@ -98,6 +98,7 @@ pub async fn verify<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     match state
+        .oauth2
         .device_authorization_service
         .lookup_for_verification(user.tenant_id, &query.user_code)
         .await
@@ -138,6 +139,7 @@ pub async fn decide<C: Connection + Clone>(
 ) -> HttpResponse {
     let body = body.into_inner();
     match state
+        .oauth2
         .device_authorization_service
         .decide(user.tenant_id, &body.user_code, body.approved, user.user_id)
         .await

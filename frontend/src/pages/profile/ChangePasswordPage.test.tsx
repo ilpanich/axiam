@@ -84,6 +84,23 @@ describe("ChangePasswordPage", () => {
     ).toBeInTheDocument();
   });
 
+  // Regression: this page rendered `response.data.message` unredacted. A
+  // password-change endpoint is the last place a credential echo should reach
+  // the screen, and it is exactly where a body that quotes the request would.
+  it("redacts a credential echoed in the failure message", async () => {
+    apiMock.post.mockRejectedValue({
+      response: { data: { message: 'rejected {"password":"hunter2"}' } },
+    });
+    renderWithProviders(<ChangePasswordPage />);
+    await userEvent.type(screen.getByLabelText("Current Password"), "wrong");
+    await userEvent.type(screen.getByLabelText("New Password"), STRONG_PW);
+    await userEvent.type(screen.getByLabelText("Confirm New Password"), STRONG_PW);
+    await userEvent.click(screen.getByRole("button", { name: "Update Password" }));
+
+    expect(await screen.findByText(/redacted/)).toBeInTheDocument();
+    expect(screen.queryByText(/hunter2/)).not.toBeInTheDocument();
+  });
+
   it("falls back to a generic error message when the response has no message/error", async () => {
     apiMock.post.mockRejectedValue({ response: { data: {} } });
     renderWithProviders(<ChangePasswordPage />);

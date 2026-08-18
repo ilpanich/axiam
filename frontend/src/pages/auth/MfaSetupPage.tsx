@@ -7,17 +7,11 @@ import { useAuthStore } from "@/stores/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { TotpSetupPanel, type TotpSetupPanelData } from "@/components/auth/TotpSetupPanel";
-import type { AxiosError } from "axios";
-import { redactSecrets } from "@/lib/apiError";
+import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
 // ---------------------------------------------------------------------------
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
-}
 
 // ---------------------------------------------------------------------------
 // MfaSetupPage states
@@ -95,19 +89,15 @@ export function MfaSetupPage() {
       }
       navigate("/dashboard");
     } catch (err) {
-      const axiosErr = err as AxiosError<ErrorResponse>;
-      if (axiosErr.response?.status === 401 || axiosErr.response?.status === 410) {
+      const status = getApiErrorStatus(err);
+      if (status === 401 || status === 410) {
         // Token-level failure (expired/invalid/used) — bounce to the
         // invalid-link state, not a wrong-code inline error.
         window.history.replaceState({}, document.title, window.location.pathname);
         setState("enroll-error");
         return;
       }
-      const msg = redactSecrets(
-        axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Invalid or expired code. Please try again."
-      );
+      const msg = getApiErrorMessage(err, "Invalid or expired code. Please try again.");
       setConfirmError(msg);
     } finally {
       setIsConfirming(false);

@@ -5,17 +5,11 @@ import { authService } from "@/services/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth";
-import type { AxiosError } from "axios";
-import { redactSecrets } from "@/lib/apiError";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
 // ---------------------------------------------------------------------------
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
-}
 
 // ---------------------------------------------------------------------------
 // Verification states
@@ -74,11 +68,9 @@ export function VerifyEmailPage() {
         setVerifyState("success");
       } catch (err) {
         window.history.replaceState({}, document.title, window.location.pathname);
-        const axiosErr = err as AxiosError<ErrorResponse>;
-        const msg = redactSecrets(
-          axiosErr.response?.data?.message ??
-            axiosErr.response?.data?.error ??
-            "Verification failed. The link may be expired or already used."
+        const msg = getApiErrorMessage(
+          err,
+          "Verification failed. The link may be expired or already used."
         );
         setErrorMessage(msg);
         setVerifyState("error");

@@ -1,19 +1,61 @@
 import { describe, it, expect } from "vitest";
-import { getApiErrorMessage, redactSecrets } from "./apiError";
+import {
+  getApiErrorCode,
+  getApiErrorMessage,
+  getApiErrorStatus,
+  redactSecrets,
+} from "./apiError";
 
-// Minimal AxiosError shape — avoids importing axios in tests.
-function makeAxiosError(data?: { error?: string; message?: string }): unknown {
+// Minimal rejected-request shape. `isAxiosError` is set here only because a
+// real axios rejection carries it — the helpers read the shape structurally
+// and never the brand, which is what lets a test double describe an error
+// without importing the transport (see `makeBareError` below).
+function makeAxiosError(
+  data?: { error?: string; message?: string; error_description?: string },
+  status?: number
+): unknown {
   return {
     isAxiosError: true,
-    response: data !== undefined ? { data } : undefined,
+    response: data !== undefined ? { data, status } : undefined,
     message: "Network Error",
   };
 }
 
+// The same thing with no axios branding at all, as a fetch wrapper or a test
+// double would throw it.
+function makeBareError(data?: { error?: string; message?: string }): unknown {
+  return { response: data !== undefined ? { data } : undefined };
+}
+
 describe("getApiErrorMessage", () => {
-  it("returns response.data.error when present", () => {
-    const err = makeAxiosError({ error: "Email already in use", message: "conflict" });
-    expect(getApiErrorMessage(err)).toBe("Email already in use");
+  // The shape axiam-api-rest's `ErrorBody` actually sends: `error` is a
+  // machine slug and `message` is the sentence. Both are always present, so
+  // whichever field this helper reads first is the one every caller renders.
+  it("prefers response.data.message over the response.data.error slug", () => {
+    const err = makeAxiosError({
+      error: "already_exists",
+      message: "Entity already exists: user",
+    });
+    expect(getApiErrorMessage(err)).toBe("Entity already exists: user");
+  });
+
+  it("reads error_description for an RFC 6749 OAuth2 error body", () => {
+    const err = makeAxiosError({
+      error: "invalid_grant",
+      error_description: "The refresh token has been revoked.",
+    });
+    expect(getApiErrorMessage(err)).toBe("The refresh token has been revoked.");
+  });
+
+  it("renders the error slug only when it is the only field present", () => {
+    const err = makeAxiosError({ error: "rate_limited" });
+    expect(getApiErrorMessage(err)).toBe("rate_limited");
+  });
+
+  it("reads a rejection that carries no isAxiosError brand", () => {
+    expect(getApiErrorMessage(makeBareError({ message: "Token expired" }))).toBe(
+      "Token expired"
+    );
   });
 
   it("falls back to response.data.message when error field absent", () => {
@@ -152,7 +194,78 @@ describe("redactSecrets", () => {
   });
 });
 
+describe("getApiErrorMessage fallback precedence", () => {
+  // A page-authored fallback outranks a transport exception string, because
+  // "Network Error" and "timeout of 0ms exceeded" are developer diagnostics
+  // and the page has written something a person can act on.
+  it("prefers a caller fallback over the transport message", () => {
+    const err = { message: "Network Error" };
+    expect(getApiErrorMessage(err, "This link has expired.")).toBe(
+      "This link has expired."
+    );
+  });
+
+  it("still reaches the transport message when no fallback is supplied", () => {
+    expect(getApiErrorMessage({ message: "Network Error" })).toBe("Network Error");
+  });
+
+  it("prefers a server message over the caller fallback", () => {
+    const err = makeAxiosError({ message: "Token already used", error: "conflict" });
+    expect(getApiErrorMessage(err, "This link has expired.")).toBe(
+      "Token already used"
+    );
+  });
+
+  it("returns the caller fallback for null and undefined", () => {
+    expect(getApiErrorMessage(null, "nope")).toBe("nope");
+    expect(getApiErrorMessage(undefined, "nope")).toBe("nope");
+  });
+});
+
+describe("getApiErrorStatus", () => {
+  it("returns the HTTP status of a failed request", () => {
+    expect(getApiErrorStatus(makeAxiosError({ error: "forbidden" }, 403))).toBe(403);
+  });
+
+  // undefined means "no HTTP response arrived", which is a different fact from
+  // any status code and must not collapse into a falsy check.
+  it("returns undefined when no response arrived", () => {
+    expect(getApiErrorStatus(new Error("network down"))).toBeUndefined();
+    expect(getApiErrorStatus(makeAxiosError(undefined))).toBeUndefined();
+    expect(getApiErrorStatus(null)).toBeUndefined();
+    expect(getApiErrorStatus("boom")).toBeUndefined();
+  });
+});
+
+describe("getApiErrorCode", () => {
+  it("returns the machine slug, which is the field to branch on", () => {
+    const err = makeAxiosError({
+      error: "password_policy_violation",
+      message: "Password policy violation: too short",
+    });
+    expect(getApiErrorCode(err)).toBe("password_policy_violation");
+  });
+
+  it("returns undefined when there is no slug", () => {
+    expect(getApiErrorCode(makeAxiosError({ message: "boom" }))).toBeUndefined();
+    expect(getApiErrorCode(new Error("network down"))).toBeUndefined();
+    expect(getApiErrorCode(null)).toBeUndefined();
+  });
+});
+
 describe("getApiErrorMessage redaction", () => {
+  // The regression that motivated routing every page through this helper:
+  // ProfilePage, ChangePasswordPage and MfaManagementPage each extracted
+  // `response.data.message` inline and rendered it with no redaction at all.
+  it("redacts a secret echoed in response.data.message even with a fallback", () => {
+    const err = makeAxiosError({
+      message: `update rejected for eyJhbGciOiJFZERTQSJ9.${"c".repeat(20)}.${"d".repeat(20)}`,
+    });
+    const out = getApiErrorMessage(err, "Failed to update profile.");
+    expect(out).toContain("[redacted: jwt]");
+    expect(out).not.toContain("c".repeat(20));
+  });
+
   it("redacts a secret echoed in response.data.error", () => {
     const err = makeAxiosError({ error: `leaked axiam_scim_${"b".repeat(43)}` });
     expect(getApiErrorMessage(err)).toContain("[redacted: scim token]");

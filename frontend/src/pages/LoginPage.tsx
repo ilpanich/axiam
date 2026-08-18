@@ -16,8 +16,7 @@ import { cn } from "@/lib/utils";
 import api from "@/lib/api";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
-import type { AxiosError } from "axios";
-import { redactSecrets } from "@/lib/apiError";
+import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
 
@@ -40,11 +39,6 @@ interface LoginResponse {
   available_methods?: string[];
   mfa_setup_required?: boolean;
   setup_token?: string;
-}
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
 }
 
 export function LoginPage() {
@@ -250,19 +244,13 @@ export function LoginPage() {
         navigate("/login");
       }
     } catch (err) {
-      const axiosErr = err as AxiosError<ErrorResponse>;
-      if (axiosErr.response?.status === 403) {
+      if (getApiErrorStatus(err) === 403) {
         setError(
           "Request rejected for security reasons. Please refresh the page and try again."
         );
         return;
       }
-      const msg = redactSecrets(
-        axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Invalid credentials. Please try again."
-      );
-      setError(msg);
+      setError(getApiErrorMessage(err, "Invalid credentials. Please try again."));
     } finally {
       setIsLoading(false);
     }
@@ -293,19 +281,13 @@ export function LoginPage() {
         navigate("/login");
       }
     } catch (err) {
-      const axiosErr = err as AxiosError<ErrorResponse>;
-      if (axiosErr.response?.status === 403) {
+      if (getApiErrorStatus(err) === 403) {
         setError(
           "Request rejected for security reasons. Please refresh the page and try again."
         );
         return;
       }
-      const msg = redactSecrets(
-        axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Invalid or expired MFA code."
-      );
-      setError(msg);
+      setError(getApiErrorMessage(err, "Invalid or expired MFA code."));
     } finally {
       setIsLoading(false);
     }

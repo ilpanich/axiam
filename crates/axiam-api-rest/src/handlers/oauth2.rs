@@ -963,7 +963,7 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
 /// Returns the public signing keys used by the authorization server
 /// so that relying parties can verify JWTs without sharing a secret.
 ///
-/// B3: served from an in-process cache (`state.oauth2.oauth2_jwks_cache`) keyed by
+/// B3: served from an in-process cache (`state.oauth2_jwks_cache`) keyed by
 /// a hash of the source PEM, with a `Cache-Control: public, max-age=<n>`
 /// header (configurable, default 300s) and a strong `ETag`. Clients that
 /// send a matching `If-None-Match` get `304 Not Modified` with no body;
@@ -972,6 +972,15 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
 /// See `axiam_oauth2::jwks_cache` module docs for the cache design and the
 /// documented limitations (no key-rotation mechanism exists yet; the
 /// endpoint serves one global, not per-tenant, key set).
+//
+// F3 note, deliberately NOT a doc comment: the field is `state.oauth2.
+// oauth2_jwks_cache` since the sub-state split. The line above still says
+// `state.oauth2_jwks_cache` because utoipa lifts this doc block verbatim into
+// the OpenAPI `description`, which eleven SDK repos vendor byte-for-byte. An
+// internal field rename is not a reason to churn a published API artifact and
+// re-vendor it eleven times; that the description names an internal field at
+// all is a separate (real) smell, and fixing it deserves its own change with a
+// spec regeneration and a re-vendor round.
 #[utoipa::path(
     get,
     path = "/oauth2/jwks",

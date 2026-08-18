@@ -66,6 +66,18 @@ axiam/
 └── sdks/                   # SDK contract (CONTRACT.md) + OpenAPI spec only
 ```
 
+### Documentation lint (ratcheting)
+
+`[workspace.lints.rust] missing_docs = "warn"` is defined in the root
+`Cargo.toml` and opted into **per crate** with `[lints] workspace = true`. It is
+a warning locally and an error in CI, where clippy runs `-D warnings`.
+
+Opted in today: **`axiam-authz`**. Next target: **`axiam-core`, 993 sites** —
+`missing_docs` fires on struct and enum *fields*, so the count is roughly four
+times the number of public types. Do not add the `[lints]` key to a crate you
+have not documented first; a lint that fires on every build is one everybody
+learns to scroll past.
+
 ### Crate layering (enforced)
 
 Dependencies point **inward**: a crate may depend only on crates in a strictly

@@ -19,6 +19,7 @@ use uuid::Uuid;
 /// surface the reason rather than flatten it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessDecision {
+    /// A grant matched and no explicit deny overrode it.
     Allow,
     /// Default deny — no grant matched.
     Deny(String),
@@ -27,6 +28,12 @@ pub enum AccessDecision {
 }
 
 impl AccessDecision {
+    /// Whether this decision permits the request.
+    ///
+    /// The only place a caller should collapse a decision to a boolean. Both
+    /// refusals answer `false` here, which is correct at an enforcement point
+    /// and lossy anywhere a human will read the result -- see the type's own
+    /// documentation for why the two are distinguished at all.
     pub fn is_allowed(&self) -> bool {
         matches!(self, AccessDecision::Allow)
     }
@@ -59,9 +66,18 @@ impl AccessDecision {
 /// Input for an authorization check.
 #[derive(Debug, Clone)]
 pub struct AccessRequest {
+    /// The tenant the check is scoped to. Every lookup the engine performs is
+    /// filtered by it, so a request can never see another tenant's grants.
     pub tenant_id: Uuid,
+    /// Who is asking -- a user id, or a service account's id. The engine
+    /// resolves roles by subject id, directly and through group membership.
     pub subject_id: Uuid,
+    /// What they want to do, as a `resource:verb` permission name
+    /// (`"users:create"`).
     pub action: String,
+    /// What they want to do it to. The nil UUID is the "global" sentinel,
+    /// meaning a permission not attached to any particular resource; anything
+    /// else is a resource whose ancestors are walked for inherited grants.
     pub resource_id: Uuid,
     /// Optional scope for sub-resource granularity.
     pub scope: Option<String>,

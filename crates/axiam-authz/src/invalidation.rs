@@ -46,11 +46,21 @@ pub enum InvalidationEvent {
     /// Drop every cached decision for a tenant — the conservative,
     /// always-correct invalidation used for coarse mutations whose
     /// affected-subject set is not known without a query.
-    Tenant { tenant_id: Uuid },
+    Tenant {
+        /// The tenant whose cached decisions are dropped.
+        tenant_id: Uuid,
+    },
     /// Drop every cached decision for one subject within a tenant — the
     /// targeted invalidation used when exactly one subject's effective
     /// permissions change.
-    Subject { tenant_id: Uuid, subject_id: Uuid },
+    Subject {
+        /// The tenant the subject belongs to. Also selects the per-tenant HKDF
+        /// subkey the wire message is signed with, so this event cannot be
+        /// replayed against another tenant.
+        tenant_id: Uuid,
+        /// The one subject whose cached decisions are dropped.
+        subject_id: Uuid,
+    },
 }
 
 impl InvalidationEvent {

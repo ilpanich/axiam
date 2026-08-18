@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Documentation is enforced, one crate at a time (F6).**
+  `[workspace.lints.rust] missing_docs = "warn"` now exists and `axiam-authz`
+  opts into it, with its ten undocumented items written up. The lint is a
+  warning locally and an error in CI (clippy runs `-D warnings`), so a local
+  `cargo check` does not fail mid-thought while a pull request cannot merge
+  without the sentence.
+
+  Measured, so the next step can be planned rather than discovered:
+  **`axiam-core` has 993 sites**. `missing_docs` fires on struct and enum
+  *fields*, not only the items containing them, so that is roughly four times
+  the number of public types. It is deliberately left for its own change —
+  993 doc comments written in a hurry to clear a lint are 993 sentences nobody
+  will trust.
+
 - **`AccessTokenSpec`: one description of a token, one signer (F4).** Access-token
   issuance had grown into twelve public functions in three telescoping chains,
   each tier existing only to add one parameter to the tier below

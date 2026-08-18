@@ -197,6 +197,19 @@ where
     S: ScopeRepository,
     G: GroupRepository,
 {
+    /// Build an engine over the five repositories it reads.
+    ///
+    /// The engine is generic over `axiam-core`'s repository *traits*, never
+    /// over a datastore: that is what lets the same evaluation logic serve the
+    /// REST, gRPC and AMQP entry points, and what keeps this crate at layer 1
+    /// with no dependency on `axiam-db`.
+    ///
+    /// The optional collaborators -- a decision cache and an invalidation
+    /// broadcaster -- are absent by default and added with
+    /// [`Self::with_decision_cache`] and
+    /// [`Self::with_invalidation_broadcaster`]. Absent means every check is
+    /// evaluated from the datastore, which is the conservative default: §11.2
+    /// rule 6 bans decision caching unless a deployment opts into it.
     pub fn new(
         role_repo: R,
         permission_repo: P,

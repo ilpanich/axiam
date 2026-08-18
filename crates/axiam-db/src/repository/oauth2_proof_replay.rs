@@ -14,7 +14,7 @@
 //! proof-of-possession credential that survives one concurrent replay is not a
 //! proof of possession.
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::repository::{ProofKind, ProofReplayRepository};
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::CountRow;
+use crate::helpers::{classify_replay_write_error, cleanup_expired_rows};
 
 /// SurrealDB implementation of the OAuth2 proof-replay repository.
 pub struct SurrealProofReplayRepository<C: Connection> {
@@ -78,48 +78,19 @@ impl<C: Connection> ProofReplayRepository for SurrealProofReplayRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        // The UNIQUE violation IS the answer: this `jti` has been presented
+        // before. The three replay guards used to carry a hand-copied marker
+        // set each, kept identical by hand so they "cannot drift into
+        // disagreeing about what a conflict looks like" -- the right worry,
+        // and a mechanism that would have let a security fix land in two of
+        // three files. They now share one definition (D-09).
         result
             .check()
-            .map_err(|e| {
-                let msg = e.to_string();
-                // SurrealDB v3 reports a UNIQUE index violation as "Database
-                // index `idx_proof_replay_uniq` already contains [...]". The
-                // other two patterns are the same fallbacks
-                // `saml_replay::insert_assertion` carries, kept identical so
-                // the three replay guards cannot drift into disagreeing about
-                // what a conflict looks like.
-                if msg.contains("already contains")
-                    || msg.contains("already exists")
-                    || msg.contains("unique")
-                {
-                    AxiamError::ReplayDetected
-                } else {
-                    AxiamError::Database(msg)
-                }
-            })
+            .map_err(classify_replay_write_error)
             .map(|_| ())
     }
 
     async fn cleanup_expired_proofs(&self) -> AxiamResult<u64> {
-        let mut count_result = self
-            .db
-            .current()
-            .query(
-                "SELECT count() AS total FROM oauth2_proof_replay \
-                 WHERE expires_at < time::now() GROUP ALL",
-            )
-            .await
-            .map_err(DbError::from)?;
-
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
-
-        self.db
-            .current()
-            .query("DELETE oauth2_proof_replay WHERE expires_at < time::now()")
-            .await
-            .map_err(DbError::from)?;
-
-        Ok(total)
+        cleanup_expired_rows(&self.db, "oauth2_proof_replay").await
     }
 }

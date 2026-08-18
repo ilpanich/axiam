@@ -438,14 +438,16 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     result.check().map_err(|e| {
         let msg = e.to_string();
-        // SurrealDB v3 UNIQUE index violation message contains "already
-        // contains" (e.g. bootstrap_lock's implicit record-ID uniqueness
-        // constraint). Also match "already exists" and "unique" as
-        // fallback patterns (mirrors saml_replay.rs::insert_assertion).
-        if msg.contains("already contains")
-            || msg.contains("already exists")
-            || msg.contains("unique")
-        {
+        // A UNIQUE violation here is `bootstrap_lock`'s implicit record-ID
+        // constraint: somebody else won the race to initialise this
+        // deployment, and the loser must get a 409 rather than a second admin.
+        //
+        // What counts as a UNIQUE violation is decided in exactly one place
+        // (D-09) -- `axiam_db::helpers::is_unique_violation`. This site calls
+        // the predicate rather than a whole classifier so it can keep the
+        // "bootstrap transaction:" prefix on the non-conflict branch, which is
+        // what makes a failure here findable in the server log.
+        if axiam_db::helpers::is_unique_violation(&msg) {
             AxiamApiError(AxiamError::AlreadyExists {
                 entity: "bootstrap".into(),
             })

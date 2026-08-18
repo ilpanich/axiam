@@ -5,7 +5,7 @@
 //! `Err(AxiamError::ReplayDetected)` so the authz/audit AMQP consumers can
 //! reject replayed messages (NEW-4). Mirrors [`super::saml_replay`].
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::repository::AmqpNonceRepository;
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::CountRow;
+use crate::helpers::{classify_replay_write_error, cleanup_expired_rows};
 
 // ---------------------------------------------------------------------------
 // Repository
@@ -68,47 +68,16 @@ impl<C: Connection> AmqpNonceRepository for SurrealAmqpNonceRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        // The UNIQUE violation IS the answer: this nonce has been seen, so the
+        // message is a replay. What counts as one is decided in exactly one
+        // place (D-09) -- see `helpers::is_unique_violation`.
         result
             .check()
-            .map_err(|e| {
-                let msg = e.to_string();
-                // SurrealDB v3 UNIQUE index violation message contains
-                // "already contains" (e.g. "Database index
-                // `idx_amqp_nonce_uniq` already contains [...]"). Also match
-                // "already exists" and "unique" as fallback patterns.
-                if msg.contains("already contains")
-                    || msg.contains("already exists")
-                    || msg.contains("unique")
-                {
-                    AxiamError::ReplayDetected
-                } else {
-                    AxiamError::Database(msg)
-                }
-            })
+            .map_err(classify_replay_write_error)
             .map(|_| ())
     }
 
     async fn cleanup_expired(&self) -> AxiamResult<u64> {
-        // Count expired rows first, then delete.
-        let mut count_result = self
-            .db
-            .current()
-            .query(
-                "SELECT count() AS total FROM amqp_nonce_replay \
-                 WHERE expires_at < time::now() GROUP ALL",
-            )
-            .await
-            .map_err(DbError::from)?;
-
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
-
-        self.db
-            .current()
-            .query("DELETE amqp_nonce_replay WHERE expires_at < time::now()")
-            .await
-            .map_err(DbError::from)?;
-
-        Ok(total)
+        cleanup_expired_rows(&self.db, "amqp_nonce_replay").await
     }
 }

@@ -5,7 +5,7 @@
 //! `Err(AxiamError::ReplayDetected)` so the SAML ACS handler can reject
 //! replayed assertions (D-09).
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::repository::AssertionReplayRepository;
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::CountRow;
+use crate::helpers::{classify_replay_write_error, cleanup_expired_rows};
 
 // ---------------------------------------------------------------------------
 // Repository
@@ -68,47 +68,17 @@ impl<C: Connection> AssertionReplayRepository for SurrealAssertionReplayReposito
             .await
             .map_err(DbError::from)?;
 
+        // The UNIQUE violation IS the answer: this assertion ID has been seen.
+        // What counts as one is decided in exactly one place (D-09) so the
+        // three replay guards cannot drift apart -- see
+        // `helpers::is_unique_violation`.
         result
             .check()
-            .map_err(|e| {
-                let msg = e.to_string();
-                // SurrealDB v3 UNIQUE index violation message contains
-                // "already contains" (e.g. "Database index `idx_replay_uniq`
-                // already contains [...]"). Also match "already exists" and
-                // "unique" as fallback patterns.
-                if msg.contains("already contains")
-                    || msg.contains("already exists")
-                    || msg.contains("unique")
-                {
-                    AxiamError::ReplayDetected
-                } else {
-                    AxiamError::Database(msg)
-                }
-            })
+            .map_err(classify_replay_write_error)
             .map(|_| ())
     }
 
     async fn cleanup_expired(&self) -> AxiamResult<u64> {
-        // Count expired rows first, then delete.
-        let mut count_result = self
-            .db
-            .current()
-            .query(
-                "SELECT count() AS total FROM saml_assertion_replay \
-                 WHERE expires_at < time::now() GROUP ALL",
-            )
-            .await
-            .map_err(DbError::from)?;
-
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
-
-        self.db
-            .current()
-            .query("DELETE saml_assertion_replay WHERE expires_at < time::now()")
-            .await
-            .map_err(DbError::from)?;
-
-        Ok(total)
+        cleanup_expired_rows(&self.db, "saml_assertion_replay").await
     }
 }

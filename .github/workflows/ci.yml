@@ -46,7 +46,7 @@ jobs:
   # and finishes in about a second, so it reports an architectural regression
   # long before the compile jobs have finished telling you the code is fine.
   layering:
-    name: Crate Layering
+    name: Architecture Invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -63,6 +63,15 @@ jobs:
       - name: Layer table
         if: always()
         run: python3 scripts/check-crate-layering.py --graph
+
+      # F5 -- UNIQUE-violation detection is a security decision (a replayed
+      # assertion refused or accepted), and D-09 already said it may live in
+      # exactly one place. Five call sites had their own copy anyway. This is
+      # what makes the rule true rather than merely written down.
+      - name: Conflict-marker gate self-test (fixtures)
+        run: python3 scripts/check-conflict-markers.py --self-test
+      - name: Conflict markers appear in one place only
+        run: python3 scripts/check-conflict-markers.py
 
   build:
     name: Build

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::CountRow;
+use crate::helpers::{CountRow, classify_conflict_write_error};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -81,20 +81,9 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
 
         result
             .check()
-            .map_err(|e| {
-                let msg = e.to_string();
-                // UNIQUE index violation on `state` — duplicate state value.
-                if msg.contains("already contains")
-                    || msg.contains("already exists")
-                    || msg.contains("unique")
-                {
-                    AxiamError::AlreadyExists {
-                        entity: "federation_login_state.state".into(),
-                    }
-                } else {
-                    AxiamError::Database(msg)
-                }
-            })
+            // A UNIQUE violation here is a duplicate `state` value. What counts
+            // as one is decided in exactly one place (D-09).
+            .map_err(|e| classify_conflict_write_error(e, "federation_login_state.state"))
             .map(|_| ())
     }
 

@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **UNIQUE-violation detection lives in one place, and CI now says so (F5).**
+  Deciding "was this a conflict?" means matching substrings in a SurrealDB
+  error message, and that match is a security outcome: at the three replay
+  guards it is the difference between refusing a replayed SAML assertion, AMQP
+  nonce or DPoP proof and accepting it as fresh. `classify_write_error` had
+  documented itself as the only place allowed to do it since D-09; five call
+  sites carried their own copy of the marker set anyway, each with a comment
+  pointing at one of the others.
+
+  The markers now live once in `axiam_db::helpers`, behind `is_unique_violation`
+  and three classifiers (`classify_replay_write_error`,
+  `classify_conflict_write_error`, `classify_write_error`), and
+  `scripts/check-conflict-markers.py` fails the build if a sixth inline copy
+  appears. The three replay tables also share one `cleanup_expired_rows` sweep
+  instead of a byte-identical copy each. No behaviour changes: the marker set,
+  the fallthrough to 5xx, and every error variant are what they were.
+
 - **BREAKING: AMQP is TLS-only.** `AXIAM__AMQP__URL` must be `amqps://`; every
   other scheme is refused before a socket is opened, in a debug build exactly
   as in a release one. `AXIAM__AMQP__ALLOW_PLAINTEXT` is **removed** — it is no

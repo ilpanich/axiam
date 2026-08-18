@@ -379,3 +379,55 @@ eleven. Worth a look during normal maintenance, not a project.
 - The coverage floors (88 / 92.4 / 90–98) are the safety net. **Ratchet them up as the
   refactors land; never lower one to accommodate a refactor.** F2 in particular should *raise*
   the server floor by bringing `main.rs` back under measurement.
+
+
+---
+
+## Appendix — implementation status (2026-08-18)
+
+Everything below except **F2** was implemented in the same session that produced
+this review. F2 (extracting `axiam-server::main()` and removing its coverage
+exclusion) was **explicitly deferred by the maintainer**: bringing 2 119 lines
+of untested composition root under the coverage gate without first writing tests
+for it would drop the workspace percentage below the floor, and whether those
+tests can be written at all is an open question. The finding stands as written;
+the work does not.
+
+| Finding | Status | Where |
+|---|---|---|
+| F1 — no architecture gate | done | `scripts/check-crate-layering.py`, CI job *Architecture Invariants* |
+| F2 — `main()` 1 887 lines, coverage-excluded | **deferred by maintainer** | — |
+| F3 — 75-field `AppState` | done | `crates/axiam-api-rest/src/state/` |
+| F4 — 12 telescoping `issue_*` | done | `crates/axiam-auth/src/token.rs` |
+| F5 — near-duplicate repositories | done | `axiam_db::helpers`, `scripts/check-conflict-markers.py` |
+| F6 — rustdoc unenforced | done | `[workspace.lints]`, `missing_docs` on `axiam-core` + `axiam-authz` |
+| F7 — Rust SDK D5 gap | done | `axiam-rust-sdk/tests/d5_conformance.rs` |
+| F8 — `AxiosError` in the view layer | done | `frontend/src/lib/apiError.ts` |
+| F9 — stale vendored `openapi.json` | done | all eleven SDK repos |
+
+### Two things the implementation changed about the review's own conclusions
+
+**F1 — `axiam-db` → `axiam-auth` is not a violation.** The review flagged it as
+"infrastructure depending on domain services". Building the gate forced the
+question properly: under the Clean Architecture dependency rule an outer ring
+(an adapter) reaching *inward* for a domain service is exactly what is
+permitted. Password hashing belongs next to the write, and re-implementing
+Argon2id inside `axiam-db` to tidy the graph would have been the actual mistake.
+The gate encodes inward-only and reports zero production violations today.
+
+**F5 was worse than "duplication", and F8 was worse than "a layering smell".**
+Both turned out to have a live defect underneath:
+
+- The three replay guards each hand-rolled the UNIQUE-violation marker set that
+  `axiam_db::helpers::classify_write_error` had documented since D-09 as
+  belonging in exactly one place — as did `federation_login_state` and the REST
+  bootstrap handler. Five copies, each a security decision, none enforced.
+- `getApiErrorMessage` read `response.data.error` first, which in
+  `axiam_api_rest::error::ErrorBody` is a machine slug rather than prose, so
+  ~40 call sites rendered `validation_error` where the server had written a
+  sentence. Six pages had hand-rolled the correct order inline — and three of
+  those dropped `redactSecrets` on the way past. The pages that would have
+  exposed the bug were the ones routing around it.
+
+Both are fixed, and both now have a CI gate or a regression test rather than a
+convention.

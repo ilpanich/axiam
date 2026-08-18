@@ -85,7 +85,7 @@ lower layer. `axiam-core` (layer 0) has no internal dependencies at all; the
 composition root `axiam-server` (layer 8) may reach everything and nothing may
 reach back.
 
-`scripts/check-crate-layering.py` enforces this in CI (job **Crate Layering**);
+`scripts/check-crate-layering.py` enforces this in CI (job **Architecture Invariants**);
 `--graph` prints the table with every crate's edges resolved against it. Adding a
 crate to the workspace without placing it in that table is itself a failure.
 Test-only outward edges are allowed but must be declared in

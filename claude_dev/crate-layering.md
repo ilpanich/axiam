@@ -1,6 +1,6 @@
 # Crate layering — the dependency rule, and the gate that holds it
 
-**Status:** enforced in CI (`scripts/check-crate-layering.py`, job `Crate Layering`)
+**Status:** enforced in CI (`scripts/check-crate-layering.py`, job `Architecture Invariants`)
 **Introduced by:** the 2026-08 SOLID / clean-architecture review, finding F1
 
 ## The rule

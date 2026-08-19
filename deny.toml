@@ -46,6 +46,45 @@ ignore = [
     # Review date: 2026-08-04. Re-verify with the command above if rust_decimal's feature defaults
     # change, or drop this entry if rust_decimal moves to rkyv >=0.8.17.
     { id = "RUSTSEC-2026-0235", reason = "rkyv is optional in rust_decimal and no feature enables it — zero occurrences in the resolved tree, never compiled; Cargo.lock artifact only. Review: 2026-08-04" },
+    # RUSTSEC-2026-0258: h2 accepts and queues empty DATA frames without limit; if streams are not
+    # actively drained that grows memory without bound, or panics if the length overflows.
+    # Upstream rates it LOW. Solution: upgrade to >=0.4.16.
+    #
+    # READ THIS ENTRY DIFFERENTLY FROM EVERY ONE ABOVE. The others are never compiled
+    # (RUSTSEC-2026-0235), off by default (the quick-xml pair), or off the reachable path
+    # (RUSTSEC-2023-0071). This one IS reachable in a default AXIAM deployment. It is suppressed
+    # only because there is no fix to take:
+    #
+    #   * Two copies of h2 resolve. The `h2 0.4.x` copy — reqwest / tonic / hyper — HAS been
+    #     patched: Cargo.lock pins 0.4.16, so it raises no finding. Note that the suppression is
+    #     keyed by advisory ID, not by version, so it would ALSO mask this advisory if the 0.4
+    #     copy were ever rolled back below 0.4.16 — check `h2` in Cargo.lock before assuming a
+    #     silent audit means only the actix path is affected.
+    #   * `h2 0.3.27` arrives via actix-http <- actix-web / actix-governor and is what serves the
+    #     REST listener. The advisory patches `>=0.4.16` only; there is no 0.3.x backport, and
+    #     `cargo update -p h2@0.3.27` locks 0 packages. actix-http 3.13.3 and actix-web 4.14.1
+    #     (both released 2026-08-09) are the newest versions on crates.io and predate the
+    #     advisory, so there is nothing upstream to pick up yet.
+    #
+    # Exposure, stated rather than assumed: `crates/axiam-server/src/tls.rs:38` advertises
+    # ["h2", "http/1.1"] on the rustls bind, and `reject_unsupported_http2_knob` makes startup FAIL
+    # rather than let an operator narrow ALPN to HTTP/1.1, so every HTTP/2-capable TLS client
+    # negotiates h2 against the affected code. Two things that look like mitigations are not:
+    # the `server.h2` window knobs do not bound this (empty DATA frames consume no flow-control
+    # credit — that is precisely why the bug exists), and actix-http never sends
+    # SETTINGS_MAX_CONCURRENT_STREAMS (see the `max_concurrent_streams` note in tls.rs), so no
+    # stream cap bounds it either.
+    #
+    # What genuinely limits the blast radius: it is availability-only (no key, token or data
+    # compromise), upstream severity is low, and it requires an attacker who can complete a TLS
+    # handshake against the REST listener. An operator who needs the exposure gone before actix
+    # ships a fix can terminate TLS at an edge that does not offer HTTP/2 and leave `server.tls`
+    # disabled — see `docs/security-profiles.md` and `benchmarks/targets/axiam/tls/tls13-h1.conf`.
+    #
+    # Review date: 2026-08-19. DROP THIS ENTRY as soon as actix-http publishes a release built on
+    # h2 0.4.x (watch https://github.com/actix/actix-web/releases) — that is the only reason it is
+    # here, and it should not outlive the missing upstream release.
+    { id = "RUSTSEC-2026-0258", reason = "REACHABLE, not theoretical — unlike every other entry here. h2 0.3.27 via actix-http serves the TLS REST listener and has no patched 0.3.x release (patched >=0.4.16 only; actix-http 3.13.3 predates the advisory). The 0.4.x copy IS patched, to 0.4.16. Availability-only, upstream severity low; h1-only edge termination is the interim mitigation. Drop when actix-http moves to h2 0.4. Review: 2026-08-19" },
 ]
 
 [licenses]

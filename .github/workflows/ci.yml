@@ -140,10 +140,19 @@ jobs:
       #     them in, so this is a lockfile artifact rather than a reachable vulnerability — unlike
       #     the entries above, which are real dependencies with a reachability argument.
       #     Re-verify with the command above if rust_decimal's feature defaults ever change.
+      #   RUSTSEC-2026-0258 — h2 unbounded empty DATA frames (DoS). THIS ONE IS REACHABLE, unlike
+      #     every entry above, and is ignored only because no fix exists to take. Two copies of h2
+      #     resolve: the 0.4.x copy (reqwest/tonic/hyper) IS patched — Cargo.lock pins 0.4.16 — but
+      #     `h2 0.3.27` arrives via actix-http <- actix-web/actix-governor and serves the REST
+      #     listener, and the advisory patches >=0.4.16 only, with no 0.3.x backport
+      #     (`cargo update -p h2@0.3.27` locks 0 packages). actix-http 3.13.3 / actix-web 4.14.1
+      #     are the newest releases and predate the 2026-08-17 advisory. Availability-only,
+      #     upstream severity low. Drop this ID the moment actix-http ships on h2 0.4.
+      #     Full reachability analysis and the interim operator mitigation: deny.toml.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0235
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0235,RUSTSEC-2026-0258
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       - name: cargo deny

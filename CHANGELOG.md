@@ -151,6 +151,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison target is unaffected by it. Re-baseline rather than extending a
   trend line through it.
 
+### Security
+
+- **`h2` bumped to 0.4.16, and RUSTSEC-2026-0258 ignored for the copy that has
+  no fix** (h2 queues empty DATA frames without limit — unbounded memory, or a
+  panic on length overflow; upstream severity low).
+
+  Two copies of `h2` resolve. The **0.4.x copy (reqwest / tonic / hyper) is
+  patched**: `Cargo.lock` moves 0.4.15 → 0.4.16, a lockfile-only change with 91
+  dependencies unchanged. The **0.3.27 copy cannot be**: it arrives via
+  `actix-http` ← `actix-web` / `actix-governor`, the advisory patches `>=0.4.16`
+  only with no 0.3.x backport, and `actix-http` 3.13.3 / `actix-web` 4.14.1 —
+  both released 2026-08-09 — are the newest versions and predate the 2026-08-17
+  advisory. There is nothing upstream to take.
+
+  **That copy is the one serving the REST listener, so this suppression covers a
+  reachable advisory** — unlike every other entry in the ignore list, which are
+  never compiled, off by default, or off the reachable path. `tls.rs` advertises
+  `h2` in ALPN and refuses to start rather than let ALPN be narrowed to
+  HTTP/1.1. Neither the `server.h2` window knobs nor a stream cap bound it
+  (empty DATA frames consume no flow-control credit, and `actix-http` never
+  sends `SETTINGS_MAX_CONCURRENT_STREAMS`). It is availability-only — no key,
+  token or data compromise — and an operator who needs the exposure gone before
+  actix ships a fix can terminate TLS at an edge that does not offer HTTP/2
+  (`docs/security-profiles.md`, `benchmarks/targets/axiam/tls/tls13-h1.conf`).
+
+  The entry carries that reasoning in full in `deny.toml`, and is to be dropped
+  the moment `actix-http` publishes a release built on h2 0.4.
+
 ## [1.0.0-alpha26] - 2026-08-16
 
 ### Added

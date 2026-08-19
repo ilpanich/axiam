@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha28] - 2026-08-19
+
+### Changed
+
+- Enforce the advisory ignore-list invariant instead of asserting it
+- Patch h2 0.4 and document why 0.3 must be ignored
+- Split AppState into seven cohesive sub-states (F3)
+- Name the CI job correctly in the layering docs
+- Enforce missing_docs, starting with axiam-authz (F6)
+- AccessTokenSpec — one description, one signer (F4)
+- One definition of a UNIQUE violation, and a gate (F5)
+- Gate the crate dependency graph on pointing inward (F1)
+- SOLID / clean-code / clean-architecture review of AXIAM + 11 SDKs
+- Bump the minor-patch group with 4 updates
+- Bump actions/upload-artifact from 4.6.2 to 7.0.1
+- Bump taiki-e/install-action from 2.85.10 to 2.85.13
+- Bump github/codeql-action/upload-sarif
+- Bump the minor-patch group in /frontend with 5 updates
+- Re-trigger CI after the 2026-08-17 GitHub outage
+- Bump postcss
+
+### Fixed
+
+- Keep the /oauth2/jwks description byte-stable across F3
+- Route every page error through getApiErrorMessage (F8)
+- Thread the hash gate into the client-gated auth test
+- Use numeric UIDs in USER directives (DL3066)
+- Separate expected-throttle cells from genuine failures
+- Gate ValidateCredentials' Argon2id verify (B1)
+
 ## [1.0.0-alpha27] - 2026-08-17
 
 ### Added

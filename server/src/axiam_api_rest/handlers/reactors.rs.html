@@ -241,7 +241,7 @@
 <a href=#241 id=241 data-nosnippet>241</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());
 <a href=#242 id=242 data-nosnippet>242</a>    }
 <a href=#243 id=243 data-nosnippet>243</a>
-<a href=#244 id=244 data-nosnippet>244</a>    <span class="kw">if </span>!state.reactor_gate.can_dispatch() {
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="kw">if </span>!state.events.reactor_gate.can_dispatch() {
 <a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(axiam_core::error::AxiamError::ServiceUnavailable(
 <a href=#246 id=246 data-nosnippet>246</a>            <span class="string">"the AMQP reactor transport is not available in this build, so a registered \
 <a href=#247 id=247 data-nosnippet>247</a>             reactor could never be reached. Registering one would apply its failure_policy \
@@ -348,209 +348,218 @@
 <a href=#348 id=348 data-nosnippet>348</a>        .map_err(|e| validation_err(e.to_string()))<span class="question-mark">?</span>;
 <a href=#349 id=349 data-nosnippet>349</a>
 <a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">let </span>reactor = state
-<a href=#351 id=351 data-nosnippet>351</a>        .reactor_repo
-<a href=#352 id=352 data-nosnippet>352</a>        .create(CreateReactor {
-<a href=#353 id=353 data-nosnippet>353</a>            tenant_id: user.tenant_id,
-<a href=#354 id=354 data-nosnippet>354</a>            name: req.name,
-<a href=#355 id=355 data-nosnippet>355</a>            description: req.description,
-<a href=#356 id=356 data-nosnippet>356</a>            events: req.events,
-<a href=#357 id=357 data-nosnippet>357</a>            mode: req.mode,
-<a href=#358 id=358 data-nosnippet>358</a>            priority: req.priority,
-<a href=#359 id=359 data-nosnippet>359</a>            timeout_ms: <span class="prelude-val">Some</span>(timeout_ms),
-<a href=#360 id=360 data-nosnippet>360</a>            failure_policy: req.failure_policy,
-<a href=#361 id=361 data-nosnippet>361</a>            enabled: req.enabled,
-<a href=#362 id=362 data-nosnippet>362</a>        })
-<a href=#363 id=363 data-nosnippet>363</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#364 id=364 data-nosnippet>364</a>
-<a href=#365 id=365 data-nosnippet>365</a>    <span class="comment">// X1 — the routing table this replica dispatches from is a TTL cache, so a
-<a href=#366 id=366 data-nosnippet>366</a>    // new registration would otherwise not fire for up to the TTL. Invalidate
-<a href=#367 id=367 data-nosnippet>367</a>    // the tenant's entries here so it is live at once; the TTL remains the
-<a href=#368 id=368 data-nosnippet>368</a>    // guarantee for every OTHER replica, which did not serve this request.
-<a href=#369 id=369 data-nosnippet>369</a>    </span>state.invalidate_reactor_routing(user.tenant_id);
-<a href=#370 id=370 data-nosnippet>370</a>
-<a href=#371 id=371 data-nosnippet>371</a>    <span class="prelude-val">Ok</span>(HttpResponse::Created().json(ReactorResponse::from(reactor)))
-<a href=#372 id=372 data-nosnippet>372</a>}
-<a href=#373 id=373 data-nosnippet>373</a>
-<a href=#374 id=374 data-nosnippet>374</a><span class="doccomment">/// `GET /api/v1/reactors`
-<a href=#375 id=375 data-nosnippet>375</a></span><span class="attr">#[utoipa::path(
-<a href=#376 id=376 data-nosnippet>376</a>    get,
-<a href=#377 id=377 data-nosnippet>377</a>    path = <span class="string">"/api/v1/reactors"</span>,
-<a href=#378 id=378 data-nosnippet>378</a>    tag = <span class="string">"reactors"</span>,
-<a href=#379 id=379 data-nosnippet>379</a>    params(Pagination),
-<a href=#380 id=380 data-nosnippet>380</a>    responses(
-<a href=#381 id=381 data-nosnippet>381</a>        (status = <span class="number">200</span>, description = <span class="string">"Registered reactors"</span>,
-<a href=#382 id=382 data-nosnippet>382</a>         body = inline(PaginatedResult&lt;ReactorResponse&gt;)),
-<a href=#383 id=383 data-nosnippet>383</a>    ),
-<a href=#384 id=384 data-nosnippet>384</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#385 id=385 data-nosnippet>385</a>)]
-<a href=#386 id=386 data-nosnippet>386</a><span class="kw">pub async fn </span>list&lt;C: Connection + Clone&gt;(
-<a href=#387 id=387 data-nosnippet>387</a>    user: AuthenticatedUser,
-<a href=#388 id=388 data-nosnippet>388</a>    authz: AuthzData,
-<a href=#389 id=389 data-nosnippet>389</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#390 id=390 data-nosnippet>390</a>    pagination: web::Query&lt;Pagination&gt;,
-<a href=#391 id=391 data-nosnippet>391</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#392 id=392 data-nosnippet>392</a>    RequirePermission::new(<span class="string">"reactors:list"</span>, Uuid::nil())
-<a href=#393 id=393 data-nosnippet>393</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#394 id=394 data-nosnippet>394</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#395 id=395 data-nosnippet>395</a>    <span class="kw">let </span>result = state
-<a href=#396 id=396 data-nosnippet>396</a>        .reactor_repo
-<a href=#397 id=397 data-nosnippet>397</a>        .list(user.tenant_id, pagination.into_inner())
-<a href=#398 id=398 data-nosnippet>398</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#399 id=399 data-nosnippet>399</a>
-<a href=#400 id=400 data-nosnippet>400</a>    <span class="comment">// R2.3: one page of reactors is small (an admin console's page size, not
-<a href=#401 id=401 data-nosnippet>401</a>    // the event-path scale reactors themselves dispatch at), so a sequential
-<a href=#402 id=402 data-nosnippet>402</a>    // per-reactor health read is the honest cost of "current health" — the
-<a href=#403 id=403 data-nosnippet>403</a>    // alternative is a stale cached number a fail_closed veto going quiet
-<a href=#404 id=404 data-nosnippet>404</a>    // would not show up in promptly.
-<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>items = Vec::with_capacity(result.items.len());
-<a href=#406 id=406 data-nosnippet>406</a>    <span class="kw">for </span>reactor <span class="kw">in </span>result.items {
-<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">let </span>health = reactor_health(<span class="kw-2">&amp;</span>state.audit_repo, user.tenant_id, reactor.id).<span class="kw">await</span>;
-<a href=#408 id=408 data-nosnippet>408</a>        items.push(ReactorResponse::from(reactor).with_health(health));
-<a href=#409 id=409 data-nosnippet>409</a>    }
-<a href=#410 id=410 data-nosnippet>410</a>
-<a href=#411 id=411 data-nosnippet>411</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(PaginatedResult {
-<a href=#412 id=412 data-nosnippet>412</a>        items,
-<a href=#413 id=413 data-nosnippet>413</a>        total: result.total,
-<a href=#414 id=414 data-nosnippet>414</a>        offset: result.offset,
-<a href=#415 id=415 data-nosnippet>415</a>        limit: result.limit,
-<a href=#416 id=416 data-nosnippet>416</a>    }))
-<a href=#417 id=417 data-nosnippet>417</a>}
-<a href=#418 id=418 data-nosnippet>418</a>
-<a href=#419 id=419 data-nosnippet>419</a><span class="doccomment">/// `GET /api/v1/reactors/{id}`
-<a href=#420 id=420 data-nosnippet>420</a></span><span class="attr">#[utoipa::path(
-<a href=#421 id=421 data-nosnippet>421</a>    get,
-<a href=#422 id=422 data-nosnippet>422</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
-<a href=#423 id=423 data-nosnippet>423</a>    tag = <span class="string">"reactors"</span>,
-<a href=#424 id=424 data-nosnippet>424</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
-<a href=#425 id=425 data-nosnippet>425</a>    responses((status = <span class="number">200</span>, description = <span class="string">"Reactor found"</span>, body = ReactorResponse)),
-<a href=#426 id=426 data-nosnippet>426</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#427 id=427 data-nosnippet>427</a>)]
-<a href=#428 id=428 data-nosnippet>428</a><span class="kw">pub async fn </span>get&lt;C: Connection + Clone&gt;(
-<a href=#429 id=429 data-nosnippet>429</a>    user: AuthenticatedUser,
-<a href=#430 id=430 data-nosnippet>430</a>    authz: AuthzData,
-<a href=#431 id=431 data-nosnippet>431</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#432 id=432 data-nosnippet>432</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#433 id=433 data-nosnippet>433</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#434 id=434 data-nosnippet>434</a>    RequirePermission::new(<span class="string">"reactors:get"</span>, Uuid::nil())
-<a href=#435 id=435 data-nosnippet>435</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#436 id=436 data-nosnippet>436</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#437 id=437 data-nosnippet>437</a>    <span class="kw">let </span>reactor = state
-<a href=#438 id=438 data-nosnippet>438</a>        .reactor_repo
-<a href=#439 id=439 data-nosnippet>439</a>        .get_by_id(user.tenant_id, path.into_inner())
-<a href=#440 id=440 data-nosnippet>440</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#441 id=441 data-nosnippet>441</a>    <span class="kw">let </span>health = reactor_health(<span class="kw-2">&amp;</span>state.audit_repo, user.tenant_id, reactor.id).<span class="kw">await</span>;
-<a href=#442 id=442 data-nosnippet>442</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(ReactorResponse::from(reactor).with_health(health)))
-<a href=#443 id=443 data-nosnippet>443</a>}
-<a href=#444 id=444 data-nosnippet>444</a>
-<a href=#445 id=445 data-nosnippet>445</a><span class="doccomment">/// `PUT /api/v1/reactors/{id}`
-<a href=#446 id=446 data-nosnippet>446</a></span><span class="attr">#[utoipa::path(
-<a href=#447 id=447 data-nosnippet>447</a>    put,
-<a href=#448 id=448 data-nosnippet>448</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
-<a href=#449 id=449 data-nosnippet>449</a>    tag = <span class="string">"reactors"</span>,
-<a href=#450 id=450 data-nosnippet>450</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
-<a href=#451 id=451 data-nosnippet>451</a>    request_body = UpdateReactorRequest,
-<a href=#452 id=452 data-nosnippet>452</a>    responses(
-<a href=#453 id=453 data-nosnippet>453</a>        (status = <span class="number">200</span>, description = <span class="string">"Reactor updated"</span>, body = ReactorResponse),
-<a href=#454 id=454 data-nosnippet>454</a>        (status = <span class="number">400</span>, description = <span class="string">"The merged registration is invalid"</span>),
-<a href=#455 id=455 data-nosnippet>455</a>    ),
-<a href=#456 id=456 data-nosnippet>456</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#457 id=457 data-nosnippet>457</a>)]
-<a href=#458 id=458 data-nosnippet>458</a><span class="kw">pub async fn </span>update&lt;C: Connection + Clone&gt;(
-<a href=#459 id=459 data-nosnippet>459</a>    user: AuthenticatedUser,
-<a href=#460 id=460 data-nosnippet>460</a>    authz: AuthzData,
-<a href=#461 id=461 data-nosnippet>461</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#462 id=462 data-nosnippet>462</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#463 id=463 data-nosnippet>463</a>    body: web::Json&lt;UpdateReactorRequest&gt;,
-<a href=#464 id=464 data-nosnippet>464</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#465 id=465 data-nosnippet>465</a>    RequirePermission::new(<span class="string">"reactors:update"</span>, Uuid::nil())
-<a href=#466 id=466 data-nosnippet>466</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#467 id=467 data-nosnippet>467</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#468 id=468 data-nosnippet>468</a>    <span class="kw">let </span>id = path.into_inner();
-<a href=#469 id=469 data-nosnippet>469</a>    <span class="kw">let </span>req = body.into_inner();
-<a href=#470 id=470 data-nosnippet>470</a>
-<a href=#471 id=471 data-nosnippet>471</a>    <span class="comment">// Validate the MERGED registration, not the request.
-<a href=#472 id=472 data-nosnippet>472</a>    //
-<a href=#473 id=473 data-nosnippet>473</a>    // A PUT that only sets `mode: intercept` is valid in isolation and
-<a href=#474 id=474 data-nosnippet>474</a>    // invalid against a stored `events` list containing a listen-only event.
-<a href=#475 id=475 data-nosnippet>475</a>    // Validating the request alone would let exactly that combination through
-<a href=#476 id=476 data-nosnippet>476</a>    // — the request names one field and the violation is in the pair.
-<a href=#477 id=477 data-nosnippet>477</a>    </span><span class="kw">let </span>current = state.reactor_repo.get_by_id(user.tenant_id, id).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#478 id=478 data-nosnippet>478</a>    <span class="kw">let </span>merged_name = req.name.clone().unwrap_or_else(|| current.name.clone());
-<a href=#479 id=479 data-nosnippet>479</a>    <span class="kw">let </span>merged_events = req.events.clone().unwrap_or_else(|| current.events.clone());
-<a href=#480 id=480 data-nosnippet>480</a>    <span class="kw">let </span>merged_mode = req.mode.unwrap_or(current.mode);
-<a href=#481 id=481 data-nosnippet>481</a>    <span class="kw">let </span>merged_timeout = req.timeout_ms.unwrap_or(current.timeout_ms);
-<a href=#482 id=482 data-nosnippet>482</a>    <span class="kw">let </span>merged_enabled = req.enabled.unwrap_or(current.enabled);
-<a href=#483 id=483 data-nosnippet>483</a>
-<a href=#484 id=484 data-nosnippet>484</a>    <span class="comment">// SEC-101, on the merged result: an update that leaves the registration
-<a href=#485 id=485 data-nosnippet>485</a>    // enabled is refused while the transport cannot deliver, and one that
-<a href=#486 id=486 data-nosnippet>486</a>    // disables it is always allowed — that is the operator's way out.
-<a href=#487 id=487 data-nosnippet>487</a>    </span>require_dispatchable_transport(state.get_ref(), merged_enabled, merged_mode)<span class="question-mark">?</span>;
-<a href=#488 id=488 data-nosnippet>488</a>
-<a href=#489 id=489 data-nosnippet>489</a>    validate_registration(<span class="kw-2">&amp;</span>merged_name, <span class="kw-2">&amp;</span>merged_events, merged_mode, merged_timeout)
-<a href=#490 id=490 data-nosnippet>490</a>        .map_err(|e| validation_err(e.to_string()))<span class="question-mark">?</span>;
-<a href=#491 id=491 data-nosnippet>491</a>
-<a href=#492 id=492 data-nosnippet>492</a>    <span class="comment">// Changing the event set can change what the STORED failure_policy means.
-<a href=#493 id=493 data-nosnippet>493</a>    // If the caller replaces the events and does not name a policy, re-derive
-<a href=#494 id=494 data-nosnippet>494</a>    // it: a reactor that was enrichment-only (fail_open) and is now also
-<a href=#495 id=495 data-nosnippet>495</a>    // registered for `login.post_auth` must not keep passing when unreachable.
-<a href=#496 id=496 data-nosnippet>496</a>    </span><span class="kw">let </span>failure_policy = <span class="kw">match </span>(req.failure_policy, req.events.is_some()) {
-<a href=#497 id=497 data-nosnippet>497</a>        (<span class="prelude-val">Some</span>(explicit), <span class="kw">_</span>) =&gt; <span class="prelude-val">Some</span>(explicit),
-<a href=#498 id=498 data-nosnippet>498</a>        (<span class="prelude-val">None</span>, <span class="bool-val">true</span>) =&gt; <span class="prelude-val">Some</span>(default_failure_policy_for(<span class="kw-2">&amp;</span>merged_events)),
-<a href=#499 id=499 data-nosnippet>499</a>        (<span class="prelude-val">None</span>, <span class="bool-val">false</span>) =&gt; <span class="prelude-val">None</span>,
-<a href=#500 id=500 data-nosnippet>500</a>    };
-<a href=#501 id=501 data-nosnippet>501</a>
-<a href=#502 id=502 data-nosnippet>502</a>    <span class="kw">let </span>reactor = state
-<a href=#503 id=503 data-nosnippet>503</a>        .reactor_repo
-<a href=#504 id=504 data-nosnippet>504</a>        .update(
-<a href=#505 id=505 data-nosnippet>505</a>            user.tenant_id,
-<a href=#506 id=506 data-nosnippet>506</a>            id,
-<a href=#507 id=507 data-nosnippet>507</a>            UpdateReactor {
-<a href=#508 id=508 data-nosnippet>508</a>                name: req.name,
-<a href=#509 id=509 data-nosnippet>509</a>                description: req.description,
-<a href=#510 id=510 data-nosnippet>510</a>                events: req.events,
-<a href=#511 id=511 data-nosnippet>511</a>                mode: req.mode,
-<a href=#512 id=512 data-nosnippet>512</a>                priority: req.priority,
-<a href=#513 id=513 data-nosnippet>513</a>                timeout_ms: req.timeout_ms,
-<a href=#514 id=514 data-nosnippet>514</a>                failure_policy,
-<a href=#515 id=515 data-nosnippet>515</a>                enabled: req.enabled,
-<a href=#516 id=516 data-nosnippet>516</a>            },
-<a href=#517 id=517 data-nosnippet>517</a>        )
-<a href=#518 id=518 data-nosnippet>518</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#519 id=519 data-nosnippet>519</a>
-<a href=#520 id=520 data-nosnippet>520</a>    state.invalidate_reactor_routing(user.tenant_id);
-<a href=#521 id=521 data-nosnippet>521</a>
-<a href=#522 id=522 data-nosnippet>522</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(ReactorResponse::from(reactor)))
-<a href=#523 id=523 data-nosnippet>523</a>}
-<a href=#524 id=524 data-nosnippet>524</a>
-<a href=#525 id=525 data-nosnippet>525</a><span class="doccomment">/// `DELETE /api/v1/reactors/{id}`
-<a href=#526 id=526 data-nosnippet>526</a></span><span class="attr">#[utoipa::path(
-<a href=#527 id=527 data-nosnippet>527</a>    delete,
-<a href=#528 id=528 data-nosnippet>528</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
-<a href=#529 id=529 data-nosnippet>529</a>    tag = <span class="string">"reactors"</span>,
-<a href=#530 id=530 data-nosnippet>530</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
-<a href=#531 id=531 data-nosnippet>531</a>    responses((status = <span class="number">204</span>, description = <span class="string">"Reactor deleted"</span>)),
-<a href=#532 id=532 data-nosnippet>532</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#533 id=533 data-nosnippet>533</a>)]
-<a href=#534 id=534 data-nosnippet>534</a><span class="kw">pub async fn </span>delete&lt;C: Connection + Clone&gt;(
-<a href=#535 id=535 data-nosnippet>535</a>    user: AuthenticatedUser,
-<a href=#536 id=536 data-nosnippet>536</a>    authz: AuthzData,
-<a href=#537 id=537 data-nosnippet>537</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#538 id=538 data-nosnippet>538</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#539 id=539 data-nosnippet>539</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#540 id=540 data-nosnippet>540</a>    RequirePermission::new(<span class="string">"reactors:delete"</span>, Uuid::nil())
-<a href=#541 id=541 data-nosnippet>541</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#542 id=542 data-nosnippet>542</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#543 id=543 data-nosnippet>543</a>    state
-<a href=#544 id=544 data-nosnippet>544</a>        .reactor_repo
-<a href=#545 id=545 data-nosnippet>545</a>        .delete(user.tenant_id, path.into_inner())
-<a href=#546 id=546 data-nosnippet>546</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#547 id=547 data-nosnippet>547</a>
-<a href=#548 id=548 data-nosnippet>548</a>    <span class="comment">// Deleting matters most of the three: an interceptor that no longer exists
-<a href=#549 id=549 data-nosnippet>549</a>    // must stop being dispatched to, and a `fail_closed` one that is still in
-<a href=#550 id=550 data-nosnippet>550</a>    // the routing table would deny every login it was registered for until the
-<a href=#551 id=551 data-nosnippet>551</a>    // TTL expired.
-<a href=#552 id=552 data-nosnippet>552</a>    </span>state.invalidate_reactor_routing(user.tenant_id);
-<a href=#553 id=553 data-nosnippet>553</a>
-<a href=#554 id=554 data-nosnippet>554</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#555 id=555 data-nosnippet>555</a>}
+<a href=#351 id=351 data-nosnippet>351</a>        .events
+<a href=#352 id=352 data-nosnippet>352</a>        .reactor_repo
+<a href=#353 id=353 data-nosnippet>353</a>        .create(CreateReactor {
+<a href=#354 id=354 data-nosnippet>354</a>            tenant_id: user.tenant_id,
+<a href=#355 id=355 data-nosnippet>355</a>            name: req.name,
+<a href=#356 id=356 data-nosnippet>356</a>            description: req.description,
+<a href=#357 id=357 data-nosnippet>357</a>            events: req.events,
+<a href=#358 id=358 data-nosnippet>358</a>            mode: req.mode,
+<a href=#359 id=359 data-nosnippet>359</a>            priority: req.priority,
+<a href=#360 id=360 data-nosnippet>360</a>            timeout_ms: <span class="prelude-val">Some</span>(timeout_ms),
+<a href=#361 id=361 data-nosnippet>361</a>            failure_policy: req.failure_policy,
+<a href=#362 id=362 data-nosnippet>362</a>            enabled: req.enabled,
+<a href=#363 id=363 data-nosnippet>363</a>        })
+<a href=#364 id=364 data-nosnippet>364</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="comment">// X1 — the routing table this replica dispatches from is a TTL cache, so a
+<a href=#367 id=367 data-nosnippet>367</a>    // new registration would otherwise not fire for up to the TTL. Invalidate
+<a href=#368 id=368 data-nosnippet>368</a>    // the tenant's entries here so it is live at once; the TTL remains the
+<a href=#369 id=369 data-nosnippet>369</a>    // guarantee for every OTHER replica, which did not serve this request.
+<a href=#370 id=370 data-nosnippet>370</a>    </span>state.invalidate_reactor_routing(user.tenant_id);
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="prelude-val">Ok</span>(HttpResponse::Created().json(ReactorResponse::from(reactor)))
+<a href=#373 id=373 data-nosnippet>373</a>}
+<a href=#374 id=374 data-nosnippet>374</a>
+<a href=#375 id=375 data-nosnippet>375</a><span class="doccomment">/// `GET /api/v1/reactors`
+<a href=#376 id=376 data-nosnippet>376</a></span><span class="attr">#[utoipa::path(
+<a href=#377 id=377 data-nosnippet>377</a>    get,
+<a href=#378 id=378 data-nosnippet>378</a>    path = <span class="string">"/api/v1/reactors"</span>,
+<a href=#379 id=379 data-nosnippet>379</a>    tag = <span class="string">"reactors"</span>,
+<a href=#380 id=380 data-nosnippet>380</a>    params(Pagination),
+<a href=#381 id=381 data-nosnippet>381</a>    responses(
+<a href=#382 id=382 data-nosnippet>382</a>        (status = <span class="number">200</span>, description = <span class="string">"Registered reactors"</span>,
+<a href=#383 id=383 data-nosnippet>383</a>         body = inline(PaginatedResult&lt;ReactorResponse&gt;)),
+<a href=#384 id=384 data-nosnippet>384</a>    ),
+<a href=#385 id=385 data-nosnippet>385</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#386 id=386 data-nosnippet>386</a>)]
+<a href=#387 id=387 data-nosnippet>387</a><span class="kw">pub async fn </span>list&lt;C: Connection + Clone&gt;(
+<a href=#388 id=388 data-nosnippet>388</a>    user: AuthenticatedUser,
+<a href=#389 id=389 data-nosnippet>389</a>    authz: AuthzData,
+<a href=#390 id=390 data-nosnippet>390</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#391 id=391 data-nosnippet>391</a>    pagination: web::Query&lt;Pagination&gt;,
+<a href=#392 id=392 data-nosnippet>392</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#393 id=393 data-nosnippet>393</a>    RequirePermission::new(<span class="string">"reactors:list"</span>, Uuid::nil())
+<a href=#394 id=394 data-nosnippet>394</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#395 id=395 data-nosnippet>395</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#396 id=396 data-nosnippet>396</a>    <span class="kw">let </span>result = state
+<a href=#397 id=397 data-nosnippet>397</a>        .events
+<a href=#398 id=398 data-nosnippet>398</a>        .reactor_repo
+<a href=#399 id=399 data-nosnippet>399</a>        .list(user.tenant_id, pagination.into_inner())
+<a href=#400 id=400 data-nosnippet>400</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="comment">// R2.3: one page of reactors is small (an admin console's page size, not
+<a href=#403 id=403 data-nosnippet>403</a>    // the event-path scale reactors themselves dispatch at), so a sequential
+<a href=#404 id=404 data-nosnippet>404</a>    // per-reactor health read is the honest cost of "current health" — the
+<a href=#405 id=405 data-nosnippet>405</a>    // alternative is a stale cached number a fail_closed veto going quiet
+<a href=#406 id=406 data-nosnippet>406</a>    // would not show up in promptly.
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>items = Vec::with_capacity(result.items.len());
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="kw">for </span>reactor <span class="kw">in </span>result.items {
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">let </span>health = reactor_health(<span class="kw-2">&amp;</span>state.audit_repo, user.tenant_id, reactor.id).<span class="kw">await</span>;
+<a href=#410 id=410 data-nosnippet>410</a>        items.push(ReactorResponse::from(reactor).with_health(health));
+<a href=#411 id=411 data-nosnippet>411</a>    }
+<a href=#412 id=412 data-nosnippet>412</a>
+<a href=#413 id=413 data-nosnippet>413</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(PaginatedResult {
+<a href=#414 id=414 data-nosnippet>414</a>        items,
+<a href=#415 id=415 data-nosnippet>415</a>        total: result.total,
+<a href=#416 id=416 data-nosnippet>416</a>        offset: result.offset,
+<a href=#417 id=417 data-nosnippet>417</a>        limit: result.limit,
+<a href=#418 id=418 data-nosnippet>418</a>    }))
+<a href=#419 id=419 data-nosnippet>419</a>}
+<a href=#420 id=420 data-nosnippet>420</a>
+<a href=#421 id=421 data-nosnippet>421</a><span class="doccomment">/// `GET /api/v1/reactors/{id}`
+<a href=#422 id=422 data-nosnippet>422</a></span><span class="attr">#[utoipa::path(
+<a href=#423 id=423 data-nosnippet>423</a>    get,
+<a href=#424 id=424 data-nosnippet>424</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
+<a href=#425 id=425 data-nosnippet>425</a>    tag = <span class="string">"reactors"</span>,
+<a href=#426 id=426 data-nosnippet>426</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
+<a href=#427 id=427 data-nosnippet>427</a>    responses((status = <span class="number">200</span>, description = <span class="string">"Reactor found"</span>, body = ReactorResponse)),
+<a href=#428 id=428 data-nosnippet>428</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#429 id=429 data-nosnippet>429</a>)]
+<a href=#430 id=430 data-nosnippet>430</a><span class="kw">pub async fn </span>get&lt;C: Connection + Clone&gt;(
+<a href=#431 id=431 data-nosnippet>431</a>    user: AuthenticatedUser,
+<a href=#432 id=432 data-nosnippet>432</a>    authz: AuthzData,
+<a href=#433 id=433 data-nosnippet>433</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#434 id=434 data-nosnippet>434</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#435 id=435 data-nosnippet>435</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#436 id=436 data-nosnippet>436</a>    RequirePermission::new(<span class="string">"reactors:get"</span>, Uuid::nil())
+<a href=#437 id=437 data-nosnippet>437</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#438 id=438 data-nosnippet>438</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="kw">let </span>reactor = state
+<a href=#440 id=440 data-nosnippet>440</a>        .events
+<a href=#441 id=441 data-nosnippet>441</a>        .reactor_repo
+<a href=#442 id=442 data-nosnippet>442</a>        .get_by_id(user.tenant_id, path.into_inner())
+<a href=#443 id=443 data-nosnippet>443</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#444 id=444 data-nosnippet>444</a>    <span class="kw">let </span>health = reactor_health(<span class="kw-2">&amp;</span>state.audit_repo, user.tenant_id, reactor.id).<span class="kw">await</span>;
+<a href=#445 id=445 data-nosnippet>445</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(ReactorResponse::from(reactor).with_health(health)))
+<a href=#446 id=446 data-nosnippet>446</a>}
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a><span class="doccomment">/// `PUT /api/v1/reactors/{id}`
+<a href=#449 id=449 data-nosnippet>449</a></span><span class="attr">#[utoipa::path(
+<a href=#450 id=450 data-nosnippet>450</a>    put,
+<a href=#451 id=451 data-nosnippet>451</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
+<a href=#452 id=452 data-nosnippet>452</a>    tag = <span class="string">"reactors"</span>,
+<a href=#453 id=453 data-nosnippet>453</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
+<a href=#454 id=454 data-nosnippet>454</a>    request_body = UpdateReactorRequest,
+<a href=#455 id=455 data-nosnippet>455</a>    responses(
+<a href=#456 id=456 data-nosnippet>456</a>        (status = <span class="number">200</span>, description = <span class="string">"Reactor updated"</span>, body = ReactorResponse),
+<a href=#457 id=457 data-nosnippet>457</a>        (status = <span class="number">400</span>, description = <span class="string">"The merged registration is invalid"</span>),
+<a href=#458 id=458 data-nosnippet>458</a>    ),
+<a href=#459 id=459 data-nosnippet>459</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#460 id=460 data-nosnippet>460</a>)]
+<a href=#461 id=461 data-nosnippet>461</a><span class="kw">pub async fn </span>update&lt;C: Connection + Clone&gt;(
+<a href=#462 id=462 data-nosnippet>462</a>    user: AuthenticatedUser,
+<a href=#463 id=463 data-nosnippet>463</a>    authz: AuthzData,
+<a href=#464 id=464 data-nosnippet>464</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#465 id=465 data-nosnippet>465</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#466 id=466 data-nosnippet>466</a>    body: web::Json&lt;UpdateReactorRequest&gt;,
+<a href=#467 id=467 data-nosnippet>467</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#468 id=468 data-nosnippet>468</a>    RequirePermission::new(<span class="string">"reactors:update"</span>, Uuid::nil())
+<a href=#469 id=469 data-nosnippet>469</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#470 id=470 data-nosnippet>470</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#471 id=471 data-nosnippet>471</a>    <span class="kw">let </span>id = path.into_inner();
+<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw">let </span>req = body.into_inner();
+<a href=#473 id=473 data-nosnippet>473</a>
+<a href=#474 id=474 data-nosnippet>474</a>    <span class="comment">// Validate the MERGED registration, not the request.
+<a href=#475 id=475 data-nosnippet>475</a>    //
+<a href=#476 id=476 data-nosnippet>476</a>    // A PUT that only sets `mode: intercept` is valid in isolation and
+<a href=#477 id=477 data-nosnippet>477</a>    // invalid against a stored `events` list containing a listen-only event.
+<a href=#478 id=478 data-nosnippet>478</a>    // Validating the request alone would let exactly that combination through
+<a href=#479 id=479 data-nosnippet>479</a>    // — the request names one field and the violation is in the pair.
+<a href=#480 id=480 data-nosnippet>480</a>    </span><span class="kw">let </span>current = state
+<a href=#481 id=481 data-nosnippet>481</a>        .events
+<a href=#482 id=482 data-nosnippet>482</a>        .reactor_repo
+<a href=#483 id=483 data-nosnippet>483</a>        .get_by_id(user.tenant_id, id)
+<a href=#484 id=484 data-nosnippet>484</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#485 id=485 data-nosnippet>485</a>    <span class="kw">let </span>merged_name = req.name.clone().unwrap_or_else(|| current.name.clone());
+<a href=#486 id=486 data-nosnippet>486</a>    <span class="kw">let </span>merged_events = req.events.clone().unwrap_or_else(|| current.events.clone());
+<a href=#487 id=487 data-nosnippet>487</a>    <span class="kw">let </span>merged_mode = req.mode.unwrap_or(current.mode);
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="kw">let </span>merged_timeout = req.timeout_ms.unwrap_or(current.timeout_ms);
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="kw">let </span>merged_enabled = req.enabled.unwrap_or(current.enabled);
+<a href=#490 id=490 data-nosnippet>490</a>
+<a href=#491 id=491 data-nosnippet>491</a>    <span class="comment">// SEC-101, on the merged result: an update that leaves the registration
+<a href=#492 id=492 data-nosnippet>492</a>    // enabled is refused while the transport cannot deliver, and one that
+<a href=#493 id=493 data-nosnippet>493</a>    // disables it is always allowed — that is the operator's way out.
+<a href=#494 id=494 data-nosnippet>494</a>    </span>require_dispatchable_transport(state.get_ref(), merged_enabled, merged_mode)<span class="question-mark">?</span>;
+<a href=#495 id=495 data-nosnippet>495</a>
+<a href=#496 id=496 data-nosnippet>496</a>    validate_registration(<span class="kw-2">&amp;</span>merged_name, <span class="kw-2">&amp;</span>merged_events, merged_mode, merged_timeout)
+<a href=#497 id=497 data-nosnippet>497</a>        .map_err(|e| validation_err(e.to_string()))<span class="question-mark">?</span>;
+<a href=#498 id=498 data-nosnippet>498</a>
+<a href=#499 id=499 data-nosnippet>499</a>    <span class="comment">// Changing the event set can change what the STORED failure_policy means.
+<a href=#500 id=500 data-nosnippet>500</a>    // If the caller replaces the events and does not name a policy, re-derive
+<a href=#501 id=501 data-nosnippet>501</a>    // it: a reactor that was enrichment-only (fail_open) and is now also
+<a href=#502 id=502 data-nosnippet>502</a>    // registered for `login.post_auth` must not keep passing when unreachable.
+<a href=#503 id=503 data-nosnippet>503</a>    </span><span class="kw">let </span>failure_policy = <span class="kw">match </span>(req.failure_policy, req.events.is_some()) {
+<a href=#504 id=504 data-nosnippet>504</a>        (<span class="prelude-val">Some</span>(explicit), <span class="kw">_</span>) =&gt; <span class="prelude-val">Some</span>(explicit),
+<a href=#505 id=505 data-nosnippet>505</a>        (<span class="prelude-val">None</span>, <span class="bool-val">true</span>) =&gt; <span class="prelude-val">Some</span>(default_failure_policy_for(<span class="kw-2">&amp;</span>merged_events)),
+<a href=#506 id=506 data-nosnippet>506</a>        (<span class="prelude-val">None</span>, <span class="bool-val">false</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#507 id=507 data-nosnippet>507</a>    };
+<a href=#508 id=508 data-nosnippet>508</a>
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="kw">let </span>reactor = state
+<a href=#510 id=510 data-nosnippet>510</a>        .events
+<a href=#511 id=511 data-nosnippet>511</a>        .reactor_repo
+<a href=#512 id=512 data-nosnippet>512</a>        .update(
+<a href=#513 id=513 data-nosnippet>513</a>            user.tenant_id,
+<a href=#514 id=514 data-nosnippet>514</a>            id,
+<a href=#515 id=515 data-nosnippet>515</a>            UpdateReactor {
+<a href=#516 id=516 data-nosnippet>516</a>                name: req.name,
+<a href=#517 id=517 data-nosnippet>517</a>                description: req.description,
+<a href=#518 id=518 data-nosnippet>518</a>                events: req.events,
+<a href=#519 id=519 data-nosnippet>519</a>                mode: req.mode,
+<a href=#520 id=520 data-nosnippet>520</a>                priority: req.priority,
+<a href=#521 id=521 data-nosnippet>521</a>                timeout_ms: req.timeout_ms,
+<a href=#522 id=522 data-nosnippet>522</a>                failure_policy,
+<a href=#523 id=523 data-nosnippet>523</a>                enabled: req.enabled,
+<a href=#524 id=524 data-nosnippet>524</a>            },
+<a href=#525 id=525 data-nosnippet>525</a>        )
+<a href=#526 id=526 data-nosnippet>526</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#527 id=527 data-nosnippet>527</a>
+<a href=#528 id=528 data-nosnippet>528</a>    state.invalidate_reactor_routing(user.tenant_id);
+<a href=#529 id=529 data-nosnippet>529</a>
+<a href=#530 id=530 data-nosnippet>530</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(ReactorResponse::from(reactor)))
+<a href=#531 id=531 data-nosnippet>531</a>}
+<a href=#532 id=532 data-nosnippet>532</a>
+<a href=#533 id=533 data-nosnippet>533</a><span class="doccomment">/// `DELETE /api/v1/reactors/{id}`
+<a href=#534 id=534 data-nosnippet>534</a></span><span class="attr">#[utoipa::path(
+<a href=#535 id=535 data-nosnippet>535</a>    delete,
+<a href=#536 id=536 data-nosnippet>536</a>    path = <span class="string">"/api/v1/reactors/{id}"</span>,
+<a href=#537 id=537 data-nosnippet>537</a>    tag = <span class="string">"reactors"</span>,
+<a href=#538 id=538 data-nosnippet>538</a>    params((<span class="string">"id" </span>= Uuid, Path, description = <span class="string">"Reactor ID"</span>)),
+<a href=#539 id=539 data-nosnippet>539</a>    responses((status = <span class="number">204</span>, description = <span class="string">"Reactor deleted"</span>)),
+<a href=#540 id=540 data-nosnippet>540</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#541 id=541 data-nosnippet>541</a>)]
+<a href=#542 id=542 data-nosnippet>542</a><span class="kw">pub async fn </span>delete&lt;C: Connection + Clone&gt;(
+<a href=#543 id=543 data-nosnippet>543</a>    user: AuthenticatedUser,
+<a href=#544 id=544 data-nosnippet>544</a>    authz: AuthzData,
+<a href=#545 id=545 data-nosnippet>545</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#546 id=546 data-nosnippet>546</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#547 id=547 data-nosnippet>547</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#548 id=548 data-nosnippet>548</a>    RequirePermission::new(<span class="string">"reactors:delete"</span>, Uuid::nil())
+<a href=#549 id=549 data-nosnippet>549</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#550 id=550 data-nosnippet>550</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#551 id=551 data-nosnippet>551</a>    state
+<a href=#552 id=552 data-nosnippet>552</a>        .events
+<a href=#553 id=553 data-nosnippet>553</a>        .reactor_repo
+<a href=#554 id=554 data-nosnippet>554</a>        .delete(user.tenant_id, path.into_inner())
+<a href=#555 id=555 data-nosnippet>555</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a>    <span class="comment">// Deleting matters most of the three: an interceptor that no longer exists
+<a href=#558 id=558 data-nosnippet>558</a>    // must stop being dispatched to, and a `fail_closed` one that is still in
+<a href=#559 id=559 data-nosnippet>559</a>    // the routing table would deny every login it was registered for until the
+<a href=#560 id=560 data-nosnippet>560</a>    // TTL expired.
+<a href=#561 id=561 data-nosnippet>561</a>    </span>state.invalidate_reactor_routing(user.tenant_id);
+<a href=#562 id=562 data-nosnippet>562</a>
+<a href=#563 id=563 data-nosnippet>563</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#564 id=564 data-nosnippet>564</a>}
 </code></pre></div></section></main></body></html>

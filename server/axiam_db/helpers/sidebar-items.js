@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DELETE_TARGET_MISSING"],"fn":["classify_write_error","delete_existence_guard","is_transaction_conflict","map_delete_errors","paginate","parse_uuid","take_first_or_not_found"],"struct":["CountRow"]};
+window.SIDEBAR_ITEMS = {"constant":["DELETE_TARGET_MISSING"],"fn":["classify_conflict_write_error","classify_replay_write_error","classify_write_error","cleanup_expired_rows","delete_existence_guard","is_transaction_conflict","is_unique_violation","map_delete_errors","paginate","parse_uuid","take_first_or_not_found"],"struct":["CountRow"]};

@@ -107,7 +107,7 @@
 <a href=#107 id=107 data-nosnippet>107</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
 <a href=#108 id=108 data-nosnippet>108</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#109 id=109 data-nosnippet>109</a>
-<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">let </span>response = <span class="kw">match </span>state.mds_repo.get_meta().<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">let </span>response = <span class="kw">match </span>state.webauthn.mds_repo.get_meta().<span class="kw">await</span><span class="question-mark">? </span>{
 <a href=#111 id=111 data-nosnippet>111</a>        <span class="prelude-val">Some</span>(m) =&gt; MdsStatusResponse {
 <a href=#112 id=112 data-nosnippet>112</a>            no: <span class="prelude-val">Some</span>(m.no),
 <a href=#113 id=113 data-nosnippet>113</a>            next_update: <span class="prelude-val">Some</span>(m.next_update),
@@ -156,41 +156,45 @@
 <a href=#156 id=156 data-nosnippet>156</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
 <a href=#157 id=157 data-nosnippet>157</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#158 id=158 data-nosnippet>158</a>
-<a href=#159 id=159 data-nosnippet>159</a>    <span class="kw">if </span>!state.pki_config.mds_enabled {
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="kw">if </span>!state.webauthn.pki_config.mds_enabled {
 <a href=#160 id=160 data-nosnippet>160</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
 <a href=#161 id=161 data-nosnippet>161</a>            message: <span class="string">"MDS ingestion is disabled (set AXIAM__PKI__MDS_ENABLED=true to enable it)"
 <a href=#162 id=162 data-nosnippet>162</a>                </span>.into(),
 <a href=#163 id=163 data-nosnippet>163</a>        }));
 <a href=#164 id=164 data-nosnippet>164</a>    }
 <a href=#165 id=165 data-nosnippet>165</a>
-<a href=#166 id=166 data-nosnippet>166</a>    <span class="kw">let </span>outcome = <span class="kw">match </span><span class="kw-2">&amp;</span>state.pki_config.mds_blob_path {
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="kw">let </span>outcome = <span class="kw">match </span><span class="kw-2">&amp;</span>state.webauthn.pki_config.mds_blob_path {
 <a href=#167 id=167 data-nosnippet>167</a>        <span class="prelude-val">Some</span>(path) =&gt; {
-<a href=#168 id=168 data-nosnippet>168</a>            mds_ingest::ingest_from_file(<span class="kw-2">&amp;</span>state.mds_repo, path, <span class="kw-2">&amp;</span>state.pki_config.mds_leaf_dns)
-<a href=#169 id=169 data-nosnippet>169</a>                .<span class="kw">await</span><span class="question-mark">?
-<a href=#170 id=170 data-nosnippet>170</a>        </span>}
-<a href=#171 id=171 data-nosnippet>171</a>        <span class="prelude-val">None </span>=&gt; {
-<a href=#172 id=172 data-nosnippet>172</a>            mds_ingest::ingest_from_url(
-<a href=#173 id=173 data-nosnippet>173</a>                <span class="kw-2">&amp;</span>state.mds_repo,
-<a href=#174 id=174 data-nosnippet>174</a>                <span class="kw-2">&amp;</span>state.pki_config.mds_blob_url,
-<a href=#175 id=175 data-nosnippet>175</a>                <span class="kw-2">&amp;</span>state.pki_config.mds_leaf_dns,
-<a href=#176 id=176 data-nosnippet>176</a>                <span class="bool-val">false</span>, <span class="comment">// production: never allow private/loopback targets
-<a href=#177 id=177 data-nosnippet>177</a>            </span>)
-<a href=#178 id=178 data-nosnippet>178</a>            .<span class="kw">await</span><span class="question-mark">?
-<a href=#179 id=179 data-nosnippet>179</a>        </span>}
-<a href=#180 id=180 data-nosnippet>180</a>    };
-<a href=#181 id=181 data-nosnippet>181</a>
-<a href=#182 id=182 data-nosnippet>182</a>    <span class="comment">// W2-D3: only a genuine change to the set of known attestation roots
-<a href=#183 id=183 data-nosnippet>183</a>    // needs the cache rebuilt — a no-op refresh or rejected rollback left it
-<a href=#184 id=184 data-nosnippet>184</a>    // untouched. `mds_ingest`'s own `ingest_blob`/`log_fetch_failure` already
-<a href=#185 id=185 data-nosnippet>185</a>    // emitted the `mds.refreshed`/`mds.refresh_failed` structured events
-<a href=#186 id=186 data-nosnippet>186</a>    // (D11) before this returns.
-<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">if </span><span class="macro">matches!</span>(
-<a href=#188 id=188 data-nosnippet>188</a>        outcome,
-<a href=#189 id=189 data-nosnippet>189</a>        MdsIngestOutcome::Initial { .. } | MdsIngestOutcome::Replaced { .. }
-<a href=#190 id=190 data-nosnippet>190</a>    ) {
-<a href=#191 id=191 data-nosnippet>191</a>        state.attestation_ca_cache.invalidate();
-<a href=#192 id=192 data-nosnippet>192</a>    }
-<a href=#193 id=193 data-nosnippet>193</a>
-<a href=#194 id=194 data-nosnippet>194</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(MdsRefreshOutcome::from(outcome)))
-<a href=#195 id=195 data-nosnippet>195</a>}
+<a href=#168 id=168 data-nosnippet>168</a>            mds_ingest::ingest_from_file(
+<a href=#169 id=169 data-nosnippet>169</a>                <span class="kw-2">&amp;</span>state.webauthn.mds_repo,
+<a href=#170 id=170 data-nosnippet>170</a>                path,
+<a href=#171 id=171 data-nosnippet>171</a>                <span class="kw-2">&amp;</span>state.webauthn.pki_config.mds_leaf_dns,
+<a href=#172 id=172 data-nosnippet>172</a>            )
+<a href=#173 id=173 data-nosnippet>173</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#174 id=174 data-nosnippet>174</a>        </span>}
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="prelude-val">None </span>=&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>            mds_ingest::ingest_from_url(
+<a href=#177 id=177 data-nosnippet>177</a>                <span class="kw-2">&amp;</span>state.webauthn.mds_repo,
+<a href=#178 id=178 data-nosnippet>178</a>                <span class="kw-2">&amp;</span>state.webauthn.pki_config.mds_blob_url,
+<a href=#179 id=179 data-nosnippet>179</a>                <span class="kw-2">&amp;</span>state.webauthn.pki_config.mds_leaf_dns,
+<a href=#180 id=180 data-nosnippet>180</a>                <span class="bool-val">false</span>, <span class="comment">// production: never allow private/loopback targets
+<a href=#181 id=181 data-nosnippet>181</a>            </span>)
+<a href=#182 id=182 data-nosnippet>182</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#183 id=183 data-nosnippet>183</a>        </span>}
+<a href=#184 id=184 data-nosnippet>184</a>    };
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="comment">// W2-D3: only a genuine change to the set of known attestation roots
+<a href=#187 id=187 data-nosnippet>187</a>    // needs the cache rebuilt — a no-op refresh or rejected rollback left it
+<a href=#188 id=188 data-nosnippet>188</a>    // untouched. `mds_ingest`'s own `ingest_blob`/`log_fetch_failure` already
+<a href=#189 id=189 data-nosnippet>189</a>    // emitted the `mds.refreshed`/`mds.refresh_failed` structured events
+<a href=#190 id=190 data-nosnippet>190</a>    // (D11) before this returns.
+<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="kw">if </span><span class="macro">matches!</span>(
+<a href=#192 id=192 data-nosnippet>192</a>        outcome,
+<a href=#193 id=193 data-nosnippet>193</a>        MdsIngestOutcome::Initial { .. } | MdsIngestOutcome::Replaced { .. }
+<a href=#194 id=194 data-nosnippet>194</a>    ) {
+<a href=#195 id=195 data-nosnippet>195</a>        state.webauthn.attestation_ca_cache.invalidate();
+<a href=#196 id=196 data-nosnippet>196</a>    }
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(MdsRefreshOutcome::from(outcome)))
+<a href=#199 id=199 data-nosnippet>199</a>}
 </code></pre></div></section></main></body></html>

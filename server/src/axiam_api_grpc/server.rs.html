@@ -41,289 +41,296 @@
 <a href=#41 id=41 data-nosnippet>41</a>};
 <a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span>axiam_db::DbHandle;
 <a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>surrealdb::Connection;
-<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>tonic::transport::{Identity, Server, ServerTlsConfig};
-<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>uuid::Uuid;
-<a href=#46 id=46 data-nosnippet>46</a>
-<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span><span class="kw">crate</span>::config::GrpcConfig;
-<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span><span class="kw">crate</span>::middleware::auth::AuthInterceptor;
-<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span><span class="kw">crate</span>::middleware::rate_limit::{
-<a href=#50 id=50 data-nosnippet>50</a>    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
-<a href=#51 id=51 data-nosnippet>51</a>};
-<a href=#52 id=52 data-nosnippet>52</a><span class="kw">use </span><span class="kw">crate</span>::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
-<a href=#53 id=53 data-nosnippet>53</a><span class="kw">use </span><span class="kw">crate</span>::proto::authorization_service_server::AuthorizationServiceServer;
-<a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span><span class="kw">crate</span>::proto::reactor_admin_service_server::ReactorAdminServiceServer;
-<a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span><span class="kw">crate</span>::proto::token_service_server::TokenServiceServer;
-<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use </span><span class="kw">crate</span>::proto::user_info_service_server::UserInfoServiceServer;
-<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span><span class="kw">crate</span>::proto::user_service_server::UserServiceServer;
-<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span><span class="kw">crate</span>::services::{
-<a href=#59 id=59 data-nosnippet>59</a>    AuthorizationServiceImpl, ReactorAdminServiceImpl, TokenServiceImpl, UserInfoServiceImpl,
-<a href=#60 id=60 data-nosnippet>60</a>    UserServiceImpl,
-<a href=#61 id=61 data-nosnippet>61</a>};
-<a href=#62 id=62 data-nosnippet>62</a>
-<a href=#63 id=63 data-nosnippet>63</a><span class="doccomment">/// Start the gRPC server with all registered services.
-<a href=#64 id=64 data-nosnippet>64</a>///
-<a href=#65 id=65 data-nosnippet>65</a>/// Applies two cooperating rate-limit layers (SECHRD-03, D-01a/b/c — gap
-<a href=#66 id=66 data-nosnippet>66</a>/// closure for 24-07): the [`GrpcSharedRateLimitLayer`] cross-replica
-<a href=#67 id=67 data-nosnippet>67</a>/// pre-check runs FIRST (outermost), failing OPEN to the per-replica in-memory
-<a href=#68 id=68 data-nosnippet>68</a>/// governor stack (per D-10). Both layers derive their client-IP key from the
-<a href=#69 id=69 data-nosnippet>69</a>/// SAME `trusted_hops` value so gRPC keying stays in lockstep across the
-<a href=#70 id=70 data-nosnippet>70</a>/// shared counter and the in-memory fallback, and both are sized from the
-<a href=#71 id=71 data-nosnippet>71</a>/// same per-second [`crate::middleware::rate_limit::GrpcRateLimits`] value.
-<a href=#72 id=72 data-nosnippet>72</a>///
-<a href=#73 id=73 data-nosnippet>73</a>/// Since I1/I2 the ceilings are **per method family**, not server-wide:
-<a href=#74 id=74 data-nosnippet>74</a>/// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
-<a href=#75 id=75 data-nosnippet>75</a>/// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService`/`TokenService`,
-<a href=#76 id=76 data-nosnippet>76</a>/// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and gRPC
-<a href=#77 id=77 data-nosnippet>77</a>/// reflection/health are never limited.
-<a href=#78 id=78 data-nosnippet>78</a>///
-<a href=#79 id=79 data-nosnippet>79</a>/// Since the H2 performance fix the shared pre-check performs NO synchronous
-<a href=#80 id=80 data-nosnippet>80</a>/// datastore write: it is backed by the process-wide write-behind
-<a href=#81 id=81 data-nosnippet>81</a>/// `axiam_db::SharedRateLimitCounter`, built ONCE here (this layer is
-<a href=#82 id=82 data-nosnippet>82</a>/// server-wide, so every gRPC call used to pay one `UPSERT`). Knobs:
-<a href=#83 id=83 data-nosnippet>83</a>/// `AXIAM__RATE_LIMIT__SHARED` (on|off, default on) and
-<a href=#84 id=84 data-nosnippet>84</a>/// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000, clamped 50..=60000) —
-<a href=#85 id=85 data-nosnippet>85</a>/// the same two the REST listener reads.
-<a href=#86 id=86 data-nosnippet>86</a>///
-<a href=#87 id=87 data-nosnippet>87</a>/// Transport limits (CQ-B20):
-<a href=#88 id=88 data-nosnippet>88</a>/// - Max message size: 4 MiB decode / 4 MiB encode
-<a href=#89 id=89 data-nosnippet>89</a>/// - Per-connection timeout: 30 s
-<a href=#90 id=90 data-nosnippet>90</a>/// - Concurrency limit: 256 streams per connection
-<a href=#91 id=91 data-nosnippet>91</a>///
-<a href=#92 id=92 data-nosnippet>92</a>/// TLS (REQ-15 AC-1): env-gated via `AXIAM__GRPC_TLS_CERT_PATH` /
-<a href=#93 id=93 data-nosnippet>93</a>/// `AXIAM__GRPC_TLS_KEY_PATH`. When absent, TLS is disabled and a warning
-<a href=#94 id=94 data-nosnippet>94</a>/// is logged (acceptable for in-mesh/loopback deployments).
-<a href=#95 id=95 data-nosnippet>95</a>///
-<a href=#96 id=96 data-nosnippet>96</a>/// # `strict_revocation_checker` (A4/J10)
-<a href=#97 id=97 data-nosnippet>97</a>///
-<a href=#98 id=98 data-nosnippet>98</a>/// `Some(..)` only when `AXIAM__GRPC__STRICT_REVOCATION=true`, and it MUST be
-<a href=#99 id=99 data-nosnippet>99</a>/// the SAME session-repository instance the REST path holds. A second instance
-<a href=#100 id=100 data-nosnippet>100</a>/// would carry a second validation cache, and a cache the REST invalidation
-<a href=#101 id=101 data-nosnippet>101</a>/// hooks never reach is exactly the stale allow strict mode exists to prevent.
-<a href=#102 id=102 data-nosnippet>102</a>/// `None` keeps the shipped posture: gRPC trusts JWT lifetime, so revocation
-<a href=#103 id=103 data-nosnippet>103</a>/// takes effect at token expiry (up to 15 min) rather than immediately. See
-<a href=#104 id=104 data-nosnippet>104</a>/// [`crate::middleware::strict_revocation`] for the full posture table.
-<a href=#105 id=105 data-nosnippet>105</a>///
-<a href=#106 id=106 data-nosnippet>106</a>/// # `reactor_engine`, `reactor_repo`, `reactor_audit_repo`, `reactor_routing_invalidator` (X1 / R2.3)
-<a href=#107 id=107 data-nosnippet>107</a>///
-<a href=#108 id=108 data-nosnippet>108</a>/// `reactor_engine` is a SECOND [`AuthorizationEngine`] instance, built from
-<a href=#109 id=109 data-nosnippet>109</a>/// the same repositories as `engine`. `AuthorizationEngine` does not
-<a href=#110 id=110 data-nosnippet>110</a>/// implement `Clone`, so `ReactorAdminServiceImpl` cannot share `engine`'s
-<a href=#111 id=111 data-nosnippet>111</a>/// instance — it is given its own, mirroring `AuthorizationServiceImpl`'s.
-<a href=#112 id=112 data-nosnippet>112</a>/// Two engines over the same repositories is correct, not wasteful: the
-<a href=#113 id=113 data-nosnippet>113</a>/// decision cache and invalidation broadcaster (when configured) are handed
-<a href=#114 id=114 data-nosnippet>114</a>/// to both by the caller, so the two stay coherent with each other exactly as
-<a href=#115 id=115 data-nosnippet>115</a>/// `axiam-server`'s REST `AuthzChecker` and this gRPC listener already do.
-<a href=#116 id=116 data-nosnippet>116</a>/// `reactor_routing_invalidator` MUST be the same closure over the same
-<a href=#117 id=117 data-nosnippet>117</a>/// `ReactorRoutingTable` the REST admin handlers invalidate through, or a
-<a href=#118 id=118 data-nosnippet>118</a>/// registration written over gRPC would not take effect on this replica
-<a href=#119 id=119 data-nosnippet>119</a>/// until the routing table's TTL expired.
-<a href=#120 id=120 data-nosnippet>120</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
-<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub async fn </span>start_grpc_server&lt;R, P, Res, S, G, U, C, Rr, A&gt;(
-<a href=#122 id=122 data-nosnippet>122</a>    addr: SocketAddr,
-<a href=#123 id=123 data-nosnippet>123</a>    engine: AuthorizationEngine&lt;R, P, Res, S, G&gt;,
-<a href=#124 id=124 data-nosnippet>124</a>    user_repo: U,
-<a href=#125 id=125 data-nosnippet>125</a>    auth_config: AuthConfig,
-<a href=#126 id=126 data-nosnippet>126</a>    grpc_config: <span class="kw-2">&amp;</span>GrpcConfig,
-<a href=#127 id=127 data-nosnippet>127</a>    db: <span class="kw">impl </span>Into&lt;DbHandle&lt;C&gt;&gt;,
-<a href=#128 id=128 data-nosnippet>128</a>    batch_max_concurrency: usize,
-<a href=#129 id=129 data-nosnippet>129</a>    strict_revocation_checker: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>SessionRevocationCheck&gt;&gt;,
-<a href=#130 id=130 data-nosnippet>130</a>    reactor_engine: AuthorizationEngine&lt;R, P, Res, S, G&gt;,
-<a href=#131 id=131 data-nosnippet>131</a>    reactor_repo: Rr,
-<a href=#132 id=132 data-nosnippet>132</a>    reactor_audit_repo: A,
-<a href=#133 id=133 data-nosnippet>133</a>    reactor_routing_invalidator: Arc&lt;<span class="kw">dyn </span>Fn(Uuid) + Send + Sync&gt;,
-<a href=#134 id=134 data-nosnippet>134</a>    <span class="comment">// SEC-101 — whether the composed reactor transport can deliver at all.
-<a href=#135 id=135 data-nosnippet>135</a>    // MUST be read from the same gate `axiam-api-rest` holds, so the two
-<a href=#136 id=136 data-nosnippet>136</a>    // admin surfaces refuse (or accept) the same registrations.
-<a href=#137 id=137 data-nosnippet>137</a>    </span>reactor_dispatch_available: bool,
-<a href=#138 id=138 data-nosnippet>138</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), tonic::transport::Error&gt;
-<a href=#139 id=139 data-nosnippet>139</a><span class="kw">where
-<a href=#140 id=140 data-nosnippet>140</a>    </span>R: RoleRepository + <span class="lifetime">'static</span>,
-<a href=#141 id=141 data-nosnippet>141</a>    P: PermissionRepository + <span class="lifetime">'static</span>,
-<a href=#142 id=142 data-nosnippet>142</a>    Res: ResourceRepository + <span class="lifetime">'static</span>,
-<a href=#143 id=143 data-nosnippet>143</a>    S: ScopeRepository + <span class="lifetime">'static</span>,
-<a href=#144 id=144 data-nosnippet>144</a>    G: GroupRepository + <span class="lifetime">'static</span>,
-<a href=#145 id=145 data-nosnippet>145</a>    U: UserRepository + Clone + <span class="lifetime">'static</span>,
-<a href=#146 id=146 data-nosnippet>146</a>    C: Connection + <span class="lifetime">'static</span>,
-<a href=#147 id=147 data-nosnippet>147</a>    Rr: ReactorRepository + <span class="lifetime">'static</span>,
-<a href=#148 id=148 data-nosnippet>148</a>    A: AuditLogRepository + <span class="lifetime">'static</span>,
-<a href=#149 id=149 data-nosnippet>149</a>{
-<a href=#150 id=150 data-nosnippet>150</a>    <span class="comment">// I2: per-family ceilings (unset knobs derived from the authz ceiling).
-<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">let </span>rate_limits = grpc_config.rate_limits();
-<a href=#152 id=152 data-nosnippet>152</a>    <span class="macro">tracing::info!</span>(
-<a href=#153 id=153 data-nosnippet>153</a>        bind = %addr,
-<a href=#154 id=154 data-nosnippet>154</a>        grpc_authz_per_sec = rate_limits.authz_per_sec,
-<a href=#155 id=155 data-nosnippet>155</a>        grpc_identity_per_sec = rate_limits.identity_per_sec,
-<a href=#156 id=156 data-nosnippet>156</a>        grpc_admin_per_sec = rate_limits.admin_per_sec,
-<a href=#157 id=157 data-nosnippet>157</a>        <span class="string">"Starting gRPC server"</span>,
-<a href=#158 id=158 data-nosnippet>158</a>    );
-<a href=#159 id=159 data-nosnippet>159</a>
-<a href=#160 id=160 data-nosnippet>160</a>    <span class="comment">// SECHRD-03 gap closure (24-07 follow-up): the shared-store pre-check
-<a href=#161 id=161 data-nosnippet>161</a>    // MUST use the same trusted_hops value as the in-memory governor's key
-<a href=#162 id=162 data-nosnippet>162</a>    // extractor (both ultimately key off GrpcTrustedHopsKeyExtractor logic)
-<a href=#163 id=163 data-nosnippet>163</a>    // so a rotating XFF cannot mint a fresh bucket in one layer while being
-<a href=#164 id=164 data-nosnippet>164</a>    // correctly collapsed in the other.
-<a href=#165 id=165 data-nosnippet>165</a>    </span><span class="kw">let </span>trusted_hops = trusted_hops_from_env();
-<a href=#166 id=166 data-nosnippet>166</a>    <span class="comment">// Built exactly ONCE per process: this constructs the write-behind
-<a href=#167 id=167 data-nosnippet>167</a>    // `SharedRateLimitCounter` (and spawns its single background flusher on
-<a href=#168 id=168 data-nosnippet>168</a>    // this runtime). Cloning the LAYER is fine — the counter inside is an
-<a href=#169 id=169 data-nosnippet>169</a>    // `Arc` handle, so every clone shares the same local counts. Building a
-<a href=#170 id=170 data-nosnippet>170</a>    // second layer would create a second, independent counter.
-<a href=#171 id=171 data-nosnippet>171</a>    //
-<a href=#172 id=172 data-nosnippet>172</a>    // I1 (units) + I2 (scope): both layers are now built from the SAME
-<a href=#173 id=173 data-nosnippet>173</a>    // per-second `GrpcRateLimits` value. `new_method_scoped` converts each
-<a href=#174 id=174 data-nosnippet>174</a>    // per-second ceiling into the shared layer's 60-second window budget
-<a href=#175 id=175 data-nosnippet>175</a>    // itself (`per_sec_to_window_limit`) — previously the per-second number
-<a href=#176 id=176 data-nosnippet>176</a>    // was passed to a per-minute window verbatim, which made the effective
-<a href=#177 id=177 data-nosnippet>177</a>    // gRPC ceiling 1/60th of the configured one.
-<a href=#178 id=178 data-nosnippet>178</a>    </span><span class="kw">let </span>shared_rate_limit_layer =
-<a href=#179 id=179 data-nosnippet>179</a>        GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
-<a href=#180 id=180 data-nosnippet>180</a>    <span class="kw">let </span>governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
-<a href=#181 id=181 data-nosnippet>181</a>
-<a href=#182 id=182 data-nosnippet>182</a>    <span class="comment">// A4/J10: built before the interceptors take ownership of `auth_config`.
-<a href=#183 id=183 data-nosnippet>183</a>    // The layer needs it to decode (not verify — see the module docs) the
-<a href=#184 id=184 data-nosnippet>184</a>    // bearer token far enough to learn which session a request names.
-<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">let </span>strict_revocation_layer = strict_revocation_checker.map(|checker| {
-<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">tracing::warn!</span>(
-<a href=#187 id=187 data-nosnippet>187</a>            <span class="string">"gRPC STRICT REVOCATION enabled — every gRPC request now re-checks \
-<a href=#188 id=188 data-nosnippet>188</a>             session validity, matching REST. Expect the gRPC check profile to \
-<a href=#189 id=189 data-nosnippet>189</a>             approach REST's revocation-checked one; with the session-validation \
-<a href=#190 id=190 data-nosnippet>190</a>             cache disabled this is one datastore read per request."
-<a href=#191 id=191 data-nosnippet>191</a>        </span>);
-<a href=#192 id=192 data-nosnippet>192</a>        GrpcStrictRevocationLayer::new(checker, auth_config.clone())
-<a href=#193 id=193 data-nosnippet>193</a>    });
-<a href=#194 id=194 data-nosnippet>194</a>
-<a href=#195 id=195 data-nosnippet>195</a>    <span class="kw">let </span>authz_svc = AuthorizationServiceServer::with_interceptor(
-<a href=#196 id=196 data-nosnippet>196</a>        AuthorizationServiceImpl::new(engine, batch_max_concurrency),
-<a href=#197 id=197 data-nosnippet>197</a>        AuthInterceptor::new(auth_config.clone()),
-<a href=#198 id=198 data-nosnippet>198</a>    );
-<a href=#199 id=199 data-nosnippet>199</a>    <span class="comment">// SECFIX-01: UserService and TokenService previously had zero auth —
-<a href=#200 id=200 data-nosnippet>200</a>    // any unauthenticated mesh peer could call GetUser/ValidateCredentials/
-<a href=#201 id=201 data-nosnippet>201</a>    // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
-<a href=#202 id=202 data-nosnippet>202</a>    // as AuthorizationService so every gRPC call requires a verified bearer JWT.
-<a href=#203 id=203 data-nosnippet>203</a>    </span><span class="kw">let </span>user_svc = UserServiceServer::with_interceptor(
-<a href=#204 id=204 data-nosnippet>204</a>        UserServiceImpl::new(user_repo.clone(), auth_config.clone()),
-<a href=#205 id=205 data-nosnippet>205</a>        AuthInterceptor::new(auth_config.clone()),
-<a href=#206 id=206 data-nosnippet>206</a>    );
-<a href=#207 id=207 data-nosnippet>207</a>    <span class="comment">// UserInfoService: OIDC-style self lookup — identity derived entirely from
-<a href=#208 id=208 data-nosnippet>208</a>    // the interceptor-verified bearer token (no request body), mirroring the
-<a href=#209 id=209 data-nosnippet>209</a>    // REST `/oauth2/userinfo` endpoint. Guarded by the same AuthInterceptor.
-<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">let </span>user_info_svc = UserInfoServiceServer::with_interceptor(
-<a href=#211 id=211 data-nosnippet>211</a>        UserInfoServiceImpl::new(user_repo),
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>tokio::sync::Semaphore;
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>tonic::transport::{Identity, Server, ServerTlsConfig};
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>uuid::Uuid;
+<a href=#47 id=47 data-nosnippet>47</a>
+<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span><span class="kw">crate</span>::config::GrpcConfig;
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span><span class="kw">crate</span>::middleware::auth::AuthInterceptor;
+<a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span><span class="kw">crate</span>::middleware::rate_limit::{
+<a href=#51 id=51 data-nosnippet>51</a>    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
+<a href=#52 id=52 data-nosnippet>52</a>};
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">use </span><span class="kw">crate</span>::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span><span class="kw">crate</span>::proto::authorization_service_server::AuthorizationServiceServer;
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span><span class="kw">crate</span>::proto::reactor_admin_service_server::ReactorAdminServiceServer;
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use </span><span class="kw">crate</span>::proto::token_service_server::TokenServiceServer;
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span><span class="kw">crate</span>::proto::user_info_service_server::UserInfoServiceServer;
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span><span class="kw">crate</span>::proto::user_service_server::UserServiceServer;
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">use </span><span class="kw">crate</span>::services::{
+<a href=#60 id=60 data-nosnippet>60</a>    AuthorizationServiceImpl, ReactorAdminServiceImpl, TokenServiceImpl, UserInfoServiceImpl,
+<a href=#61 id=61 data-nosnippet>61</a>    UserServiceImpl,
+<a href=#62 id=62 data-nosnippet>62</a>};
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Start the gRPC server with all registered services.
+<a href=#65 id=65 data-nosnippet>65</a>///
+<a href=#66 id=66 data-nosnippet>66</a>/// Applies two cooperating rate-limit layers (SECHRD-03, D-01a/b/c — gap
+<a href=#67 id=67 data-nosnippet>67</a>/// closure for 24-07): the [`GrpcSharedRateLimitLayer`] cross-replica
+<a href=#68 id=68 data-nosnippet>68</a>/// pre-check runs FIRST (outermost), failing OPEN to the per-replica in-memory
+<a href=#69 id=69 data-nosnippet>69</a>/// governor stack (per D-10). Both layers derive their client-IP key from the
+<a href=#70 id=70 data-nosnippet>70</a>/// SAME `trusted_hops` value so gRPC keying stays in lockstep across the
+<a href=#71 id=71 data-nosnippet>71</a>/// shared counter and the in-memory fallback, and both are sized from the
+<a href=#72 id=72 data-nosnippet>72</a>/// same per-second [`crate::middleware::rate_limit::GrpcRateLimits`] value.
+<a href=#73 id=73 data-nosnippet>73</a>///
+<a href=#74 id=74 data-nosnippet>74</a>/// Since I1/I2 the ceilings are **per method family**, not server-wide:
+<a href=#75 id=75 data-nosnippet>75</a>/// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
+<a href=#76 id=76 data-nosnippet>76</a>/// `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService`/`TokenService`,
+<a href=#77 id=77 data-nosnippet>77</a>/// `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and gRPC
+<a href=#78 id=78 data-nosnippet>78</a>/// reflection/health are never limited.
+<a href=#79 id=79 data-nosnippet>79</a>///
+<a href=#80 id=80 data-nosnippet>80</a>/// Since the H2 performance fix the shared pre-check performs NO synchronous
+<a href=#81 id=81 data-nosnippet>81</a>/// datastore write: it is backed by the process-wide write-behind
+<a href=#82 id=82 data-nosnippet>82</a>/// `axiam_db::SharedRateLimitCounter`, built ONCE here (this layer is
+<a href=#83 id=83 data-nosnippet>83</a>/// server-wide, so every gRPC call used to pay one `UPSERT`). Knobs:
+<a href=#84 id=84 data-nosnippet>84</a>/// `AXIAM__RATE_LIMIT__SHARED` (on|off, default on) and
+<a href=#85 id=85 data-nosnippet>85</a>/// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000, clamped 50..=60000) —
+<a href=#86 id=86 data-nosnippet>86</a>/// the same two the REST listener reads.
+<a href=#87 id=87 data-nosnippet>87</a>///
+<a href=#88 id=88 data-nosnippet>88</a>/// Transport limits (CQ-B20):
+<a href=#89 id=89 data-nosnippet>89</a>/// - Max message size: 4 MiB decode / 4 MiB encode
+<a href=#90 id=90 data-nosnippet>90</a>/// - Per-connection timeout: 30 s
+<a href=#91 id=91 data-nosnippet>91</a>/// - Concurrency limit: 256 streams per connection
+<a href=#92 id=92 data-nosnippet>92</a>///
+<a href=#93 id=93 data-nosnippet>93</a>/// TLS (REQ-15 AC-1): env-gated via `AXIAM__GRPC_TLS_CERT_PATH` /
+<a href=#94 id=94 data-nosnippet>94</a>/// `AXIAM__GRPC_TLS_KEY_PATH`. When absent, TLS is disabled and a warning
+<a href=#95 id=95 data-nosnippet>95</a>/// is logged (acceptable for in-mesh/loopback deployments).
+<a href=#96 id=96 data-nosnippet>96</a>///
+<a href=#97 id=97 data-nosnippet>97</a>/// # `strict_revocation_checker` (A4/J10)
+<a href=#98 id=98 data-nosnippet>98</a>///
+<a href=#99 id=99 data-nosnippet>99</a>/// `Some(..)` only when `AXIAM__GRPC__STRICT_REVOCATION=true`, and it MUST be
+<a href=#100 id=100 data-nosnippet>100</a>/// the SAME session-repository instance the REST path holds. A second instance
+<a href=#101 id=101 data-nosnippet>101</a>/// would carry a second validation cache, and a cache the REST invalidation
+<a href=#102 id=102 data-nosnippet>102</a>/// hooks never reach is exactly the stale allow strict mode exists to prevent.
+<a href=#103 id=103 data-nosnippet>103</a>/// `None` keeps the shipped posture: gRPC trusts JWT lifetime, so revocation
+<a href=#104 id=104 data-nosnippet>104</a>/// takes effect at token expiry (up to 15 min) rather than immediately. See
+<a href=#105 id=105 data-nosnippet>105</a>/// [`crate::middleware::strict_revocation`] for the full posture table.
+<a href=#106 id=106 data-nosnippet>106</a>///
+<a href=#107 id=107 data-nosnippet>107</a>/// # `reactor_engine`, `reactor_repo`, `reactor_audit_repo`, `reactor_routing_invalidator` (X1 / R2.3)
+<a href=#108 id=108 data-nosnippet>108</a>///
+<a href=#109 id=109 data-nosnippet>109</a>/// `reactor_engine` is a SECOND [`AuthorizationEngine`] instance, built from
+<a href=#110 id=110 data-nosnippet>110</a>/// the same repositories as `engine`. `AuthorizationEngine` does not
+<a href=#111 id=111 data-nosnippet>111</a>/// implement `Clone`, so `ReactorAdminServiceImpl` cannot share `engine`'s
+<a href=#112 id=112 data-nosnippet>112</a>/// instance — it is given its own, mirroring `AuthorizationServiceImpl`'s.
+<a href=#113 id=113 data-nosnippet>113</a>/// Two engines over the same repositories is correct, not wasteful: the
+<a href=#114 id=114 data-nosnippet>114</a>/// decision cache and invalidation broadcaster (when configured) are handed
+<a href=#115 id=115 data-nosnippet>115</a>/// to both by the caller, so the two stay coherent with each other exactly as
+<a href=#116 id=116 data-nosnippet>116</a>/// `axiam-server`'s REST `AuthzChecker` and this gRPC listener already do.
+<a href=#117 id=117 data-nosnippet>117</a>/// `reactor_routing_invalidator` MUST be the same closure over the same
+<a href=#118 id=118 data-nosnippet>118</a>/// `ReactorRoutingTable` the REST admin handlers invalidate through, or a
+<a href=#119 id=119 data-nosnippet>119</a>/// registration written over gRPC would not take effect on this replica
+<a href=#120 id=120 data-nosnippet>120</a>/// until the routing table's TTL expired.
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#122 id=122 data-nosnippet>122</a></span><span class="kw">pub async fn </span>start_grpc_server&lt;R, P, Res, S, G, U, C, Rr, A&gt;(
+<a href=#123 id=123 data-nosnippet>123</a>    addr: SocketAddr,
+<a href=#124 id=124 data-nosnippet>124</a>    engine: AuthorizationEngine&lt;R, P, Res, S, G&gt;,
+<a href=#125 id=125 data-nosnippet>125</a>    user_repo: U,
+<a href=#126 id=126 data-nosnippet>126</a>    auth_config: AuthConfig,
+<a href=#127 id=127 data-nosnippet>127</a>    grpc_config: <span class="kw-2">&amp;</span>GrpcConfig,
+<a href=#128 id=128 data-nosnippet>128</a>    db: <span class="kw">impl </span>Into&lt;DbHandle&lt;C&gt;&gt;,
+<a href=#129 id=129 data-nosnippet>129</a>    batch_max_concurrency: usize,
+<a href=#130 id=130 data-nosnippet>130</a>    strict_revocation_checker: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>SessionRevocationCheck&gt;&gt;,
+<a href=#131 id=131 data-nosnippet>131</a>    reactor_engine: AuthorizationEngine&lt;R, P, Res, S, G&gt;,
+<a href=#132 id=132 data-nosnippet>132</a>    reactor_repo: Rr,
+<a href=#133 id=133 data-nosnippet>133</a>    reactor_audit_repo: A,
+<a href=#134 id=134 data-nosnippet>134</a>    reactor_routing_invalidator: Arc&lt;<span class="kw">dyn </span>Fn(Uuid) + Send + Sync&gt;,
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="comment">// SEC-101 — whether the composed reactor transport can deliver at all.
+<a href=#136 id=136 data-nosnippet>136</a>    // MUST be read from the same gate `axiam-api-rest` holds, so the two
+<a href=#137 id=137 data-nosnippet>137</a>    // admin surfaces refuse (or accept) the same registrations.
+<a href=#138 id=138 data-nosnippet>138</a>    </span>reactor_dispatch_available: bool,
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="comment">// B1 — the process-wide Argon2id gate. MUST be a clone of the same
+<a href=#140 id=140 data-nosnippet>140</a>    // `Arc&lt;Semaphore&gt;` `AppState::crypto_semaphore` holds: the permit count
+<a href=#141 id=141 data-nosnippet>141</a>    // bounds peak concurrent ~19 MiB hash arenas for the WHOLE process, so a
+<a href=#142 id=142 data-nosnippet>142</a>    // listener with its own instance would silently double the bound.
+<a href=#143 id=143 data-nosnippet>143</a>    // `UserService/ValidateCredentials` is this listener's only consumer.
+<a href=#144 id=144 data-nosnippet>144</a>    </span>crypto_semaphore: Arc&lt;Semaphore&gt;,
+<a href=#145 id=145 data-nosnippet>145</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), tonic::transport::Error&gt;
+<a href=#146 id=146 data-nosnippet>146</a><span class="kw">where
+<a href=#147 id=147 data-nosnippet>147</a>    </span>R: RoleRepository + <span class="lifetime">'static</span>,
+<a href=#148 id=148 data-nosnippet>148</a>    P: PermissionRepository + <span class="lifetime">'static</span>,
+<a href=#149 id=149 data-nosnippet>149</a>    Res: ResourceRepository + <span class="lifetime">'static</span>,
+<a href=#150 id=150 data-nosnippet>150</a>    S: ScopeRepository + <span class="lifetime">'static</span>,
+<a href=#151 id=151 data-nosnippet>151</a>    G: GroupRepository + <span class="lifetime">'static</span>,
+<a href=#152 id=152 data-nosnippet>152</a>    U: UserRepository + Clone + <span class="lifetime">'static</span>,
+<a href=#153 id=153 data-nosnippet>153</a>    C: Connection + <span class="lifetime">'static</span>,
+<a href=#154 id=154 data-nosnippet>154</a>    Rr: ReactorRepository + <span class="lifetime">'static</span>,
+<a href=#155 id=155 data-nosnippet>155</a>    A: AuditLogRepository + <span class="lifetime">'static</span>,
+<a href=#156 id=156 data-nosnippet>156</a>{
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="comment">// I2: per-family ceilings (unset knobs derived from the authz ceiling).
+<a href=#158 id=158 data-nosnippet>158</a>    </span><span class="kw">let </span>rate_limits = grpc_config.rate_limits();
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="macro">tracing::info!</span>(
+<a href=#160 id=160 data-nosnippet>160</a>        bind = %addr,
+<a href=#161 id=161 data-nosnippet>161</a>        grpc_authz_per_sec = rate_limits.authz_per_sec,
+<a href=#162 id=162 data-nosnippet>162</a>        grpc_identity_per_sec = rate_limits.identity_per_sec,
+<a href=#163 id=163 data-nosnippet>163</a>        grpc_admin_per_sec = rate_limits.admin_per_sec,
+<a href=#164 id=164 data-nosnippet>164</a>        <span class="string">"Starting gRPC server"</span>,
+<a href=#165 id=165 data-nosnippet>165</a>    );
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="comment">// SECHRD-03 gap closure (24-07 follow-up): the shared-store pre-check
+<a href=#168 id=168 data-nosnippet>168</a>    // MUST use the same trusted_hops value as the in-memory governor's key
+<a href=#169 id=169 data-nosnippet>169</a>    // extractor (both ultimately key off GrpcTrustedHopsKeyExtractor logic)
+<a href=#170 id=170 data-nosnippet>170</a>    // so a rotating XFF cannot mint a fresh bucket in one layer while being
+<a href=#171 id=171 data-nosnippet>171</a>    // correctly collapsed in the other.
+<a href=#172 id=172 data-nosnippet>172</a>    </span><span class="kw">let </span>trusted_hops = trusted_hops_from_env();
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="comment">// Built exactly ONCE per process: this constructs the write-behind
+<a href=#174 id=174 data-nosnippet>174</a>    // `SharedRateLimitCounter` (and spawns its single background flusher on
+<a href=#175 id=175 data-nosnippet>175</a>    // this runtime). Cloning the LAYER is fine — the counter inside is an
+<a href=#176 id=176 data-nosnippet>176</a>    // `Arc` handle, so every clone shares the same local counts. Building a
+<a href=#177 id=177 data-nosnippet>177</a>    // second layer would create a second, independent counter.
+<a href=#178 id=178 data-nosnippet>178</a>    //
+<a href=#179 id=179 data-nosnippet>179</a>    // I1 (units) + I2 (scope): both layers are now built from the SAME
+<a href=#180 id=180 data-nosnippet>180</a>    // per-second `GrpcRateLimits` value. `new_method_scoped` converts each
+<a href=#181 id=181 data-nosnippet>181</a>    // per-second ceiling into the shared layer's 60-second window budget
+<a href=#182 id=182 data-nosnippet>182</a>    // itself (`per_sec_to_window_limit`) — previously the per-second number
+<a href=#183 id=183 data-nosnippet>183</a>    // was passed to a per-minute window verbatim, which made the effective
+<a href=#184 id=184 data-nosnippet>184</a>    // gRPC ceiling 1/60th of the configured one.
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">let </span>shared_rate_limit_layer =
+<a href=#186 id=186 data-nosnippet>186</a>        GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="kw">let </span>governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
+<a href=#188 id=188 data-nosnippet>188</a>
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="comment">// A4/J10: built before the interceptors take ownership of `auth_config`.
+<a href=#190 id=190 data-nosnippet>190</a>    // The layer needs it to decode (not verify — see the module docs) the
+<a href=#191 id=191 data-nosnippet>191</a>    // bearer token far enough to learn which session a request names.
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">let </span>strict_revocation_layer = strict_revocation_checker.map(|checker| {
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="macro">tracing::warn!</span>(
+<a href=#194 id=194 data-nosnippet>194</a>            <span class="string">"gRPC STRICT REVOCATION enabled — every gRPC request now re-checks \
+<a href=#195 id=195 data-nosnippet>195</a>             session validity, matching REST. Expect the gRPC check profile to \
+<a href=#196 id=196 data-nosnippet>196</a>             approach REST's revocation-checked one; with the session-validation \
+<a href=#197 id=197 data-nosnippet>197</a>             cache disabled this is one datastore read per request."
+<a href=#198 id=198 data-nosnippet>198</a>        </span>);
+<a href=#199 id=199 data-nosnippet>199</a>        GrpcStrictRevocationLayer::new(checker, auth_config.clone())
+<a href=#200 id=200 data-nosnippet>200</a>    });
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>    <span class="kw">let </span>authz_svc = AuthorizationServiceServer::with_interceptor(
+<a href=#203 id=203 data-nosnippet>203</a>        AuthorizationServiceImpl::new(engine, batch_max_concurrency),
+<a href=#204 id=204 data-nosnippet>204</a>        AuthInterceptor::new(auth_config.clone()),
+<a href=#205 id=205 data-nosnippet>205</a>    );
+<a href=#206 id=206 data-nosnippet>206</a>    <span class="comment">// SECFIX-01: UserService and TokenService previously had zero auth —
+<a href=#207 id=207 data-nosnippet>207</a>    // any unauthenticated mesh peer could call GetUser/ValidateCredentials/
+<a href=#208 id=208 data-nosnippet>208</a>    // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
+<a href=#209 id=209 data-nosnippet>209</a>    // as AuthorizationService so every gRPC call requires a verified bearer JWT.
+<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">let </span>user_svc = UserServiceServer::with_interceptor(
+<a href=#211 id=211 data-nosnippet>211</a>        UserServiceImpl::new(user_repo.clone(), auth_config.clone(), crypto_semaphore),
 <a href=#212 id=212 data-nosnippet>212</a>        AuthInterceptor::new(auth_config.clone()),
 <a href=#213 id=213 data-nosnippet>213</a>    );
-<a href=#214 id=214 data-nosnippet>214</a>    <span class="kw">let </span>token_svc = TokenServiceServer::with_interceptor(
-<a href=#215 id=215 data-nosnippet>215</a>        TokenServiceImpl::new(auth_config.clone()),
-<a href=#216 id=216 data-nosnippet>216</a>        AuthInterceptor::new(auth_config.clone()),
-<a href=#217 id=217 data-nosnippet>217</a>    );
-<a href=#218 id=218 data-nosnippet>218</a>    <span class="comment">// X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST
-<a href=#219 id=219 data-nosnippet>219</a>    // `/api/v1/reactors*` surface. Same `AuthInterceptor` chokepoint as every
-<a href=#220 id=220 data-nosnippet>220</a>    // other authenticated service here.
-<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="kw">let </span>reactor_svc = ReactorAdminServiceServer::with_interceptor(
-<a href=#222 id=222 data-nosnippet>222</a>        ReactorAdminServiceImpl::new(
-<a href=#223 id=223 data-nosnippet>223</a>            reactor_repo,
-<a href=#224 id=224 data-nosnippet>224</a>            reactor_engine,
-<a href=#225 id=225 data-nosnippet>225</a>            reactor_audit_repo,
-<a href=#226 id=226 data-nosnippet>226</a>            reactor_routing_invalidator,
-<a href=#227 id=227 data-nosnippet>227</a>            reactor_dispatch_available,
-<a href=#228 id=228 data-nosnippet>228</a>        ),
-<a href=#229 id=229 data-nosnippet>229</a>        AuthInterceptor::new(auth_config),
-<a href=#230 id=230 data-nosnippet>230</a>    );
-<a href=#231 id=231 data-nosnippet>231</a>
-<a href=#232 id=232 data-nosnippet>232</a>    <span class="comment">// CQ-B20: Apply transport limits to the gRPC server builder.
-<a href=#233 id=233 data-nosnippet>233</a>    // Note: tonic 0.14 does not expose max_decoding_message_size / max_encoding_message_size
-<a href=#234 id=234 data-nosnippet>234</a>    // at the Server level (added in tonic 0.12+ via the Router API). The HTTP/2 frame-size
-<a href=#235 id=235 data-nosnippet>235</a>    // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
-<a href=#236 id=236 data-nosnippet>236</a>    // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
-<a href=#237 id=237 data-nosnippet>237</a>    // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
-<a href=#238 id=238 data-nosnippet>238</a>    // SECHRD-03 (D-01a/b/c) + run-5 J1: layer ORDER is load-bearing here.
-<a href=#239 id=239 data-nosnippet>239</a>    // Tower's `Server::builder()` runs the FIRST-added layer with the request
-<a href=#240 id=240 data-nosnippet>240</a>    // FIRST (the opposite of actix's last-`.wrap()`-is-outermost rule), so
-<a href=#241 id=241 data-nosnippet>241</a>    // the layer named first below is the OUTERMOST one.
-<a href=#242 id=242 data-nosnippet>242</a>    //
-<a href=#243 id=243 data-nosnippet>243</a>    // Until run 5 the shared-store pre-check was outermost. That inverted the
-<a href=#244 id=244 data-nosnippet>244</a>    // two layers' natural roles and starved every gRPC family: the pre-check
-<a href=#245 id=245 data-nosnippet>245</a>    // charges its whole 60-second window budget the moment it admits a
-<a href=#246 id=246 data-nosnippet>246</a>    // request, but the per-second `governor` behind it then rejected almost
-<a href=#247 id=247 data-nosnippet>247</a>    // all of those requests. A flood therefore burned all 6 000 authz
-<a href=#248 id=248 data-nosnippet>248</a>    // admissions of a window on traffic that was never served, in well under
-<a href=#249 id=249 data-nosnippet>249</a>    // a second, and the window stayed exhausted for its remaining ~59 —
-<a href=#250 id=250 data-nosnippet>250</a>    // measured at 181 admissions/min against a configured 6 000/min, i.e.
-<a href=#251 id=251 data-nosnippet>251</a>    // 1/33 of the ceiling (`claude_dev/improvement-after-run5-benchmark.md`
-<a href=#252 id=252 data-nosnippet>252</a>    // A1/J1).
-<a href=#253 id=253 data-nosnippet>253</a>    //
-<a href=#254 id=254 data-nosnippet>254</a>    // The governor is therefore now OUTERMOST and owns the admission
-<a href=#255 id=255 data-nosnippet>255</a>    // decision, and the shared cross-replica counter sits behind it, counting
-<a href=#256 id=256 data-nosnippet>256</a>    // only traffic that was actually admitted. Both roles are preserved:
-<a href=#257 id=257 data-nosnippet>257</a>    //
-<a href=#258 id=258 data-nosnippet>258</a>    // - single replica — the governor's per-second quota is the binding
-<a href=#259 id=259 data-nosnippet>259</a>    //   constraint and the shared counter (sized `per_sec × 60`) never trips,
-<a href=#260 id=260 data-nosnippet>260</a>    //   so the effective ceiling equals the configured one;
-<a href=#261 id=261 data-nosnippet>261</a>    // - N replicas — each admits its own per-second quota, their sum reaches
-<a href=#262 id=262 data-nosnippet>262</a>    //   the shared window budget, and the shared counter cuts in. That is
-<a href=#263 id=263 data-nosnippet>263</a>    //   exactly the `replicas × limit` multiplication SECHRD-03 exists to
-<a href=#264 id=264 data-nosnippet>264</a>    //   stop, and it is still stopped.
-<a href=#265 id=265 data-nosnippet>265</a>    //
-<a href=#266 id=266 data-nosnippet>266</a>    // Fail-open is unchanged: on a missing key, a disabled shared layer, or a
-<a href=#267 id=267 data-nosnippet>267</a>    // SurrealDB blip the inner layer forwards the request and the governor's
-<a href=#268 id=268 data-nosnippet>268</a>    // decision (already taken, outside it) stands.
-<a href=#269 id=269 data-nosnippet>269</a>    //
-<a href=#270 id=270 data-nosnippet>270</a>    // The REST listener cannot use this ordering — its shared middleware is
-<a href=#271 id=271 data-nosnippet>271</a>    // also what parses `client_id` out of the form body for the client-aware
-<a href=#272 id=272 data-nosnippet>272</a>    // key modes, so it must stay outermost there. It solves the same problem
-<a href=#273 id=273 data-nosnippet>273</a>    // with `SharedRateLimitCounter::refund` instead; see that method's docs.
-<a href=#274 id=274 data-nosnippet>274</a>    // A4/J10: strict revocation, when enabled, sits INSIDE the rate limiters
-<a href=#275 id=275 data-nosnippet>275</a>    // (so a flood of revoked-session calls is throttled before it can touch
-<a href=#276 id=276 data-nosnippet>276</a>    // the session cache) and OUTSIDE the services (so it applies uniformly to
-<a href=#277 id=277 data-nosnippet>277</a>    // every RPC, including any added later). `option_layer` makes the disabled
-<a href=#278 id=278 data-nosnippet>278</a>    // case a genuine no-op rather than a branch in the request path.
-<a href=#279 id=279 data-nosnippet>279</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>builder = Server::builder()
-<a href=#280 id=280 data-nosnippet>280</a>        .max_frame_size(<span class="number">4 </span>* <span class="number">1024 </span>* <span class="number">1024</span>) <span class="comment">// CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
-<a href=#281 id=281 data-nosnippet>281</a>        </span>.timeout(Duration::from_secs(<span class="number">30</span>))
-<a href=#282 id=282 data-nosnippet>282</a>        .concurrency_limit_per_connection(<span class="number">256</span>)
-<a href=#283 id=283 data-nosnippet>283</a>        .layer(governor_layer)
-<a href=#284 id=284 data-nosnippet>284</a>        .layer(shared_rate_limit_layer)
-<a href=#285 id=285 data-nosnippet>285</a>        .layer(tower::util::option_layer(strict_revocation_layer));
-<a href=#286 id=286 data-nosnippet>286</a>
-<a href=#287 id=287 data-nosnippet>287</a>    <span class="comment">// REQ-15 AC-1 / CQ-B20: Env-gated TLS.
-<a href=#288 id=288 data-nosnippet>288</a>    // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.
-<a href=#289 id=289 data-nosnippet>289</a>    </span><span class="kw">let </span>cert_path = std::env::var(<span class="string">"AXIAM__GRPC_TLS_CERT_PATH"</span>).ok();
-<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">let </span>key_path = std::env::var(<span class="string">"AXIAM__GRPC_TLS_KEY_PATH"</span>).ok();
-<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">match </span>(cert_path, key_path) {
-<a href=#292 id=292 data-nosnippet>292</a>        (<span class="prelude-val">Some</span>(cert_path), <span class="prelude-val">Some</span>(key_path)) =&gt; {
-<a href=#293 id=293 data-nosnippet>293</a>            <span class="kw">let </span>cert_pem = std::fs::read(<span class="kw-2">&amp;</span>cert_path).unwrap_or_else(|e| {
-<a href=#294 id=294 data-nosnippet>294</a>                <span class="macro">panic!</span>(<span class="string">"AXIAM__GRPC_TLS_CERT_PATH set but file not readable at '{cert_path}': {e}"</span>)
-<a href=#295 id=295 data-nosnippet>295</a>            });
-<a href=#296 id=296 data-nosnippet>296</a>            <span class="kw">let </span>key_pem = std::fs::read(<span class="kw-2">&amp;</span>key_path).unwrap_or_else(|e| {
-<a href=#297 id=297 data-nosnippet>297</a>                <span class="macro">panic!</span>(<span class="string">"AXIAM__GRPC_TLS_KEY_PATH set but file not readable at '{key_path}': {e}"</span>)
-<a href=#298 id=298 data-nosnippet>298</a>            });
-<a href=#299 id=299 data-nosnippet>299</a>
-<a href=#300 id=300 data-nosnippet>300</a>            <span class="kw">let </span>identity = Identity::from_pem(cert_pem, key_pem);
-<a href=#301 id=301 data-nosnippet>301</a>            <span class="kw">let </span>tls_config = ServerTlsConfig::new().identity(identity);
-<a href=#302 id=302 data-nosnippet>302</a>            <span class="macro">tracing::info!</span>(<span class="string">"gRPC server TLS enabled (AXIAM__GRPC_TLS_CERT_PATH)"</span>);
-<a href=#303 id=303 data-nosnippet>303</a>            builder
-<a href=#304 id=304 data-nosnippet>304</a>                .tls_config(tls_config)<span class="question-mark">?
-<a href=#305 id=305 data-nosnippet>305</a>                </span>.add_service(authz_svc)
-<a href=#306 id=306 data-nosnippet>306</a>                .add_service(user_svc)
-<a href=#307 id=307 data-nosnippet>307</a>                .add_service(user_info_svc)
-<a href=#308 id=308 data-nosnippet>308</a>                .add_service(token_svc)
-<a href=#309 id=309 data-nosnippet>309</a>                .add_service(reactor_svc)
-<a href=#310 id=310 data-nosnippet>310</a>                .serve(addr)
-<a href=#311 id=311 data-nosnippet>311</a>                .<span class="kw">await
-<a href=#312 id=312 data-nosnippet>312</a>        </span>}
-<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">_ </span>=&gt; {
-<a href=#314 id=314 data-nosnippet>314</a>            <span class="macro">tracing::warn!</span>(
-<a href=#315 id=315 data-nosnippet>315</a>                <span class="string">"gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + \
-<a href=#316 id=316 data-nosnippet>316</a>                 AXIAM__GRPC_TLS_KEY_PATH to enable (acceptable for in-mesh deployments)"
-<a href=#317 id=317 data-nosnippet>317</a>            </span>);
-<a href=#318 id=318 data-nosnippet>318</a>            builder
-<a href=#319 id=319 data-nosnippet>319</a>                .add_service(authz_svc)
-<a href=#320 id=320 data-nosnippet>320</a>                .add_service(user_svc)
-<a href=#321 id=321 data-nosnippet>321</a>                .add_service(user_info_svc)
-<a href=#322 id=322 data-nosnippet>322</a>                .add_service(token_svc)
-<a href=#323 id=323 data-nosnippet>323</a>                .add_service(reactor_svc)
-<a href=#324 id=324 data-nosnippet>324</a>                .serve(addr)
-<a href=#325 id=325 data-nosnippet>325</a>                .<span class="kw">await
-<a href=#326 id=326 data-nosnippet>326</a>        </span>}
-<a href=#327 id=327 data-nosnippet>327</a>    }
-<a href=#328 id=328 data-nosnippet>328</a>}
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="comment">// UserInfoService: OIDC-style self lookup — identity derived entirely from
+<a href=#215 id=215 data-nosnippet>215</a>    // the interceptor-verified bearer token (no request body), mirroring the
+<a href=#216 id=216 data-nosnippet>216</a>    // REST `/oauth2/userinfo` endpoint. Guarded by the same AuthInterceptor.
+<a href=#217 id=217 data-nosnippet>217</a>    </span><span class="kw">let </span>user_info_svc = UserInfoServiceServer::with_interceptor(
+<a href=#218 id=218 data-nosnippet>218</a>        UserInfoServiceImpl::new(user_repo),
+<a href=#219 id=219 data-nosnippet>219</a>        AuthInterceptor::new(auth_config.clone()),
+<a href=#220 id=220 data-nosnippet>220</a>    );
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="kw">let </span>token_svc = TokenServiceServer::with_interceptor(
+<a href=#222 id=222 data-nosnippet>222</a>        TokenServiceImpl::new(auth_config.clone()),
+<a href=#223 id=223 data-nosnippet>223</a>        AuthInterceptor::new(auth_config.clone()),
+<a href=#224 id=224 data-nosnippet>224</a>    );
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="comment">// X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST
+<a href=#226 id=226 data-nosnippet>226</a>    // `/api/v1/reactors*` surface. Same `AuthInterceptor` chokepoint as every
+<a href=#227 id=227 data-nosnippet>227</a>    // other authenticated service here.
+<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="kw">let </span>reactor_svc = ReactorAdminServiceServer::with_interceptor(
+<a href=#229 id=229 data-nosnippet>229</a>        ReactorAdminServiceImpl::new(
+<a href=#230 id=230 data-nosnippet>230</a>            reactor_repo,
+<a href=#231 id=231 data-nosnippet>231</a>            reactor_engine,
+<a href=#232 id=232 data-nosnippet>232</a>            reactor_audit_repo,
+<a href=#233 id=233 data-nosnippet>233</a>            reactor_routing_invalidator,
+<a href=#234 id=234 data-nosnippet>234</a>            reactor_dispatch_available,
+<a href=#235 id=235 data-nosnippet>235</a>        ),
+<a href=#236 id=236 data-nosnippet>236</a>        AuthInterceptor::new(auth_config),
+<a href=#237 id=237 data-nosnippet>237</a>    );
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="comment">// CQ-B20: Apply transport limits to the gRPC server builder.
+<a href=#240 id=240 data-nosnippet>240</a>    // Note: tonic 0.14 does not expose max_decoding_message_size / max_encoding_message_size
+<a href=#241 id=241 data-nosnippet>241</a>    // at the Server level (added in tonic 0.12+ via the Router API). The HTTP/2 frame-size
+<a href=#242 id=242 data-nosnippet>242</a>    // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
+<a href=#243 id=243 data-nosnippet>243</a>    // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
+<a href=#244 id=244 data-nosnippet>244</a>    // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
+<a href=#245 id=245 data-nosnippet>245</a>    // SECHRD-03 (D-01a/b/c) + run-5 J1: layer ORDER is load-bearing here.
+<a href=#246 id=246 data-nosnippet>246</a>    // Tower's `Server::builder()` runs the FIRST-added layer with the request
+<a href=#247 id=247 data-nosnippet>247</a>    // FIRST (the opposite of actix's last-`.wrap()`-is-outermost rule), so
+<a href=#248 id=248 data-nosnippet>248</a>    // the layer named first below is the OUTERMOST one.
+<a href=#249 id=249 data-nosnippet>249</a>    //
+<a href=#250 id=250 data-nosnippet>250</a>    // Until run 5 the shared-store pre-check was outermost. That inverted the
+<a href=#251 id=251 data-nosnippet>251</a>    // two layers' natural roles and starved every gRPC family: the pre-check
+<a href=#252 id=252 data-nosnippet>252</a>    // charges its whole 60-second window budget the moment it admits a
+<a href=#253 id=253 data-nosnippet>253</a>    // request, but the per-second `governor` behind it then rejected almost
+<a href=#254 id=254 data-nosnippet>254</a>    // all of those requests. A flood therefore burned all 6 000 authz
+<a href=#255 id=255 data-nosnippet>255</a>    // admissions of a window on traffic that was never served, in well under
+<a href=#256 id=256 data-nosnippet>256</a>    // a second, and the window stayed exhausted for its remaining ~59 —
+<a href=#257 id=257 data-nosnippet>257</a>    // measured at 181 admissions/min against a configured 6 000/min, i.e.
+<a href=#258 id=258 data-nosnippet>258</a>    // 1/33 of the ceiling (`claude_dev/improvement-after-run5-benchmark.md`
+<a href=#259 id=259 data-nosnippet>259</a>    // A1/J1).
+<a href=#260 id=260 data-nosnippet>260</a>    //
+<a href=#261 id=261 data-nosnippet>261</a>    // The governor is therefore now OUTERMOST and owns the admission
+<a href=#262 id=262 data-nosnippet>262</a>    // decision, and the shared cross-replica counter sits behind it, counting
+<a href=#263 id=263 data-nosnippet>263</a>    // only traffic that was actually admitted. Both roles are preserved:
+<a href=#264 id=264 data-nosnippet>264</a>    //
+<a href=#265 id=265 data-nosnippet>265</a>    // - single replica — the governor's per-second quota is the binding
+<a href=#266 id=266 data-nosnippet>266</a>    //   constraint and the shared counter (sized `per_sec × 60`) never trips,
+<a href=#267 id=267 data-nosnippet>267</a>    //   so the effective ceiling equals the configured one;
+<a href=#268 id=268 data-nosnippet>268</a>    // - N replicas — each admits its own per-second quota, their sum reaches
+<a href=#269 id=269 data-nosnippet>269</a>    //   the shared window budget, and the shared counter cuts in. That is
+<a href=#270 id=270 data-nosnippet>270</a>    //   exactly the `replicas × limit` multiplication SECHRD-03 exists to
+<a href=#271 id=271 data-nosnippet>271</a>    //   stop, and it is still stopped.
+<a href=#272 id=272 data-nosnippet>272</a>    //
+<a href=#273 id=273 data-nosnippet>273</a>    // Fail-open is unchanged: on a missing key, a disabled shared layer, or a
+<a href=#274 id=274 data-nosnippet>274</a>    // SurrealDB blip the inner layer forwards the request and the governor's
+<a href=#275 id=275 data-nosnippet>275</a>    // decision (already taken, outside it) stands.
+<a href=#276 id=276 data-nosnippet>276</a>    //
+<a href=#277 id=277 data-nosnippet>277</a>    // The REST listener cannot use this ordering — its shared middleware is
+<a href=#278 id=278 data-nosnippet>278</a>    // also what parses `client_id` out of the form body for the client-aware
+<a href=#279 id=279 data-nosnippet>279</a>    // key modes, so it must stay outermost there. It solves the same problem
+<a href=#280 id=280 data-nosnippet>280</a>    // with `SharedRateLimitCounter::refund` instead; see that method's docs.
+<a href=#281 id=281 data-nosnippet>281</a>    // A4/J10: strict revocation, when enabled, sits INSIDE the rate limiters
+<a href=#282 id=282 data-nosnippet>282</a>    // (so a flood of revoked-session calls is throttled before it can touch
+<a href=#283 id=283 data-nosnippet>283</a>    // the session cache) and OUTSIDE the services (so it applies uniformly to
+<a href=#284 id=284 data-nosnippet>284</a>    // every RPC, including any added later). `option_layer` makes the disabled
+<a href=#285 id=285 data-nosnippet>285</a>    // case a genuine no-op rather than a branch in the request path.
+<a href=#286 id=286 data-nosnippet>286</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>builder = Server::builder()
+<a href=#287 id=287 data-nosnippet>287</a>        .max_frame_size(<span class="number">4 </span>* <span class="number">1024 </span>* <span class="number">1024</span>) <span class="comment">// CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
+<a href=#288 id=288 data-nosnippet>288</a>        </span>.timeout(Duration::from_secs(<span class="number">30</span>))
+<a href=#289 id=289 data-nosnippet>289</a>        .concurrency_limit_per_connection(<span class="number">256</span>)
+<a href=#290 id=290 data-nosnippet>290</a>        .layer(governor_layer)
+<a href=#291 id=291 data-nosnippet>291</a>        .layer(shared_rate_limit_layer)
+<a href=#292 id=292 data-nosnippet>292</a>        .layer(tower::util::option_layer(strict_revocation_layer));
+<a href=#293 id=293 data-nosnippet>293</a>
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="comment">// REQ-15 AC-1 / CQ-B20: Env-gated TLS.
+<a href=#295 id=295 data-nosnippet>295</a>    // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.
+<a href=#296 id=296 data-nosnippet>296</a>    </span><span class="kw">let </span>cert_path = std::env::var(<span class="string">"AXIAM__GRPC_TLS_CERT_PATH"</span>).ok();
+<a href=#297 id=297 data-nosnippet>297</a>    <span class="kw">let </span>key_path = std::env::var(<span class="string">"AXIAM__GRPC_TLS_KEY_PATH"</span>).ok();
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">match </span>(cert_path, key_path) {
+<a href=#299 id=299 data-nosnippet>299</a>        (<span class="prelude-val">Some</span>(cert_path), <span class="prelude-val">Some</span>(key_path)) =&gt; {
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="kw">let </span>cert_pem = std::fs::read(<span class="kw-2">&amp;</span>cert_path).unwrap_or_else(|e| {
+<a href=#301 id=301 data-nosnippet>301</a>                <span class="macro">panic!</span>(<span class="string">"AXIAM__GRPC_TLS_CERT_PATH set but file not readable at '{cert_path}': {e}"</span>)
+<a href=#302 id=302 data-nosnippet>302</a>            });
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="kw">let </span>key_pem = std::fs::read(<span class="kw-2">&amp;</span>key_path).unwrap_or_else(|e| {
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="macro">panic!</span>(<span class="string">"AXIAM__GRPC_TLS_KEY_PATH set but file not readable at '{key_path}': {e}"</span>)
+<a href=#305 id=305 data-nosnippet>305</a>            });
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="kw">let </span>identity = Identity::from_pem(cert_pem, key_pem);
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="kw">let </span>tls_config = ServerTlsConfig::new().identity(identity);
+<a href=#309 id=309 data-nosnippet>309</a>            <span class="macro">tracing::info!</span>(<span class="string">"gRPC server TLS enabled (AXIAM__GRPC_TLS_CERT_PATH)"</span>);
+<a href=#310 id=310 data-nosnippet>310</a>            builder
+<a href=#311 id=311 data-nosnippet>311</a>                .tls_config(tls_config)<span class="question-mark">?
+<a href=#312 id=312 data-nosnippet>312</a>                </span>.add_service(authz_svc)
+<a href=#313 id=313 data-nosnippet>313</a>                .add_service(user_svc)
+<a href=#314 id=314 data-nosnippet>314</a>                .add_service(user_info_svc)
+<a href=#315 id=315 data-nosnippet>315</a>                .add_service(token_svc)
+<a href=#316 id=316 data-nosnippet>316</a>                .add_service(reactor_svc)
+<a href=#317 id=317 data-nosnippet>317</a>                .serve(addr)
+<a href=#318 id=318 data-nosnippet>318</a>                .<span class="kw">await
+<a href=#319 id=319 data-nosnippet>319</a>        </span>}
+<a href=#320 id=320 data-nosnippet>320</a>        <span class="kw">_ </span>=&gt; {
+<a href=#321 id=321 data-nosnippet>321</a>            <span class="macro">tracing::warn!</span>(
+<a href=#322 id=322 data-nosnippet>322</a>                <span class="string">"gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + \
+<a href=#323 id=323 data-nosnippet>323</a>                 AXIAM__GRPC_TLS_KEY_PATH to enable (acceptable for in-mesh deployments)"
+<a href=#324 id=324 data-nosnippet>324</a>            </span>);
+<a href=#325 id=325 data-nosnippet>325</a>            builder
+<a href=#326 id=326 data-nosnippet>326</a>                .add_service(authz_svc)
+<a href=#327 id=327 data-nosnippet>327</a>                .add_service(user_svc)
+<a href=#328 id=328 data-nosnippet>328</a>                .add_service(user_info_svc)
+<a href=#329 id=329 data-nosnippet>329</a>                .add_service(token_svc)
+<a href=#330 id=330 data-nosnippet>330</a>                .add_service(reactor_svc)
+<a href=#331 id=331 data-nosnippet>331</a>                .serve(addr)
+<a href=#332 id=332 data-nosnippet>332</a>                .<span class="kw">await
+<a href=#333 id=333 data-nosnippet>333</a>        </span>}
+<a href=#334 id=334 data-nosnippet>334</a>    }
+<a href=#335 id=335 data-nosnippet>335</a>}
 </code></pre></div></section></main></body></html>

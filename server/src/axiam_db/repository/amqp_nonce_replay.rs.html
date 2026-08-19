@@ -1,11 +1,11 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/repository/amqp_nonce_replay.rs`."><title>amqp_nonce_replay.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/repository/</div>amqp_nonce_replay.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SurrealDB implementation of [`AmqpNonceRepository`] (NEW-4).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/repository/amqp_nonce_replay.rs`."><title>amqp_nonce_replay.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/repository/</div>amqp_nonce_replay.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SurrealDB implementation of [`AmqpNonceRepository`] (NEW-4).
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Provides insert-or-conflict semantics for AMQP message nonces. Inserting a
 <a href=#4 id=4 data-nosnippet>4</a>//! `(tenant_id, nonce)` pair that already exists returns
 <a href=#5 id=5 data-nosnippet>5</a>//! `Err(AxiamError::ReplayDetected)` so the authz/audit AMQP consumers can
 <a href=#6 id=6 data-nosnippet>6</a>//! reject replayed messages (NEW-4). Mirrors [`super::saml_replay`].
 <a href=#7 id=7 data-nosnippet>7</a>
-<a href=#8 id=8 data-nosnippet>8</a></span><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
+<a href=#8 id=8 data-nosnippet>8</a></span><span class="kw">use </span>axiam_core::error::AxiamResult;
 <a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>axiam_core::id::new_id;
 <a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>axiam_core::repository::AmqpNonceRepository;
 <a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span>chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@
 <a href=#14 id=14 data-nosnippet>14</a>
 <a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><span class="kw">crate</span>::helpers::CountRow;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{classify_replay_write_error, cleanup_expired_rows};
 <a href=#18 id=18 data-nosnippet>18</a>
 <a href=#19 id=19 data-nosnippet>19</a><span class="comment">// ---------------------------------------------------------------------------
 <a href=#20 id=20 data-nosnippet>20</a>// Repository
@@ -68,48 +68,17 @@
 <a href=#68 id=68 data-nosnippet>68</a>            .<span class="kw">await
 <a href=#69 id=69 data-nosnippet>69</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#70 id=70 data-nosnippet>70</a>
-<a href=#71 id=71 data-nosnippet>71</a>        result
-<a href=#72 id=72 data-nosnippet>72</a>            .check()
-<a href=#73 id=73 data-nosnippet>73</a>            .map_err(|e| {
-<a href=#74 id=74 data-nosnippet>74</a>                <span class="kw">let </span>msg = e.to_string();
-<a href=#75 id=75 data-nosnippet>75</a>                <span class="comment">// SurrealDB v3 UNIQUE index violation message contains
-<a href=#76 id=76 data-nosnippet>76</a>                // "already contains" (e.g. "Database index
-<a href=#77 id=77 data-nosnippet>77</a>                // `idx_amqp_nonce_uniq` already contains [...]"). Also match
-<a href=#78 id=78 data-nosnippet>78</a>                // "already exists" and "unique" as fallback patterns.
-<a href=#79 id=79 data-nosnippet>79</a>                </span><span class="kw">if </span>msg.contains(<span class="string">"already contains"</span>)
-<a href=#80 id=80 data-nosnippet>80</a>                    || msg.contains(<span class="string">"already exists"</span>)
-<a href=#81 id=81 data-nosnippet>81</a>                    || msg.contains(<span class="string">"unique"</span>)
-<a href=#82 id=82 data-nosnippet>82</a>                {
-<a href=#83 id=83 data-nosnippet>83</a>                    AxiamError::ReplayDetected
-<a href=#84 id=84 data-nosnippet>84</a>                } <span class="kw">else </span>{
-<a href=#85 id=85 data-nosnippet>85</a>                    AxiamError::Database(msg)
-<a href=#86 id=86 data-nosnippet>86</a>                }
-<a href=#87 id=87 data-nosnippet>87</a>            })
-<a href=#88 id=88 data-nosnippet>88</a>            .map(|<span class="kw">_</span>| ())
-<a href=#89 id=89 data-nosnippet>89</a>    }
-<a href=#90 id=90 data-nosnippet>90</a>
-<a href=#91 id=91 data-nosnippet>91</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#92 id=92 data-nosnippet>92</a>        <span class="comment">// Count expired rows first, then delete.
-<a href=#93 id=93 data-nosnippet>93</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
-<a href=#94 id=94 data-nosnippet>94</a>            </span>.db
-<a href=#95 id=95 data-nosnippet>95</a>            .current()
-<a href=#96 id=96 data-nosnippet>96</a>            .query(
-<a href=#97 id=97 data-nosnippet>97</a>                <span class="string">"SELECT count() AS total FROM amqp_nonce_replay \
-<a href=#98 id=98 data-nosnippet>98</a>                 WHERE expires_at &lt; time::now() GROUP ALL"</span>,
-<a href=#99 id=99 data-nosnippet>99</a>            )
-<a href=#100 id=100 data-nosnippet>100</a>            .<span class="kw">await
-<a href=#101 id=101 data-nosnippet>101</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#102 id=102 data-nosnippet>102</a>
-<a href=#103 id=103 data-nosnippet>103</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#104 id=104 data-nosnippet>104</a>        <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
-<a href=#105 id=105 data-nosnippet>105</a>
-<a href=#106 id=106 data-nosnippet>106</a>        <span class="self">self</span>.db
-<a href=#107 id=107 data-nosnippet>107</a>            .current()
-<a href=#108 id=108 data-nosnippet>108</a>            .query(<span class="string">"DELETE amqp_nonce_replay WHERE expires_at &lt; time::now()"</span>)
-<a href=#109 id=109 data-nosnippet>109</a>            .<span class="kw">await
-<a href=#110 id=110 data-nosnippet>110</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#111 id=111 data-nosnippet>111</a>
-<a href=#112 id=112 data-nosnippet>112</a>        <span class="prelude-val">Ok</span>(total)
-<a href=#113 id=113 data-nosnippet>113</a>    }
-<a href=#114 id=114 data-nosnippet>114</a>}
+<a href=#71 id=71 data-nosnippet>71</a>        <span class="comment">// The UNIQUE violation IS the answer: this nonce has been seen, so the
+<a href=#72 id=72 data-nosnippet>72</a>        // message is a replay. What counts as one is decided in exactly one
+<a href=#73 id=73 data-nosnippet>73</a>        // place (D-09) -- see `helpers::is_unique_violation`.
+<a href=#74 id=74 data-nosnippet>74</a>        </span>result
+<a href=#75 id=75 data-nosnippet>75</a>            .check()
+<a href=#76 id=76 data-nosnippet>76</a>            .map_err(classify_replay_write_error)
+<a href=#77 id=77 data-nosnippet>77</a>            .map(|<span class="kw">_</span>| ())
+<a href=#78 id=78 data-nosnippet>78</a>    }
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#81 id=81 data-nosnippet>81</a>        cleanup_expired_rows(<span class="kw-2">&amp;</span><span class="self">self</span>.db, <span class="string">"amqp_nonce_replay"</span>).<span class="kw">await
+<a href=#82 id=82 data-nosnippet>82</a>    </span>}
+<a href=#83 id=83 data-nosnippet>83</a>}
 </code></pre></div></section></main></body></html>

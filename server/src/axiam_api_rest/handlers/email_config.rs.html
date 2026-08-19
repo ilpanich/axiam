@@ -38,7 +38,7 @@
 <a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">fn </span>require_email_config_repo&lt;C: Connection + Clone&gt;(
 <a href=#39 id=39 data-nosnippet>39</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
 <a href=#40 id=40 data-nosnippet>40</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="kw-2">&amp;</span>SurrealEmailConfigRepository&lt;C&gt;, AxiamApiError&gt; {
-<a href=#41 id=41 data-nosnippet>41</a>    state.email_config_repo.as_ref().ok_or_else(|| {
+<a href=#41 id=41 data-nosnippet>41</a>    state.mail.email_config_repo.as_ref().ok_or_else(|| {
 <a href=#42 id=42 data-nosnippet>42</a>        AxiamApiError(AxiamError::Internal(
 <a href=#43 id=43 data-nosnippet>43</a>            <span class="string">"email configuration is disabled (AXIAM__EMAIL_ENCRYPTION_KEY not set)"</span>.into(),
 <a href=#44 id=44 data-nosnippet>44</a>        ))

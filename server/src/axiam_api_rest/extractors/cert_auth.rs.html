@@ -119,7 +119,7 @@
 <a href=#119 id=119 data-nosnippet>119</a>        <span class="kw">let </span>state = req
 <a href=#120 id=120 data-nosnippet>120</a>            .app_data::&lt;web::Data&lt;AppState&lt;C&gt;&gt;&gt;()
 <a href=#121 id=121 data-nosnippet>121</a>            .ok_or(AxiamError::Internal(<span class="string">"missing AppState"</span>.into()))<span class="question-mark">?</span>;
-<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">let </span>service = <span class="kw-2">&amp;</span>state.device_auth_service;
+<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">let </span>service = <span class="kw-2">&amp;</span>state.pki.device_auth_service;
 <a href=#123 id=123 data-nosnippet>123</a>
 <a href=#124 id=124 data-nosnippet>124</a>        <span class="comment">// Prefer the VERIFIED client certificate captured at TLS handshake time
 <a href=#125 id=125 data-nosnippet>125</a>        // (D3 native mTLS): rustls has already checked it against the client-CA

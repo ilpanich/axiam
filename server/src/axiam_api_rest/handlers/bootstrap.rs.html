@@ -438,33 +438,35 @@
 <a href=#438 id=438 data-nosnippet>438</a>
 <a href=#439 id=439 data-nosnippet>439</a>    result.check().map_err(|e| {
 <a href=#440 id=440 data-nosnippet>440</a>        <span class="kw">let </span>msg = e.to_string();
-<a href=#441 id=441 data-nosnippet>441</a>        <span class="comment">// SurrealDB v3 UNIQUE index violation message contains "already
-<a href=#442 id=442 data-nosnippet>442</a>        // contains" (e.g. bootstrap_lock's implicit record-ID uniqueness
-<a href=#443 id=443 data-nosnippet>443</a>        // constraint). Also match "already exists" and "unique" as
-<a href=#444 id=444 data-nosnippet>444</a>        // fallback patterns (mirrors saml_replay.rs::insert_assertion).
-<a href=#445 id=445 data-nosnippet>445</a>        </span><span class="kw">if </span>msg.contains(<span class="string">"already contains"</span>)
-<a href=#446 id=446 data-nosnippet>446</a>            || msg.contains(<span class="string">"already exists"</span>)
-<a href=#447 id=447 data-nosnippet>447</a>            || msg.contains(<span class="string">"unique"</span>)
-<a href=#448 id=448 data-nosnippet>448</a>        {
-<a href=#449 id=449 data-nosnippet>449</a>            AxiamApiError(AxiamError::AlreadyExists {
-<a href=#450 id=450 data-nosnippet>450</a>                entity: <span class="string">"bootstrap"</span>.into(),
-<a href=#451 id=451 data-nosnippet>451</a>            })
-<a href=#452 id=452 data-nosnippet>452</a>        } <span class="kw">else </span>{
-<a href=#453 id=453 data-nosnippet>453</a>            AxiamApiError(AxiamError::Internal(<span class="macro">format!</span>(
-<a href=#454 id=454 data-nosnippet>454</a>                <span class="string">"bootstrap transaction: {msg}"
-<a href=#455 id=455 data-nosnippet>455</a>            </span>)))
-<a href=#456 id=456 data-nosnippet>456</a>        }
-<a href=#457 id=457 data-nosnippet>457</a>    })<span class="question-mark">?</span>;
-<a href=#458 id=458 data-nosnippet>458</a>
-<a href=#459 id=459 data-nosnippet>459</a>    <span class="comment">// 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
-<a href=#460 id=460 data-nosnippet>460</a>    </span><span class="prelude-val">Ok</span>(HttpResponse::Created().json(BootstrapResponse {
-<a href=#461 id=461 data-nosnippet>461</a>        message: <span class="string">"Organization, tenant and admin user created. Login via /api/v1/auth/login."
-<a href=#462 id=462 data-nosnippet>462</a>            </span>.into(),
-<a href=#463 id=463 data-nosnippet>463</a>        organization_id: org.id,
-<a href=#464 id=464 data-nosnippet>464</a>        organization_slug: org_slug,
-<a href=#465 id=465 data-nosnippet>465</a>        tenant_id,
-<a href=#466 id=466 data-nosnippet>466</a>        tenant_slug,
-<a href=#467 id=467 data-nosnippet>467</a>        user_id,
-<a href=#468 id=468 data-nosnippet>468</a>    }))
-<a href=#469 id=469 data-nosnippet>469</a>}
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="comment">// A UNIQUE violation here is `bootstrap_lock`'s implicit record-ID
+<a href=#442 id=442 data-nosnippet>442</a>        // constraint: somebody else won the race to initialise this
+<a href=#443 id=443 data-nosnippet>443</a>        // deployment, and the loser must get a 409 rather than a second admin.
+<a href=#444 id=444 data-nosnippet>444</a>        //
+<a href=#445 id=445 data-nosnippet>445</a>        // What counts as a UNIQUE violation is decided in exactly one place
+<a href=#446 id=446 data-nosnippet>446</a>        // (D-09) -- `axiam_db::helpers::is_unique_violation`. This site calls
+<a href=#447 id=447 data-nosnippet>447</a>        // the predicate rather than a whole classifier so it can keep the
+<a href=#448 id=448 data-nosnippet>448</a>        // "bootstrap transaction:" prefix on the non-conflict branch, which is
+<a href=#449 id=449 data-nosnippet>449</a>        // what makes a failure here findable in the server log.
+<a href=#450 id=450 data-nosnippet>450</a>        </span><span class="kw">if </span>axiam_db::helpers::is_unique_violation(<span class="kw-2">&amp;</span>msg) {
+<a href=#451 id=451 data-nosnippet>451</a>            AxiamApiError(AxiamError::AlreadyExists {
+<a href=#452 id=452 data-nosnippet>452</a>                entity: <span class="string">"bootstrap"</span>.into(),
+<a href=#453 id=453 data-nosnippet>453</a>            })
+<a href=#454 id=454 data-nosnippet>454</a>        } <span class="kw">else </span>{
+<a href=#455 id=455 data-nosnippet>455</a>            AxiamApiError(AxiamError::Internal(<span class="macro">format!</span>(
+<a href=#456 id=456 data-nosnippet>456</a>                <span class="string">"bootstrap transaction: {msg}"
+<a href=#457 id=457 data-nosnippet>457</a>            </span>)))
+<a href=#458 id=458 data-nosnippet>458</a>        }
+<a href=#459 id=459 data-nosnippet>459</a>    })<span class="question-mark">?</span>;
+<a href=#460 id=460 data-nosnippet>460</a>
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="comment">// 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
+<a href=#462 id=462 data-nosnippet>462</a>    </span><span class="prelude-val">Ok</span>(HttpResponse::Created().json(BootstrapResponse {
+<a href=#463 id=463 data-nosnippet>463</a>        message: <span class="string">"Organization, tenant and admin user created. Login via /api/v1/auth/login."
+<a href=#464 id=464 data-nosnippet>464</a>            </span>.into(),
+<a href=#465 id=465 data-nosnippet>465</a>        organization_id: org.id,
+<a href=#466 id=466 data-nosnippet>466</a>        organization_slug: org_slug,
+<a href=#467 id=467 data-nosnippet>467</a>        tenant_id,
+<a href=#468 id=468 data-nosnippet>468</a>        tenant_slug,
+<a href=#469 id=469 data-nosnippet>469</a>        user_id,
+<a href=#470 id=470 data-nosnippet>470</a>    }))
+<a href=#471 id=471 data-nosnippet>471</a>}
 </code></pre></div></section></main></body></html>

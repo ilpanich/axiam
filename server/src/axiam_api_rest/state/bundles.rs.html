@@ -1,0 +1,247 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/state/bundles.rs`."><title>bundles.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/state/</div>bundles.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! `AppState`'s cohesive sub-states (F3).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! # Why these exist
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! `AppState` carried **75 public fields**, nearly all concrete
+<a href=#6 id=6 data-nosnippet>6</a>//! `Surreal*Repository&lt;C&gt;` values, and every handler received all of them
+<a href=#7 id=7 data-nosnippet>7</a>//! regardless of what it used. That is a god object by the usual definition,
+<a href=#8 id=8 data-nosnippet>8</a>//! and it had the usual consequences: `state.rs` referenced `axiam_db` in
+<a href=#9 id=9 data-nosnippet>9</a>//! nineteen places, `C: Connection + Clone` propagated through every handler
+<a href=#10 id=10 data-nosnippet>10</a>//! signature in the crate, and twenty-five `#[allow(clippy::too_many_arguments)]`
+<a href=#11 id=11 data-nosnippet>11</a>//! sites sat downstream of the same pressure.
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! Forty-six of those fields are used by **one** handler module each. Grouping
+<a href=#14 id=14 data-nosnippet>14</a>//! them by what they are *for* takes the root from 75 members to 36 and gives
+<a href=#15 id=15 data-nosnippet>15</a>//! each group a name, a docstring and a boundary.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! # Why not `Arc&lt;dyn Repository&gt;`
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! The obvious "fix" for a struct full of concrete types is to box them behind
+<a href=#20 id=20 data-nosnippet>20</a>//! trait objects. That would put vtable dispatch on the authorization hot path,
+<a href=#21 id=21 data-nosnippet>21</a>//! which is the one place this system cannot afford it -- `check_access` is
+<a href=#22 id=22 data-nosnippet>22</a>//! what a service mesh calls on every request.
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! This is a **field-grouping change, not a dispatch change**. Every type is
+<a href=#25 id=25 data-nosnippet>25</a>//! what it was, monomorphisation is what it was, and the generated code is what
+<a href=#26 id=26 data-nosnippet>26</a>//! it was. What changes is who can see what.
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! # `use super::*`
+<a href=#29 id=29 data-nosnippet>29</a>//!
+<a href=#30 id=30 data-nosnippet>30</a>//! Deliberate. These structs and [`super::AppState`] are two halves of one
+<a href=#31 id=31 data-nosnippet>31</a>//! dependency-injection container and name the same forty-odd types; a
+<a href=#32 id=32 data-nosnippet>32</a>//! duplicated import list would be a second place to update every time a
+<a href=#33 id=33 data-nosnippet>33</a>//! repository is added, for no reader's benefit.
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a></span><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// Certificate authority, X.509 issuance, PGP and device certificate auth.
+<a href=#38 id=38 data-nosnippet>38</a>///
+<a href=#39 id=39 data-nosnippet>39</a>/// Everything behind `/api/v1/ca-certificates`, `/api/v1/certificates`,
+<a href=#40 id=40 data-nosnippet>40</a>/// `/api/v1/pgp-keys` and the mTLS device-auth path. Grouped because they share
+<a href=#41 id=41 data-nosnippet>41</a>/// one subject -- key material this deployment issues or verifies -- and because
+<a href=#42 id=42 data-nosnippet>42</a>/// nothing outside those four handlers has any business reaching a signing
+<a href=#43 id=43 data-nosnippet>43</a>/// service.
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="attr">#[derive(Clone)]
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">pub struct </span>PkiState&lt;C: Connection + Clone&gt; {
+<a href=#46 id=46 data-nosnippet>46</a>    <span class="kw">pub </span>ca_service: CaServiceT&lt;C&gt;,
+<a href=#47 id=47 data-nosnippet>47</a>    <span class="kw">pub </span>cert_service: CertServiceT&lt;C&gt;,
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="kw">pub </span>cert_repo: SurrealCertificateRepository&lt;C&gt;,
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="kw">pub </span>pgp_service: PgpServiceT&lt;C&gt;,
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="kw">pub </span>device_auth_service: DeviceAuthServiceT&lt;C&gt;,
+<a href=#51 id=51 data-nosnippet>51</a>}
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="doccomment">/// WebAuthn ceremonies, attestation policy and FIDO MDS metadata.
+<a href=#54 id=54 data-nosnippet>54</a>///
+<a href=#55 id=55 data-nosnippet>55</a>/// The registration/authentication ceremonies, the tenant attestation policy
+<a href=#56 id=56 data-nosnippet>56</a>/// they are evaluated against, and the FIDO MDS3 metadata that policy reads.
+<a href=#57 id=57 data-nosnippet>57</a>/// `attestation_ca_cache` and `attestation_metadata_source` sit here rather than
+<a href=#58 id=58 data-nosnippet>58</a>/// in [`PkiState`] because they exist to answer "is this authenticator's
+<a href=#59 id=59 data-nosnippet>59</a>/// attestation acceptable", which is a WebAuthn question, not a PKI one.
+<a href=#60 id=60 data-nosnippet>60</a></span><span class="attr">#[derive(Clone)]
+<a href=#61 id=61 data-nosnippet>61</a></span><span class="kw">pub struct </span>WebauthnState&lt;C: Connection + Clone&gt; {
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="kw">pub </span>webauthn_service: WebauthnServiceT&lt;C&gt;,
+<a href=#63 id=63 data-nosnippet>63</a>    <span class="doccomment">/// X3 wave 3: direct access to WebAuthn credentials for the tenant-wide
+<a href=#64 id=64 data-nosnippet>64</a>    /// compliance report (D9) — `webauthn_service` only exposes per-user
+<a href=#65 id=65 data-nosnippet>65</a>    /// ceremony operations, not a tenant-wide listing.
+<a href=#66 id=66 data-nosnippet>66</a>    </span><span class="kw">pub </span>webauthn_credential_repo: SurrealWebauthnCredentialRepository&lt;C&gt;,
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="doccomment">/// X3 (D5): tenant WebAuthn attestation policy. Resolved by REST
+<a href=#68 id=68 data-nosnippet>68</a>    /// handlers on every registration ceremony start/finish (an absent row
+<a href=#69 id=69 data-nosnippet>69</a>    /// means `WebauthnAttestationPolicy::default()`, i.e. today's `mode:
+<a href=#70 id=70 data-nosnippet>70</a>    /// none` behavior) and by the policy admin/compliance-report endpoints.
+<a href=#71 id=71 data-nosnippet>71</a>    </span><span class="kw">pub </span>webauthn_attestation_policy_repo: SurrealWebauthnAttestationPolicyRepository&lt;C&gt;,
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="doccomment">/// X3 (D10): server-global FIDO MDS3 metadata storage, read by the
+<a href=#73 id=73 data-nosnippet>73</a>    /// `GET /api/v1/mds/status` / `POST /api/v1/mds/refresh` admin endpoints.
+<a href=#74 id=74 data-nosnippet>74</a>    </span><span class="kw">pub </span>mds_repo: SurrealMdsRepository&lt;C&gt;,
+<a href=#75 id=75 data-nosnippet>75</a>    <span class="doccomment">/// X3 (W2-D4): the small, data-only view over `mds_repo` that
+<a href=#76 id=76 data-nosnippet>76</a>    /// `axiam-auth`'s attestation enforcement and compliance evaluation
+<a href=#77 id=77 data-nosnippet>77</a>    /// consume, keeping `axiam-auth` free of a hard `axiam-db` dependency.
+<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="kw">pub </span>attestation_metadata_source: MdsAttestationMetadataSource&lt;SurrealMdsRepository&lt;C&gt;&gt;,
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="doccomment">/// X3 (W2-D3): process-wide cache of built `AttestationCaList`s.
+<a href=#80 id=80 data-nosnippet>80</a>    /// `Arc`-shared (mirrors `tenant_org_cache`) so every worker/request
+<a href=#81 id=81 data-nosnippet>81</a>    /// sees the same cache, and so it can be invalidated from the MDS
+<a href=#82 id=82 data-nosnippet>82</a>    /// refresh and attestation-policy-update endpoints (and the background
+<a href=#83 id=83 data-nosnippet>83</a>    /// MDS refresh job in `axiam-server`) without threading a second
+<a href=#84 id=84 data-nosnippet>84</a>    /// `web::Data` registration through every call site.
+<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="kw">pub </span>attestation_ca_cache: Arc&lt;AttestationCaCache&gt;,
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// X3 (D10): FIDO MDS3 ingestion configuration (`mds_enabled`,
+<a href=#87 id=87 data-nosnippet>87</a>    /// `mds_blob_url`/`mds_blob_path`, `mds_leaf_dns`). `POST
+<a href=#88 id=88 data-nosnippet>88</a>    /// /api/v1/mds/refresh` reads this to decide whether ingestion is
+<a href=#89 id=89 data-nosnippet>89</a>    /// enabled at all and which source to fetch from — `encryption_key`
+<a href=#90 id=90 data-nosnippet>90</a>    /// here is unused by the REST layer (PKI-service construction in
+<a href=#91 id=91 data-nosnippet>91</a>    /// `axiam-server` keeps its own copy for that).
+<a href=#92 id=92 data-nosnippet>92</a>    </span><span class="kw">pub </span>pki_config: PkiConfig,
+<a href=#93 id=93 data-nosnippet>93</a>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a><span class="doccomment">/// Consent records, account deletion, data export and erasure proofs.
+<a href=#96 id=96 data-nosnippet>96</a>///
+<a href=#97 id=97 data-nosnippet>97</a>/// The Art. 7 / Art. 17 / Art. 20 surfaces. A tight, self-contained group:
+<a href=#98 id=98 data-nosnippet>98</a>/// these four repositories are read by `handlers/gdpr.rs` and the cleanup job and
+<a href=#99 id=99 data-nosnippet>99</a>/// by nothing else, which is exactly the property that makes them a bundle rather
+<a href=#100 id=100 data-nosnippet>100</a>/// than four more fields on the root.
+<a href=#101 id=101 data-nosnippet>101</a></span><span class="attr">#[derive(Clone)]
+<a href=#102 id=102 data-nosnippet>102</a></span><span class="kw">pub struct </span>GdprState&lt;C: Connection + Clone&gt; {
+<a href=#103 id=103 data-nosnippet>103</a>    <span class="kw">pub </span>consent_repo: SurrealConsentRepository&lt;C&gt;,
+<a href=#104 id=104 data-nosnippet>104</a>    <span class="kw">pub </span>account_deletion_repo: SurrealAccountDeletionRepository&lt;C&gt;,
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="kw">pub </span>export_job_repo: SurrealExportJobRepository&lt;C&gt;,
+<a href=#106 id=106 data-nosnippet>106</a>    <span class="kw">pub </span>erasure_proof_repo: SurrealErasureProofRepository&lt;C&gt;,
+<a href=#107 id=107 data-nosnippet>107</a>}
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a><span class="doccomment">/// Outbound mail, provider configuration and the two token-mail services.
+<a href=#110 id=110 data-nosnippet>110</a>///
+<a href=#111 id=111 data-nosnippet>111</a>/// `email_encryption_key` is `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is
+<a href=#112 id=112 data-nosnippet>112</a>/// unset, and that absence is what makes the email-config routes fail closed. It
+<a href=#113 id=113 data-nosnippet>113</a>/// lives beside the repository it protects rather than several screens away from
+<a href=#114 id=114 data-nosnippet>114</a>/// it, so the pairing is visible at the point of use.
+<a href=#115 id=115 data-nosnippet>115</a></span><span class="attr">#[derive(Clone)]
+<a href=#116 id=116 data-nosnippet>116</a></span><span class="kw">pub struct </span>MailState&lt;C: Connection + Clone&gt; {
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">pub </span>mail_outbound_publisher: Arc&lt;<span class="kw">dyn </span>DynMailPublisher&gt;,
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// D-02: `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is unset — the six
+<a href=#119 id=119 data-nosnippet>119</a>    /// email-config routes fail closed rather than silently using a
+<a href=#120 id=120 data-nosnippet>120</a>    /// constant/zero key.
+<a href=#121 id=121 data-nosnippet>121</a>    </span><span class="kw">pub </span>email_config_repo: <span class="prelude-ty">Option</span>&lt;SurrealEmailConfigRepository&lt;C&gt;&gt;,
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// D-17: AES-256-GCM key for email-provider secrets. Absent (`None`)
+<a href=#123 id=123 data-nosnippet>123</a>    /// means email-config admin endpoints and mail delivery stay disabled
+<a href=#124 id=124 data-nosnippet>124</a>    /// (fail-closed) — mirrors the pre-existing behavior exactly.
+<a href=#125 id=125 data-nosnippet>125</a>    </span><span class="kw">pub </span>email_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="kw">pub </span>email_verification_service: EmailVerificationServiceT&lt;C&gt;,
+<a href=#127 id=127 data-nosnippet>127</a>
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="comment">// -- QUAL-07: hoisted per-request service constructions (13 call sites) --
+<a href=#129 id=129 data-nosnippet>129</a>    </span><span class="kw">pub </span>password_reset_service: PasswordResetServiceT&lt;C&gt;,
+<a href=#130 id=130 data-nosnippet>130</a>}
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a><span class="doccomment">/// Reactors, webhooks and notification rules — everything AXIAM emits outward.
+<a href=#133 id=133 data-nosnippet>133</a>///
+<a href=#134 id=134 data-nosnippet>134</a>/// The three outbound-notification mechanisms share a lifecycle: a domain
+<a href=#135 id=135 data-nosnippet>135</a>/// event happens, a routing table decides who hears about it, and delivery is
+<a href=#136 id=136 data-nosnippet>136</a>/// best-effort and must never fail the request that produced it. Keeping them
+<a href=#137 id=137 data-nosnippet>137</a>/// together keeps that shared property in one place.
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="attr">#[derive(Clone)]
+<a href=#139 id=139 data-nosnippet>139</a></span><span class="kw">pub struct </span>EventsState&lt;C: Connection + Clone&gt; {
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="kw">pub </span>reactor_repo: SurrealReactorRepository&lt;C&gt;,
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// X1 — the interceptor chain the `user.pre_create`, `user.pre_update` and
+<a href=#142 id=142 data-nosnippet>142</a>    /// `grant.pre_assign` handlers call.
+<a href=#143 id=143 data-nosnippet>143</a>    ///
+<a href=#144 id=144 data-nosnippet>144</a>    /// `axiam-auth` and `axiam-oauth2` hold their own clone of the same gate
+<a href=#145 id=145 data-nosnippet>145</a>    /// (they own the `login.post_auth` and `token.pre_issue` sites), so all
+<a href=#146 id=146 data-nosnippet>146</a>    /// five hooks share one routing table, one per-tenant concurrency bound and
+<a href=#147 id=147 data-nosnippet>147</a>    /// one audit sink. A deployment without AMQP holds
+<a href=#148 id=148 data-nosnippet>148</a>    /// [`axiam_core::models::reactor::NoopReactorGate`] here — never `None`,
+<a href=#149 id=149 data-nosnippet>149</a>    /// because a call site that branches on the feature is a call site where
+<a href=#150 id=150 data-nosnippet>150</a>    /// the two builds can drift.
+<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">pub </span>reactor_gate: axiam_core::models::reactor::SharedReactorGate,
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="doccomment">/// X1 — invalidates the gate's routing table when a reactor registration
+<a href=#153 id=153 data-nosnippet>153</a>    /// changes, so the change is live on this replica immediately rather than
+<a href=#154 id=154 data-nosnippet>154</a>    /// at the end of the TTL.
+<a href=#155 id=155 data-nosnippet>155</a>    ///
+<a href=#156 id=156 data-nosnippet>156</a>    /// A closure rather than the routing table itself because the table is
+<a href=#157 id=157 data-nosnippet>157</a>    /// generic over its source, and `AppState&lt;C&gt;` is already generic over one
+<a href=#158 id=158 data-nosnippet>158</a>    /// parameter too many. `None` when no gate is composed.
+<a href=#159 id=159 data-nosnippet>159</a>    </span><span class="kw">pub </span>reactor_routing_invalidator: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>Fn(uuid::Uuid) + Send + Sync&gt;&gt;,
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">pub </span>webhook_repo: SurrealWebhookRepository&lt;C&gt;,
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="kw">pub </span>webhook_delivery: WebhookDeliveryServiceT&lt;C&gt;,
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="doccomment">/// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
+<a href=#163 id=163 data-nosnippet>163</a>    /// events onto the durable webhook queue (CQ-B22). `None` in tests and when
+<a href=#164 id=164 data-nosnippet>164</a>    /// AMQP is unavailable — `emit_webhook` becomes a no-op rather than failing
+<a href=#165 id=165 data-nosnippet>165</a>    /// the originating request (webhook delivery is a best-effort side effect).
+<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">pub </span>webhook_publisher: <span class="prelude-ty">Option</span>&lt;Arc&lt;axiam_amqp::WebhookPublisher&gt;&gt;,
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="kw">pub </span>notification_rule_repo: SurrealNotificationRuleRepository&lt;C&gt;,
+<a href=#168 id=168 data-nosnippet>168</a>}
+<a href=#169 id=169 data-nosnippet>169</a>
+<a href=#170 id=170 data-nosnippet>170</a><span class="doccomment">/// The OAuth2 authorization server and OIDC provider.
+<a href=#171 id=171 data-nosnippet>171</a>///
+<a href=#172 id=172 data-nosnippet>172</a>/// The widest bundle, and the one that most justifies the split: twelve
+<a href=#173 id=173 data-nosnippet>173</a>/// fields that only `handlers/oauth2.rs`, `uma.rs`, `token_exchange.rs` and
+<a href=#174 id=174 data-nosnippet>174</a>/// `backchannel_logout.rs` touch, previously visible to all twenty-nine handler
+<a href=#175 id=175 data-nosnippet>175</a>/// modules.
+<a href=#176 id=176 data-nosnippet>176</a></span><span class="attr">#[derive(Clone)]
+<a href=#177 id=177 data-nosnippet>177</a></span><span class="kw">pub struct </span>OAuth2State&lt;C: Connection + Clone&gt; {
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="kw">pub </span>authorize_service: AuthorizeServiceT&lt;C&gt;,
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">pub </span>token_service: TokenServiceT&lt;C&gt;,
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="doccomment">/// B2 — device authorization grant (RFC 8628).
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub </span>device_authorization_service: DeviceAuthorizationServiceT&lt;C&gt;,
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// B3 — token exchange (RFC 8693).
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub </span>token_exchange_service: TokenExchangeServiceT&lt;C&gt;,
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// B5 — pushed authorization requests (RFC 9126).
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">pub </span>par_service: ParServiceT&lt;C&gt;,
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="doccomment">/// X2 — UMA 2.0 permission tickets.
+<a href=#187 id=187 data-nosnippet>187</a>    ///
+<a href=#188 id=188 data-nosnippet>188</a>    /// The repository rather than an assembled `UmaService`, because the
+<a href=#189 id=189 data-nosnippet>189</a>    /// service also needs the [`crate::authz::AuthzChecker`], which is a
+<a href=#190 id=190 data-nosnippet>190</a>    /// separate `web::Data` and not part of this state. Handlers assemble the
+<a href=#191 id=191 data-nosnippet>191</a>    /// service with [`AppState::uma_service`].
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">pub </span>permission_ticket_repo: SurrealPermissionTicketRepository&lt;C&gt;,
+<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// X2 — deployment ceiling on RPT lifetime, in seconds. The effective
+<a href=#194 id=194 data-nosnippet>194</a>    /// lifetime is the minimum of this, the protocol default (300 s), and the
+<a href=#195 id=195 data-nosnippet>195</a>    /// subject token's own remaining life.
+<a href=#196 id=196 data-nosnippet>196</a>    </span><span class="kw">pub </span>rpt_max_lifetime_secs: i64,
+<a href=#197 id=197 data-nosnippet>197</a>    <span class="doccomment">/// B5 — which clients joined which session, for the back-channel logout
+<a href=#198 id=198 data-nosnippet>198</a>    /// fan-out.
+<a href=#199 id=199 data-nosnippet>199</a>    </span><span class="kw">pub </span>session_client_repo: SurrealSessionClientRepository&lt;C&gt;,
+<a href=#200 id=200 data-nosnippet>200</a>    <span class="kw">pub </span>device_grant_repo: SurrealDeviceGrantRepository&lt;C&gt;,
+<a href=#201 id=201 data-nosnippet>201</a>    <span class="doccomment">/// X5.1 — single-use `jti` store for RFC 7523 client assertions and
+<a href=#202 id=202 data-nosnippet>202</a>    /// RFC 9449 DPoP proofs. Decides replay by a `UNIQUE` index violation
+<a href=#203 id=203 data-nosnippet>203</a>    /// rather than by reading first; see the repository's module docs.
+<a href=#204 id=204 data-nosnippet>204</a>    </span><span class="kw">pub </span>proof_replay_repo: SurrealProofReplayRepository&lt;C&gt;,
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="doccomment">/// B3: in-process cache + ETag for AXIAM's OWN `GET /oauth2/jwks`
+<a href=#206 id=206 data-nosnippet>206</a>    /// response (the signing keys AXIAM serves to relying parties).
+<a href=#207 id=207 data-nosnippet>207</a>    /// Constructed once at startup and shared via this `Arc` so all workers
+<a href=#208 id=208 data-nosnippet>208</a>    /// hit the same cache instead of each maintaining its own.
+<a href=#209 id=209 data-nosnippet>209</a>    </span><span class="kw">pub </span>oauth2_jwks_cache: Arc&lt;Oauth2JwksCache&gt;,
+<a href=#210 id=210 data-nosnippet>210</a>    <span class="doccomment">/// B3: `Cache-Control` max-age (and header rendering) for the
+<a href=#211 id=211 data-nosnippet>211</a>    /// `GET /oauth2/jwks` response. Configured via
+<a href=#212 id=212 data-nosnippet>212</a>    /// `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS` (default 300s).
+<a href=#213 id=213 data-nosnippet>213</a>    </span><span class="kw">pub </span>oauth2_jwks_cache_config: Oauth2JwksCacheConfig,
+<a href=#214 id=214 data-nosnippet>214</a>}
+<a href=#215 id=215 data-nosnippet>215</a>
+<a href=#216 id=216 data-nosnippet>216</a><span class="doccomment">/// Inbound SAML and OIDC federation.
+<a href=#217 id=217 data-nosnippet>217</a>///
+<a href=#218 id=218 data-nosnippet>218</a>/// Where AXIAM is the *relying party* rather than the provider --
+<a href=#219 id=219 data-nosnippet>219</a>/// `OAuth2State` is the other direction. `assertion_replay_repo` belongs here and
+<a href=#220 id=220 data-nosnippet>220</a>/// not with the other replay guards because what it guards is a SAML assertion,
+<a href=#221 id=221 data-nosnippet>221</a>/// and the handler that consumes one is the only caller.
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="attr">#[derive(Clone)]
+<a href=#223 id=223 data-nosnippet>223</a></span><span class="kw">pub struct </span>FederationState&lt;C: Connection + Clone&gt; {
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="kw">pub </span>federation_config_repo: SurrealFederationConfigRepository&lt;C&gt;,
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">pub </span>federation_link_repo: SurrealFederationLinkRepository&lt;C&gt;,
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">pub </span>federation_login_state_repo: SurrealFederationLoginStateRepository&lt;C&gt;,
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="kw">pub </span>assertion_replay_repo: SurrealAssertionReplayRepository&lt;C&gt;,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
+<a href=#229 id=229 data-nosnippet>229</a>    /// OIDC federation encryption key is baked into `OidcFederationService`
+<a href=#230 id=230 data-nosnippet>230</a>    /// at construction, so absence is resolved once at startup rather than
+<a href=#231 id=231 data-nosnippet>231</a>    /// per-request (identical fail-closed error at the 4 call sites).
+<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">pub </span>oidc_federation_service: <span class="prelude-ty">Option</span>&lt;OidcFederationServiceT&lt;C&gt;&gt;,
+<a href=#233 id=233 data-nosnippet>233</a>    <span class="doccomment">/// Constructed unconditionally (SamlFederationService::new needs no
+<a href=#234 id=234 data-nosnippet>234</a>    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
+<a href=#235 id=235 data-nosnippet>235</a>    /// gated. Why: `axiam_federation::saml` only exists when
+<a href=#236 id=236 data-nosnippet>236</a>    /// axiam-federation's OWN `saml` Cargo feature is on, and
+<a href=#237 id=237 data-nosnippet>237</a>    /// axiam-api-rest's `saml` feature intentionally forwards to it so
+<a href=#238 id=238 data-nosnippet>238</a>    /// `cargo build -p axiam-server --no-default-features` can still build
+<a href=#239 id=239 data-nosnippet>239</a>    /// without the `samael`/`libxml2` dependency chain (documented escape
+<a href=#240 id=240 data-nosnippet>240</a>    /// hatch for hosts with an incompatible system libxml2 — see
+<a href=#241 id=241 data-nosnippet>241</a>    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
+<a href=#242 id=242 data-nosnippet>242</a>    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
+<a href=#243 id=243 data-nosnippet>243</a>    /// `axiam-federation/saml` on unconditionally and break that hatch.
+<a href=#244 id=244 data-nosnippet>244</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="kw">pub </span>saml_federation_service: SamlFederationServiceT&lt;C&gt;,
+<a href=#246 id=246 data-nosnippet>246</a>}
+</code></pre></div></section></main></body></html>

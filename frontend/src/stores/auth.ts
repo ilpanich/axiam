@@ -14,6 +14,15 @@ export interface AuthUser {
   /** Restored from /auth/me for slug-based tenant context (CQ-F29). */
   tenantSlug?: string;
   orgSlug?: string;
+  /**
+   * The caller's own tenant's effective SRP policy, from /auth/me.
+   *
+   * Carried here because setting a password requires computing a verifier
+   * client-side, and the client cannot do that without knowing the group and
+   * KDF. Absent means the tenant does not use SRP (or settings could not be
+   * resolved), in which case password-set requests simply omit the field.
+   */
+  srp?: { srp_mode: string; srp_group: string; srp_kdf: string };
 }
 
 interface AuthState {

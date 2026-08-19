@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { useAuthStore } from "@/stores/auth";
+import { buildEnrollmentForUser } from "@/services/srp";
 
 // ---------------------------------------------------------------------------
 // API error response type
@@ -36,6 +38,8 @@ export function ChangePasswordPage() {
   const confirmError = confirmTouched && confirmPassword.length > 0 && !passwordsMatch;
   const canSubmit = policyMet && passwordsMatch && confirmPassword.length > 0;
 
+  const user = useAuthStore((s) => s.user);
+
   const [state, formAction, isPending] = useActionState<ChangePasswordState, FormData>(
     async (_prev, formData) => {
       const currentPassword = formData.get("current_password") as string;
@@ -50,7 +54,12 @@ export function ChangePasswordPage() {
       }
 
       try {
-        await authService.changePassword(currentPassword, newPw);
+        // The verifier is bound to `username ":" password`, so it must be
+        // computed here — the server never sees the plaintext and cannot
+        // derive it. `null` when the tenant does not use SRP, in which case the
+        // field is omitted entirely.
+        const srp = await buildEnrollmentForUser(user, newPw);
+        await authService.changePassword(currentPassword, newPw, srp);
         return { error: null, success: true };
       } catch (err) {
         const msg = getApiErrorMessage(

@@ -232,6 +232,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 "/reset/confirm",
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
             )
+            // Token-gated lookup that lets an unauthenticated reset page compute
+            // an SRP verifier. Shares `/reset`'s budget: it is unauthenticated
+            // and takes a token, so it must not be a cheaper probe than the
+            // endpoint it supports.
+            .service(
+                web::resource("/reset/context")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "password_reset_context",
+                        rate_limit_cfg.password_reset_per_min,
+                    ))
+                    .route(web::get().to(handlers::password_reset::reset_context::<C>)),
+            )
             // --- GDPR delete-cancel (public — emailed single-use token, D-09) ---
             // Listed in PUBLIC_PATHS so AuthzMiddleware lets it through without a JWT.
             .service(

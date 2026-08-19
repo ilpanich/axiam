@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import type { SrpEnrollment } from "@/services/srp";
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
 
@@ -77,13 +78,23 @@ export const authService = {
   confirmPasswordReset: (
     tenantId: string,
     token: string,
-    new_password: string
+    new_password: string,
+    /**
+     * Verifier for the new password, when the tenant uses SRP.
+     *
+     * Reset has to carry one or it becomes the hole in SRP coverage: a tenant
+     * could run `srp_mode: required` while every "forgot password" still put a
+     * plaintext on the wire and left the account holding a verifier for a
+     * password it no longer has.
+     */
+    srp?: SrpEnrollment | null
   ): Promise<void> =>
     api
       .post<void>("/api/v1/auth/reset/confirm", {
         tenant_id: tenantId,
         token,
         new_password,
+        ...(srp ? { srp } : {}),
       })
       .then(() => undefined),
 
@@ -122,9 +133,18 @@ export const authService = {
    * Change the currently-authenticated user's password.
    * POST /api/v1/auth/password/change
    */
-  changePassword: (current_password: string, new_password: string): Promise<void> =>
+  changePassword: (
+    current_password: string,
+    new_password: string,
+    /** Verifier for the new password, when the tenant uses SRP. */
+    srp?: SrpEnrollment | null
+  ): Promise<void> =>
     api
-      .post<void>("/api/v1/auth/password/change", { current_password, new_password })
+      .post<void>("/api/v1/auth/password/change", {
+        current_password,
+        new_password,
+        ...(srp ? { srp } : {}),
+      })
       .then(() => undefined),
 
   /**

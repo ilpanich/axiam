@@ -161,6 +161,20 @@ pub struct MfaSetupConfirmRequest {
 pub struct MeResponse {
     pub user: LoginUserInfo,
     pub permissions: Vec<String>,
+    /// The caller's own tenant's effective SRP policy.
+    ///
+    /// Here rather than behind an admin-only settings endpoint because every
+    /// authenticated user needs it for one non-administrative reason: setting a
+    /// password requires computing a verifier client-side, and the client
+    /// cannot do that without knowing the group and KDF to use. It discloses a
+    /// property of the caller's own tenant and nothing about any other tenant
+    /// or user.
+    ///
+    /// Omitted (not an error) when settings cannot be resolved, so a settings
+    /// outage degrades to "no SRP" rather than to a failed `/me` — the same
+    /// treatment `tenant_slug`/`org_slug` already get.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub srp: Option<axiam_core::models::settings::SrpPolicy>,
 }
 
 /// Request body for `POST /api/v1/auth/password/change`.
@@ -818,6 +832,16 @@ pub async fn me<C: Connection + Clone>(
         None => None,
     };
 
+    let srp = match tenant.as_ref() {
+        Some(t) => state
+            .settings_repo
+            .get_effective_settings(t.organization_id, user.tenant_id)
+            .await
+            .ok()
+            .map(|s| s.srp),
+        None => None,
+    };
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
@@ -828,6 +852,7 @@ pub async fn me<C: Connection + Clone>(
             org_slug,
         },
         permissions,
+        srp,
     }))
 }
 

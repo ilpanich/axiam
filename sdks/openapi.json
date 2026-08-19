@@ -924,6 +924,52 @@
         }
       }
     },
+    "/api/v1/auth/reset/context": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/reset/context`",
+        "description": "Password reset would otherwise be a permanent hole in SRP coverage. The\nreset page is unauthenticated: it holds a token and a tenant id and knows\nneither the account's username — which the verifier is bound to — nor the\ntenant's group and KDF. Without those it cannot compute a verifier, so every\n\"forgot password\" would leave the account with a verifier for a password it\nno longer has, and under `srp_mode: required` would leave it unable to log\nin at all.\n\n# Why disclosing the username here is not a leak\n\nThe caller has presented an unconsumed, unexpired reset token, which was\ndelivered to the account's own registered email address. They are the\naccount holder, and the username is not a secret from the account holder.\nAn attacker without a valid token gets `404` and learns nothing — the same\nanswer for a wrong token, an expired token, and a token for a tenant that\ndoes not exist.\n\nThe token is **read, not consumed**: this is a lookup, and burning the\nsingle-use token here would break the reset it is meant to enable.",
+        "operationId": "reset_context",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant the reset link was issued for",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "Raw reset token from the emailed link",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity and SRP policy for this reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetContextResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, expired or already-consumed token"
+          }
+        }
+      }
+    },
     "/api/v1/auth/srp/challenge": {
       "post": {
         "tags": [
@@ -12912,6 +12958,30 @@
           "tenant_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "ResetContextResponse": {
+        "type": "object",
+        "description": "What a valid reset-token holder needs in order to compute an SRP verifier.",
+        "required": [
+          "identity"
+        ],
+        "properties": {
+          "identity": {
+            "type": "string",
+            "description": "The canonical identity the verifier must be bound to — the account's\nusername, which the reset page has no other way to learn."
+          },
+          "srp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SrpPolicy",
+                "description": "The tenant's effective SRP policy, so the client knows which group and\nKDF to use. Absent when the tenant does not use SRP."
+              }
+            ]
           }
         }
       },

@@ -282,6 +282,8 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // middleware knows nothing about.
     "/api/v1/auth/srp/challenge",
     "/api/v1/auth/srp/verify",
+    // Token-gated: the caller presents a reset token, which is the credential.
+    "/api/v1/auth/reset/context",
     // Refresh authenticates via its own opaque `axiam_refresh` cookie, not the
     // access token. It MUST be public: the `axiam_access` cookie expires with
     // the 15-min access token, so a client refreshing after expiry carries no

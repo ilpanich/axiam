@@ -396,9 +396,9 @@ macro_rules! test_app {
                         .build()
                         .unwrap();
                     state.jwks_cache = Arc::clone(&jwks_cache);
-                    state.oidc_federation_service = Some(OidcFederationService::new(
-                        state.federation_config_repo.clone(),
-                        state.federation_link_repo.clone(),
+                    state.federation.oidc_federation_service = Some(OidcFederationService::new(
+                        state.federation.federation_config_repo.clone(),
+                        state.federation.federation_link_repo.clone(),
                         state.user_repo.clone(),
                         state.http_client.clone(),
                         Arc::clone(&state.jwks_cache),

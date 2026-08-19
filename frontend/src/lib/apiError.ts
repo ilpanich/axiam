@@ -1,8 +1,27 @@
-import type { AxiosError } from "axios";
-
-interface ApiErrorData {
+/**
+ * The body shape AXIAM's HTTP surfaces actually return.
+ *
+ * Two conventions overlap here and the difference is load-bearing:
+ *
+ * - `axiam-api-rest`'s `ErrorBody` sends **both** `error` and `message` on
+ *   every failure, and `error` is a *machine slug* — `not_found`,
+ *   `validation_error`, `already_exists`, `authorization_denied`. The
+ *   human-readable sentence is always in `message`.
+ * - OAuth2/OIDC endpoints follow RFC 6749: `error` is again a slug
+ *   (`invalid_grant`, `invalid_client`) and the prose lives in
+ *   `error_description`.
+ *
+ * In both conventions `error` is the field a *program* branches on and the
+ * last one a *person* should be shown. Exported so pages can type a response
+ * body without re-declaring this interface — six of them used to.
+ */
+export interface ApiErrorData {
+  /** Machine-readable slug. Branch on it; do not render it. */
   error?: string;
+  /** Human-readable sentence (axiam-api-rest `ErrorBody`). */
   message?: string;
+  /** Human-readable sentence (RFC 6749 OAuth2/OIDC errors). */
+  error_description?: string;
 }
 
 // ─── Secret redaction ─────────────────────────────────────────────────────────
@@ -58,6 +77,9 @@ const SECRET_PATTERNS: readonly { re: RegExp; label: string }[] = [
   },
 ];
 
+/** Last-resort message, used when nothing else yields text. */
+const GENERIC_ERROR_MESSAGE = "An unexpected error occurred. Please try again.";
+
 /**
  * Strip credential-shaped content from a message before it reaches the UI.
  *
@@ -88,42 +110,117 @@ export function redactSecrets(message: string): string {
 }
 
 /**
+ * The subset of a rejected request this module reads.
+ *
+ * Deliberately structural rather than `AxiosError`. Axios brands its own
+ * errors with `isAxiosError: true`, and keying off that brand would put the
+ * transport back into every caller — and, worse, into every *test*, which
+ * would then have to fake an axios internal to exercise an error path. The
+ * shape below is what an HTTP client rejection looks like in any library, so
+ * a component, a hook and a test double all describe an error the same way.
+ */
+interface ErrorLike {
+  response?: { status?: number; data?: ApiErrorData };
+  message?: string;
+}
+
+/** Read `value` as {@link ErrorLike} when it could plausibly be one. */
+function asErrorLike(value: unknown): ErrorLike | undefined {
+  return typeof value === "object" && value !== null ? (value as ErrorLike) : undefined;
+}
+
+/** The first non-empty string in `candidates`, or `undefined`. */
+function firstNonEmpty(candidates: readonly (string | undefined)[]): string | undefined {
+  return candidates.find((c): c is string => typeof c === "string" && c.length > 0);
+}
+
+/**
  * Extract a human-readable error message from any thrown value.
  *
- * Priority order (mirrors LoginPage.tsx AxiosError unwrapping):
- *   1. response.data.error  (backend field name used in most handlers)
- *   2. response.data.message
- *   3. error.message        (plain Error or AxiosError network message)
- *   4. Generic fallback     (never returns empty)
+ * Priority order:
+ *   1. response.data.message            (axiam-api-rest's human sentence)
+ *   2. response.data.error_description  (RFC 6749's human sentence)
+ *   3. response.data.error              (a slug — last resort, see below)
+ *   4. `fallback`, when the caller supplied one
+ *   5. error.message                    (a plain Error, or a network message)
+ *   6. a generic constant               (never returns empty)
+ *
+ * **`message` outranks `error`, and that ordering is the point.** This helper
+ * used to read `error` first, on the reasonable-sounding basis that it is "the
+ * backend field name used in most handlers". It is — but what it *carries* is
+ * `axiam_api_rest::error::ErrorBody`'s slug, not prose. Both fields are always
+ * present on an AXIAM error, so reading `error` first meant every one of the
+ * ~40 call sites rendered `validation_error` where the server had written
+ * "Validation error: email must be a valid email address".
+ *
+ * Six pages had already noticed and hand-rolled the correct order inline. That
+ * is how the ordering bug survived: the pages that would have exposed it were
+ * the ones routing around it — and three of them dropped {@link redactSecrets}
+ * on the way past, which is the more expensive half of the same mistake.
+ *
+ * `fallback` supplies the page-specific last resort those inline versions had
+ * ("This reset link is invalid or has expired.") so that migrating to this
+ * helper costs no message quality.
+ *
+ * **`fallback` outranks `error.message`, and only `fallback`.** `error.message`
+ * on a transport failure is a developer string — "Network Error", "timeout of
+ * 0ms exceeded", "Request failed with status code 500". A page that has
+ * bothered to write "This reset link is invalid or has expired. Please request
+ * a new one." has said something more useful than any of those, and the inline
+ * implementations this replaces all agreed: none of them read `err.message` at
+ * all. Callers that pass no `fallback` keep the old behaviour and still see
+ * `error.message`, because for them the alternative is only the generic
+ * constant.
  *
  * Every branch that returns server- or exception-supplied text passes through
- * [`redactSecrets`] first. The generic fallback is a constant and needs no
- * such treatment.
+ * {@link redactSecrets} first. `fallback` and the generic constant are
+ * caller-authored constants and need no such treatment.
  */
-export function getApiErrorMessage(err: unknown): string {
-  if (err == null) {
-    return "An unexpected error occurred. Please try again.";
+export function getApiErrorMessage(err: unknown, fallback?: string): string {
+  const last = fallback ?? GENERIC_ERROR_MESSAGE;
+  const e = asErrorLike(err);
+  if (!e) {
+    return last;
   }
-
-  const axiosErr = err as AxiosError<ApiErrorData>;
-  if (axiosErr.isAxiosError) {
-    if (axiosErr.response?.data) {
-      const data = axiosErr.response.data;
-      if (typeof data.error === "string" && data.error.length > 0) {
-        return redactSecrets(data.error);
-      }
-      if (typeof data.message === "string" && data.message.length > 0) {
-        return redactSecrets(data.message);
-      }
-    }
-    if (typeof axiosErr.message === "string" && axiosErr.message.length > 0) {
-      return redactSecrets(axiosErr.message);
-    }
+  const data = e.response?.data;
+  const serverText = firstNonEmpty([data?.message, data?.error_description, data?.error]);
+  if (serverText !== undefined) {
+    return redactSecrets(serverText);
   }
-
-  if (err instanceof Error && err.message.length > 0) {
-    return redactSecrets(err.message);
+  if (fallback !== undefined) {
+    return fallback;
   }
+  const transportText = firstNonEmpty([e.message]);
+  return transportText === undefined ? last : redactSecrets(transportText);
+}
 
-  return "An unexpected error occurred. Please try again.";
+/**
+ * The machine-readable slug from an API error body, or `undefined`.
+ *
+ * The counterpart to {@link getApiErrorMessage}: this is the field to branch
+ * on, and the one never to render. Kept here so a caller that needs to
+ * distinguish `password_policy_violation` from `validation_error` does not
+ * reach for `AxiosError` to do it.
+ */
+export function getApiErrorCode(err: unknown): string | undefined {
+  const code = asErrorLike(err)?.response?.data?.error;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
+/**
+ * The HTTP status of a failed request, or `undefined` if there was no response.
+ *
+ * Exists so a page can ask "was this a 403?" without importing `AxiosError`.
+ * That import was the last reason any component needed to know the app talks
+ * to the server over Axios, and a page that knows its transport is a page that
+ * has to change when the transport does.
+ *
+ * `undefined` means *no HTTP response arrived* — a timeout, a DNS failure, a
+ * TLS error. It is deliberately not conflated with `0`, so
+ * `getApiErrorStatus(err) === undefined` is a usable test for "the request
+ * never landed" rather than an ambiguous falsy check.
+ */
+export function getApiErrorStatus(err: unknown): number | undefined {
+  const status = asErrorLike(err)?.response?.status;
+  return typeof status === "number" ? status : undefined;
 }

@@ -480,7 +480,7 @@ impl axiam_core::models::reactor::DynReactorGate for UndispatchableGate {
 macro_rules! undispatchable_app {
     ($db:expr, $auth:expr) => {{
         let mut state = AppState::for_test($db.clone(), $auth.clone());
-        state.reactor_gate = Arc::new(UndispatchableGate);
+        state.events.reactor_gate = Arc::new(UndispatchableGate);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))

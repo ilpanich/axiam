@@ -203,7 +203,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new($authz.clone()))
                 .app_data(web::Data::new({
                     let mut state = AppState::for_test($db.clone(), $auth.clone());
-                    state.email_config_repo = Some(SurrealEmailConfigRepository::new(
+                    state.mail.email_config_repo = Some(SurrealEmailConfigRepository::new(
                         $db.clone(),
                         TEST_EMAIL_KEY,
                     ));

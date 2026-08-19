@@ -162,6 +162,37 @@ describe("MfaManagementPage", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  // Regression: the confirm handler rendered `response.data.message` with no
+  // redaction. The TOTP enrolment dialog carries a shared secret, so a body
+  // echoing it would have put that secret on screen.
+  it("redacts a credential echoed in the confirm error", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === "/api/v1/auth/mfa/enroll") {
+        return Promise.resolve(
+          res({ secret_base32: "SECRETXYZ", totp_uri: "otpauth://totp/test4" })
+        );
+      }
+      if (url === "/api/v1/auth/mfa/confirm") {
+        return Promise.reject({
+          response: { data: { message: 'rejected {"secret":"SECRETXYZ"}' } },
+        });
+      }
+      return Promise.reject(new Error("unexpected " + url));
+    });
+
+    renderWithProviders(<MfaManagementPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Set up TOTP Authenticator" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Verification Code"), "000000");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    expect(await within(dialog).findByText(/redacted/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/SECRETXYZ"/)).not.toBeInTheDocument();
+  });
+
   it("closes the TOTP dialog via Cancel and clears state", async () => {
     apiMock.get.mockResolvedValue(res([]));
     apiMock.post.mockResolvedValue(

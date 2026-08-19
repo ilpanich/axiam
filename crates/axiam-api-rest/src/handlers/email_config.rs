@@ -38,7 +38,7 @@ use crate::state::AppState;
 fn require_email_config_repo<C: Connection + Clone>(
     state: &AppState<C>,
 ) -> Result<&SurrealEmailConfigRepository<C>, AxiamApiError> {
-    state.email_config_repo.as_ref().ok_or_else(|| {
+    state.mail.email_config_repo.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Internal(
             "email configuration is disabled (AXIAM__EMAIL_ENCRYPTION_KEY not set)".into(),
         ))

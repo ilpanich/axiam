@@ -119,7 +119,7 @@ impl CertificateAuthenticated {
         let state = req
             .app_data::<web::Data<AppState<C>>>()
             .ok_or(AxiamError::Internal("missing AppState".into()))?;
-        let service = &state.device_auth_service;
+        let service = &state.pki.device_auth_service;
 
         // Prefer the VERIFIED client certificate captured at TLS handshake time
         // (D3 native mTLS): rustls has already checked it against the client-CA

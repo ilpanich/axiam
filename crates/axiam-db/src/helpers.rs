@@ -1,7 +1,9 @@
 //! Shared repository utilities: common row types and helper functions
 //! that were previously duplicated across every repo module.
 
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::repository::{PaginatedResult, Pagination};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
@@ -64,14 +66,141 @@ pub fn parse_uuid(s: &str, field: &str) -> Result<Uuid, DbError> {
 /// markers — call sites must not add their own inline `contains(...)` checks.
 pub fn classify_write_error<E: std::fmt::Display>(err: E, entity: &str) -> DbError {
     let msg = err.to_string();
-    if msg.contains("already contains") || msg.contains("already exists") || msg.contains("unique")
-    {
+    if is_unique_violation(&msg) {
         DbError::AlreadyExists {
             entity: entity.to_string(),
         }
     } else {
         DbError::Migration(msg)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The unique-violation marker set — one definition, three classifiers (F5)
+// ---------------------------------------------------------------------------
+
+/// Substrings that identify a SurrealDB UNIQUE-index violation.
+///
+/// SurrealDB v3 reports one as ``Database index `idx_x_uniq` already contains
+/// [...]``. `"already exists"` and `"unique"` are kept as fallbacks: they
+/// covered earlier server versions and cost nothing to keep, and a conflict
+/// this set fails to recognise is not a benign miss — it is a replayed
+/// assertion accepted as fresh.
+///
+/// **The set is narrow on purpose.** Everything it does not match falls
+/// through to a 5xx, and that is the safe direction: a datastore outage
+/// contains none of these markers and must never be reported to a caller as
+/// "that already exists" or "that was a replay". Widening this set trades a
+/// clearer conflict message for the risk of answering an outage with a 409.
+const UNIQUE_VIOLATION_MARKERS: [&str; 3] = ["already contains", "already exists", "unique"];
+
+/// Whether a datastore error message reports a UNIQUE-index violation.
+///
+/// # Why this is a function and not three `contains` calls
+///
+/// [`classify_write_error`] has always documented itself as "the ONLY place
+/// that inspects error text for these markers — call sites must not add their
+/// own inline `contains(...)` checks" (D-09). Five call sites did anyway:
+/// `saml_replay`, `amqp_nonce_replay`, `oauth2_proof_replay`,
+/// `federation_login_state` and the REST bootstrap handler, each with the
+/// three markers written out again and a comment pointing at one of the
+/// others as its source of truth.
+///
+/// Nobody did that carelessly — the copies were kept deliberately identical,
+/// and `oauth2_proof_replay` says so in as many words: "kept identical so the
+/// three replay guards cannot drift into disagreeing about what a conflict
+/// looks like." That is the correct worry and the wrong mechanism. Every one
+/// of those five sites decides whether a replayed credential is refused or
+/// accepted; a marker added to four of them is a security fix with a hole in
+/// it, and no test would notice.
+///
+/// So the markers live here, once, and the five sites call one of the three
+/// classifiers below. See `claude_dev/conflict-classification.md`, and
+/// `scripts/check-conflict-markers.py`, which fails CI if a sixth inline copy
+/// appears.
+pub fn is_unique_violation(msg: &str) -> bool {
+    UNIQUE_VIOLATION_MARKERS.iter().any(|m| msg.contains(m))
+}
+
+/// Classify a failed single-use `CREATE` on a replay-guard table.
+///
+/// A UNIQUE violation here is not an error condition — it is the answer. The
+/// row was already present, so the assertion / nonce / proof `jti` being
+/// inserted has been seen before, and the caller must refuse it. Anything else
+/// is a real datastore failure and propagates as [`AxiamError::Database`], so
+/// an outage surfaces as a 5xx rather than as a silent "replay detected" that
+/// would refuse legitimate traffic.
+///
+/// Used by all three replay repositories (`saml_replay`, `amqp_nonce_replay`,
+/// `oauth2_proof_replay`), which is the point: there is one definition of what
+/// a replay looks like.
+pub fn classify_replay_write_error<E: std::fmt::Display>(err: E) -> AxiamError {
+    let msg = err.to_string();
+    if is_unique_violation(&msg) {
+        AxiamError::ReplayDetected
+    } else {
+        AxiamError::Database(msg)
+    }
+}
+
+/// Classify a failed `CREATE` where a UNIQUE violation means "already taken".
+///
+/// The [`AxiamError`]-returning counterpart to [`classify_write_error`], for
+/// the write paths that build an `AxiamError` directly rather than a
+/// [`DbError`]. `entity` names what collided and reaches the client in the
+/// 409 body, so it should identify the constrained thing
+/// (`"federation_login_state.state"`), not merely the table.
+pub fn classify_conflict_write_error<E: std::fmt::Display>(err: E, entity: &str) -> AxiamError {
+    let msg = err.to_string();
+    if is_unique_violation(&msg) {
+        AxiamError::AlreadyExists {
+            entity: entity.to_string(),
+        }
+    } else {
+        AxiamError::Database(msg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cleanup_expired_rows — one sweep for every replay-guard table (F5)
+// ---------------------------------------------------------------------------
+
+/// Count and then delete every row of `table` whose `expires_at` has passed,
+/// returning how many were removed.
+///
+/// The three replay tables carried a byte-identical copy of this, differing
+/// only in the table name. It is not security-critical the way
+/// [`classify_replay_write_error`] is — a sweep that under-deletes leaves rows
+/// that only cost space, and the UNIQUE index keeps doing its job either way —
+/// but three copies of one query is three places to fix when the count and the
+/// delete need to become one statement.
+///
+/// `table` is interpolated into the query rather than bound, because SurrealDB
+/// has no bind form for a table name. It is therefore **never** caller- or
+/// request-derived: every call site passes a `&'static str` literal naming one
+/// of this crate's own tables.
+pub async fn cleanup_expired_rows<C: Connection>(
+    db: &crate::handle::DbHandle<C>,
+    table: &'static str,
+) -> AxiamResult<u64> {
+    let mut count_result = db
+        .current()
+        .query(format!(
+            "SELECT count() AS total FROM {table} \
+             WHERE expires_at < time::now() GROUP ALL"
+        ))
+        .await
+        .map_err(DbError::from)?;
+
+    let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+    let total = count_rows.first().map(|r| r.total).unwrap_or(0);
+
+    db.current()
+        .query(format!("DELETE {table} WHERE expires_at < time::now()"))
+        .await
+        .map_err(DbError::from)?;
+
+    Ok(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +483,121 @@ mod tests {
         match err {
             DbError::Migration(m) => assert_eq!(m, msg),
             other => panic!("expected DbError::Migration, got {other:?}"),
+        }
+    }
+
+    // --- is_unique_violation / classify_replay_write_error (F5, D-09) ---
+
+    /// Real SurrealDB v3 UNIQUE-index violation messages, one per replay table.
+    ///
+    /// These are the exact shapes the three guards see. They are quoted here
+    /// rather than paraphrased because the classifier is a substring match:
+    /// a paraphrase that happens to contain "already contains" would pass this
+    /// test while telling us nothing about the message the server sends.
+    const REAL_VIOLATION_MESSAGES: [&str; 3] = [
+        "Database index `idx_replay_uniq` already contains ['t1', 'assertion-1'], \
+         with record `saml_assertion_replay:abc`",
+        "Database index `idx_amqp_nonce_uniq` already contains ['t1', 'n-1'], \
+         with record `amqp_nonce_replay:def`",
+        "Database index `idx_proof_replay_uniq` already contains ['t1', 'dpop', 'jti-1'], \
+         with record `oauth2_proof_replay:ghi`",
+    ];
+
+    #[test]
+    fn is_unique_violation_recognises_every_real_index_message() {
+        for msg in REAL_VIOLATION_MESSAGES {
+            assert!(is_unique_violation(msg), "should have matched: {msg}");
+        }
+    }
+
+    #[test]
+    fn is_unique_violation_recognises_the_fallback_markers() {
+        assert!(is_unique_violation("record already exists"));
+        assert!(is_unique_violation("violates unique constraint"));
+    }
+
+    /// The safety property, stated as a test: an outage must never read as a
+    /// conflict. A false "already exists" turns a 5xx into a 409, and at a
+    /// replay guard a false ReplayDetected refuses legitimate traffic.
+    #[test]
+    fn is_unique_violation_rejects_failures_that_are_not_conflicts() {
+        for msg in [
+            "There was a problem with the database: connection reset by peer",
+            "IO error: broken pipe",
+            "There was a problem with the database: transaction timed out",
+            "Serialization error: invalid UTF-8",
+            "",
+        ] {
+            assert!(!is_unique_violation(msg), "should NOT have matched: {msg}");
+        }
+    }
+
+    /// The three replay guards must agree, because they now share one
+    /// definition. This test is what fails if somebody reintroduces a local
+    /// copy that answers differently for one table.
+    #[test]
+    fn classify_replay_write_error_reports_every_real_violation_as_a_replay() {
+        for msg in REAL_VIOLATION_MESSAGES {
+            match classify_replay_write_error(msg) {
+                AxiamError::ReplayDetected => {}
+                other => panic!("expected ReplayDetected for {msg}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_replay_write_error_passes_an_outage_through_as_database() {
+        let msg = "There was a problem with the database: connection reset by peer";
+        match classify_replay_write_error(msg) {
+            AxiamError::Database(m) => assert_eq!(m, msg),
+            other => panic!("expected AxiamError::Database, got {other:?}"),
+        }
+    }
+
+    /// The three classifiers read one predicate, so they cannot disagree about
+    /// whether a given message is a conflict -- only about what to call it.
+    #[test]
+    fn the_three_classifiers_agree_on_what_a_conflict_is() {
+        for msg in REAL_VIOLATION_MESSAGES
+            .iter()
+            .copied()
+            .chain(["connection reset by peer", "transaction timed out"])
+        {
+            let expected = is_unique_violation(msg);
+            assert_eq!(
+                matches!(classify_replay_write_error(msg), AxiamError::ReplayDetected),
+                expected,
+                "classify_replay_write_error disagreed on: {msg}"
+            );
+            assert_eq!(
+                matches!(
+                    classify_conflict_write_error(msg, "thing"),
+                    AxiamError::AlreadyExists { .. }
+                ),
+                expected,
+                "classify_conflict_write_error disagreed on: {msg}"
+            );
+            assert_eq!(
+                matches!(
+                    classify_write_error(msg, "thing"),
+                    DbError::AlreadyExists { .. }
+                ),
+                expected,
+                "classify_write_error disagreed on: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_conflict_write_error_names_the_constrained_thing() {
+        match classify_conflict_write_error(
+            "Database index `idx_state_uniq` already contains ['s']",
+            "federation_login_state.state",
+        ) {
+            AxiamError::AlreadyExists { entity } => {
+                assert_eq!(entity, "federation_login_state.state");
+            }
+            other => panic!("expected AlreadyExists, got {other:?}"),
         }
     }
 }

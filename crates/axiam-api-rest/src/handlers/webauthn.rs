@@ -153,12 +153,14 @@ pub async fn start_registration<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
     let policy = state
+        .webauthn
         .webauthn_attestation_policy_repo
         .get_by_tenant(user.tenant_id)
         .await?
         .unwrap_or_default();
 
     let (challenge, state_token) = state
+        .webauthn
         .webauthn_service
         .start_registration_for_policy(
             user.tenant_id,
@@ -166,8 +168,8 @@ pub async fn start_registration<C: Connection + Clone>(
             user.user_id,
             &user_name,
             &policy,
-            &state.attestation_metadata_source,
-            &state.attestation_ca_cache,
+            &state.webauthn.attestation_metadata_source,
+            &state.webauthn.attestation_ca_cache,
         )
         .await?;
 
@@ -207,12 +209,14 @@ pub async fn finish_registration<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
     let policy = state
+        .webauthn
         .webauthn_attestation_policy_repo
         .get_by_tenant(user.tenant_id)
         .await?
         .unwrap_or_default();
 
     let cred = state
+        .webauthn
         .webauthn_service
         .finish_registration_for_policy(
             user.tenant_id,
@@ -221,8 +225,8 @@ pub async fn finish_registration<C: Connection + Clone>(
             &b.credential_name,
             &b.response,
             &policy,
-            &state.attestation_metadata_source,
-            &state.attestation_ca_cache,
+            &state.webauthn.attestation_metadata_source,
+            &state.webauthn.attestation_ca_cache,
         )
         .await?;
 
@@ -261,6 +265,7 @@ pub async fn start_authentication<C: Connection + Clone>(
         .map_err(|e| AxiamApiError(e.into()))?;
 
     let (challenge, state_token) = state
+        .webauthn
         .webauthn_service
         .start_authentication(tenant_id, org_id, user_id)
         .await?;
@@ -295,6 +300,7 @@ pub async fn finish_authentication<C: Connection + Clone>(
     let tenant_id = peek_tenant_id(&b.state_token)?;
 
     let (user_id, org_id) = state
+        .webauthn
         .webauthn_service
         .finish_authentication(tenant_id, &b.state_token, &b.response)
         .await?;

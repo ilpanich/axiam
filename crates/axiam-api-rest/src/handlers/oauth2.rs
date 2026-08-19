@@ -140,6 +140,7 @@ pub async fn authorize<C: Connection + Clone>(
             }
 
             let params = match state
+                .oauth2
                 .par_service
                 .consume(user.tenant_id, &q.client_id, &request_uri)
                 .await
@@ -203,7 +204,7 @@ pub async fn authorize<C: Connection + Clone>(
     let resolved_state = req.state.clone();
     let authorized_client_id = req.client_id.clone();
 
-    match state.authorize_service.authorize(req).await {
+    match state.oauth2.authorize_service.authorize(req).await {
         Ok(resp) => {
             // B5: the client has just joined this session. Recorded here —
             // the moment a code is issued — because that is when
@@ -212,6 +213,7 @@ pub async fn authorize<C: Connection + Clone>(
             // logout notification is bad, but failing the login that would
             // have created the session is worse.
             if let Err(e) = state
+                .oauth2
                 .session_client_repo
                 .record(axiam_core::models::oauth2_client::CreateSessionClient {
                     tenant_id: user.tenant_id,
@@ -337,6 +339,7 @@ pub async fn token<C: Connection + Clone>(
             }
         };
         return match state
+            .oauth2
             .device_authorization_service
             .poll(tenant_id, &device_code)
             .await
@@ -405,7 +408,12 @@ pub async fn token<C: Connection + Clone>(
         return handle_uma_ticket(tenant_id, form, &state, &authz, &ctx).await;
     }
 
-    match state.token_service.exchange(tenant_id, form, &ctx).await {
+    match state
+        .oauth2
+        .token_service
+        .exchange(tenant_id, form, &ctx)
+        .await
+    {
         Ok(resp) => {
             let exchange_us = started.elapsed().as_micros() as u64;
 
@@ -634,6 +642,7 @@ async fn dpop_from_request<C: Connection + Clone>(
     };
 
     match state
+        .oauth2
         .proof_replay_repo
         .insert_proof_jti(
             tenant_id,
@@ -859,6 +868,7 @@ pub async fn revoke<C: Connection + Clone>(
     let ctx = token_request_context(&http_req);
 
     match state
+        .oauth2
         .token_service
         .revoke_token(tenant_id, form.into_inner(), &ctx)
         .await
@@ -900,6 +910,7 @@ pub async fn introspect<C: Connection + Clone>(
     let ctx = token_request_context(&http_req);
 
     match state
+        .oauth2
         .token_service
         .introspect_token(tenant_id, form.into_inner(), &ctx)
         .await
@@ -961,6 +972,15 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
 /// See `axiam_oauth2::jwks_cache` module docs for the cache design and the
 /// documented limitations (no key-rotation mechanism exists yet; the
 /// endpoint serves one global, not per-tenant, key set).
+//
+// F3 note, deliberately NOT a doc comment: the field is `state.oauth2.
+// oauth2_jwks_cache` since the sub-state split. The line above still says
+// `state.oauth2_jwks_cache` because utoipa lifts this doc block verbatim into
+// the OpenAPI `description`, which eleven SDK repos vendor byte-for-byte. An
+// internal field rename is not a reason to churn a published API artifact and
+// re-vendor it eleven times; that the description names an internal field at
+// all is a separate (real) smell, and fixing it deserves its own change with a
+// spec regeneration and a re-vendor round.
 #[utoipa::path(
     get,
     path = "/oauth2/jwks",
@@ -980,9 +1000,10 @@ pub async fn jwks<C: Connection + Clone>(
         .get(actix_web::http::header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok());
 
-    let cache_control = state.oauth2_jwks_cache_config.cache_control_header();
+    let cache_control = state.oauth2.oauth2_jwks_cache_config.cache_control_header();
 
     match state
+        .oauth2
         .oauth2_jwks_cache
         .get(&state.auth_config.jwt_public_key_pem, if_none_match)
     {
@@ -1197,6 +1218,7 @@ pub async fn device_authorization<C: Connection + Clone>(
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
     match state
+        .oauth2
         .device_authorization_service
         .authorize(tenant_id, form.into_inner())
         .await
@@ -1259,6 +1281,7 @@ async fn handle_uma_ticket<C: Connection + Clone>(
     };
 
     let client = match state
+        .oauth2
         .token_service
         .authenticate_client(tenant_id, client_id, form.client_secret.as_deref(), ctx)
         .await
@@ -1291,7 +1314,11 @@ async fn handle_uma_ticket<C: Connection + Clone>(
     if let Err(e) = axiam_oauth2::fapi::enforce_token_request(&client, ctx.evidence()) {
         return build_oauth2_error_response(&e);
     }
-    let cnf = match state.token_service.certificate_binding_for(&client, ctx) {
+    let cnf = match state
+        .oauth2
+        .token_service
+        .certificate_binding_for(&client, ctx)
+    {
         Ok(cnf) => cnf,
         Err(e) => return build_oauth2_error_response(&e),
     };
@@ -1487,6 +1514,7 @@ async fn handle_token_exchange<C: Connection + Clone>(
     };
 
     let client = match state
+        .oauth2
         .token_service
         .authenticate_client(tenant_id, client_id, form.client_secret.as_deref(), ctx)
         .await
@@ -1538,7 +1566,11 @@ async fn handle_token_exchange<C: Connection + Clone>(
     // this is byte-identical to the pre-SEC-096 response for them; for a
     // client that registered binding and presented nothing it refuses rather
     // than laundering a bound token into an unbound one.
-    let cnf = match state.token_service.certificate_binding_for(&client, ctx) {
+    let cnf = match state
+        .oauth2
+        .token_service
+        .certificate_binding_for(&client, ctx)
+    {
         Ok(cnf) => cnf,
         Err(e) => return build_oauth2_error_response(&e),
     };
@@ -1552,6 +1584,7 @@ async fn handle_token_exchange<C: Connection + Clone>(
     };
 
     match state
+        .oauth2
         .token_exchange_service
         .exchange(tenant_id, &client, exchange_req, cnf)
         .await
@@ -1819,6 +1852,7 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
         req.client_assertion_type.as_deref(),
     );
     let client = match state
+        .oauth2
         .token_service
         .authenticate_client(
             tenant_id,
@@ -1852,6 +1886,7 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
     }
 
     match state
+        .oauth2
         .par_service
         .push(axiam_oauth2::par::PushedRequest {
             tenant_id,
@@ -2057,6 +2092,7 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
     subject_id: Uuid,
 ) {
     let participants = match state
+        .oauth2
         .session_client_repo
         .list_for_session(tenant_id, session_id)
         .await
@@ -2146,6 +2182,7 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
     // Participation records are dropped after the fan-out list is built, not
     // before — the list is what the fan-out iterates.
     let _ = state
+        .oauth2
         .session_client_repo
         .delete_for_session(tenant_id, session_id)
         .await;

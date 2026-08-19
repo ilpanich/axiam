@@ -43,6 +43,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`AppState` split into seven cohesive sub-states (F3).** The REST
+  composition root carried **75 public fields**, nearly all concrete
+  `Surreal*Repository<C>` values, and every handler received all of them.
+  A scan found that **46 of the 75 are referenced by exactly one handler module
+  each**; those move into `PkiState`, `WebauthnState`, `GdprState`,
+  `MailState`, `EventsState`, `OAuth2State` and `FederationState`, taking the
+  root from 75 members to 36.
+
+  **This is a field-grouping change, not a dispatch change.** Boxing the
+  repositories behind `Arc<dyn …>` would have collapsed the `C` parameter too,
+  and would have put vtable dispatch on the authorization hot path — what a
+  service mesh calls on every request — for a cosmetic gain. Every type,
+  monomorphisation and generated instruction is what it was; what changes is
+  who can see what.
+
+  `state.rs` becomes `state/mod.rs` + `state/bundles.rs`. Migration was
+  mechanical and compiler-verified: `state.foo` → `state.<bundle>.foo` at 131
+  call sites across 19 files. No handler logic, route, wire format or test
+  expectation changed. Rationale in `claude_dev/appstate-substates.md`.
+
+- **Documentation is enforced, one crate at a time (F6).**
+  `[workspace.lints.rust] missing_docs = "warn"` now exists and `axiam-authz`
+  opts into it, with its ten undocumented items written up. The lint is a
+  warning locally and an error in CI (clippy runs `-D warnings`), so a local
+  `cargo check` does not fail mid-thought while a pull request cannot merge
+  without the sentence.
+
+  Measured, so the next step can be planned rather than discovered:
+  **`axiam-core` has 993 sites**. `missing_docs` fires on struct and enum
+  *fields*, not only the items containing them, so that is roughly four times
+  the number of public types. It is deliberately left for its own change —
+  993 doc comments written in a hurry to clear a lint are 993 sentences nobody
+  will trust.
+
+- **`AccessTokenSpec`: one description of a token, one signer (F4).** Access-token
+  issuance had grown into twelve public functions in three telescoping chains,
+  each tier existing only to add one parameter to the tier below
+  (`issue_access_token` -> `_bound` adds `cnf` -> `_enriched` adds `ext`). Five
+  carried `#[allow(clippy::too_many_arguments)]`; `issue_id_token` takes ten
+  positional parameters. Adding one claim meant adding one function per chain,
+  so a module whose entire job is "describe a token and sign it" was closed to
+  extension — and the signing tail was copied six times, which meant "AXIAM
+  signs with EdDSA" could have changed in five of them.
+
+  `AccessTokenSpec` describes a token once; `sign_claims` signs it once. The
+  four constructors (`user`, `oauth2_client`, `service_account`, `exchanged`)
+  each stamp the `aud`/`sub_kind` pairing that belongs to that principal, which
+  is what §4.3 / SEC-006 route narrowing reads and what §17.2 residual 1 was a
+  case of getting out of step.
+
+  **All twelve names keep their signatures** as thin delegations, so no caller
+  changes. Token bytes, claim order, `jti` policy and every default are
+  unchanged, which is what the pre-existing token suites assert. Rationale in
+  `claude_dev/token-issuance-spec.md`.
+
+- **UNIQUE-violation detection lives in one place, and CI now says so (F5).**
+  Deciding "was this a conflict?" means matching substrings in a SurrealDB
+  error message, and that match is a security outcome: at the three replay
+  guards it is the difference between refusing a replayed SAML assertion, AMQP
+  nonce or DPoP proof and accepting it as fresh. `classify_write_error` had
+  documented itself as the only place allowed to do it since D-09; five call
+  sites carried their own copy of the marker set anyway, each with a comment
+  pointing at one of the others.
+
+  The markers now live once in `axiam_db::helpers`, behind `is_unique_violation`
+  and three classifiers (`classify_replay_write_error`,
+  `classify_conflict_write_error`, `classify_write_error`), and
+  `scripts/check-conflict-markers.py` fails the build if a sixth inline copy
+  appears. The three replay tables also share one `cleanup_expired_rows` sweep
+  instead of a byte-identical copy each. No behaviour changes: the marker set,
+  the fallthrough to 5xx, and every error variant are what they were.
+
 - **BREAKING: AMQP is TLS-only.** `AXIAM__AMQP__URL` must be `amqps://`; every
   other scheme is refused before a socket is opened, in a debug build exactly
   as in a release one. `AXIAM__AMQP__ALLOW_PLAINTEXT` is **removed** — it is no
@@ -78,6 +150,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ingestion) are not directly comparable across this change, and the Keycloak
   comparison target is unaffected by it. Re-baseline rather than extending a
   trend line through it.
+
+### Security
+
+- **`h2` bumped to 0.4.16, and RUSTSEC-2026-0258 ignored for the copy that has
+  no fix** (h2 queues empty DATA frames without limit — unbounded memory, or a
+  panic on length overflow; upstream severity low).
+
+  Two copies of `h2` resolve. The **0.4.x copy (reqwest / tonic / hyper) is
+  patched**: `Cargo.lock` moves 0.4.15 → 0.4.16, a lockfile-only change with 91
+  dependencies unchanged. The **0.3.27 copy cannot be**: it arrives via
+  `actix-http` ← `actix-web` / `actix-governor`, the advisory patches `>=0.4.16`
+  only with no 0.3.x backport, and `actix-http` 3.13.3 / `actix-web` 4.14.1 —
+  both released 2026-08-09 — are the newest versions and predate the 2026-08-17
+  advisory. There is nothing upstream to take.
+
+  **That copy is the one serving the REST listener, so this suppression covers a
+  reachable advisory** — unlike every other entry in the ignore list, which are
+  never compiled, off by default, or off the reachable path. `tls.rs` advertises
+  `h2` in ALPN and refuses to start rather than let ALPN be narrowed to
+  HTTP/1.1. Neither the `server.h2` window knobs nor a stream cap bound it
+  (empty DATA frames consume no flow-control credit, and `actix-http` never
+  sends `SETTINGS_MAX_CONCURRENT_STREAMS`). It is availability-only — no key,
+  token or data compromise — and an operator who needs the exposure gone before
+  actix ships a fix can terminate TLS at an edge that does not offer HTTP/2
+  (`docs/security-profiles.md`, `benchmarks/targets/axiam/tls/tls13-h1.conf`).
+
+  The entry carries that reasoning in full in `deny.toml`, and is to be dropped
+  the moment `actix-http` publishes a release built on h2 0.4.
+
+- **The advisory ignore-list is now enforced to be written consistently in both
+  places** — `scripts/check-audit-ignore-sync.py`, wired into the Architecture
+  Invariants job. `cargo-deny` reads `deny.toml`; `cargo-audit` reads the
+  workflow's `ignore:` input and never looks at `deny.toml`, so the list exists
+  twice and "keep them in sync" was a comment with nothing behind it. Drift is
+  silent in both directions: an ID only in `deny.toml` leaves `cargo audit` red
+  for a reason nobody wrote down, and an ID only in the workflow means the
+  rationale for suppressing it is recorded in no file at all. Like the other
+  gates added here, it ships a `--self-test` that runs on fixtures rather than
+  on the repository it guards, and it was verified by deleting an ID from the
+  workflow and confirming it names the missing one.
 
 ## [1.0.0-alpha26] - 2026-08-16
 

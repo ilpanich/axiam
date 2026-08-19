@@ -145,6 +145,7 @@ pub async fn request_reset<C: Connection + Clone>(
     let pepper = state.auth_config.pepper.as_ref().map(|p| p.expose_secret());
 
     match state
+        .mail
         .password_reset_service
         .initiate_reset(tenant_id, &req.email, expiry_hours, pepper)
         .await
@@ -186,7 +187,7 @@ pub async fn request_reset<C: Connection + Clone>(
                 enqueued_at: Utc::now(),
             };
 
-            if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
+            if let Err(e) = state.mail.mail_outbound_publisher.publish(msg).await {
                 // D-15: log warn but do NOT propagate — uniform 200 regardless
                 tracing::warn!(
                     error = %e,
@@ -254,6 +255,7 @@ pub async fn confirm_reset<C: Connection + Clone>(
 
     // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
     state
+        .mail
         .password_reset_service
         .confirm_reset(
             req.tenant_id,

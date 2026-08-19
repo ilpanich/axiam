@@ -132,7 +132,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new({
                     let mut state = AppState::for_test($db.clone(), $auth.clone());
-                    state.ca_service = CaService::new(
+                    state.pki.ca_service = CaService::new(
                         SurrealCaCertificateRepository::new($db.clone()),
                         test_pki_config(),
                         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),

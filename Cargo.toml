@@ -24,6 +24,36 @@ members = [
 exclude = ["tools/surreal-race-probe"]
 resolver = "3"
 
+# ---------------------------------------------------------------------------
+# Lints (F6)
+# ---------------------------------------------------------------------------
+#
+# Opt-in per crate via `[lints] workspace = true`, so the ratchet can move one
+# crate at a time rather than landing 245 doc comments in one diff.
+#
+# `missing_docs` is a warning here and an error in CI, where clippy runs with
+# `-D warnings`. That asymmetry is deliberate: a local `cargo check` should not
+# fail while you are mid-thought on a new public item, and a pull request
+# should not merge without the sentence explaining it.
+#
+# Currently opted in: axiam-authz.
+#
+# The rest of the workspace is a ratchet target -- add `[lints] workspace = true`
+# to a crate once its public surface is documented. Do NOT add the key to a
+# crate you have not documented first: a lint that fires on every build is one
+# everybody learns to scroll past, and then it is worse than no lint.
+#
+# Next, and sized so it can be planned rather than discovered: **axiam-core,
+# 993 sites**. `missing_docs` fires on struct and enum *fields*, not only on
+# the items containing them, so the count is roughly four times the number of
+# public types. The concentrations are models/oauth2_client.rs (115),
+# repository.rs (146), models/settings.rs (74) and models/federation.rs (44).
+# It is worth doing -- axiam-core is the crate every other crate reads -- and
+# it is worth doing as its own change, because 993 doc comments written in a
+# hurry to clear a lint are 993 sentences nobody will trust.
+[workspace.lints.rust]
+missing_docs = "warn"
+
 [workspace.package]
 version = "1.0.0-alpha27"
 edition = "2024"

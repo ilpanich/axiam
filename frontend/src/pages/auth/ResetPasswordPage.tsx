@@ -7,17 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
-import type { AxiosError } from "axios";
-import { redactSecrets } from "@/lib/apiError";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
 // ---------------------------------------------------------------------------
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
-}
 
 // ---------------------------------------------------------------------------
 // Action state type
@@ -75,11 +69,9 @@ export function ResetPasswordPage() {
         return { error: null, success: true };
       } catch (err) {
         window.history.replaceState({}, document.title, window.location.pathname);
-        const axiosErr = err as AxiosError<ErrorResponse>;
-        const msg = redactSecrets(
-          axiosErr.response?.data?.message ??
-            axiosErr.response?.data?.error ??
-            "This reset link is invalid or has expired. Please request a new one."
+        const msg = getApiErrorMessage(
+          err,
+          "This reset link is invalid or has expired. Please request a new one."
         );
         return { error: msg, success: false };
       }

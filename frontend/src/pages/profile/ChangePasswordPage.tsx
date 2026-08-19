@@ -7,16 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
-import type { AxiosError } from "axios";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // API error response type
 // ---------------------------------------------------------------------------
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
-}
 
 // ---------------------------------------------------------------------------
 // Action state type
@@ -58,11 +53,10 @@ export function ChangePasswordPage() {
         await authService.changePassword(currentPassword, newPw);
         return { error: null, success: true };
       } catch (err) {
-        const axiosErr = err as AxiosError<ErrorResponse>;
-        const msg =
-          axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Failed to change password. Please try again.";
+        const msg = getApiErrorMessage(
+          err,
+          "Failed to change password. Please try again."
+        );
         return { error: msg, success: false };
       }
     },

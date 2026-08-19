@@ -171,7 +171,8 @@ pub async fn create<C: Connection + Clone>(
     // asked about an email that is not an email; placed before the transaction
     // so a veto costs nothing to roll back and a normalization is what gets
     // stored rather than a second write.
-    crate::reactor_hooks::user_pre_create(&state.reactor_gate, user.tenant_id, &mut input).await?;
+    crate::reactor_hooks::user_pre_create(&state.events.reactor_gate, user.tenant_id, &mut input)
+        .await?;
 
     // Capture IP and User-Agent for the Art. 7 proof-of-consent record.
     let ip_address = client_ip(&http_req);
@@ -327,7 +328,7 @@ pub async fn update<C: Connection + Clone>(
     // `status` is not in the event's allow-list, so neither the caller nor the
     // reactor can set it here.
     crate::reactor_hooks::user_pre_update(
-        &state.reactor_gate,
+        &state.events.reactor_gate,
         user.tenant_id,
         target_id,
         &mut input,

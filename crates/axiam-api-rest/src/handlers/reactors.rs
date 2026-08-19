@@ -241,7 +241,7 @@ fn require_dispatchable_transport<C: Connection + Clone>(
         return Ok(());
     }
 
-    if !state.reactor_gate.can_dispatch() {
+    if !state.events.reactor_gate.can_dispatch() {
         return Err(axiam_core::error::AxiamError::ServiceUnavailable(
             "the AMQP reactor transport is not available in this build, so a registered \
              reactor could never be reached. Registering one would apply its failure_policy \
@@ -348,6 +348,7 @@ pub async fn create<C: Connection + Clone>(
         .map_err(|e| validation_err(e.to_string()))?;
 
     let reactor = state
+        .events
         .reactor_repo
         .create(CreateReactor {
             tenant_id: user.tenant_id,
@@ -393,6 +394,7 @@ pub async fn list<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let result = state
+        .events
         .reactor_repo
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -435,6 +437,7 @@ pub async fn get<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let reactor = state
+        .events
         .reactor_repo
         .get_by_id(user.tenant_id, path.into_inner())
         .await?;
@@ -474,7 +477,11 @@ pub async fn update<C: Connection + Clone>(
     // invalid against a stored `events` list containing a listen-only event.
     // Validating the request alone would let exactly that combination through
     // — the request names one field and the violation is in the pair.
-    let current = state.reactor_repo.get_by_id(user.tenant_id, id).await?;
+    let current = state
+        .events
+        .reactor_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
     let merged_name = req.name.clone().unwrap_or_else(|| current.name.clone());
     let merged_events = req.events.clone().unwrap_or_else(|| current.events.clone());
     let merged_mode = req.mode.unwrap_or(current.mode);
@@ -500,6 +507,7 @@ pub async fn update<C: Connection + Clone>(
     };
 
     let reactor = state
+        .events
         .reactor_repo
         .update(
             user.tenant_id,
@@ -541,6 +549,7 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     state
+        .events
         .reactor_repo
         .delete(user.tenant_id, path.into_inner())
         .await?;

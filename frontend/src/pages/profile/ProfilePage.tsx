@@ -8,7 +8,6 @@ import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { AxiosError } from "axios";
 
 // ---------------------------------------------------------------------------
 // QUAL-06/D-16: data calls route through the canonical userService (get,
@@ -20,11 +19,7 @@ import type { AxiosError } from "axios";
 
 // CQ-F17: use canonical User type from services/users.ts
 import { userService, type User as UserProfile } from "@/services/users";
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
-}
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ---------------------------------------------------------------------------
 // Avatar helper
@@ -115,11 +110,7 @@ export function ProfilePage() {
         setEditing(false);
         return { error: null, success: true };
       } catch (err) {
-        const axiosErr = err as AxiosError<ErrorResponse>;
-        const msg =
-          axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Failed to update profile.";
+        const msg = getApiErrorMessage(err, "Failed to update profile.");
         return { error: msg, success: false };
       }
     },

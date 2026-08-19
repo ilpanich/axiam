@@ -24,7 +24,6 @@ import { DataTable } from "@/components/DataTable";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { TotpSetupPanel } from "@/components/auth/TotpSetupPanel";
 import type { Column } from "@/components/DataTable";
-import type { AxiosError } from "axios";
 
 // ---------------------------------------------------------------------------
 // Types & API helpers
@@ -33,16 +32,12 @@ import type { AxiosError } from "axios";
 // CQ-F17/QUAL-06: use canonical MfaMethod type + userService methods from
 // services/users.ts instead of inline api.get/api.delete (D-16).
 import { userService, type MfaMethod } from "@/services/users";
+import { getApiErrorMessage } from "@/lib/apiError";
 export type { MfaMethod };
 
 interface TotpSetupResponse {
   secret_base32: string;
   totp_uri: string;
-}
-
-interface ErrorResponse {
-  message?: string;
-  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,12 +214,9 @@ export function MfaManagementPage() {
       setTotpSetupData(null);
     },
     onError: (err) => {
-      const axiosErr = err as AxiosError<ErrorResponse>;
-      const msg =
-        axiosErr.response?.data?.message ??
-        axiosErr.response?.data?.error ??
-        "Invalid or expired code. Please try again.";
-      setTotpConfirmError(msg);
+      setTotpConfirmError(
+        getApiErrorMessage(err, "Invalid or expired code. Please try again.")
+      );
     },
   });
 

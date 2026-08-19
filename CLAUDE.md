@@ -66,6 +66,33 @@ axiam/
 └── sdks/                   # SDK contract (CONTRACT.md) + OpenAPI spec only
 ```
 
+### Documentation lint (ratcheting)
+
+`[workspace.lints.rust] missing_docs = "warn"` is defined in the root
+`Cargo.toml` and opted into **per crate** with `[lints] workspace = true`. It is
+a warning locally and an error in CI, where clippy runs `-D warnings`.
+
+Opted in today: **`axiam-authz`**. Next target: **`axiam-core`, 993 sites** —
+`missing_docs` fires on struct and enum *fields*, so the count is roughly four
+times the number of public types. Do not add the `[lints]` key to a crate you
+have not documented first; a lint that fires on every build is one everybody
+learns to scroll past.
+
+### Crate layering (enforced)
+
+Dependencies point **inward**: a crate may depend only on crates in a strictly
+lower layer. `axiam-core` (layer 0) has no internal dependencies at all; the
+composition root `axiam-server` (layer 8) may reach everything and nothing may
+reach back.
+
+`scripts/check-crate-layering.py` enforces this in CI (job **Architecture Invariants**);
+`--graph` prints the table with every crate's edges resolved against it. Adding a
+crate to the workspace without placing it in that table is itself a failure.
+Test-only outward edges are allowed but must be declared in
+`TEST_ONLY_INVERSIONS` with a reason. See
+[`claude_dev/crate-layering.md`](claude_dev/crate-layering.md) for the rationale
+behind each placement.
+
 The seven client SDKs are **not** in this repository — each lives in its own
 `ilpanich/axiam-<lang>-sdk` repo (rust, typescript, python, java, csharp, php, go) and
 vendors a copy of `sdks/CONTRACT.md`, `sdks/openapi.json` and `proto/`, which are

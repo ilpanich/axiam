@@ -170,7 +170,7 @@ macro_rules! test_app {
 macro_rules! test_app_with_key {
     ($db:expr, $auth:expr) => {{
         let mut state = AppState::for_test($db.clone(), $auth.clone());
-        state.email_encryption_key = Some(EMAIL_KEY);
+        state.mail.email_encryption_key = Some(EMAIL_KEY);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -538,7 +538,7 @@ async fn download_other_users_job_denied_without_permission() {
 
     // Reconstruct the app with a DenyAll checker + the email key set.
     let mut state = AppState::for_test(f.db.clone(), auth.clone());
-    state.email_encryption_key = Some(EMAIL_KEY);
+    state.mail.email_encryption_key = Some(EMAIL_KEY);
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(auth.clone()))

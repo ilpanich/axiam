@@ -107,7 +107,7 @@ pub async fn status<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
 
-    let response = match state.mds_repo.get_meta().await? {
+    let response = match state.webauthn.mds_repo.get_meta().await? {
         Some(m) => MdsStatusResponse {
             no: Some(m.no),
             next_update: Some(m.next_update),
@@ -156,23 +156,27 @@ pub async fn refresh<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
 
-    if !state.pki_config.mds_enabled {
+    if !state.webauthn.pki_config.mds_enabled {
         return Err(AxiamApiError(AxiamError::Validation {
             message: "MDS ingestion is disabled (set AXIAM__PKI__MDS_ENABLED=true to enable it)"
                 .into(),
         }));
     }
 
-    let outcome = match &state.pki_config.mds_blob_path {
+    let outcome = match &state.webauthn.pki_config.mds_blob_path {
         Some(path) => {
-            mds_ingest::ingest_from_file(&state.mds_repo, path, &state.pki_config.mds_leaf_dns)
-                .await?
+            mds_ingest::ingest_from_file(
+                &state.webauthn.mds_repo,
+                path,
+                &state.webauthn.pki_config.mds_leaf_dns,
+            )
+            .await?
         }
         None => {
             mds_ingest::ingest_from_url(
-                &state.mds_repo,
-                &state.pki_config.mds_blob_url,
-                &state.pki_config.mds_leaf_dns,
+                &state.webauthn.mds_repo,
+                &state.webauthn.pki_config.mds_blob_url,
+                &state.webauthn.pki_config.mds_leaf_dns,
                 false, // production: never allow private/loopback targets
             )
             .await?
@@ -188,7 +192,7 @@ pub async fn refresh<C: Connection + Clone>(
         outcome,
         MdsIngestOutcome::Initial { .. } | MdsIngestOutcome::Replaced { .. }
     ) {
-        state.attestation_ca_cache.invalidate();
+        state.webauthn.attestation_ca_cache.invalidate();
     }
 
     Ok(HttpResponse::Ok().json(MdsRefreshOutcome::from(outcome)))

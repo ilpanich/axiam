@@ -215,7 +215,7 @@ async fn request_reset_via_org_and_tenant_slug_enqueues_mail() {
     let recorder = RecordingPublisher::default();
     let sent_handle = recorder.sent.clone();
     let mut state = AppState::for_test(f.db.clone(), auth.clone());
-    state.mail_outbound_publisher = Arc::new(recorder);
+    state.mail.mail_outbound_publisher = Arc::new(recorder);
 
     let app = test::init_service(
         App::new()
@@ -391,7 +391,7 @@ async fn request_reset_mail_publish_failure_still_returns_sent_true() {
     let auth = test_auth_config();
 
     let mut state = AppState::for_test(f.db.clone(), auth.clone());
-    state.mail_outbound_publisher = Arc::new(FailingPublisher);
+    state.mail.mail_outbound_publisher = Arc::new(FailingPublisher);
 
     let app = test::init_service(
         App::new()

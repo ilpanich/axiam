@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { AlertCircle, Loader2, ShieldCheck } from "lucide-react";
-import type { AxiosError } from "axios";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +9,7 @@ import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/Passwor
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { slugify } from "@/lib/utils";
 import api from "@/lib/api";
+import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 
 /**
  * BootstrapPage — first-run provisioning.
@@ -21,11 +21,6 @@ import api from "@/lib/api";
  * setup token at first boot (logged once) — paste it into the Setup token field.
  * On success it redirects to `/login` with the org/tenant slugs pre-filled.
  */
-interface BootstrapErrorResponse {
-  message?: string;
-  error?: string;
-}
-
 export function BootstrapPage() {
   const navigate = useNavigate();
 
@@ -107,8 +102,7 @@ export function BootstrapPage() {
       });
       navigate(`/login?${params.toString()}`);
     } catch (err) {
-      const axiosErr = err as AxiosError<BootstrapErrorResponse>;
-      const status = axiosErr.response?.status;
+      const status = getApiErrorStatus(err);
       if (status === 403) {
         setEmailError(
           "Bootstrap is not authorized. Check the email gate or paste a valid setup token.",
@@ -116,11 +110,12 @@ export function BootstrapPage() {
       } else if (status === 409) {
         setAlreadyInitialized(true);
       } else {
-        const msg =
-          axiosErr.response?.data?.message ??
-          axiosErr.response?.data?.error ??
-          "Could not initialize AXIAM. Verify the server is running and check the server logs.";
-        setFormError(msg);
+        setFormError(
+          getApiErrorMessage(
+            err,
+            "Could not initialize AXIAM. Verify the server is running and check the server logs.",
+          ),
+        );
       }
     } finally {
       setIsLoading(false);

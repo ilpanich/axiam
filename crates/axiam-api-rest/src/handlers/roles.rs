@@ -261,7 +261,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
     // an approval workflow that ran after the grant existed would be reviewing
     // access the subject already has.
     crate::reactor_hooks::grant_pre_assign(
-        &state.reactor_gate,
+        &state.events.reactor_gate,
         user.tenant_id,
         serde_json::json!({
             "grantee_kind": "user",
@@ -370,7 +370,7 @@ pub async fn assign_to_group<C: Connection + Clone>(
     // inherited by every member, so it is the *wider* of the two assignment
     // paths and the one a four-eyes rule most needs to see.
     crate::reactor_hooks::grant_pre_assign(
-        &state.reactor_gate,
+        &state.events.reactor_gate,
         user.tenant_id,
         serde_json::json!({
             "grantee_kind": "group",

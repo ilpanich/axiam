@@ -129,8 +129,8 @@ macro_rules! test_app {
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new({
                     let mut state = AppState::for_test($db.clone(), $auth.clone());
-                    state.webhook_delivery =
-                        WebhookDeliveryService::new(state.webhook_repo.clone(), $enc_key);
+                    state.events.webhook_delivery =
+                        WebhookDeliveryService::new(state.events.webhook_repo.clone(), $enc_key);
                     state
                 }))
                 .app_data(web::Data::new(authz))

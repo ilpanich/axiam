@@ -210,6 +210,27 @@ describe("ProfilePage", () => {
     expect(await screen.findByText("Email already in use.")).toBeInTheDocument();
   });
 
+  // Regression: this page extracted `response.data.message` inline and rendered
+  // it with no redaction, so a server body that echoed a credential reached the
+  // screen verbatim. Routing through getApiErrorMessage closes that; this test
+  // is what stops it reopening.
+  it("redacts a credential echoed in the failure message", async () => {
+    mockGetByUrl({
+      "/api/v1/users/u1": profile,
+      "/api/v1/users/u1/mfa-methods": [],
+    });
+    apiMock.put.mockRejectedValue({
+      response: { data: { message: 'rejected {"password":"hunter2"}' } },
+    });
+    renderWithProviders(<ProfilePage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Profile/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    expect(await screen.findByText(/redacted/)).toBeInTheDocument();
+    expect(screen.queryByText(/hunter2/)).not.toBeInTheDocument();
+  });
+
   it("cancels edit mode without saving", async () => {
     mockGetByUrl({
       "/api/v1/users/u1": profile,

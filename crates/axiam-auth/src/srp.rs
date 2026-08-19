@@ -627,6 +627,126 @@ fn random_ephemeral() -> BigUint {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-language conformance vectors
+// ---------------------------------------------------------------------------
+
+/// A fully-determined SRP-6a exchange, for cross-language conformance testing.
+///
+/// Eleven SDKs implement this protocol independently. Without a shared,
+/// executable definition they will agree right up until the first value with a
+/// leading zero byte, and then fail roughly one login in 256 in a way that
+/// looks like a flaky network. These vectors pin every intermediate — not just
+/// the final proof — so an SDK that gets `u` wrong finds out at `u` rather
+/// than at "login sometimes fails".
+///
+/// Every field is lowercase hex, left-padded to the group width wherever the
+/// protocol calls for `PAD()`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExchangeVector {
+    /// Group name, e.g. `rfc5054_4096`.
+    pub group: String,
+    /// The identity `I` bound into `x`.
+    pub identity: String,
+    /// Salt `s`.
+    pub salt: String,
+    /// The KDF output `x`, supplied rather than derived — the KDF differs per
+    /// language and is specified separately in `sdks/CONTRACT.md`.
+    pub x: String,
+    /// Multiplier `k = H(N | PAD(g))`.
+    pub k: String,
+    /// Verifier `v = g^x mod N`.
+    pub verifier: String,
+    /// Client private ephemeral `a`.
+    pub a_priv: String,
+    /// Client public `A = g^a mod N`.
+    pub a_pub: String,
+    /// Server private ephemeral `b`.
+    pub b_priv: String,
+    /// Server public `B = (k*v + g^b) mod N`.
+    pub b_pub: String,
+    /// Scrambling parameter `u = H(PAD(A) | PAD(B))`.
+    pub u: String,
+    /// Shared secret `S`, which both sides must reach independently.
+    pub session_secret: String,
+    /// Session key `K = H(S)`.
+    pub session_key: String,
+    /// Client proof `M1`.
+    pub client_proof: String,
+    /// Server proof `M2`.
+    pub server_proof: String,
+}
+
+/// Compute a complete exchange from fixed inputs.
+///
+/// Deterministic by construction — `a` and `b` are parameters rather than
+/// random — which is what makes the output usable as a committed test vector.
+/// Both the client-side and server-side derivations of `S` are computed and
+/// asserted equal, so a vector can never be published that the two halves of
+/// the protocol disagree about.
+///
+/// # Panics
+///
+/// If the two derivations of `S` disagree, which would mean this module's own
+/// client and server halves are inconsistent — a bug that must never reach a
+/// published vector.
+pub fn deterministic_exchange(
+    group: SrpGroup,
+    identity: &str,
+    salt: &[u8],
+    x_bytes: &[u8],
+    a_priv: &[u8],
+    b_priv: &[u8],
+) -> ExchangeVector {
+    let params = group_params(group);
+    let n = &params.n;
+    let g = &params.g;
+    let len = params.byte_len;
+
+    let x = BigUint::from_bytes_be(x_bytes) % n;
+    let a_priv_n = BigUint::from_bytes_be(a_priv);
+    let b_priv_n = BigUint::from_bytes_be(b_priv);
+
+    let verifier = g.modpow(&x, n);
+    let a_pub = g.modpow(&a_priv_n, n);
+    let b_pub = (&params.k * &verifier + g.modpow(&b_priv_n, n)) % n;
+    let u = compute_u(&a_pub, &b_pub, len);
+
+    // Server: S = (A * v^u)^b mod N
+    let s_server = ((&a_pub * verifier.modpow(&u, n)) % n).modpow(&b_priv_n, n);
+    // Client: S = (B - k*g^x)^(a + u*x) mod N
+    let kgx = (&params.k * g.modpow(&x, n)) % n;
+    let base = ((&b_pub % n) + n - kgx) % n;
+    let s_client = base.modpow(&(&a_priv_n + &u * &x), n);
+    assert_eq!(
+        s_server, s_client,
+        "client and server derivations of S disagree; a vector must never be \
+         published from an inconsistent implementation"
+    );
+
+    let session_key = hash_parts(&[&to_bytes(&s_server, len)]);
+    let m1 = compute_m1(params, identity, salt, &a_pub, &b_pub, &session_key);
+    let m2 = compute_m2(&a_pub, &m1, &session_key, len);
+
+    ExchangeVector {
+        group: group.to_string(),
+        identity: identity.to_string(),
+        salt: hex::encode(salt),
+        x: hex::encode(to_bytes(&x, 32)),
+        k: hex::encode(to_bytes(&params.k, 32)),
+        verifier: hex::encode(to_bytes(&verifier, len)),
+        a_priv: hex::encode(a_priv),
+        a_pub: hex::encode(to_bytes(&a_pub, len)),
+        b_priv: hex::encode(b_priv),
+        b_pub: hex::encode(to_bytes(&b_pub, len)),
+        u: hex::encode(to_bytes(&u, 32)),
+        session_secret: hex::encode(to_bytes(&s_server, len)),
+        session_key: hex::encode(session_key),
+        client_proof: hex::encode(m1),
+        server_proof: hex::encode(m2),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reference client — test-only
 // ---------------------------------------------------------------------------
 

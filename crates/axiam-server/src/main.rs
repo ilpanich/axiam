@@ -801,6 +801,7 @@ async fn main() -> std::io::Result<()> {
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(pool.handle_for_repo());
+    let srp_credential_repo = axiam_db::SurrealSrpCredentialRepository::new(pool.handle_for_repo());
     // Notification-rule repository — required by the notification_rules handlers'
     // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
     // registration every /api/v1/notification-rules request 500s with
@@ -1838,6 +1839,11 @@ async fn main() -> std::io::Result<()> {
         // was built from — not a second default that could disagree.
         rate_limit_cfg: config.rate_limit.clone(),
         settings_repo: settings_repo.clone(),
+        srp_credential_repo: srp_credential_repo.clone(),
+        // `None` when AXIAM__AUTH__SRP_SESSION_KEY is unset, which makes the
+        // SRP endpoints answer 503 rather than silently leaving clients on
+        // password login — see `AuthConfig::srp_session_key`.
+        srp_server: config.auth.srp_session_key.map(axiam_auth::SrpServer::new),
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),

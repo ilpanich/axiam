@@ -924,6 +924,101 @@
         }
       }
     },
+    "/api/v1/auth/srp/challenge": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/srp/challenge`",
+        "operationId": "srp_challenge",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SrpChallengeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SRP challenge (identical shape for unknown identities)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SrpChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed client public value or missing workspace identity"
+          },
+          "404": {
+            "description": "SRP is not enabled for this tenant"
+          },
+          "503": {
+            "description": "SRP is enabled but the server has no session key configured"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/srp/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/srp/verify`",
+        "description": "Returns the same three outcomes as `POST /api/v1/auth/login` — `200` with\nsession cookies, `202` for an MFA challenge, `403` for MFA setup — so a\nclient can share one result handler across both login paths.",
+        "operationId": "srp_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SrpVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful; body carries the server proof M2",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SrpVerifyResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "MFA challenge required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaRequiredResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid proof, expired session, or unknown identity"
+          },
+          "403": {
+            "description": "MFA setup required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaSetupRequiredResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/verify-email": {
       "post": {
         "tags": [
@@ -9329,6 +9424,17 @@
           "new_password": {
             "type": "string"
           },
+          "srp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SrpEnrollment",
+                "description": "SRP verifier for `new_password`, computed client-side.\n\nWithout this, reset would be the hole in SRP coverage: a tenant could\nrun `srp_mode = required`, and every \"forgot password\" would still put a\nplaintext password on the wire and leave the account with a verifier for\na password it no longer has."
+              }
+            ]
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid"
@@ -10181,6 +10287,17 @@
           "metadata": {},
           "password": {
             "type": "string"
+          },
+          "srp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SrpEnrollment",
+                "description": "SRP verifier for `password`, computed client-side over `username`.\n\nThe server cannot derive this — it never sees the password in a form it\ncould run the KDF over — so it has to arrive with the request or not at\nall. Required under `srp_mode = required`, where a user created without\none could never authenticate."
+              }
+            ]
           },
           "username": {
             "type": "string"
@@ -11059,6 +11176,13 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "server_proof": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server proof `M2`, present only on the SRP path\n(`POST /api/v1/auth/srp/verify`).\n\nIt lives on this shared type — rather than in a separate SRP-only\nresponse — so both login paths return one body shape and a client needs\none result handler. A client that completed an SRP exchange MUST verify\nthis; without it, it has proved itself to the server but has not proved\nthe server to itself, which is half the protocol."
           },
           "session_id": {
             "type": "string",
@@ -13163,6 +13287,7 @@
           "email",
           "certificate",
           "notification",
+          "srp",
           "created_at",
           "updated_at"
         ],
@@ -13199,6 +13324,9 @@
           "scope_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "srp": {
+            "$ref": "#/components/schemas/SrpPolicy"
           },
           "token": {
             "$ref": "#/components/schemas/TokenPolicy"
@@ -13494,6 +13622,18 @@
           },
           "require_uppercase": {
             "type": "boolean"
+          },
+          "srp_group": {
+            "type": "string",
+            "example": "rfc5054_4096"
+          },
+          "srp_kdf": {
+            "type": "string",
+            "example": "argon2id"
+          },
+          "srp_mode": {
+            "type": "string",
+            "example": "disabled"
           }
         }
       },
@@ -13586,6 +13726,231 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "SrpChallenge": {
+        "type": "object",
+        "description": "Server response to `POST /api/v1/auth/srp/challenge`.\n\nEvery field is safe to return for an identity that does not exist — the\nserver fabricates a stable, deterministic salt and a well-formed `B` in\nthat case, so this response cannot be used to enumerate accounts.",
+        "required": [
+          "srp_session",
+          "identity",
+          "salt",
+          "group",
+          "kdf",
+          "iterations",
+          "b_pub"
+        ],
+        "properties": {
+          "b_pub": {
+            "type": "string",
+            "description": "Server public ephemeral `B`, lowercase hex padded to the group width."
+          },
+          "group": {
+            "type": "string",
+            "description": "Group to compute in.",
+            "example": "rfc5054_4096"
+          },
+          "identity": {
+            "type": "string",
+            "description": "The canonical identity string to feed into the KDF. The client MUST use\nthis rather than whatever the human typed, because a user may\nauthenticate by username *or* email while only one of them is bound\ninto `x`."
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "KDF iteration/time cost.",
+            "minimum": 0
+          },
+          "kdf": {
+            "type": "string",
+            "description": "KDF to derive `x` with.",
+            "example": "argon2id"
+          },
+          "memory_kib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id memory cost in KiB; absent for PBKDF2.",
+            "minimum": 0
+          },
+          "parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id parallelism; absent for PBKDF2.",
+            "minimum": 0
+          },
+          "salt": {
+            "type": "string",
+            "description": "Lowercase-hex salt `s`."
+          },
+          "srp_session": {
+            "type": "string",
+            "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/srp/verify`; the client cannot read or forge it."
+          }
+        }
+      },
+      "SrpChallengeRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/srp/challenge`.",
+        "required": [
+          "username_or_email",
+          "client_public"
+        ],
+        "properties": {
+          "client_public": {
+            "type": "string",
+            "description": "Client public ephemeral `A = g^a mod N`, lowercase hex."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Organization UUID. Either this or `org_slug` is required."
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization slug alternative to `org_id`."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Tenant UUID. Either this or `tenant_slug` is required."
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant slug alternative to `tenant_id`."
+          },
+          "username_or_email": {
+            "type": "string",
+            "description": "Username or email the human typed. The response's `identity` field, not\nthis, is what goes into the KDF."
+          }
+        }
+      },
+      "SrpEnrollment": {
+        "type": "object",
+        "description": "The client-supplied half of an SRP enrolment, as it appears inside\nregistration / change-password / reset-completion request bodies.\n\nKept separate from [`CreateSrpCredential`] because the tenant, user and\ncanonical identity are all decided by the server from the authenticated\ncontext — a client that could name them could enrol a verifier against\nsomebody else's account.",
+        "required": [
+          "group",
+          "kdf",
+          "iterations",
+          "salt",
+          "verifier"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "Group the client used. Must be permitted by effective settings.",
+            "example": "rfc5054_4096"
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "KDF iteration/time cost.",
+            "minimum": 0
+          },
+          "kdf": {
+            "type": "string",
+            "description": "KDF the client used.",
+            "example": "argon2id"
+          },
+          "memory_kib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id memory cost in KiB. Required for `argon2id`, ignored otherwise.",
+            "minimum": 0
+          },
+          "parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id parallelism. Required for `argon2id`, ignored otherwise.",
+            "minimum": 0
+          },
+          "salt": {
+            "type": "string",
+            "description": "Lowercase-hex 32-byte salt the client generated."
+          },
+          "verifier": {
+            "type": "string",
+            "description": "Lowercase-hex verifier `v = g^x mod N`."
+          }
+        }
+      },
+      "SrpPolicy": {
+        "type": "object",
+        "description": "Secure Remote Password policy.\n\n`group` and `kdf` are the parameters a *new* verifier is enrolled with.\nThey deliberately do not apply retroactively: an existing verifier is only\nvalid under the group and KDF it was generated with, so tightening these\ntakes effect as users next set a password rather than invalidating\neverybody at once.",
+        "required": [
+          "srp_mode",
+          "srp_group",
+          "srp_kdf"
+        ],
+        "properties": {
+          "srp_group": {
+            "type": "string",
+            "description": "RFC 5054 group new verifiers are enrolled under.",
+            "example": "rfc5054_4096"
+          },
+          "srp_kdf": {
+            "type": "string",
+            "description": "KDF new verifiers derive `x` with. A client that cannot perform this\nKDF may enrol with `pbkdf2_sha256` instead — see\n[`srp_kdf_is_at_least`].",
+            "example": "argon2id"
+          },
+          "srp_mode": {
+            "type": "string",
+            "description": "Whether SRP is offered, and whether password login is still accepted.",
+            "example": "disabled"
+          }
+        }
+      },
+      "SrpVerifyRequest": {
+        "type": "object",
+        "description": "Client request to `POST /api/v1/auth/srp/verify`.",
+        "required": [
+          "srp_session",
+          "client_proof"
+        ],
+        "properties": {
+          "client_proof": {
+            "type": "string",
+            "description": "Client proof `M1`, lowercase hex."
+          },
+          "srp_session": {
+            "type": "string",
+            "description": "The `srp_session` from the challenge response, echoed verbatim."
+          }
+        }
+      },
+      "SrpVerifyResponse": {
+        "type": "object",
+        "description": "`POST /api/v1/auth/srp/verify` success body.\n\nShape-compatible with `LoginSuccessResponse` plus `server_proof`; tokens\nstill arrive as `Set-Cookie`, exactly as on the password path.",
+        "required": [
+          "server_proof"
+        ],
+        "properties": {
+          "server_proof": {
+            "type": "string",
+            "description": "Server proof `M2`, lowercase hex.\n\nA client MUST check this before treating the session as good. Skipping\nit throws away half of what SRP provides — without it the client has\nauthenticated itself to the server but has not authenticated the\nserver, so a rogue endpoint that never knew the verifier is\nindistinguishable from the real one."
           }
         }
       },
@@ -13851,6 +14216,24 @@
           "require_uppercase": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "srp_group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "srp_kdf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "srp_mode": {
+            "type": [
+              "string",
               "null"
             ]
           }

@@ -73,6 +73,17 @@ jobs:
       - name: Conflict markers appear in one place only
         run: python3 scripts/check-conflict-markers.py
 
+      # The advisory ignore-list has to be written twice -- cargo-deny reads
+      # deny.toml, cargo-audit reads the `ignore:` input below and never looks
+      # at deny.toml -- and until now "keep them in sync" was a comment and
+      # nothing else. Drift is silent either way: an ID only in deny.toml
+      # leaves cargo audit red for an unwritten reason, and an ID only in the
+      # workflow means the rationale for suppressing it exists in no file.
+      - name: Ignore-list sync gate self-test (fixtures)
+        run: python3 scripts/check-audit-ignore-sync.py --self-test
+      - name: Advisory ignore-lists agree
+        run: python3 scripts/check-audit-ignore-sync.py
+
   build:
     name: Build
     runs-on: ubuntu-latest

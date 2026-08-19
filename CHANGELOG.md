@@ -179,6 +179,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The entry carries that reasoning in full in `deny.toml`, and is to be dropped
   the moment `actix-http` publishes a release built on h2 0.4.
 
+- **The advisory ignore-list is now enforced to be written consistently in both
+  places** — `scripts/check-audit-ignore-sync.py`, wired into the Architecture
+  Invariants job. `cargo-deny` reads `deny.toml`; `cargo-audit` reads the
+  workflow's `ignore:` input and never looks at `deny.toml`, so the list exists
+  twice and "keep them in sync" was a comment with nothing behind it. Drift is
+  silent in both directions: an ID only in `deny.toml` leaves `cargo audit` red
+  for a reason nobody wrote down, and an ID only in the workflow means the
+  rationale for suppressing it is recorded in no file at all. Like the other
+  gates added here, it ships a `--self-test` that runs on fixtures rather than
+  on the repository it guards, and it was verified by deleting an ID from the
+  workflow and confirming it names the missing one.
+
 ## [1.0.0-alpha26] - 2026-08-16
 
 ### Added

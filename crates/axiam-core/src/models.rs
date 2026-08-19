@@ -29,6 +29,7 @@ pub mod scope;
 pub mod service_account;
 pub mod session;
 pub mod settings;
+pub mod srp;
 pub mod tenant;
 pub mod uma;
 pub mod user;

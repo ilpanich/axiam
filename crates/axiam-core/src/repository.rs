@@ -48,6 +48,7 @@ use crate::models::{
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
+    srp::{CreateSrpCredential, SrpCredential},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
     user::{CreateUser, UpdateUser, User},
@@ -1682,6 +1683,50 @@ pub trait PasswordHistoryRepository: Send + Sync {
         user_id: Uuid,
         keep_count: u32,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SRP credentials (tenant scope)
+// ---------------------------------------------------------------------------
+
+/// Repository for Secure Remote Password verifiers.
+///
+/// One row per user at most. A verifier is written only where the plaintext
+/// password is legitimately in hand (registration, authenticated password
+/// change, reset completion), so `upsert` replaces rather than versions:
+/// keeping historical verifiers would keep historical passwords crackable for
+/// no operational benefit.
+pub trait SrpCredentialRepository: Send + Sync {
+    /// Create or replace the verifier for a user.
+    fn upsert(
+        &self,
+        input: CreateSrpCredential,
+    ) -> impl Future<Output = AxiamResult<SrpCredential>> + Send;
+
+    /// Fetch a user's verifier. `NotFound` means the user has never set a
+    /// password under an SRP-enabled policy — which is a normal state, not an
+    /// error, and callers must treat it as "fall back to password login"
+    /// rather than as a failure.
+    fn get_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SrpCredential>> + Send;
+
+    /// Remove a user's verifier — used by account deletion and by an admin
+    /// forcing a user back onto password login.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Count users in a tenant that have a verifier. Backs the admin-facing
+    /// SRP coverage figure, which is what tells an operator whether
+    /// [`SrpMode::Required`] would strand anyone.
+    ///
+    /// [`SrpMode::Required`]: crate::models::srp::SrpMode::Required
+    fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------

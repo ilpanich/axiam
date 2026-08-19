@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AxiamError, AxiamResult};
+use crate::models::srp::{SrpGroup, SrpKdf, SrpMode};
 
 // -----------------------------------------------------------------------
 // Sub-policy structs
@@ -70,6 +71,45 @@ pub struct NotificationPolicy {
     pub admin_notifications_enabled: bool,
 }
 
+/// Secure Remote Password policy.
+///
+/// `group` and `kdf` are the parameters a *new* verifier is enrolled with.
+/// They deliberately do not apply retroactively: an existing verifier is only
+/// valid under the group and KDF it was generated with, so tightening these
+/// takes effect as users next set a password rather than invalidating
+/// everybody at once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SrpPolicy {
+    /// Whether SRP is offered, and whether password login is still accepted.
+    #[schema(value_type = String, example = "disabled")]
+    pub srp_mode: SrpMode,
+    /// RFC 5054 group new verifiers are enrolled under.
+    #[schema(value_type = String, example = "rfc5054_4096")]
+    pub srp_group: SrpGroup,
+    /// KDF new verifiers derive `x` with. A client that cannot perform this
+    /// KDF may enrol with `pbkdf2_sha256` instead — see
+    /// [`srp_kdf_is_at_least`].
+    #[schema(value_type = String, example = "argon2id")]
+    pub srp_kdf: SrpKdf,
+}
+
+/// Rank a KDF by resistance to offline attack on a leaked verifier.
+///
+/// Used by the tighten-only rule: a tenant may move from PBKDF2 to Argon2id
+/// but never the other way, because that would weaken every verifier enrolled
+/// after the change.
+fn srp_kdf_rank(kdf: SrpKdf) -> u8 {
+    match kdf {
+        SrpKdf::Pbkdf2Sha256 => 0,
+        SrpKdf::Argon2id => 1,
+    }
+}
+
+/// Whether `candidate` is at least as strong as `baseline`.
+pub fn srp_kdf_is_at_least(candidate: SrpKdf, baseline: SrpKdf) -> bool {
+    srp_kdf_rank(candidate) >= srp_kdf_rank(baseline)
+}
+
 // -----------------------------------------------------------------------
 // Scope enum
 // -----------------------------------------------------------------------
@@ -119,6 +159,7 @@ pub struct SecuritySettings {
     pub email: EmailVerificationPolicy,
     pub certificate: CertificatePolicy,
     pub notification: NotificationPolicy,
+    pub srp: SrpPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -157,6 +198,13 @@ pub struct TenantSettingsOverride {
     pub max_cert_validity_days: Option<u32>,
     // Notification
     pub admin_notifications_enabled: Option<bool>,
+    // SRP
+    #[schema(value_type = Option<String>)]
+    pub srp_mode: Option<SrpMode>,
+    #[schema(value_type = Option<String>)]
+    pub srp_group: Option<SrpGroup>,
+    #[schema(value_type = Option<String>)]
+    pub srp_kdf: Option<SrpKdf>,
 }
 
 impl TenantSettingsOverride {
@@ -200,6 +248,17 @@ pub struct SetOrgSettings {
     pub max_cert_validity_days: u32,
     // Notification
     pub admin_notifications_enabled: bool,
+    // SRP — defaulted so an existing API client that has never heard of SRP
+    // keeps working unchanged and lands on `disabled`.
+    #[serde(default)]
+    #[schema(value_type = String, example = "disabled")]
+    pub srp_mode: SrpMode,
+    #[serde(default)]
+    #[schema(value_type = String, example = "rfc5054_4096")]
+    pub srp_group: SrpGroup,
+    #[serde(default)]
+    #[schema(value_type = String, example = "argon2id")]
+    pub srp_kdf: SrpKdf,
 }
 
 /// Input for setting tenant-level overrides (partial).
@@ -239,6 +298,12 @@ pub fn system_defaults() -> SetOrgSettings {
         max_cert_validity_days: 730,
         // Notification
         admin_notifications_enabled: true,
+        // SRP — off by default. Turning it on is a deliberate operator
+        // decision, and defaulting it on would change the login wire protocol
+        // for every existing deployment on upgrade.
+        srp_mode: SrpMode::Disabled,
+        srp_group: SrpGroup::Rfc5054_4096,
+        srp_kdf: SrpKdf::Argon2id,
     }
 }
 
@@ -386,6 +451,11 @@ pub fn effective_settings(
             admin_notifications_enabled: tenant_override
                 .admin_notifications_enabled
                 .unwrap_or(org.notification.admin_notifications_enabled),
+        },
+        srp: SrpPolicy {
+            srp_mode: tenant_override.srp_mode.unwrap_or(org.srp.srp_mode),
+            srp_group: tenant_override.srp_group.unwrap_or(org.srp.srp_group),
+            srp_kdf: tenant_override.srp_kdf.unwrap_or(org.srp.srp_kdf),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -559,6 +629,37 @@ pub fn validate_tenant_override(
         "admin_notifications_enabled"
     );
 
+    // --- SRP: tighten-only ---
+    //
+    // `SrpMode` derives `Ord` as Disabled < Optional < Required, which is
+    // exactly the restrictiveness order, so this is a plain comparison. Group
+    // strength is its bit width. KDF strength is ranked by resistance to
+    // offline attack on a leaked verifier.
+    if let Some(mode) = overrides.srp_mode
+        && mode < org.srp.srp_mode
+    {
+        violations.push(format!(
+            "srp_mode: tenant value {} is less restrictive than org baseline {}",
+            mode, org.srp.srp_mode,
+        ));
+    }
+    if let Some(group) = overrides.srp_group
+        && group.bits() < org.srp.srp_group.bits()
+    {
+        violations.push(format!(
+            "srp_group: tenant value {} is weaker than org baseline {}",
+            group, org.srp.srp_group,
+        ));
+    }
+    if let Some(kdf) = overrides.srp_kdf
+        && !srp_kdf_is_at_least(kdf, org.srp.srp_kdf)
+    {
+        violations.push(format!(
+            "srp_kdf: tenant value {} is weaker than org baseline {}",
+            kdf, org.srp.srp_kdf,
+        ));
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -727,6 +828,9 @@ pub fn diff_against_org(
             org.notification.admin_notifications_enabled,
             tenant.notification.admin_notifications_enabled
         ),
+        srp_mode: diff!(srp_mode, org.srp.srp_mode, tenant.srp.srp_mode),
+        srp_group: diff!(srp_group, org.srp.srp_group, tenant.srp.srp_group),
+        srp_kdf: diff!(srp_kdf, org.srp.srp_kdf, tenant.srp.srp_kdf),
     }
 }
 
@@ -771,6 +875,11 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         notification: NotificationPolicy {
             admin_notifications_enabled: input.admin_notifications_enabled,
         },
+        srp: SrpPolicy {
+            srp_mode: input.srp_mode,
+            srp_group: input.srp_group,
+            srp_kdf: input.srp_kdf,
+        },
         created_at: now,
         updated_at: now,
     }
@@ -805,6 +914,92 @@ mod tests {
         assert!(d.mfa_challenge_lifetime_secs > 0);
         assert!(d.default_cert_validity_days > 0);
         assert!(d.max_cert_validity_days >= d.default_cert_validity_days);
+    }
+
+    // --- SRP policy ---
+
+    #[test]
+    fn srp_defaults_to_disabled_so_an_upgrade_changes_no_wire_protocol() {
+        let org = org_settings();
+        assert_eq!(org.srp.srp_mode, SrpMode::Disabled);
+        assert_eq!(org.srp.srp_group, SrpGroup::Rfc5054_4096);
+        assert_eq!(org.srp.srp_kdf, SrpKdf::Argon2id);
+    }
+
+    #[test]
+    fn a_tenant_may_tighten_srp_mode_but_never_relax_it() {
+        let mut org = org_settings();
+        org.srp.srp_mode = SrpMode::Optional;
+
+        let tighten = TenantSettingsOverride {
+            srp_mode: Some(SrpMode::Required),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &tighten).is_ok());
+
+        let relax = TenantSettingsOverride {
+            srp_mode: Some(SrpMode::Disabled),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &relax).unwrap_err();
+        assert!(err.to_string().contains("srp_mode"), "{err}");
+    }
+
+    #[test]
+    fn a_tenant_may_not_move_to_a_narrower_srp_group() {
+        let mut org = org_settings();
+        org.srp.srp_group = SrpGroup::Rfc5054_3072;
+
+        let wider = TenantSettingsOverride {
+            srp_group: Some(SrpGroup::Rfc5054_4096),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &wider).is_ok());
+
+        let narrower = TenantSettingsOverride {
+            srp_group: Some(SrpGroup::Rfc5054_2048),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &narrower).is_err());
+    }
+
+    #[test]
+    fn a_tenant_may_not_downgrade_argon2id_to_pbkdf2() {
+        // Doing so would weaken every verifier enrolled after the change,
+        // which is exactly what the tighten-only rule exists to prevent.
+        let org = org_settings(); // argon2id baseline
+        let downgrade = TenantSettingsOverride {
+            srp_kdf: Some(SrpKdf::Pbkdf2Sha256),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &downgrade).is_err());
+
+        let mut weak_org = org_settings();
+        weak_org.srp.srp_kdf = SrpKdf::Pbkdf2Sha256;
+        let upgrade = TenantSettingsOverride {
+            srp_kdf: Some(SrpKdf::Argon2id),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&weak_org, &upgrade).is_ok());
+    }
+
+    #[test]
+    fn srp_overrides_flow_through_the_merge_and_back_out_of_the_diff() {
+        let mut org = org_settings();
+        org.srp.srp_mode = SrpMode::Optional;
+
+        let overrides = TenantSettingsOverride {
+            srp_mode: Some(SrpMode::Required),
+            ..Default::default()
+        };
+        let merged = effective_settings(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(merged.srp.srp_mode, SrpMode::Required);
+        // Unset fields still inherit.
+        assert_eq!(merged.srp.srp_group, org.srp.srp_group);
+
+        let round_tripped = diff_against_org(&org, &merged);
+        assert_eq!(round_tripped.srp_mode, Some(SrpMode::Required));
+        assert_eq!(round_tripped.srp_group, None);
     }
 
     // --- validate_org_settings ---

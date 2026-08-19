@@ -5,10 +5,11 @@ use crate::handle::DbHandle;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
-    PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride, SettingsScope,
+    PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride, SettingsScope, SrpPolicy,
     TenantSettingsOverride, TokenPolicy, diff_against_org, effective_settings,
     settings_from_org_input, system_defaults,
 };
+use axiam_core::models::srp::{SrpGroup, SrpKdf, SrpMode};
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -51,6 +52,13 @@ struct SettingsRow {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
+    // SRP (V41). `Option` rather than `String` so a row written before the
+    // migration — which has no such column at all — still deserializes; it
+    // resolves to the `disabled` default, which is what a deployment that has
+    // never configured SRP means.
+    srp_mode: Option<String>,
+    srp_group: Option<String>,
+    srp_kdf: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -92,11 +100,40 @@ struct SettingsRowWithId {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
+    // SRP (V41). `Option` rather than `String` so a row written before the
+    // migration — which has no such column at all — still deserializes; it
+    // resolves to the `disabled` default, which is what a deployment that has
+    // never configured SRP means.
+    srp_mode: Option<String>,
+    srp_group: Option<String>,
+    srp_kdf: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+/// Decode the three SRP columns, tolerating rows written before the V41
+/// migration.
+///
+/// An unparseable value is treated as absent rather than as an error: the
+/// alternative is a settings read that hard-fails for the whole org, which
+/// would take authentication down over a cosmetic column. The resulting
+/// `disabled` is the safe direction — it can only turn SRP *off*, never
+/// silently weaken a tenant that had it on.
+fn decode_srp(mode: Option<&str>, group: Option<&str>, kdf: Option<&str>) -> SrpPolicy {
+    SrpPolicy {
+        srp_mode: mode
+            .and_then(|v| v.parse::<SrpMode>().ok())
+            .unwrap_or_default(),
+        srp_group: group
+            .and_then(|v| v.parse::<SrpGroup>().ok())
+            .unwrap_or_default(),
+        srp_kdf: kdf
+            .and_then(|v| v.parse::<SrpKdf>().ok())
+            .unwrap_or_default(),
+    }
 }
 
 impl SettingsRowWithId {
@@ -148,6 +185,11 @@ impl SettingsRowWithId {
             notification: NotificationPolicy {
                 admin_notifications_enabled: self.notif_admin_enabled,
             },
+            srp: decode_srp(
+                self.srp_mode.as_deref(),
+                self.srp_group.as_deref(),
+                self.srp_kdf.as_deref(),
+            ),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -180,6 +222,9 @@ email_grace_period_hours = $email_grace_period_hours, \
 cert_default_validity = $cert_default_validity, \
 cert_max_validity = $cert_max_validity, \
 notif_admin_enabled = $notif_admin_enabled, \
+srp_mode = $srp_mode, \
+srp_group = $srp_group, \
+srp_kdf = $srp_kdf, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -293,6 +338,15 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 BindValue::Bool(settings.notification.admin_notifications_enabled),
             ),
         ];
+        bindings.push((
+            "srp_mode",
+            BindValue::Str(settings.srp.srp_mode.to_string()),
+        ));
+        bindings.push((
+            "srp_group",
+            BindValue::Str(settings.srp.srp_group.to_string()),
+        ));
+        bindings.push(("srp_kdf", BindValue::Str(settings.srp.srp_kdf.to_string())));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
     }
@@ -465,6 +519,11 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             notification: NotificationPolicy {
                 admin_notifications_enabled: row.notif_admin_enabled,
             },
+            srp: decode_srp(
+                row.srp_mode.as_deref(),
+                row.srp_group.as_deref(),
+                row.srp_kdf.as_deref(),
+            ),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

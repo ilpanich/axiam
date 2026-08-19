@@ -242,6 +242,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "scim_provisioning_tokens",
         sql: SCHEMA_V40,
     },
+    Migration {
+        version: 41,
+        name: "srp_credentials_and_policy",
+        sql: SCHEMA_V41,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2283,3 +2288,67 @@ mod tests {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// Schema v41 — Secure Remote Password (SRP-6a)
+// -----------------------------------------------------------------------
+//
+// Two additions:
+//
+// 1. `srp_credential` — at most one verifier per user. There is deliberately
+//    no history table: a verifier is a password equivalent under a slow KDF,
+//    and keeping superseded ones would keep superseded passwords crackable for
+//    no operational benefit.
+//
+// 2. Three columns on `security_settings`. They carry `DEFAULT` values *and*
+//    an explicit backfill, because a SCHEMAFULL SELECT over a row written
+//    before this migration would otherwise yield NONE for them. The Rust side
+//    also treats them as optional (see `decode_srp`), so a partially applied
+//    migration degrades to "SRP disabled" rather than to a settings read that
+//    fails for the whole organization.
+
+const SCHEMA_V41: &str = "\
+-- =======================================================================
+-- SRP verifiers (tenant scope)
+-- =======================================================================
+DEFINE TABLE srp_credential SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE srp_credential TYPE string;
+DEFINE FIELD user_id ON TABLE srp_credential TYPE string;
+-- The canonical identity bound into the client-side KDF that derives x.
+-- Always the
+-- username; a user may sign in with their email but only one string can be
+-- inside the KDF input.
+DEFINE FIELD identity ON TABLE srp_credential TYPE string;
+DEFINE FIELD srp_group ON TABLE srp_credential TYPE string \
+    ASSERT $value IN ['rfc5054_2048', 'rfc5054_3072', 'rfc5054_4096'];
+DEFINE FIELD kdf ON TABLE srp_credential TYPE string \
+    ASSERT $value IN ['argon2id', 'pbkdf2_sha256'];
+DEFINE FIELD kdf_memory_kib ON TABLE srp_credential TYPE option<int>;
+DEFINE FIELD kdf_iterations ON TABLE srp_credential TYPE int;
+DEFINE FIELD kdf_parallelism ON TABLE srp_credential TYPE option<int>;
+DEFINE FIELD salt ON TABLE srp_credential TYPE string;
+DEFINE FIELD verifier ON TABLE srp_credential TYPE string;
+DEFINE FIELD created_at ON TABLE srp_credential TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE srp_credential TYPE datetime \
+    DEFAULT time::now();
+-- One verifier per user. UNIQUE is what makes upsert-by-user safe under
+-- concurrent password changes.
+DEFINE INDEX idx_srp_cred_user ON TABLE srp_credential \
+    COLUMNS tenant_id, user_id UNIQUE;
+
+-- =======================================================================
+-- SRP policy on security_settings
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS srp_mode ON TABLE security_settings TYPE string \
+    DEFAULT 'disabled' ASSERT $value IN ['disabled', 'optional', 'required'];
+DEFINE FIELD IF NOT EXISTS srp_group ON TABLE security_settings TYPE string \
+    DEFAULT 'rfc5054_4096' \
+    ASSERT $value IN ['rfc5054_2048', 'rfc5054_3072', 'rfc5054_4096'];
+DEFINE FIELD IF NOT EXISTS srp_kdf ON TABLE security_settings TYPE string \
+    DEFAULT 'argon2id' ASSERT $value IN ['argon2id', 'pbkdf2_sha256'];
+-- Backfill rows that predate the columns. DEFAULT only applies on write.
+UPDATE security_settings SET srp_mode = 'disabled' WHERE srp_mode = NONE;
+UPDATE security_settings SET srp_group = 'rfc5054_4096' WHERE srp_group = NONE;
+UPDATE security_settings SET srp_kdf = 'argon2id' WHERE srp_kdf = NONE;
+";

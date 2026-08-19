@@ -275,6 +275,13 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
 pub const PUBLIC_PATHS: &[&str] = &[
     // Authentication flows (under /api/v1/auth scope)
     "/api/v1/auth/login",
+    // SRP is a sibling of /login and is unauthenticated for the same reason:
+    // it is how a caller *becomes* authenticated. Both halves of the exchange
+    // must be listed — the challenge because the caller has no credential yet,
+    // and the verify because the credential it presents is `M1`, which this
+    // middleware knows nothing about.
+    "/api/v1/auth/srp/challenge",
+    "/api/v1/auth/srp/verify",
     // Refresh authenticates via its own opaque `axiam_refresh` cookie, not the
     // access token. It MUST be public: the `axiam_access` cookie expires with
     // the 15-min access token, so a client refreshing after expiry carries no

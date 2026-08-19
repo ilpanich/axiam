@@ -24,6 +24,17 @@ use crate::config::AuthConfig;
 /// D-06: always-on accrual — callers must invoke this on every failed
 /// credential check (wrong password against an existing, non-locked user),
 /// never behind a config flag.
+/// Whether `user` is currently serving a lockout.
+///
+/// [`crate::AuthService::login`] checks this inline against the user it just
+/// fetched. The SRP verify path needs the same question answered from the
+/// outside, and a free function is the way to ask it without naming
+/// `AuthService`'s four repository type parameters at the call site.
+pub fn is_locked_out(user: &axiam_core::models::user::User) -> bool {
+    user.locked_until
+        .is_some_and(|until| until > chrono::Utc::now())
+}
+
 pub async fn record_failed_login<U: UserRepository>(
     user_repo: &U,
     config: &AuthConfig,

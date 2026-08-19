@@ -46,6 +46,14 @@ pub struct ConfirmResetBody {
     pub tenant_id: Uuid,
     pub token: String,
     pub new_password: String,
+    /// SRP verifier for `new_password`, computed client-side.
+    ///
+    /// Without this, reset would be the hole in SRP coverage: a tenant could
+    /// run `srp_mode = required`, and every "forgot password" would still put a
+    /// plaintext password on the wire and leave the account with a verifier for
+    /// a password it no longer has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srp: Option<axiam_core::models::srp::SrpEnrollment>,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +248,7 @@ pub async fn confirm_reset<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    use axiam_core::repository::{SettingsRepository, TenantRepository};
+    use axiam_core::repository::{SettingsRepository, TenantRepository, UserRepository as _};
 
     let req = body.into_inner();
 
@@ -253,8 +261,16 @@ pub async fn confirm_reset<C: Connection + Clone>(
         .get_effective_settings(tenant.organization_id, req.tenant_id)
         .await?;
 
+    // Reject a malformed verifier before the token is consumed. `confirm_reset`
+    // burns the single-use token, so failing after it would leave the user with
+    // a changed password, no verifier, and no way to retry without requesting a
+    // second reset email.
+    if let Some(enrollment) = req.srp.as_ref() {
+        enrollment.parse()?;
+    }
+
     // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
-    state
+    let user_id = state
         .mail
         .password_reset_service
         .confirm_reset(
@@ -266,6 +282,20 @@ pub async fn confirm_reset<C: Connection + Clone>(
             Some(&state.http_client),
         )
         .await?;
+
+    // Look the user up rather than trusting the request: the canonical
+    // identity bound into the verifier must be the stored username, and the
+    // reset body never carries one.
+    let record = state.user_repo.get_by_id(req.tenant_id, user_id).await?;
+    crate::handlers::srp_enrollment::record_verifier(
+        &state,
+        &settings.srp,
+        req.tenant_id,
+        user_id,
+        &record.username,
+        req.srp.as_ref(),
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "reset": true })))
 }

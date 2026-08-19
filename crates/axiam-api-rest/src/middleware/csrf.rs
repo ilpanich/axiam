@@ -41,6 +41,13 @@ pub const HEADER_CSRF: &str = "X-CSRF-Token";
 /// security model.
 const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/login",
+    // SRP challenge/verify are exempt on exactly the same grounds as /login:
+    // the caller is unauthenticated and has no `axiam_csrf` cookie to echo.
+    // This is a separate registry from `permissions::PUBLIC_PATHS` and both
+    // must cover a route for it to work unauthenticated — omitting it here
+    // gives a 403 before the handler ever runs.
+    "/api/v1/auth/srp/challenge",
+    "/api/v1/auth/srp/verify",
     "/api/v1/auth/mfa/verify",
     "/api/v1/auth/mfa/setup/enroll",
     "/api/v1/auth/mfa/setup/confirm",

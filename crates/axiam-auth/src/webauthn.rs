@@ -953,6 +953,7 @@ mod tests {
         // nothing would signal that the challenge had become public.
         let cfg = AuthConfig {
             mfa_encryption_key: None,
+            srp_session_key: None,
             ..config()
         };
         let svc = WebauthnService::new(UnusedRepo, cfg).unwrap();

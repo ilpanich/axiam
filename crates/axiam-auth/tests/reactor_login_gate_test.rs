@@ -52,6 +52,7 @@ fn test_config() -> AuthConfig {
         refresh_token_lifetime_secs: 2_592_000,
         jwt_issuer: "axiam-test".into(),
         mfa_encryption_key: Some(TEST_MFA_KEY),
+        srp_session_key: None,
         allow_missing_aud_as_user: true,
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,

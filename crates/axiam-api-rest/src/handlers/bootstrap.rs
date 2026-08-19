@@ -28,6 +28,8 @@ use axiam_auth::password;
 use axiam_core::error::AxiamError;
 use axiam_core::id::new_id;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::settings::SrpPolicy;
+use axiam_core::models::srp::{SrpEnrollment, SrpGroup, SrpKdf, SrpKdfParams, SrpMode};
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{seed_default_roles, seed_permissions};
@@ -73,6 +75,33 @@ pub struct BootstrapRequest {
     /// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise.
     #[serde(default)]
     pub setup_token: Option<String>,
+    /// Secure Remote Password policy to seed as the new organization's
+    /// baseline. Omitted means `disabled`, which is what an operator who has
+    /// not thought about SRP should get.
+    ///
+    /// Settable here — rather than only through `PUT /api/v1/settings/org`
+    /// afterwards — because the alternative is a window in which the only
+    /// account on the deployment exists without a verifier. Turning
+    /// `required` on later would then lock the sole administrator out of their
+    /// own system, with no second admin to undo it.
+    #[serde(default)]
+    #[schema(value_type = Option<String>, example = "disabled")]
+    pub srp_mode: Option<SrpMode>,
+    /// RFC 5054 group for the seeded baseline. Defaults to `rfc5054_4096`.
+    #[serde(default)]
+    #[schema(value_type = Option<String>, example = "rfc5054_4096")]
+    pub srp_group: Option<SrpGroup>,
+    /// Client KDF for the seeded baseline. Defaults to `argon2id`.
+    #[serde(default)]
+    #[schema(value_type = Option<String>, example = "argon2id")]
+    pub srp_kdf: Option<SrpKdf>,
+    /// The admin's SRP verifier, computed client-side over `username`.
+    ///
+    /// Mandatory when `srp_mode` is `required`: without it bootstrap would
+    /// produce a deployment whose only administrator cannot authenticate by
+    /// any route, and which no one has the access to repair.
+    #[serde(default)]
+    pub srp: Option<SrpEnrollment>,
 }
 
 /// Convert an arbitrary display name into a URL-safe slug: ASCII alphanumerics
@@ -305,6 +334,56 @@ pub async fn bootstrap<C: Connection + Clone>(
     //    so a retry after a transient mid-flight failure reuses the same
     //    org/tenant instead of leaking duplicates (the `bootstrap_lock:global`
     //    invariant below still guarantees exactly one successful bootstrap).
+    // 3b. Resolve and validate the SRP baseline BEFORE anything is written.
+    //
+    // Placement is the point: a refusal here must leave the deployment
+    // completely untouched. Validating after the organization exists would
+    // turn a bad request into a half-initialised system that the next
+    // bootstrap attempt then collides with.
+    let srp_policy = SrpPolicy {
+        srp_mode: req.srp_mode.unwrap_or_default(),
+        srp_group: req.srp_group.unwrap_or_default(),
+        srp_kdf: req.srp_kdf.unwrap_or_default(),
+    };
+
+    // Refuse the one combination that produces an unrecoverable deployment:
+    // SRP required, and the sole administrator has no verifier. There is no
+    // second admin to fix it and no password path to fall back to.
+    let srp_enrollment = match (srp_policy.srp_mode, req.srp.as_ref()) {
+        (SrpMode::Required, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "srp_mode=required requires an `srp` verifier for the \
+                          bootstrap admin: without one this deployment would have \
+                          no way to authenticate its only administrator"
+                    .into(),
+            }));
+        }
+        (SrpMode::Disabled, Some(_)) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "an `srp` verifier was supplied but srp_mode is disabled".into(),
+            }));
+        }
+        (_, enrollment) => enrollment,
+    };
+
+    // Parse before anything is written, so a malformed verifier is a 400 on an
+    // untouched deployment rather than a half-bootstrapped one.
+    let parsed_srp = match srp_enrollment {
+        Some(enrollment) => {
+            let (group, params, salt, verifier) = enrollment.parse()?;
+            if group.bits() < srp_policy.srp_group.bits() {
+                return Err(AxiamApiError(AxiamError::Validation {
+                    message: format!(
+                        "srp group {group} is weaker than the seeded baseline {}",
+                        srp_policy.srp_group
+                    ),
+                }));
+            }
+            Some((group, params, salt, verifier))
+        }
+        None => None,
+    };
+
     let org = match state.org_repo.get_by_slug(&org_slug).await {
         Ok(o) => o,
         Err(_) => state
@@ -333,6 +412,23 @@ pub async fn bootstrap<C: Connection + Clone>(
             .map_err(|e| AxiamApiError(AxiamError::Internal(format!("create tenant: {e}"))))?,
     };
     let tenant_id = tenant.id;
+
+    // 4b. Seed the organization's security baseline, including the SRP policy
+    // validated above. Written before the admin transaction so the verifier is
+    // stored under the policy it was checked against.
+    {
+        use axiam_core::models::settings::system_defaults;
+        use axiam_core::repository::SettingsRepository as _;
+
+        let mut baseline = system_defaults();
+        baseline.srp_mode = srp_policy.srp_mode;
+        baseline.srp_group = srp_policy.srp_group;
+        baseline.srp_kdf = srp_policy.srp_kdf;
+        state
+            .settings_repo
+            .set_org_settings(org.id, baseline)
+            .await?;
+    }
 
     // 5. Seed permissions (idempotent).
     seed_permissions(&state.db.current(), tenant_id, PERMISSION_REGISTRY)
@@ -365,6 +461,8 @@ pub async fn bootstrap<C: Connection + Clone>(
     // the first statement result is at .take(1). (See MEMORY.md)
     let user_id = new_id();
     let user_id_str = user_id.to_string();
+    // Captured before `req.username` is consumed by the query bindings below.
+    let username_for_srp = req.username.clone();
     let role_id_str = seed_result.super_admin_role_id.to_string();
     let tenant_id_str = tenant_id.to_string();
     let ph_id_str = new_id().to_string();
@@ -407,6 +505,27 @@ pub async fn bootstrap<C: Connection + Clone>(
            tenant_id = $tenant_id, user_id = $user_id, password_hash = $password_hash"
             .to_string(),
     ];
+    // The verifier goes in the SAME transaction as the admin user, not after
+    // it. A failure between the two would leave an administrator with no
+    // verifier on a deployment seeded as `required` — precisely the
+    // unrecoverable state the validation above exists to prevent, reachable
+    // instead by a mid-write crash.
+    if parsed_srp.is_some() {
+        txn_stmts.push(
+            "CREATE type::record('srp_credential', $srp_id) SET \
+               tenant_id = $tenant_id, \
+               user_id = $user_id, \
+               identity = $srp_identity, \
+               srp_group = $srp_group, \
+               kdf = $srp_kdf, \
+               kdf_memory_kib = $srp_memory_kib, \
+               kdf_iterations = $srp_iterations, \
+               kdf_parallelism = $srp_parallelism, \
+               salt = $srp_salt, \
+               verifier = $srp_verifier"
+                .to_string(),
+        );
+    }
     if consumed_token_hash.is_some() {
         txn_stmts.push(
             "CREATE type::record('bootstrap_setup_token_consumed', $token_hash) \
@@ -430,6 +549,29 @@ pub async fn bootstrap<C: Connection + Clone>(
         .bind(("ph_id", ph_id_str));
     if let Some(token_hash) = consumed_token_hash {
         query = query.bind(("token_hash", token_hash));
+    }
+    if let Some((group, params, salt, verifier)) = parsed_srp {
+        let (memory_kib, iterations, parallelism) = match params {
+            SrpKdfParams::Argon2id {
+                memory_kib,
+                iterations,
+                parallelism,
+            } => (Some(memory_kib), iterations, Some(parallelism)),
+            SrpKdfParams::Pbkdf2Sha256 { iterations } => (None, iterations, None),
+        };
+        query = query
+            .bind(("srp_id", new_id().to_string()))
+            // `username_for_srp`, captured before `req.username` is moved into
+            // the bindings above: the verifier is bound to the identity, and
+            // binding it to anything else produces one no login can satisfy.
+            .bind(("srp_identity", username_for_srp))
+            .bind(("srp_group", group.to_string()))
+            .bind(("srp_kdf", params.kdf().to_string()))
+            .bind(("srp_memory_kib", memory_kib))
+            .bind(("srp_iterations", iterations))
+            .bind(("srp_parallelism", parallelism))
+            .bind(("srp_salt", salt))
+            .bind(("srp_verifier", verifier));
     }
 
     let result = query

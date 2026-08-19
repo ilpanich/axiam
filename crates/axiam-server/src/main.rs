@@ -244,6 +244,14 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Federation encryption key loaded");
     }
 
+    // Load the SRP session-sealing key from env (skipped by serde on AuthConfig).
+    // Absent, the SRP endpoints answer 503 rather than quietly leaving clients
+    // on password login — see `AuthConfig::srp_session_key`.
+    config.auth.srp_session_key = load_key_from_env("AXIAM__AUTH__SRP_SESSION_KEY");
+    if config.auth.srp_session_key.is_some() {
+        tracing::info!("SRP session key loaded");
+    }
+
     // Load email encryption key from env (D-17).
     config.email_encryption_key = load_key_from_env("AXIAM__EMAIL_ENCRYPTION_KEY");
     if config.email_encryption_key.is_some() {

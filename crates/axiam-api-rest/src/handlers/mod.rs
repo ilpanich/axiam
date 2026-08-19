@@ -26,6 +26,8 @@ pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;
 pub mod settings;
+pub mod srp;
+pub mod srp_enrollment;
 pub mod tenants;
 pub mod uma;
 pub mod users;

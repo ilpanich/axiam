@@ -81,11 +81,25 @@ pub enum SrpMode {
     /// verifier alongside the Argon2id hash, so the tenant accumulates SRP
     /// coverage as users rotate credentials.
     Optional,
-    /// Password login is **refused for any user who has an SRP verifier**.
-    /// Users without one keep using password login — that carve-out is what
-    /// stops `Required` from locking out every account that existed before the
-    /// mode was turned on. See the module docs on [`SrpCredential`] for why a
-    /// verifier cannot be back-filled from a stored Argon2id hash.
+    /// Password login is **refused for the whole tenant**: `/auth/login`
+    /// answers `403` with `srp_required` for every principal, before any
+    /// credential is examined.
+    ///
+    /// Tenant-wide rather than per-user, deliberately. Refusing only the users
+    /// who *have* a verifier would make `/auth/login` an oracle: an attacker
+    /// sending one junk password per name would learn from the `403`-vs-`401`
+    /// split exactly which accounts exist and are enrolled, without ever
+    /// guessing a password. A uniform refusal reveals a property of the
+    /// tenant, which is not a secret, and nothing about any individual.
+    ///
+    /// The cost is that this mode **locks out anyone who has not yet enrolled**
+    /// — and see [`SrpCredential`] for why nobody can be enrolled
+    /// retroactively. Turning it on is therefore the last step of a migration,
+    /// not the first: run a password-reset campaign under
+    /// [`Self::Optional`] until `SrpCredentialRepository::count_for_tenant`
+    /// matches the tenant's user count.
+    ///
+    /// [`SrpCredentialRepository::count_for_tenant`]: crate::repository::SrpCredentialRepository::count_for_tenant
     Required,
 }
 
@@ -485,7 +499,7 @@ fn normalize_hex(value: &str, label: &str) -> AxiamResult<String> {
             message: format!("{label} must not be empty"),
         });
     }
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(AxiamError::Validation {
             message: format!("{label} must have an even number of hex characters"),
         });

@@ -59,6 +59,19 @@ pub enum AxiamError {
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// The tenant requires Secure Remote Password, so password login is
+    /// refused (`SrpMode::Required`).
+    ///
+    /// Its own variant rather than an `AuthenticationFailed` because it is the
+    /// opposite kind of answer: nothing about the caller's credentials was
+    /// wrong, they used the wrong *protocol*. A client that cannot distinguish
+    /// the two would show "invalid username or password" to a user whose
+    /// password is perfectly good, and an SDK could not auto-switch to the SRP
+    /// endpoints. It reveals only a tenant-level policy, never anything about
+    /// which accounts exist — see `models::srp::SrpMode::Required`.
+    #[error("this tenant requires Secure Remote Password authentication")]
+    SrpRequired,
+
     #[error("SAML assertion replay detected")]
     ReplayDetected,
 

@@ -2269,26 +2269,6 @@ pub fn schema_v1() -> &'static str {
     SCHEMA_V1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_v1_is_nonempty() {
-        assert!(!SCHEMA_V1.is_empty());
-    }
-
-    #[test]
-    fn migrations_are_ordered() {
-        for window in MIGRATIONS.windows(2) {
-            assert!(
-                window[0].version < window[1].version,
-                "Migrations must be in ascending version order"
-            );
-        }
-    }
-}
-
 // -----------------------------------------------------------------------
 // Schema v41 — Secure Remote Password (SRP-6a)
 // -----------------------------------------------------------------------
@@ -2352,3 +2332,23 @@ UPDATE security_settings SET srp_mode = 'disabled' WHERE srp_mode = NONE;
 UPDATE security_settings SET srp_group = 'rfc5054_4096' WHERE srp_group = NONE;
 UPDATE security_settings SET srp_kdf = 'argon2id' WHERE srp_kdf = NONE;
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_v1_is_nonempty() {
+        assert!(!SCHEMA_V1.is_empty());
+    }
+
+    #[test]
+    fn migrations_are_ordered() {
+        for window in MIGRATIONS.windows(2) {
+            assert!(
+                window[0].version < window[1].version,
+                "Migrations must be in ascending version order"
+            );
+        }
+    }
+}

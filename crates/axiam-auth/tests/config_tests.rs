@@ -17,6 +17,9 @@ fn default_has_sane_values() {
     assert_eq!(c.max_failed_login_attempts, 5);
     assert_eq!(c.hibp_breaker_threshold, 5);
     assert!(c.mfa_encryption_key.is_none());
+    // SRP defaults to unconfigured, which makes the SRP endpoints answer 503
+    // rather than silently leaving clients on password login.
+    assert!(c.srp_session_key.is_none());
 }
 
 #[test]

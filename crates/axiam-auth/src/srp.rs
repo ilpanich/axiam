@@ -289,6 +289,35 @@ struct SealedSession {
     expires_at: DateTime<Utc>,
 }
 
+/// Why an SRP verification was refused.
+///
+/// The split exists for exactly one reason: a wrong `M1` is a wrong password
+/// and MUST accrue toward account lockout, and accruing it needs to know
+/// *whose* account. Collapsing both cases into one opaque error — the obvious
+/// shape, and what this originally was — would mean that turning SRP on
+/// silently removed brute-force protection from every account that adopted it.
+/// An attacker could then grind passwords against `/auth/srp/verify` without
+/// ever tripping a lockout that the password endpoint would have tripped in
+/// five attempts.
+///
+/// The distinction never reaches the HTTP response; both map to one `401`.
+#[derive(Debug, Clone)]
+pub enum SrpRejection {
+    /// The session blob could not be opened, was tampered with, had the wrong
+    /// version, or has expired. There is no identity to attribute this to.
+    Unusable,
+    /// The session opened and the proof did not match — one failed password
+    /// attempt by whoever this is.
+    BadProof {
+        /// Tenant the exchange was scoped to.
+        tenant_id: Uuid,
+        /// The account, when the exchange was a real one. `None` for a
+        /// simulated exchange against an identity that does not exist, where
+        /// there is nothing to lock out.
+        user_id: Option<Uuid>,
+    },
+}
+
 /// Outcome of opening and checking a `srp_session` + `M1` pair.
 #[derive(Debug, Clone)]
 pub struct SrpVerified {
@@ -406,49 +435,60 @@ impl SrpServer {
 
     /// Open a `srp_session` and check the client's `M1`.
     ///
-    /// Returns `InvalidCredentials` for every failure mode — expired session,
-    /// tampered blob, wrong proof, simulated exchange — so that none of them
-    /// is distinguishable from the others by a caller.
+    /// The [`SrpRejection`] variants are for the *caller's* lockout accounting
+    /// only — every one of them must be rendered to the client as the same
+    /// `401`, or the distinction becomes a progress signal for an attacker.
     pub fn verify(
         &self,
         srp_session: &str,
         client_proof_hex: &str,
-    ) -> Result<SrpVerified, AuthError> {
+    ) -> Result<SrpVerified, SrpRejection> {
         let sealed = URL_SAFE_NO_PAD
             .decode(srp_session)
-            .map_err(|_| AuthError::InvalidCredentials)?;
+            .map_err(|_| SrpRejection::Unusable)?;
         let plaintext = aes256gcm_decrypt(
             &self.session_key,
             &base64::engine::general_purpose::STANDARD.encode(&sealed),
         )
-        .map_err(|_| AuthError::InvalidCredentials)?;
+        .map_err(|_| SrpRejection::Unusable)?;
         let session: SealedSession =
-            serde_json::from_slice(&plaintext).map_err(|_| AuthError::InvalidCredentials)?;
+            serde_json::from_slice(&plaintext).map_err(|_| SrpRejection::Unusable)?;
 
         if session.v != 1 {
-            return Err(AuthError::InvalidCredentials);
+            return Err(SrpRejection::Unusable);
         }
         if Utc::now() > session.expires_at {
-            return Err(AuthError::InvalidCredentials);
+            return Err(SrpRejection::Unusable);
         }
+
+        // From here on the session is authentic, so a refusal is attributable
+        // and must count against the account.
+        let bad_proof = SrpRejection::BadProof {
+            tenant_id: session.tenant_id,
+            user_id: session.user_id,
+        };
 
         // Constant-time over the raw bytes, not the hex text: comparing hex
         // strings would leak through length and through early-exit on the
         // first differing nibble.
-        let expected = hex::decode(&session.expected_client_proof)
-            .map_err(|_| AuthError::InvalidCredentials)?;
-        let supplied = hex::decode(client_proof_hex).map_err(|_| AuthError::InvalidCredentials)?;
+        let expected =
+            hex::decode(&session.expected_client_proof).map_err(|_| SrpRejection::Unusable)?;
+        let Ok(supplied) = hex::decode(client_proof_hex) else {
+            return Err(bad_proof);
+        };
         if expected.len() != supplied.len() {
-            return Err(AuthError::InvalidCredentials);
+            return Err(bad_proof);
         }
         if !bool::from(expected.ct_eq(&supplied)) {
-            return Err(AuthError::InvalidCredentials);
+            return Err(bad_proof);
         }
 
         // A simulated exchange can, with negligible probability, be "passed"
         // only by someone who guessed a 256-bit value; it still must not
         // authenticate anybody, because there is nobody to authenticate.
-        let user_id = session.user_id.ok_or(AuthError::InvalidCredentials)?;
+        let Some(user_id) = session.user_id else {
+            return Err(SrpRejection::Unusable);
+        };
 
         Ok(SrpVerified {
             tenant_id: session.tenant_id,
@@ -843,7 +883,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             server.verify(&challenge.srp_session, &m1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::BadProof { .. })
         ));
     }
 
@@ -912,11 +952,11 @@ mod tests {
 
         assert!(matches!(
             server.verify(&tampered, &m1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::Unusable)
         ));
         assert!(matches!(
             server.verify("not-base64-$$$", &m1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::Unusable)
         ));
     }
 
@@ -933,9 +973,11 @@ mod tests {
             .finish("alice", &challenge.salt, &challenge.b_pub, &[0x11u8; 32])
             .unwrap();
 
+        // A different key cannot open the blob at all, so there is no identity
+        // to attribute the failure to.
         assert!(matches!(
             server_b.verify(&challenge.srp_session, &m1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::Unusable)
         ));
     }
 
@@ -949,10 +991,10 @@ mod tests {
             .unwrap();
 
         for proof in ["", "ab", &"f".repeat(128), "zzzz"] {
-            assert!(matches!(
-                server.verify(&challenge.srp_session, proof),
-                Err(AuthError::InvalidCredentials)
-            ));
+            assert!(
+                server.verify(&challenge.srp_session, proof).is_err(),
+                "proof {proof:?} should be refused"
+            );
         }
     }
 
@@ -1076,7 +1118,7 @@ mod tests {
 
         assert!(matches!(
             server.verify(&challenge.srp_session, &session.expected_client_proof),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::Unusable)
         ));
     }
 
@@ -1100,7 +1142,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             server.verify(&challenge.srp_session, &m1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::BadProof { .. })
         ));
     }
 
@@ -1126,7 +1168,7 @@ mod tests {
         let (m1_for_1, _) = c1.finish("alice", &ch1.salt, &ch1.b_pub, &x).unwrap();
         assert!(matches!(
             server.verify(&ch2.srp_session, &m1_for_1),
-            Err(AuthError::InvalidCredentials)
+            Err(SrpRejection::BadProof { .. })
         ));
     }
 

@@ -221,7 +221,7 @@ where
         policy: &PasswordPolicy,
         pepper: Option<&str>,
         http_client: Option<&reqwest::Client>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<Uuid> {
         let token_hash = token::hash_refresh_token(raw_token);
 
         // Atomically consume the token.
@@ -354,7 +354,9 @@ where
             )
             .await?;
 
-        Ok(())
+        // The caller needs this to attach an SRP verifier for the password it
+        // just set; the reset body carries a token, never a user id.
+        Ok(user.id)
     }
 }
 

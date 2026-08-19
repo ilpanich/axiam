@@ -54,6 +54,7 @@ fn test_config() -> AuthConfig {
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
         mfa_encryption_key: Some(TEST_MFA_KEY),
+        srp_session_key: None,
         federation_encryption_key: None,
         allow_missing_aud_as_user: true,
         cookie_secure: true,

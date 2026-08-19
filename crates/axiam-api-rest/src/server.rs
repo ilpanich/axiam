@@ -130,6 +130,30 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
                     .route(web::post().to(handlers::auth::login::<C>)),
             )
+            // SRP shares `/login`'s per-IP budget policy for the same reason:
+            // both are unauthenticated, both take a user identifier, and
+            // neither carries a client identity to key on. The challenge
+            // endpoint is rate-limited too, not just verify — it performs a
+            // full modular exponentiation per call, so leaving it open would
+            // hand an attacker a cheap way to burn server CPU.
+            .service(
+                web::resource("/srp/challenge")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "srp_challenge",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(web::post().to(handlers::srp::srp_challenge::<C>)),
+            )
+            .service(
+                web::resource("/srp/verify")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "srp_verify",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(web::post().to(handlers::srp::srp_verify::<C>)),
+            )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
             .route("/me", web::get().to(handlers::auth::me::<C>))

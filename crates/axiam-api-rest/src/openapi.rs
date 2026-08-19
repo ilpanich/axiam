@@ -22,6 +22,8 @@ use crate::handlers;
         crate::health::ready,
         // Auth
         handlers::auth::login,
+        handlers::srp::srp_challenge,
+        handlers::srp::srp_verify,
         handlers::auth::logout,
         handlers::auth::refresh,
         handlers::auth::enroll_mfa,
@@ -235,6 +237,11 @@ use crate::handlers;
         // Auth
         handlers::auth::LoginRequest,
         handlers::auth::LoginSuccessResponse,
+        handlers::srp::SrpChallengeRequest,
+        handlers::srp::SrpVerifyResponse,
+        axiam_core::models::srp::SrpChallenge,
+        axiam_core::models::srp::SrpVerifyRequest,
+        axiam_core::models::srp::SrpEnrollment,
         handlers::auth::MfaRequiredResponse,
         handlers::auth::RefreshRequest,
         handlers::auth::MfaConfirmRequest,

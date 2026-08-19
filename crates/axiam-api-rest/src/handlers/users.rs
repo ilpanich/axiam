@@ -60,6 +60,14 @@ pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
     pub metadata: Option<serde_json::Value>,
+    /// SRP verifier for `password`, computed client-side over `username`.
+    ///
+    /// The server cannot derive this — it never sees the password in a form it
+    /// could run the KDF over — so it has to arrive with the request or not at
+    /// all. Required under `srp_mode = required`, where a user created without
+    /// one could never authenticate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srp: Option<axiam_core::models::srp::SrpEnrollment>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -146,7 +154,7 @@ pub async fn create<C: Connection + Clone>(
     RequirePermission::new("users:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let req = body.into_inner();
+    let mut req = body.into_inner();
 
     // CQ-B26: validate email format and password complexity before insert.
     validate_email_format(&req.email)?;
@@ -156,6 +164,23 @@ pub async fn create<C: Connection + Clone>(
         return Err(AxiamApiError(AxiamError::PasswordPolicy {
             message: details.join("; "),
         }));
+    }
+
+    use axiam_core::repository::{SettingsRepository as _, TenantRepository as _};
+
+    // Resolve the tenant's SRP policy and reject a malformed verifier before
+    // the user row is written. Validating afterwards would leave a created
+    // user with no verifier under `required` — an account that exists and
+    // cannot log in — which is exactly the state this check prevents.
+    let srp_enrollment = req.srp.take();
+    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+    let srp_policy = state
+        .settings_repo
+        .get_effective_settings(tenant.organization_id, user.tenant_id)
+        .await?
+        .srp;
+    if let Some(enrollment) = srp_enrollment.as_ref() {
+        enrollment.parse()?;
     }
 
     let mut input = CreateUser {
@@ -185,6 +210,20 @@ pub async fn create<C: Connection + Clone>(
         .user_repo
         .create_with_consent(input, "terms_of_service", "current", ip_address, user_agent)
         .await?;
+
+    // `created.username`, not `req.username`: a `user.pre_create` reactor is
+    // allowed to normalize it, and the verifier is bound to whatever actually
+    // got stored. Binding to the pre-normalization string would produce a
+    // verifier that no login could ever satisfy.
+    crate::handlers::srp_enrollment::record_verifier(
+        &state,
+        &srp_policy,
+        created.tenant_id,
+        created.id,
+        &created.username,
+        srp_enrollment.as_ref(),
+    )
+    .await?;
 
     // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort;
     // never blocks or fails the response).
@@ -335,10 +374,32 @@ pub async fn update<C: Connection + Clone>(
     )
     .await?;
 
+    // Capture the pre-update username so a rename can be detected below.
+    // Read here rather than from `req`, because a `user.pre_update` reactor is
+    // allowed to rewrite the incoming username.
+    let previous_username = state
+        .user_repo
+        .get_by_id(user.tenant_id, target_id)
+        .await
+        .ok()
+        .map(|u| u.username);
+
     let updated = state
         .user_repo
         .update(user.tenant_id, target_id, input)
         .await?;
+
+    // A rename invalidates any SRP verifier, because `x` is derived over
+    // `username ":" password`. Left in place, the verifier would keep
+    // answering challenges that no client could ever satisfy, and the user
+    // would see "invalid credentials" for a password that is entirely
+    // correct. Dropping it makes the state honest: no verifier, so the SRP
+    // path reports the account as unenrolled and password login (or a
+    // password change that re-enrols) applies.
+    if previous_username.as_deref() != Some(updated.username.as_str()) {
+        crate::handlers::srp_enrollment::invalidate_on_rename(&state, user.tenant_id, target_id)
+            .await;
+    }
 
     // D7 (REVOCATION — security critical): an update can NARROW access, most
     // directly by setting `status` to a non-Active value. Nothing on the

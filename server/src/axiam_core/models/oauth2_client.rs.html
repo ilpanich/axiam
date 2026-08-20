@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/models/oauth2_client.rs`."><title>oauth2_client.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/models/</div>oauth2_client.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! OAuth2 client domain model.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/models/oauth2_client.rs`."><title>oauth2_client.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/models/</div>oauth2_client.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! OAuth2 client domain model.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>chrono::{DateTime, Utc};
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>serde::{Deserialize, Serialize};
@@ -787,4 +787,380 @@
 <a href=#787 id=787 data-nosnippet>787</a>    <span class="kw">pub </span>client_id: String,
 <a href=#788 id=788 data-nosnippet>788</a>    <span class="kw">pub </span>user_id: Uuid,
 <a href=#789 id=789 data-nosnippet>789</a>}
+<a href=#790 id=790 data-nosnippet>790</a>
+<a href=#791 id=791 data-nosnippet>791</a><span class="attr">#[cfg(test)]
+<a href=#792 id=792 data-nosnippet>792</a></span><span class="kw">mod </span>tests {
+<a href=#793 id=793 data-nosnippet>793</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#794 id=794 data-nosnippet>794</a>
+<a href=#795 id=795 data-nosnippet>795</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#796 id=796 data-nosnippet>796</a>    // Wire-value parsing.
+<a href=#797 id=797 data-nosnippet>797</a>    //
+<a href=#798 id=798 data-nosnippet>798</a>    // Every `from_wire` here refuses an unrecognised value instead of
+<a href=#799 id=799 data-nosnippet>799</a>    // defaulting, and each doc comment says why: a typo that degraded to the
+<a href=#800 id=800 data-nosnippet>800</a>    // permissive variant would be a silent security downgrade. Both halves of
+<a href=#801 id=801 data-nosnippet>801</a>    // that contract are asserted — the values that MUST parse, and the ones
+<a href=#802 id=802 data-nosnippet>802</a>    // that must NOT — because a `_ =&gt; None` arm is only as good as the list
+<a href=#803 id=803 data-nosnippet>803</a>    // above it, and a missing arm looks identical to a rejected value until
+<a href=#804 id=804 data-nosnippet>804</a>    // someone registers a `fapi2` client that comes back `Standard`.
+<a href=#805 id=805 data-nosnippet>805</a>    // -----------------------------------------------------------------------
+<a href=#806 id=806 data-nosnippet>806</a>
+<a href=#807 id=807 data-nosnippet>807</a>    </span><span class="attr">#[test]
+<a href=#808 id=808 data-nosnippet>808</a>    </span><span class="kw">fn </span>client_profile_round_trips_through_its_wire_form() {
+<a href=#809 id=809 data-nosnippet>809</a>        <span class="kw">for </span>profile <span class="kw">in </span>[ClientProfile::Standard, ClientProfile::Fapi2] {
+<a href=#810 id=810 data-nosnippet>810</a>            <span class="macro">assert_eq!</span>(ClientProfile::from_wire(profile.as_str()), <span class="prelude-val">Some</span>(profile));
+<a href=#811 id=811 data-nosnippet>811</a>        }
+<a href=#812 id=812 data-nosnippet>812</a>        <span class="comment">// Stored values arrive with whatever casing and padding a migration or
+<a href=#813 id=813 data-nosnippet>813</a>        // a hand-edited row left behind; none of that changes the profile.
+<a href=#814 id=814 data-nosnippet>814</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#815 id=815 data-nosnippet>815</a>            ClientProfile::from_wire(<span class="string">"  FAPI2 "</span>),
+<a href=#816 id=816 data-nosnippet>816</a>            <span class="prelude-val">Some</span>(ClientProfile::Fapi2)
+<a href=#817 id=817 data-nosnippet>817</a>        );
+<a href=#818 id=818 data-nosnippet>818</a>        <span class="macro">assert_eq!</span>(
+<a href=#819 id=819 data-nosnippet>819</a>            ClientProfile::from_wire(<span class="string">"Standard"</span>),
+<a href=#820 id=820 data-nosnippet>820</a>            <span class="prelude-val">Some</span>(ClientProfile::Standard)
+<a href=#821 id=821 data-nosnippet>821</a>        );
+<a href=#822 id=822 data-nosnippet>822</a>    }
+<a href=#823 id=823 data-nosnippet>823</a>
+<a href=#824 id=824 data-nosnippet>824</a>    <span class="attr">#[test]
+<a href=#825 id=825 data-nosnippet>825</a>    </span><span class="kw">fn </span>an_unrecognised_profile_is_refused_rather_than_downgraded() {
+<a href=#826 id=826 data-nosnippet>826</a>        <span class="comment">// The failure this prevents: `fapi_2` silently becoming `Standard`
+<a href=#827 id=827 data-nosnippet>827</a>        // turns a typo into a client that no longer has to satisfy any FAPI
+<a href=#828 id=828 data-nosnippet>828</a>        // constraint, and nothing downstream can tell that happened.
+<a href=#829 id=829 data-nosnippet>829</a>        </span><span class="kw">for </span>raw <span class="kw">in </span>[<span class="string">"fapi_2"</span>, <span class="string">"fapi"</span>, <span class="string">"fapi3"</span>, <span class="string">""</span>, <span class="string">"   "</span>, <span class="string">"standard!"</span>, <span class="string">"null"</span>] {
+<a href=#830 id=830 data-nosnippet>830</a>            <span class="macro">assert_eq!</span>(ClientProfile::from_wire(raw), <span class="prelude-val">None</span>, <span class="string">"raw = {raw:?}"</span>);
+<a href=#831 id=831 data-nosnippet>831</a>        }
+<a href=#832 id=832 data-nosnippet>832</a>    }
+<a href=#833 id=833 data-nosnippet>833</a>
+<a href=#834 id=834 data-nosnippet>834</a>    <span class="attr">#[test]
+<a href=#835 id=835 data-nosnippet>835</a>    </span><span class="kw">fn </span>only_fapi2_reports_itself_as_fapi2() {
+<a href=#836 id=836 data-nosnippet>836</a>        <span class="macro">assert!</span>(ClientProfile::Fapi2.is_fapi2());
+<a href=#837 id=837 data-nosnippet>837</a>        <span class="macro">assert!</span>(!ClientProfile::Standard.is_fapi2());
+<a href=#838 id=838 data-nosnippet>838</a>        <span class="comment">// The default must be the RESTRICTIVE-to-adopt one: a row written
+<a href=#839 id=839 data-nosnippet>839</a>        // before the column existed is a pre-FAPI client.
+<a href=#840 id=840 data-nosnippet>840</a>        </span><span class="macro">assert_eq!</span>(ClientProfile::default(), ClientProfile::Standard);
+<a href=#841 id=841 data-nosnippet>841</a>    }
+<a href=#842 id=842 data-nosnippet>842</a>
+<a href=#843 id=843 data-nosnippet>843</a>    <span class="attr">#[test]
+<a href=#844 id=844 data-nosnippet>844</a>    </span><span class="kw">fn </span>client_auth_method_round_trips_through_its_wire_form() {
+<a href=#845 id=845 data-nosnippet>845</a>        <span class="kw">for </span>method <span class="kw">in </span>[
+<a href=#846 id=846 data-nosnippet>846</a>            ClientAuthMethod::ClientSecretPost,
+<a href=#847 id=847 data-nosnippet>847</a>            ClientAuthMethod::TlsClientAuth,
+<a href=#848 id=848 data-nosnippet>848</a>            ClientAuthMethod::SelfSignedTlsClientAuth,
+<a href=#849 id=849 data-nosnippet>849</a>            ClientAuthMethod::PrivateKeyJwt,
+<a href=#850 id=850 data-nosnippet>850</a>        ] {
+<a href=#851 id=851 data-nosnippet>851</a>            <span class="macro">assert_eq!</span>(ClientAuthMethod::from_wire(method.as_str()), <span class="prelude-val">Some</span>(method));
+<a href=#852 id=852 data-nosnippet>852</a>        }
+<a href=#853 id=853 data-nosnippet>853</a>        <span class="macro">assert_eq!</span>(
+<a href=#854 id=854 data-nosnippet>854</a>            ClientAuthMethod::from_wire(<span class="string">"  PRIVATE_KEY_JWT  "</span>),
+<a href=#855 id=855 data-nosnippet>855</a>            <span class="prelude-val">Some</span>(ClientAuthMethod::PrivateKeyJwt)
+<a href=#856 id=856 data-nosnippet>856</a>        );
+<a href=#857 id=857 data-nosnippet>857</a>    }
+<a href=#858 id=858 data-nosnippet>858</a>
+<a href=#859 id=859 data-nosnippet>859</a>    <span class="attr">#[test]
+<a href=#860 id=860 data-nosnippet>860</a>    </span><span class="kw">fn </span>an_unrecognised_auth_method_is_refused() {
+<a href=#861 id=861 data-nosnippet>861</a>        <span class="comment">// `client_secret_basic` is the interesting one: it is a real RFC 6749
+<a href=#862 id=862 data-nosnippet>862</a>        // method that this server does NOT implement, so accepting it as
+<a href=#863 id=863 data-nosnippet>863</a>        // anything would claim support that does not exist.
+<a href=#864 id=864 data-nosnippet>864</a>        </span><span class="kw">for </span>raw <span class="kw">in </span>[
+<a href=#865 id=865 data-nosnippet>865</a>            <span class="string">"client_secret_basic"</span>,
+<a href=#866 id=866 data-nosnippet>866</a>            <span class="string">"none"</span>,
+<a href=#867 id=867 data-nosnippet>867</a>            <span class="string">"private-key-jwt"</span>,
+<a href=#868 id=868 data-nosnippet>868</a>            <span class="string">"tls_client_auth "</span>,
+<a href=#869 id=869 data-nosnippet>869</a>            <span class="string">""</span>,
+<a href=#870 id=870 data-nosnippet>870</a>        ] {
+<a href=#871 id=871 data-nosnippet>871</a>            <span class="kw">if </span>raw.trim() == <span class="string">"tls_client_auth" </span>{
+<a href=#872 id=872 data-nosnippet>872</a>                <span class="kw">continue</span>; <span class="comment">// trimmed, this one is legitimate
+<a href=#873 id=873 data-nosnippet>873</a>            </span>}
+<a href=#874 id=874 data-nosnippet>874</a>            <span class="macro">assert_eq!</span>(ClientAuthMethod::from_wire(raw), <span class="prelude-val">None</span>, <span class="string">"raw = {raw:?}"</span>);
+<a href=#875 id=875 data-nosnippet>875</a>        }
+<a href=#876 id=876 data-nosnippet>876</a>        <span class="comment">// Pre-v38 rows have no column at all, and were doing client_secret_post.
+<a href=#877 id=877 data-nosnippet>877</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#878 id=878 data-nosnippet>878</a>            ClientAuthMethod::default(),
+<a href=#879 id=879 data-nosnippet>879</a>            ClientAuthMethod::ClientSecretPost
+<a href=#880 id=880 data-nosnippet>880</a>        );
+<a href=#881 id=881 data-nosnippet>881</a>    }
+<a href=#882 id=882 data-nosnippet>882</a>
+<a href=#883 id=883 data-nosnippet>883</a>    <span class="attr">#[test]
+<a href=#884 id=884 data-nosnippet>884</a>    </span><span class="kw">fn </span>device_grant_status_round_trips_and_refuses_the_unknown() {
+<a href=#885 id=885 data-nosnippet>885</a>        <span class="kw">for </span>status <span class="kw">in </span>[
+<a href=#886 id=886 data-nosnippet>886</a>            DeviceGrantStatus::Pending,
+<a href=#887 id=887 data-nosnippet>887</a>            DeviceGrantStatus::Approved,
+<a href=#888 id=888 data-nosnippet>888</a>            DeviceGrantStatus::Denied,
+<a href=#889 id=889 data-nosnippet>889</a>            DeviceGrantStatus::Redeemed,
+<a href=#890 id=890 data-nosnippet>890</a>        ] {
+<a href=#891 id=891 data-nosnippet>891</a>            <span class="macro">assert_eq!</span>(DeviceGrantStatus::from_wire(status.as_str()), <span class="prelude-val">Some</span>(status));
+<a href=#892 id=892 data-nosnippet>892</a>        }
+<a href=#893 id=893 data-nosnippet>893</a>        <span class="macro">assert_eq!</span>(
+<a href=#894 id=894 data-nosnippet>894</a>            DeviceGrantStatus::from_wire(<span class="string">" APPROVED "</span>),
+<a href=#895 id=895 data-nosnippet>895</a>            <span class="prelude-val">Some</span>(DeviceGrantStatus::Approved)
+<a href=#896 id=896 data-nosnippet>896</a>        );
+<a href=#897 id=897 data-nosnippet>897</a>        <span class="comment">// Failing closed matters most here: a status that defaulted to
+<a href=#898 id=898 data-nosnippet>898</a>        // `Approved` would hand out tokens for a grant nobody approved.
+<a href=#899 id=899 data-nosnippet>899</a>        </span><span class="kw">for </span>raw <span class="kw">in </span>[<span class="string">"approve"</span>, <span class="string">"granted"</span>, <span class="string">""</span>, <span class="string">"pending "</span>] {
+<a href=#900 id=900 data-nosnippet>900</a>            <span class="kw">if </span>raw.trim() == <span class="string">"pending" </span>{
+<a href=#901 id=901 data-nosnippet>901</a>                <span class="kw">continue</span>;
+<a href=#902 id=902 data-nosnippet>902</a>            }
+<a href=#903 id=903 data-nosnippet>903</a>            <span class="macro">assert_eq!</span>(DeviceGrantStatus::from_wire(raw), <span class="prelude-val">None</span>, <span class="string">"raw = {raw:?}"</span>);
+<a href=#904 id=904 data-nosnippet>904</a>        }
+<a href=#905 id=905 data-nosnippet>905</a>    }
+<a href=#906 id=906 data-nosnippet>906</a>
+<a href=#907 id=907 data-nosnippet>907</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#908 id=908 data-nosnippet>908</a>    // The mutually-exclusive registration counters.
+<a href=#909 id=909 data-nosnippet>909</a>    //
+<a href=#910 id=910 data-nosnippet>910</a>    // Both counters exist so that the pending registration, the merged update
+<a href=#911 id=911 data-nosnippet>911</a>    // and the stored row cannot disagree about what "registered" means. The
+<a href=#912 id=912 data-nosnippet>912</a>    // blank-string case is the whole point: `Some("")` is how the API says
+<a href=#913 id=913 data-nosnippet>913</a>    // "clear this", and if the counter treated it as present, a client could
+<a href=#914 id=914 data-nosnippet>914</a>    // pass validation with one binding and be stored with none.
+<a href=#915 id=915 data-nosnippet>915</a>    // -----------------------------------------------------------------------
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>    </span><span class="attr">#[test]
+<a href=#918 id=918 data-nosnippet>918</a>    </span><span class="kw">fn </span>mtls_binding_count_ignores_absent_and_blank_parameters() {
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>), <span class="number">0</span>);
+<a href=#920 id=920 data-nosnippet>920</a>        <span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">Some</span>(<span class="string">"CN=a"</span>), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>), <span class="number">1</span>);
+<a href=#921 id=921 data-nosnippet>921</a>        <span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="string">"a.test"</span>), <span class="prelude-val">None</span>), <span class="number">1</span>);
+<a href=#922 id=922 data-nosnippet>922</a>        <span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="string">"https://a.test"</span>)), <span class="number">1</span>);
+<a href=#923 id=923 data-nosnippet>923</a>        <span class="comment">// Blank and whitespace-only are NOT registered parameters.
+<a href=#924 id=924 data-nosnippet>924</a>        </span><span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">Some</span>(<span class="string">""</span>), <span class="prelude-val">Some</span>(<span class="string">"   "</span>), <span class="prelude-val">Some</span>(<span class="string">"\t"</span>)), <span class="number">0</span>);
+<a href=#925 id=925 data-nosnippet>925</a>        <span class="comment">// RFC 8705 permits exactly one; the counter is what makes two visible.
+<a href=#926 id=926 data-nosnippet>926</a>        </span><span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">Some</span>(<span class="string">"CN=a"</span>), <span class="prelude-val">Some</span>(<span class="string">"a.test"</span>), <span class="prelude-val">None</span>), <span class="number">2</span>);
+<a href=#927 id=927 data-nosnippet>927</a>        <span class="macro">assert_eq!</span>(
+<a href=#928 id=928 data-nosnippet>928</a>            count_mtls_bindings(<span class="prelude-val">Some</span>(<span class="string">"CN=a"</span>), <span class="prelude-val">Some</span>(<span class="string">"a.test"</span>), <span class="prelude-val">Some</span>(<span class="string">"https://a.test"</span>)),
+<a href=#929 id=929 data-nosnippet>929</a>            <span class="number">3
+<a href=#930 id=930 data-nosnippet>930</a>        </span>);
+<a href=#931 id=931 data-nosnippet>931</a>        <span class="comment">// A blank alongside a real one still counts one, not two.
+<a href=#932 id=932 data-nosnippet>932</a>        </span><span class="macro">assert_eq!</span>(count_mtls_bindings(<span class="prelude-val">Some</span>(<span class="string">"CN=a"</span>), <span class="prelude-val">Some</span>(<span class="string">" "</span>), <span class="prelude-val">None</span>), <span class="number">1</span>);
+<a href=#933 id=933 data-nosnippet>933</a>    }
+<a href=#934 id=934 data-nosnippet>934</a>
+<a href=#935 id=935 data-nosnippet>935</a>    <span class="attr">#[test]
+<a href=#936 id=936 data-nosnippet>936</a>    </span><span class="kw">fn </span>jwks_source_count_ignores_absent_and_blank_sources() {
+<a href=#937 id=937 data-nosnippet>937</a>        <span class="macro">assert_eq!</span>(count_jwks_sources(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>), <span class="number">0</span>);
+<a href=#938 id=938 data-nosnippet>938</a>        <span class="macro">assert_eq!</span>(count_jwks_sources(<span class="prelude-val">Some</span>(<span class="string">"{\"keys\":[]}"</span>), <span class="prelude-val">None</span>), <span class="number">1</span>);
+<a href=#939 id=939 data-nosnippet>939</a>        <span class="macro">assert_eq!</span>(count_jwks_sources(<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="string">"https://a.test/jwks"</span>)), <span class="number">1</span>);
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="macro">assert_eq!</span>(count_jwks_sources(<span class="prelude-val">Some</span>(<span class="string">""</span>), <span class="prelude-val">Some</span>(<span class="string">"  "</span>)), <span class="number">0</span>);
+<a href=#941 id=941 data-nosnippet>941</a>        <span class="comment">// Two sources means the client's credentials are the union of a
+<a href=#942 id=942 data-nosnippet>942</a>        // document it controls and one it publishes — RFC 7591 permits one.
+<a href=#943 id=943 data-nosnippet>943</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#944 id=944 data-nosnippet>944</a>            count_jwks_sources(<span class="prelude-val">Some</span>(<span class="string">"{\"keys\":[]}"</span>), <span class="prelude-val">Some</span>(<span class="string">"https://a.test/jwks"</span>)),
+<a href=#945 id=945 data-nosnippet>945</a>            <span class="number">2
+<a href=#946 id=946 data-nosnippet>946</a>        </span>);
+<a href=#947 id=947 data-nosnippet>947</a>    }
+<a href=#948 id=948 data-nosnippet>948</a>
+<a href=#949 id=949 data-nosnippet>949</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#950 id=950 data-nosnippet>950</a>    // Fixtures for the struct-level helpers.
+<a href=#951 id=951 data-nosnippet>951</a>    // -----------------------------------------------------------------------
+<a href=#952 id=952 data-nosnippet>952</a>
+<a href=#953 id=953 data-nosnippet>953</a>    </span><span class="kw">fn </span>client() -&gt; OAuth2Client {
+<a href=#954 id=954 data-nosnippet>954</a>        OAuth2Client {
+<a href=#955 id=955 data-nosnippet>955</a>            id: Uuid::new_v4(),
+<a href=#956 id=956 data-nosnippet>956</a>            tenant_id: Uuid::new_v4(),
+<a href=#957 id=957 data-nosnippet>957</a>            client_id: <span class="string">"client-1"</span>.into(),
+<a href=#958 id=958 data-nosnippet>958</a>            client_secret_hash: <span class="string">"hash"</span>.into(),
+<a href=#959 id=959 data-nosnippet>959</a>            name: <span class="string">"Client One"</span>.into(),
+<a href=#960 id=960 data-nosnippet>960</a>            redirect_uris: <span class="macro">vec!</span>[<span class="string">"https://rp.test/cb"</span>.into()],
+<a href=#961 id=961 data-nosnippet>961</a>            grant_types: <span class="macro">vec!</span>[<span class="string">"authorization_code"</span>.into()],
+<a href=#962 id=962 data-nosnippet>962</a>            scopes: <span class="macro">vec!</span>[<span class="string">"openid"</span>.into()],
+<a href=#963 id=963 data-nosnippet>963</a>            post_logout_redirect_uris: Vec::new(),
+<a href=#964 id=964 data-nosnippet>964</a>            backchannel_logout_uri: <span class="prelude-val">None</span>,
+<a href=#965 id=965 data-nosnippet>965</a>            require_par: <span class="bool-val">false</span>,
+<a href=#966 id=966 data-nosnippet>966</a>            profile: ClientProfile::Standard,
+<a href=#967 id=967 data-nosnippet>967</a>            token_endpoint_auth_method: ClientAuthMethod::ClientSecretPost,
+<a href=#968 id=968 data-nosnippet>968</a>            tls_client_auth_subject_dn: <span class="prelude-val">None</span>,
+<a href=#969 id=969 data-nosnippet>969</a>            tls_client_auth_san_dns: <span class="prelude-val">None</span>,
+<a href=#970 id=970 data-nosnippet>970</a>            tls_client_auth_san_uri: <span class="prelude-val">None</span>,
+<a href=#971 id=971 data-nosnippet>971</a>            self_signed_tls_client_auth_thumbprints: Vec::new(),
+<a href=#972 id=972 data-nosnippet>972</a>            tls_client_certificate_bound_access_tokens: <span class="bool-val">false</span>,
+<a href=#973 id=973 data-nosnippet>973</a>            jwks: <span class="prelude-val">None</span>,
+<a href=#974 id=974 data-nosnippet>974</a>            jwks_uri: <span class="prelude-val">None</span>,
+<a href=#975 id=975 data-nosnippet>975</a>            dpop_bound_access_tokens: <span class="bool-val">false</span>,
+<a href=#976 id=976 data-nosnippet>976</a>            dpop_require_nonce: <span class="bool-val">false</span>,
+<a href=#977 id=977 data-nosnippet>977</a>            created_at: Utc::now(),
+<a href=#978 id=978 data-nosnippet>978</a>            updated_at: Utc::now(),
+<a href=#979 id=979 data-nosnippet>979</a>        }
+<a href=#980 id=980 data-nosnippet>980</a>    }
+<a href=#981 id=981 data-nosnippet>981</a>
+<a href=#982 id=982 data-nosnippet>982</a>    <span class="kw">fn </span>create() -&gt; CreateOAuth2Client {
+<a href=#983 id=983 data-nosnippet>983</a>        CreateOAuth2Client {
+<a href=#984 id=984 data-nosnippet>984</a>            tenant_id: Uuid::new_v4(),
+<a href=#985 id=985 data-nosnippet>985</a>            name: <span class="string">"Client One"</span>.into(),
+<a href=#986 id=986 data-nosnippet>986</a>            redirect_uris: <span class="macro">vec!</span>[<span class="string">"https://rp.test/cb"</span>.into()],
+<a href=#987 id=987 data-nosnippet>987</a>            grant_types: <span class="macro">vec!</span>[<span class="string">"authorization_code"</span>.into()],
+<a href=#988 id=988 data-nosnippet>988</a>            scopes: <span class="macro">vec!</span>[<span class="string">"openid"</span>.into()],
+<a href=#989 id=989 data-nosnippet>989</a>            post_logout_redirect_uris: Vec::new(),
+<a href=#990 id=990 data-nosnippet>990</a>            backchannel_logout_uri: <span class="prelude-val">None</span>,
+<a href=#991 id=991 data-nosnippet>991</a>            require_par: <span class="bool-val">false</span>,
+<a href=#992 id=992 data-nosnippet>992</a>            profile: ClientProfile::Standard,
+<a href=#993 id=993 data-nosnippet>993</a>            token_endpoint_auth_method: ClientAuthMethod::ClientSecretPost,
+<a href=#994 id=994 data-nosnippet>994</a>            tls_client_auth_subject_dn: <span class="prelude-val">None</span>,
+<a href=#995 id=995 data-nosnippet>995</a>            tls_client_auth_san_dns: <span class="prelude-val">None</span>,
+<a href=#996 id=996 data-nosnippet>996</a>            tls_client_auth_san_uri: <span class="prelude-val">None</span>,
+<a href=#997 id=997 data-nosnippet>997</a>            self_signed_tls_client_auth_thumbprints: Vec::new(),
+<a href=#998 id=998 data-nosnippet>998</a>            tls_client_certificate_bound_access_tokens: <span class="bool-val">false</span>,
+<a href=#999 id=999 data-nosnippet>999</a>            jwks: <span class="prelude-val">None</span>,
+<a href=#1000 id=1000 data-nosnippet>1000</a>            jwks_uri: <span class="prelude-val">None</span>,
+<a href=#1001 id=1001 data-nosnippet>1001</a>            dpop_bound_access_tokens: <span class="bool-val">false</span>,
+<a href=#1002 id=1002 data-nosnippet>1002</a>            dpop_require_nonce: <span class="bool-val">false</span>,
+<a href=#1003 id=1003 data-nosnippet>1003</a>        }
+<a href=#1004 id=1004 data-nosnippet>1004</a>    }
+<a href=#1005 id=1005 data-nosnippet>1005</a>
+<a href=#1006 id=1006 data-nosnippet>1006</a>    <span class="attr">#[test]
+<a href=#1007 id=1007 data-nosnippet>1007</a>    </span><span class="kw">fn </span>the_counters_read_the_same_way_from_a_row_and_from_a_pending_registration() {
+<a href=#1008 id=1008 data-nosnippet>1008</a>        <span class="comment">// The invariant the free functions exist to protect: a registration
+<a href=#1009 id=1009 data-nosnippet>1009</a>        // that validates as "exactly one binding" must still count one after
+<a href=#1010 id=1010 data-nosnippet>1010</a>        // it has been stored. Asserting them separately would let the two
+<a href=#1011 id=1011 data-nosnippet>1011</a>        // drift; asserting them against each other is the actual contract.
+<a href=#1012 id=1012 data-nosnippet>1012</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>c = create();
+<a href=#1013 id=1013 data-nosnippet>1013</a>        c.tls_client_auth_san_dns = <span class="prelude-val">Some</span>(<span class="string">"a.test"</span>.into());
+<a href=#1014 id=1014 data-nosnippet>1014</a>        c.jwks_uri = <span class="prelude-val">Some</span>(<span class="string">"https://a.test/jwks"</span>.into());
+<a href=#1015 id=1015 data-nosnippet>1015</a>
+<a href=#1016 id=1016 data-nosnippet>1016</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = client();
+<a href=#1017 id=1017 data-nosnippet>1017</a>        row.tls_client_auth_san_dns = c.tls_client_auth_san_dns.clone();
+<a href=#1018 id=1018 data-nosnippet>1018</a>        row.jwks_uri = c.jwks_uri.clone();
+<a href=#1019 id=1019 data-nosnippet>1019</a>
+<a href=#1020 id=1020 data-nosnippet>1020</a>        <span class="macro">assert_eq!</span>(c.mtls_binding_count(), row.mtls_binding_count());
+<a href=#1021 id=1021 data-nosnippet>1021</a>        <span class="macro">assert_eq!</span>(c.jwks_source_count(), row.jwks_source_count());
+<a href=#1022 id=1022 data-nosnippet>1022</a>        <span class="macro">assert_eq!</span>(row.mtls_binding_count(), <span class="number">1</span>);
+<a href=#1023 id=1023 data-nosnippet>1023</a>        <span class="macro">assert_eq!</span>(row.jwks_source_count(), <span class="number">1</span>);
+<a href=#1024 id=1024 data-nosnippet>1024</a>
+<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="comment">// ...and a blank clears it on both sides identically.
+<a href=#1026 id=1026 data-nosnippet>1026</a>        </span>c.tls_client_auth_san_dns = <span class="prelude-val">Some</span>(<span class="string">"  "</span>.into());
+<a href=#1027 id=1027 data-nosnippet>1027</a>        row.tls_client_auth_san_dns = <span class="prelude-val">Some</span>(<span class="string">"  "</span>.into());
+<a href=#1028 id=1028 data-nosnippet>1028</a>        <span class="macro">assert_eq!</span>(c.mtls_binding_count(), <span class="number">0</span>);
+<a href=#1029 id=1029 data-nosnippet>1029</a>        <span class="macro">assert_eq!</span>(row.mtls_binding_count(), <span class="number">0</span>);
+<a href=#1030 id=1030 data-nosnippet>1030</a>    }
+<a href=#1031 id=1031 data-nosnippet>1031</a>
+<a href=#1032 id=1032 data-nosnippet>1032</a>    <span class="attr">#[test]
+<a href=#1033 id=1033 data-nosnippet>1033</a>    </span><span class="kw">fn </span>sender_constrained_asks_the_question_rather_than_enumerating_mechanisms() {
+<a href=#1034 id=1034 data-nosnippet>1034</a>        <span class="kw">let </span><span class="kw-2">mut </span>c = client();
+<a href=#1035 id=1035 data-nosnippet>1035</a>        <span class="macro">assert!</span>(!c.is_sender_constrained());
+<a href=#1036 id=1036 data-nosnippet>1036</a>        c.tls_client_certificate_bound_access_tokens = <span class="bool-val">true</span>;
+<a href=#1037 id=1037 data-nosnippet>1037</a>        <span class="macro">assert!</span>(c.is_sender_constrained());
+<a href=#1038 id=1038 data-nosnippet>1038</a>        c.tls_client_certificate_bound_access_tokens = <span class="bool-val">false</span>;
+<a href=#1039 id=1039 data-nosnippet>1039</a>        c.dpop_bound_access_tokens = <span class="bool-val">true</span>;
+<a href=#1040 id=1040 data-nosnippet>1040</a>        <span class="macro">assert!</span>(c.is_sender_constrained());
+<a href=#1041 id=1041 data-nosnippet>1041</a>        <span class="comment">// Both at once is not a contradiction — it is still constrained.
+<a href=#1042 id=1042 data-nosnippet>1042</a>        </span>c.tls_client_certificate_bound_access_tokens = <span class="bool-val">true</span>;
+<a href=#1043 id=1043 data-nosnippet>1043</a>        <span class="macro">assert!</span>(c.is_sender_constrained());
+<a href=#1044 id=1044 data-nosnippet>1044</a>    }
+<a href=#1045 id=1045 data-nosnippet>1045</a>
+<a href=#1046 id=1046 data-nosnippet>1046</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#1047 id=1047 data-nosnippet>1047</a>    // Update patches.
+<a href=#1048 id=1048 data-nosnippet>1048</a>    // -----------------------------------------------------------------------
+<a href=#1049 id=1049 data-nosnippet>1049</a>
+<a href=#1050 id=1050 data-nosnippet>1050</a>    </span><span class="attr">#[test]
+<a href=#1051 id=1051 data-nosnippet>1051</a>    </span><span class="kw">fn </span>touches_security_profile_is_false_only_for_a_patch_that_cannot_change_it() {
+<a href=#1052 id=1052 data-nosnippet>1052</a>        <span class="comment">// A rename must not force the caller to read the stored row back.
+<a href=#1053 id=1053 data-nosnippet>1053</a>        </span><span class="kw">let </span>patch = UpdateOAuth2Client::default();
+<a href=#1054 id=1054 data-nosnippet>1054</a>        <span class="macro">assert!</span>(!patch.touches_security_profile());
+<a href=#1055 id=1055 data-nosnippet>1055</a>
+<a href=#1056 id=1056 data-nosnippet>1056</a>        <span class="comment">// Every field the profile rules read must flip it. Listing them here
+<a href=#1057 id=1057 data-nosnippet>1057</a>        // is the point: a field added to the struct but forgotten in
+<a href=#1058 id=1058 data-nosnippet>1058</a>        // `touches_security_profile` would let a patch change the client's
+<a href=#1059 id=1059 data-nosnippet>1059</a>        // security posture while being validated against the OLD row.
+<a href=#1060 id=1060 data-nosnippet>1060</a>        </span><span class="kw">type </span>Patch = Box&lt;<span class="kw">dyn </span>Fn(<span class="kw-2">&amp;mut </span>UpdateOAuth2Client)&gt;;
+<a href=#1061 id=1061 data-nosnippet>1061</a>        <span class="kw">let </span>cases: Vec&lt;Patch&gt; = <span class="macro">vec!</span>[
+<a href=#1062 id=1062 data-nosnippet>1062</a>            Box::new(|u| u.profile = <span class="prelude-val">Some</span>(ClientProfile::Fapi2)),
+<a href=#1063 id=1063 data-nosnippet>1063</a>            Box::new(|u| u.token_endpoint_auth_method = <span class="prelude-val">Some</span>(ClientAuthMethod::PrivateKeyJwt)),
+<a href=#1064 id=1064 data-nosnippet>1064</a>            Box::new(|u| u.require_par = <span class="prelude-val">Some</span>(<span class="bool-val">true</span>)),
+<a href=#1065 id=1065 data-nosnippet>1065</a>            Box::new(|u| u.tls_client_certificate_bound_access_tokens = <span class="prelude-val">Some</span>(<span class="bool-val">true</span>)),
+<a href=#1066 id=1066 data-nosnippet>1066</a>            Box::new(|u| u.tls_client_auth_subject_dn = <span class="prelude-val">Some</span>(<span class="string">"CN=a"</span>.into())),
+<a href=#1067 id=1067 data-nosnippet>1067</a>            Box::new(|u| u.tls_client_auth_san_dns = <span class="prelude-val">Some</span>(<span class="string">"a.test"</span>.into())),
+<a href=#1068 id=1068 data-nosnippet>1068</a>            Box::new(|u| u.tls_client_auth_san_uri = <span class="prelude-val">Some</span>(<span class="string">"https://a.test"</span>.into())),
+<a href=#1069 id=1069 data-nosnippet>1069</a>            Box::new(|u| u.self_signed_tls_client_auth_thumbprints = <span class="prelude-val">Some</span>(<span class="macro">vec!</span>[<span class="string">"ab"</span>.into()])),
+<a href=#1070 id=1070 data-nosnippet>1070</a>            Box::new(|u| u.jwks = <span class="prelude-val">Some</span>(<span class="string">"{}"</span>.into())),
+<a href=#1071 id=1071 data-nosnippet>1071</a>            Box::new(|u| u.jwks_uri = <span class="prelude-val">Some</span>(<span class="string">"https://a.test/jwks"</span>.into())),
+<a href=#1072 id=1072 data-nosnippet>1072</a>            Box::new(|u| u.dpop_bound_access_tokens = <span class="prelude-val">Some</span>(<span class="bool-val">true</span>)),
+<a href=#1073 id=1073 data-nosnippet>1073</a>            Box::new(|u| u.dpop_require_nonce = <span class="prelude-val">Some</span>(<span class="bool-val">true</span>)),
+<a href=#1074 id=1074 data-nosnippet>1074</a>        ];
+<a href=#1075 id=1075 data-nosnippet>1075</a>        <span class="kw">for </span>(i, set) <span class="kw">in </span>cases.iter().enumerate() {
+<a href=#1076 id=1076 data-nosnippet>1076</a>            <span class="kw">let </span><span class="kw-2">mut </span>u = UpdateOAuth2Client::default();
+<a href=#1077 id=1077 data-nosnippet>1077</a>            set(<span class="kw-2">&amp;mut </span>u);
+<a href=#1078 id=1078 data-nosnippet>1078</a>            <span class="macro">assert!</span>(u.touches_security_profile(), <span class="string">"case {i} did not flip it"</span>);
+<a href=#1079 id=1079 data-nosnippet>1079</a>        }
+<a href=#1080 id=1080 data-nosnippet>1080</a>    }
+<a href=#1081 id=1081 data-nosnippet>1081</a>
+<a href=#1082 id=1082 data-nosnippet>1082</a>    <span class="attr">#[test]
+<a href=#1083 id=1083 data-nosnippet>1083</a>    </span><span class="kw">fn </span>with_update_applied_merges_only_the_profile_relevant_fields() {
+<a href=#1084 id=1084 data-nosnippet>1084</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = client();
+<a href=#1085 id=1085 data-nosnippet>1085</a>        row.name = <span class="string">"original"</span>.into();
+<a href=#1086 id=1086 data-nosnippet>1086</a>        row.tls_client_auth_subject_dn = <span class="prelude-val">Some</span>(<span class="string">"CN=old"</span>.into());
+<a href=#1087 id=1087 data-nosnippet>1087</a>
+<a href=#1088 id=1088 data-nosnippet>1088</a>        <span class="kw">let </span>patch = UpdateOAuth2Client {
+<a href=#1089 id=1089 data-nosnippet>1089</a>            profile: <span class="prelude-val">Some</span>(ClientProfile::Fapi2),
+<a href=#1090 id=1090 data-nosnippet>1090</a>            token_endpoint_auth_method: <span class="prelude-val">Some</span>(ClientAuthMethod::PrivateKeyJwt),
+<a href=#1091 id=1091 data-nosnippet>1091</a>            require_par: <span class="prelude-val">Some</span>(<span class="bool-val">true</span>),
+<a href=#1092 id=1092 data-nosnippet>1092</a>            tls_client_certificate_bound_access_tokens: <span class="prelude-val">Some</span>(<span class="bool-val">true</span>),
+<a href=#1093 id=1093 data-nosnippet>1093</a>            tls_client_auth_subject_dn: <span class="prelude-val">Some</span>(<span class="string">"CN=new"</span>.into()),
+<a href=#1094 id=1094 data-nosnippet>1094</a>            self_signed_tls_client_auth_thumbprints: <span class="prelude-val">Some</span>(<span class="macro">vec!</span>[<span class="string">"aabb"</span>.into()]),
+<a href=#1095 id=1095 data-nosnippet>1095</a>            jwks: <span class="prelude-val">Some</span>(<span class="string">"{\"keys\":[]}"</span>.into()),
+<a href=#1096 id=1096 data-nosnippet>1096</a>            dpop_bound_access_tokens: <span class="prelude-val">Some</span>(<span class="bool-val">true</span>),
+<a href=#1097 id=1097 data-nosnippet>1097</a>            dpop_require_nonce: <span class="prelude-val">Some</span>(<span class="bool-val">true</span>),
+<a href=#1098 id=1098 data-nosnippet>1098</a>            ..Default::default()
+<a href=#1099 id=1099 data-nosnippet>1099</a>        };
+<a href=#1100 id=1100 data-nosnippet>1100</a>        <span class="kw">let </span>merged = row.clone().with_update_applied(<span class="kw-2">&amp;</span>patch);
+<a href=#1101 id=1101 data-nosnippet>1101</a>
+<a href=#1102 id=1102 data-nosnippet>1102</a>        <span class="macro">assert_eq!</span>(merged.profile, ClientProfile::Fapi2);
+<a href=#1103 id=1103 data-nosnippet>1103</a>        <span class="macro">assert_eq!</span>(
+<a href=#1104 id=1104 data-nosnippet>1104</a>            merged.token_endpoint_auth_method,
+<a href=#1105 id=1105 data-nosnippet>1105</a>            ClientAuthMethod::PrivateKeyJwt
+<a href=#1106 id=1106 data-nosnippet>1106</a>        );
+<a href=#1107 id=1107 data-nosnippet>1107</a>        <span class="macro">assert!</span>(merged.require_par);
+<a href=#1108 id=1108 data-nosnippet>1108</a>        <span class="macro">assert!</span>(merged.tls_client_certificate_bound_access_tokens);
+<a href=#1109 id=1109 data-nosnippet>1109</a>        <span class="macro">assert_eq!</span>(merged.tls_client_auth_subject_dn.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"CN=new"</span>));
+<a href=#1110 id=1110 data-nosnippet>1110</a>        <span class="macro">assert_eq!</span>(merged.self_signed_tls_client_auth_thumbprints, <span class="macro">vec!</span>[<span class="string">"aabb"</span>]);
+<a href=#1111 id=1111 data-nosnippet>1111</a>        <span class="macro">assert_eq!</span>(merged.jwks.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"{\"keys\":[]}"</span>));
+<a href=#1112 id=1112 data-nosnippet>1112</a>        <span class="macro">assert!</span>(merged.dpop_bound_access_tokens);
+<a href=#1113 id=1113 data-nosnippet>1113</a>        <span class="macro">assert!</span>(merged.dpop_require_nonce);
+<a href=#1114 id=1114 data-nosnippet>1114</a>
+<a href=#1115 id=1115 data-nosnippet>1115</a>        <span class="comment">// Deliberately NOT merged: the result exists only to be validated, and
+<a href=#1116 id=1116 data-nosnippet>1116</a>        // carrying the rest would invite it to be mistaken for the row about
+<a href=#1117 id=1117 data-nosnippet>1117</a>        // to be written.
+<a href=#1118 id=1118 data-nosnippet>1118</a>        </span><span class="macro">assert_eq!</span>(merged.name, <span class="string">"original"</span>);
+<a href=#1119 id=1119 data-nosnippet>1119</a>    }
+<a href=#1120 id=1120 data-nosnippet>1120</a>
+<a href=#1121 id=1121 data-nosnippet>1121</a>    <span class="attr">#[test]
+<a href=#1122 id=1122 data-nosnippet>1122</a>    </span><span class="kw">fn </span>with_update_applied_leaves_untouched_fields_alone() {
+<a href=#1123 id=1123 data-nosnippet>1123</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = client();
+<a href=#1124 id=1124 data-nosnippet>1124</a>        row.profile = ClientProfile::Fapi2;
+<a href=#1125 id=1125 data-nosnippet>1125</a>        row.require_par = <span class="bool-val">true</span>;
+<a href=#1126 id=1126 data-nosnippet>1126</a>        row.tls_client_auth_san_dns = <span class="prelude-val">Some</span>(<span class="string">"keep.test"</span>.into());
+<a href=#1127 id=1127 data-nosnippet>1127</a>        row.jwks_uri = <span class="prelude-val">Some</span>(<span class="string">"https://keep.test/jwks"</span>.into());
+<a href=#1128 id=1128 data-nosnippet>1128</a>
+<a href=#1129 id=1129 data-nosnippet>1129</a>        <span class="kw">let </span>merged = row
+<a href=#1130 id=1130 data-nosnippet>1130</a>            .clone()
+<a href=#1131 id=1131 data-nosnippet>1131</a>            .with_update_applied(<span class="kw-2">&amp;</span>UpdateOAuth2Client::default());
+<a href=#1132 id=1132 data-nosnippet>1132</a>
+<a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="macro">assert_eq!</span>(merged.profile, ClientProfile::Fapi2);
+<a href=#1134 id=1134 data-nosnippet>1134</a>        <span class="macro">assert!</span>(merged.require_par);
+<a href=#1135 id=1135 data-nosnippet>1135</a>        <span class="macro">assert_eq!</span>(merged.tls_client_auth_san_dns.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"keep.test"</span>));
+<a href=#1136 id=1136 data-nosnippet>1136</a>        <span class="macro">assert_eq!</span>(merged.jwks_uri.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"https://keep.test/jwks"</span>));
+<a href=#1137 id=1137 data-nosnippet>1137</a>    }
+<a href=#1138 id=1138 data-nosnippet>1138</a>
+<a href=#1139 id=1139 data-nosnippet>1139</a>    <span class="attr">#[test]
+<a href=#1140 id=1140 data-nosnippet>1140</a>    </span><span class="kw">fn </span>an_empty_string_in_a_patch_clears_the_field_exactly_as_the_write_will() {
+<a href=#1141 id=1141 data-nosnippet>1141</a>        <span class="comment">// This is the case the doc comment singles out. If validation saw the
+<a href=#1142 id=1142 data-nosnippet>1142</a>        // OLD DN while the repository stored `None`, an update that clears the
+<a href=#1143 id=1143 data-nosnippet>1143</a>        // last `tls_client_auth_*` parameter would pass validation and then
+<a href=#1144 id=1144 data-nosnippet>1144</a>        // store a client that can authenticate nothing.
+<a href=#1145 id=1145 data-nosnippet>1145</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>row = client();
+<a href=#1146 id=1146 data-nosnippet>1146</a>        row.token_endpoint_auth_method = ClientAuthMethod::TlsClientAuth;
+<a href=#1147 id=1147 data-nosnippet>1147</a>        row.tls_client_auth_subject_dn = <span class="prelude-val">Some</span>(<span class="string">"CN=old"</span>.into());
+<a href=#1148 id=1148 data-nosnippet>1148</a>        row.jwks = <span class="prelude-val">Some</span>(<span class="string">"{\"keys\":[]}"</span>.into());
+<a href=#1149 id=1149 data-nosnippet>1149</a>        <span class="macro">assert_eq!</span>(row.mtls_binding_count(), <span class="number">1</span>);
+<a href=#1150 id=1150 data-nosnippet>1150</a>
+<a href=#1151 id=1151 data-nosnippet>1151</a>        <span class="kw">let </span>patch = UpdateOAuth2Client {
+<a href=#1152 id=1152 data-nosnippet>1152</a>            tls_client_auth_subject_dn: <span class="prelude-val">Some</span>(String::new()),
+<a href=#1153 id=1153 data-nosnippet>1153</a>            jwks: <span class="prelude-val">Some</span>(<span class="string">"   "</span>.into()),
+<a href=#1154 id=1154 data-nosnippet>1154</a>            ..Default::default()
+<a href=#1155 id=1155 data-nosnippet>1155</a>        };
+<a href=#1156 id=1156 data-nosnippet>1156</a>        <span class="kw">let </span>merged = row.with_update_applied(<span class="kw-2">&amp;</span>patch);
+<a href=#1157 id=1157 data-nosnippet>1157</a>
+<a href=#1158 id=1158 data-nosnippet>1158</a>        <span class="macro">assert_eq!</span>(merged.tls_client_auth_subject_dn, <span class="prelude-val">None</span>);
+<a href=#1159 id=1159 data-nosnippet>1159</a>        <span class="macro">assert_eq!</span>(merged.jwks, <span class="prelude-val">None</span>);
+<a href=#1160 id=1160 data-nosnippet>1160</a>        <span class="comment">// ...and the counter agrees, which is the invariant that matters:
+<a href=#1161 id=1161 data-nosnippet>1161</a>        // validation now sees zero bindings and can refuse the update.
+<a href=#1162 id=1162 data-nosnippet>1162</a>        </span><span class="macro">assert_eq!</span>(merged.mtls_binding_count(), <span class="number">0</span>);
+<a href=#1163 id=1163 data-nosnippet>1163</a>        <span class="macro">assert_eq!</span>(merged.jwks_source_count(), <span class="number">0</span>);
+<a href=#1164 id=1164 data-nosnippet>1164</a>    }
+<a href=#1165 id=1165 data-nosnippet>1165</a>}
 </code></pre></div></section></main></body></html>

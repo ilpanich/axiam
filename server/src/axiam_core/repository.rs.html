@@ -2295,4 +2295,159 @@
 <a href=#2295 id=2295 data-nosnippet>2295</a>        msg: OutboundMailMessage,
 <a href=#2296 id=2296 data-nosnippet>2296</a>    ) -&gt; <span class="kw">impl </span>Future&lt;Output = <span class="kw">crate</span>::error::AxiamResult&lt;()&gt;&gt; + Send;
 <a href=#2297 id=2297 data-nosnippet>2297</a>}
+<a href=#2298 id=2298 data-nosnippet>2298</a>
+<a href=#2299 id=2299 data-nosnippet>2299</a><span class="attr">#[cfg(test)]
+<a href=#2300 id=2300 data-nosnippet>2300</a></span><span class="kw">mod </span>tests {
+<a href=#2301 id=2301 data-nosnippet>2301</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#2302 id=2302 data-nosnippet>2302</a>    <span class="kw">use </span>std::future::Future;
+<a href=#2303 id=2303 data-nosnippet>2303</a>
+<a href=#2304 id=2304 data-nosnippet>2304</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#2305 id=2305 data-nosnippet>2305</a>    // Pagination (SEC-010 / CQ-B30)
+<a href=#2306 id=2306 data-nosnippet>2306</a>    //
+<a href=#2307 id=2307 data-nosnippet>2307</a>    // `clamp_pagination_limit` is a resource-exhaustion control, not a
+<a href=#2308 id=2308 data-nosnippet>2308</a>    // convenience: it is the only thing standing between `?limit=100000000`
+<a href=#2309 id=2309 data-nosnippet>2309</a>    // and a query that tries to materialise the whole table. It runs on the
+<a href=#2310 id=2310 data-nosnippet>2310</a>    // SERDE path only — direct struct construction is deliberately unaffected,
+<a href=#2311 id=2311 data-nosnippet>2311</a>    // because internal callers that ask for a large page have already been
+<a href=#2312 id=2312 data-nosnippet>2312</a>    // reasoned about, while a query string has not.
+<a href=#2313 id=2313 data-nosnippet>2313</a>    //
+<a href=#2314 id=2314 data-nosnippet>2314</a>    // Both halves of that split are asserted below. A refactor that moved the
+<a href=#2315 id=2315 data-nosnippet>2315</a>    // clamp into the struct would break internal callers silently; one that
+<a href=#2316 id=2316 data-nosnippet>2316</a>    // dropped it from serde would reopen the DoS with no visible change.
+<a href=#2317 id=2317 data-nosnippet>2317</a>    // -----------------------------------------------------------------------
+<a href=#2318 id=2318 data-nosnippet>2318</a>
+<a href=#2319 id=2319 data-nosnippet>2319</a>    </span><span class="kw">fn </span>from_query(json: <span class="kw-2">&amp;</span>str) -&gt; Pagination {
+<a href=#2320 id=2320 data-nosnippet>2320</a>        serde_json::from_str(json).expect(<span class="string">"deserialises"</span>)
+<a href=#2321 id=2321 data-nosnippet>2321</a>    }
+<a href=#2322 id=2322 data-nosnippet>2322</a>
+<a href=#2323 id=2323 data-nosnippet>2323</a>    <span class="attr">#[test]
+<a href=#2324 id=2324 data-nosnippet>2324</a>    </span><span class="kw">fn </span>a_deserialised_limit_is_clamped_to_the_documented_bounds() {
+<a href=#2325 id=2325 data-nosnippet>2325</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":100000000}"#</span>).limit, <span class="number">200</span>);
+<a href=#2326 id=2326 data-nosnippet>2326</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":201}"#</span>).limit, <span class="number">200</span>);
+<a href=#2327 id=2327 data-nosnippet>2327</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":200}"#</span>).limit, <span class="number">200</span>);
+<a href=#2328 id=2328 data-nosnippet>2328</a>        <span class="comment">// A zero-size page is not a page; it would loop forever in any caller
+<a href=#2329 id=2329 data-nosnippet>2329</a>        // that pages until it sees fewer rows than it asked for.
+<a href=#2330 id=2330 data-nosnippet>2330</a>        </span><span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":0}"#</span>).limit, <span class="number">1</span>);
+<a href=#2331 id=2331 data-nosnippet>2331</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":1}"#</span>).limit, <span class="number">1</span>);
+<a href=#2332 id=2332 data-nosnippet>2332</a>        <span class="comment">// Anything already inside the range passes through untouched.
+<a href=#2333 id=2333 data-nosnippet>2333</a>        </span><span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":50}"#</span>).limit, <span class="number">50</span>);
+<a href=#2334 id=2334 data-nosnippet>2334</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":0,"limit":199}"#</span>).limit, <span class="number">199</span>);
+<a href=#2335 id=2335 data-nosnippet>2335</a>        <span class="comment">// u64::MAX is the value an attacker actually sends.
+<a href=#2336 id=2336 data-nosnippet>2336</a>        </span><span class="kw">let </span>max = <span class="macro">format!</span>(<span class="string">r#"{{"offset":0,"limit":{}}}"#</span>, u64::MAX);
+<a href=#2337 id=2337 data-nosnippet>2337</a>        <span class="macro">assert_eq!</span>(from_query(<span class="kw-2">&amp;</span>max).limit, <span class="number">200</span>);
+<a href=#2338 id=2338 data-nosnippet>2338</a>    }
+<a href=#2339 id=2339 data-nosnippet>2339</a>
+<a href=#2340 id=2340 data-nosnippet>2340</a>    <span class="attr">#[test]
+<a href=#2341 id=2341 data-nosnippet>2341</a>    </span><span class="kw">fn </span>the_offset_is_not_clamped_because_it_bounds_no_work() {
+<a href=#2342 id=2342 data-nosnippet>2342</a>        <span class="comment">// Only `limit` decides how many rows come back, so only `limit` is a
+<a href=#2343 id=2343 data-nosnippet>2343</a>        // DoS lever. A huge offset returns an empty page cheaply, and clamping
+<a href=#2344 id=2344 data-nosnippet>2344</a>        // it would silently hand back page 1 to a caller that asked for page
+<a href=#2345 id=2345 data-nosnippet>2345</a>        // 10 000 — a correctness bug in service of no security gain.
+<a href=#2346 id=2346 data-nosnippet>2346</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#2347 id=2347 data-nosnippet>2347</a>            from_query(<span class="string">r#"{"offset":100000000,"limit":10}"#</span>).offset,
+<a href=#2348 id=2348 data-nosnippet>2348</a>            <span class="number">100_000_000
+<a href=#2349 id=2349 data-nosnippet>2349</a>        </span>);
+<a href=#2350 id=2350 data-nosnippet>2350</a>    }
+<a href=#2351 id=2351 data-nosnippet>2351</a>
+<a href=#2352 id=2352 data-nosnippet>2352</a>    <span class="attr">#[test]
+<a href=#2353 id=2353 data-nosnippet>2353</a>    </span><span class="kw">fn </span>direct_construction_bypasses_the_clamp_on_purpose() {
+<a href=#2354 id=2354 data-nosnippet>2354</a>        <span class="comment">// The doc comment says "direct struct construction is unaffected".
+<a href=#2355 id=2355 data-nosnippet>2355</a>        // Internal callers rely on it — an export or a reconciliation job asks
+<a href=#2356 id=2356 data-nosnippet>2356</a>        // for a big page knowingly, and it has not come from a query string.
+<a href=#2357 id=2357 data-nosnippet>2357</a>        </span><span class="kw">let </span>p = Pagination {
+<a href=#2358 id=2358 data-nosnippet>2358</a>            offset: <span class="number">0</span>,
+<a href=#2359 id=2359 data-nosnippet>2359</a>            limit: <span class="number">100_000</span>,
+<a href=#2360 id=2360 data-nosnippet>2360</a>        };
+<a href=#2361 id=2361 data-nosnippet>2361</a>        <span class="macro">assert_eq!</span>(p.limit, <span class="number">100_000</span>);
+<a href=#2362 id=2362 data-nosnippet>2362</a>    }
+<a href=#2363 id=2363 data-nosnippet>2363</a>
+<a href=#2364 id=2364 data-nosnippet>2364</a>    <span class="attr">#[test]
+<a href=#2365 id=2365 data-nosnippet>2365</a>    </span><span class="kw">fn </span>the_default_page_is_the_documented_one() {
+<a href=#2366 id=2366 data-nosnippet>2366</a>        <span class="kw">let </span>p = Pagination::default();
+<a href=#2367 id=2367 data-nosnippet>2367</a>        <span class="macro">assert_eq!</span>(p.offset, <span class="number">0</span>);
+<a href=#2368 id=2368 data-nosnippet>2368</a>        <span class="macro">assert_eq!</span>(p.limit, <span class="number">50</span>);
+<a href=#2369 id=2369 data-nosnippet>2369</a>        <span class="comment">// `#[serde(default)]` on the struct means an absent field falls back
+<a href=#2370 id=2370 data-nosnippet>2370</a>        // here rather than to u64's zero — and a zero limit would be the
+<a href=#2371 id=2371 data-nosnippet>2371</a>        // infinite-loop page described above.
+<a href=#2372 id=2372 data-nosnippet>2372</a>        </span><span class="kw">let </span>empty = from_query(<span class="string">"{}"</span>);
+<a href=#2373 id=2373 data-nosnippet>2373</a>        <span class="macro">assert_eq!</span>(empty.offset, <span class="number">0</span>);
+<a href=#2374 id=2374 data-nosnippet>2374</a>        <span class="macro">assert_eq!</span>(empty.limit, <span class="number">50</span>);
+<a href=#2375 id=2375 data-nosnippet>2375</a>        <span class="comment">// One field present, the other defaulted.
+<a href=#2376 id=2376 data-nosnippet>2376</a>        </span><span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"offset":20}"#</span>).limit, <span class="number">50</span>);
+<a href=#2377 id=2377 data-nosnippet>2377</a>        <span class="macro">assert_eq!</span>(from_query(<span class="string">r#"{"limit":10}"#</span>).offset, <span class="number">0</span>);
+<a href=#2378 id=2378 data-nosnippet>2378</a>    }
+<a href=#2379 id=2379 data-nosnippet>2379</a>
+<a href=#2380 id=2380 data-nosnippet>2380</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#2381 id=2381 data-nosnippet>2381</a>    // ProofKind
+<a href=#2382 id=2382 data-nosnippet>2382</a>    // -----------------------------------------------------------------------
+<a href=#2383 id=2383 data-nosnippet>2383</a>
+<a href=#2384 id=2384 data-nosnippet>2384</a>    </span><span class="attr">#[test]
+<a href=#2385 id=2385 data-nosnippet>2385</a>    </span><span class="kw">fn </span>proof_kind_wire_names_are_stable() {
+<a href=#2386 id=2386 data-nosnippet>2386</a>        <span class="comment">// These strings are a storage format: the replay table is keyed on
+<a href=#2387 id=2387 data-nosnippet>2387</a>        // them, so renaming one would silently split the namespace and let a
+<a href=#2388 id=2388 data-nosnippet>2388</a>        // proof that was already spent be replayed once more under its new
+<a href=#2389 id=2389 data-nosnippet>2389</a>        // name.
+<a href=#2390 id=2390 data-nosnippet>2390</a>        </span><span class="macro">assert_eq!</span>(ProofKind::ClientAssertion.as_str(), <span class="string">"client_assertion"</span>);
+<a href=#2391 id=2391 data-nosnippet>2391</a>        <span class="macro">assert_eq!</span>(ProofKind::DpopProof.as_str(), <span class="string">"dpop_proof"</span>);
+<a href=#2392 id=2392 data-nosnippet>2392</a>        <span class="macro">assert_ne!</span>(
+<a href=#2393 id=2393 data-nosnippet>2393</a>            ProofKind::ClientAssertion.as_str(),
+<a href=#2394 id=2394 data-nosnippet>2394</a>            ProofKind::DpopProof.as_str()
+<a href=#2395 id=2395 data-nosnippet>2395</a>        );
+<a href=#2396 id=2396 data-nosnippet>2396</a>    }
+<a href=#2397 id=2397 data-nosnippet>2397</a>
+<a href=#2398 id=2398 data-nosnippet>2398</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#2399 id=2399 data-nosnippet>2399</a>    // The provided `list_by_tenant` default
+<a href=#2400 id=2400 data-nosnippet>2400</a>    // -----------------------------------------------------------------------
+<a href=#2401 id=2401 data-nosnippet>2401</a>
+<a href=#2402 id=2402 data-nosnippet>2402</a>    </span><span class="attr">#[test]
+<a href=#2403 id=2403 data-nosnippet>2403</a>    </span><span class="kw">fn </span>list_by_tenant_defaults_to_empty_so_test_doubles_keep_compiling() {
+<a href=#2404 id=2404 data-nosnippet>2404</a>        <span class="comment">// The default exists so pre-existing test doubles did not all have to
+<a href=#2405 id=2405 data-nosnippet>2405</a>        // grow a method when D9 added tenant-wide listing. Its contract is
+<a href=#2406 id=2406 data-nosnippet>2406</a>        // "empty", and that must stay true: a double that silently returned
+<a href=#2407 id=2407 data-nosnippet>2407</a>        // something would make a compliance report look complete when the
+<a href=#2408 id=2408 data-nosnippet>2408</a>        // repository behind it had never been asked.
+<a href=#2409 id=2409 data-nosnippet>2409</a>        </span><span class="kw">struct </span>Double;
+<a href=#2410 id=2410 data-nosnippet>2410</a>        <span class="kw">impl </span>WebauthnCredentialRepository <span class="kw">for </span>Double {
+<a href=#2411 id=2411 data-nosnippet>2411</a>            <span class="kw">async fn </span>create(
+<a href=#2412 id=2412 data-nosnippet>2412</a>                <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#2413 id=2413 data-nosnippet>2413</a>                _input: CreateWebauthnCredential,
+<a href=#2414 id=2414 data-nosnippet>2414</a>            ) -&gt; AxiamResult&lt;WebauthnCredential&gt; {
+<a href=#2415 id=2415 data-nosnippet>2415</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2416 id=2416 data-nosnippet>2416</a>            }
+<a href=#2417 id=2417 data-nosnippet>2417</a>            <span class="kw">async fn </span>get_by_id(<span class="kw-2">&amp;</span><span class="self">self</span>, _t: Uuid, _i: Uuid) -&gt; AxiamResult&lt;WebauthnCredential&gt; {
+<a href=#2418 id=2418 data-nosnippet>2418</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2419 id=2419 data-nosnippet>2419</a>            }
+<a href=#2420 id=2420 data-nosnippet>2420</a>            <span class="kw">async fn </span>list_by_user(
+<a href=#2421 id=2421 data-nosnippet>2421</a>                <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#2422 id=2422 data-nosnippet>2422</a>                _t: Uuid,
+<a href=#2423 id=2423 data-nosnippet>2423</a>                _u: Uuid,
+<a href=#2424 id=2424 data-nosnippet>2424</a>            ) -&gt; AxiamResult&lt;Vec&lt;WebauthnCredential&gt;&gt; {
+<a href=#2425 id=2425 data-nosnippet>2425</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2426 id=2426 data-nosnippet>2426</a>            }
+<a href=#2427 id=2427 data-nosnippet>2427</a>            <span class="kw">async fn </span>update_last_used(<span class="kw-2">&amp;</span><span class="self">self</span>, _t: Uuid, _i: Uuid) -&gt; AxiamResult&lt;()&gt; {
+<a href=#2428 id=2428 data-nosnippet>2428</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2429 id=2429 data-nosnippet>2429</a>            }
+<a href=#2430 id=2430 data-nosnippet>2430</a>            <span class="kw">async fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, _t: Uuid, _i: Uuid) -&gt; AxiamResult&lt;()&gt; {
+<a href=#2431 id=2431 data-nosnippet>2431</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2432 id=2432 data-nosnippet>2432</a>            }
+<a href=#2433 id=2433 data-nosnippet>2433</a>            <span class="kw">async fn </span>count_by_user(<span class="kw-2">&amp;</span><span class="self">self</span>, _t: Uuid, _u: Uuid) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#2434 id=2434 data-nosnippet>2434</a>                <span class="macro">unreachable!</span>(<span class="string">"not exercised by this test"</span>)
+<a href=#2435 id=2435 data-nosnippet>2435</a>            }
+<a href=#2436 id=2436 data-nosnippet>2436</a>            <span class="comment">// list_by_tenant deliberately NOT overridden — the default is
+<a href=#2437 id=2437 data-nosnippet>2437</a>            // what is under test.
+<a href=#2438 id=2438 data-nosnippet>2438</a>        </span>}
+<a href=#2439 id=2439 data-nosnippet>2439</a>
+<a href=#2440 id=2440 data-nosnippet>2440</a>        <span class="comment">// Polled by hand rather than through an executor: axiam-core is
+<a href=#2441 id=2441 data-nosnippet>2441</a>        // layer 0 and depends on no runtime, and a dev-dependency on one just
+<a href=#2442 id=2442 data-nosnippet>2442</a>        // to drive a future that never yields would be a dependency the
+<a href=#2443 id=2443 data-nosnippet>2443</a>        // layering check has to reason about forever.
+<a href=#2444 id=2444 data-nosnippet>2444</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>fut = <span class="macro">std::pin::pin!</span>(Double.list_by_tenant(Uuid::new_v4()));
+<a href=#2445 id=2445 data-nosnippet>2445</a>        <span class="kw">let </span><span class="kw-2">mut </span>cx = std::task::Context::from_waker(std::task::Waker::noop());
+<a href=#2446 id=2446 data-nosnippet>2446</a>        <span class="kw">let </span>got = <span class="kw">match </span>fut.as_mut().poll(<span class="kw-2">&amp;mut </span>cx) {
+<a href=#2447 id=2447 data-nosnippet>2447</a>            std::task::Poll::Ready(r) =&gt; r.expect(<span class="string">"the default never fails"</span>),
+<a href=#2448 id=2448 data-nosnippet>2448</a>            std::task::Poll::Pending =&gt; <span class="macro">panic!</span>(<span class="string">"the default must not yield"</span>),
+<a href=#2449 id=2449 data-nosnippet>2449</a>        };
+<a href=#2450 id=2450 data-nosnippet>2450</a>        <span class="macro">assert!</span>(got.is_empty());
+<a href=#2451 id=2451 data-nosnippet>2451</a>    }
+<a href=#2452 id=2452 data-nosnippet>2452</a>}
 </code></pre></div></section></main></body></html>

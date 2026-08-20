@@ -116,4 +116,139 @@
 <a href=#116 id=116 data-nosnippet>116</a>            .finish()
 <a href=#117 id=117 data-nosnippet>117</a>    }
 <a href=#118 id=118 data-nosnippet>118</a>}
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a><span class="attr">#[cfg(test)]
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">mod </span>tests {
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#123 id=123 data-nosnippet>123</a>
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="comment">// The three `Debug` impls in this file are hand-written for one reason
+<a href=#125 id=125 data-nosnippet>125</a>    // (SEC-067 / SECHRD-09 / D-06): a webhook's HMAC secret must never reach a
+<a href=#126 id=126 data-nosnippet>126</a>    // log line. That makes them security controls, not formatting niceties —
+<a href=#127 id=127 data-nosnippet>127</a>    // and a derived `Debug` accidentally restored by a later refactor would
+<a href=#128 id=128 data-nosnippet>128</a>    // reintroduce the leak silently, because nothing else in the system would
+<a href=#129 id=129 data-nosnippet>129</a>    // change. So each one is asserted the same way: the secret is absent, the
+<a href=#130 id=130 data-nosnippet>130</a>    // marker is present, and the fields an operator actually needs to identify
+<a href=#131 id=131 data-nosnippet>131</a>    // the webhook survive.
+<a href=#132 id=132 data-nosnippet>132</a>
+<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">const </span>SECRET: <span class="kw-2">&amp;</span>str = <span class="string">"s3cr3t-hmac-key-do-not-log"</span>;
+<a href=#134 id=134 data-nosnippet>134</a>
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="kw">fn </span>webhook() -&gt; Webhook {
+<a href=#136 id=136 data-nosnippet>136</a>        Webhook {
+<a href=#137 id=137 data-nosnippet>137</a>            id: Uuid::new_v4(),
+<a href=#138 id=138 data-nosnippet>138</a>            tenant_id: Uuid::new_v4(),
+<a href=#139 id=139 data-nosnippet>139</a>            url: <span class="string">"https://hooks.example.test/axiam"</span>.into(),
+<a href=#140 id=140 data-nosnippet>140</a>            events: <span class="macro">vec!</span>[<span class="string">"user.created"</span>.into(), <span class="string">"auth.login"</span>.into()],
+<a href=#141 id=141 data-nosnippet>141</a>            secret: SECRET.into(),
+<a href=#142 id=142 data-nosnippet>142</a>            enabled: <span class="bool-val">true</span>,
+<a href=#143 id=143 data-nosnippet>143</a>            retry_policy: RetryPolicy::default(),
+<a href=#144 id=144 data-nosnippet>144</a>            created_at: Utc::now(),
+<a href=#145 id=145 data-nosnippet>145</a>            updated_at: Utc::now(),
+<a href=#146 id=146 data-nosnippet>146</a>        }
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="attr">#[test]
+<a href=#150 id=150 data-nosnippet>150</a>    </span><span class="kw">fn </span>webhook_debug_redacts_the_secret_but_keeps_the_identifying_fields() {
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="kw">let </span>w = webhook();
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{w:?}"</span>);
+<a href=#153 id=153 data-nosnippet>153</a>
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="macro">assert!</span>(
+<a href=#155 id=155 data-nosnippet>155</a>            !rendered.contains(SECRET),
+<a href=#156 id=156 data-nosnippet>156</a>            <span class="string">"the HMAC secret reached a Debug rendering: {rendered}"
+<a href=#157 id=157 data-nosnippet>157</a>        </span>);
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"[REDACTED]"</span>));
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="comment">// Redaction must not cost observability: an operator reading a log
+<a href=#160 id=160 data-nosnippet>160</a>        // line has to be able to tell WHICH webhook it is, or the redaction
+<a href=#161 id=161 data-nosnippet>161</a>        // just moves the incident from "leaked secret" to "undiagnosable".
+<a href=#162 id=162 data-nosnippet>162</a>        </span><span class="macro">assert!</span>(rendered.contains(<span class="kw-2">&amp;</span>w.id.to_string()));
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="macro">assert!</span>(rendered.contains(<span class="kw-2">&amp;</span>w.tenant_id.to_string()));
+<a href=#164 id=164 data-nosnippet>164</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"https://hooks.example.test/axiam"</span>));
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"user.created"</span>));
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"Webhook"</span>));
+<a href=#167 id=167 data-nosnippet>167</a>    }
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="attr">#[test]
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="kw">fn </span>create_webhook_debug_redacts_the_plaintext_secret() {
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="comment">// This one is the most dangerous of the three: at CreateWebhook stage
+<a href=#172 id=172 data-nosnippet>172</a>        // the secret is still PLAINTEXT, before the repository encrypts it.
+<a href=#173 id=173 data-nosnippet>173</a>        </span><span class="kw">let </span>c = CreateWebhook {
+<a href=#174 id=174 data-nosnippet>174</a>            tenant_id: Uuid::new_v4(),
+<a href=#175 id=175 data-nosnippet>175</a>            url: <span class="string">"https://hooks.example.test/axiam"</span>.into(),
+<a href=#176 id=176 data-nosnippet>176</a>            events: <span class="macro">vec!</span>[<span class="string">"user.created"</span>.into()],
+<a href=#177 id=177 data-nosnippet>177</a>            secret: SECRET.into(),
+<a href=#178 id=178 data-nosnippet>178</a>            retry_policy: <span class="prelude-val">None</span>,
+<a href=#179 id=179 data-nosnippet>179</a>        };
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{c:?}"</span>);
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="macro">assert!</span>(
+<a href=#183 id=183 data-nosnippet>183</a>            !rendered.contains(SECRET),
+<a href=#184 id=184 data-nosnippet>184</a>            <span class="string">"the PLAINTEXT secret reached a Debug rendering: {rendered}"
+<a href=#185 id=185 data-nosnippet>185</a>        </span>);
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"[REDACTED]"</span>));
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"CreateWebhook"</span>));
+<a href=#188 id=188 data-nosnippet>188</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"https://hooks.example.test/axiam"</span>));
+<a href=#189 id=189 data-nosnippet>189</a>    }
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="attr">#[test]
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">fn </span>update_webhook_debug_distinguishes_a_rotation_from_an_untouched_secret() {
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="comment">// `UpdateWebhook.secret` is an Option and its Debug maps Some(_) to the
+<a href=#194 id=194 data-nosnippet>194</a>        // marker rather than printing a fixed string unconditionally. That
+<a href=#195 id=195 data-nosnippet>195</a>        // distinction is load-bearing: an operator debugging a rotation needs
+<a href=#196 id=196 data-nosnippet>196</a>        // to see THAT a new secret was supplied without seeing what it is, and
+<a href=#197 id=197 data-nosnippet>197</a>        // a `None` must not look like a rotation that happened.
+<a href=#198 id=198 data-nosnippet>198</a>        </span><span class="kw">let </span>rotating = UpdateWebhook {
+<a href=#199 id=199 data-nosnippet>199</a>            url: <span class="prelude-val">Some</span>(<span class="string">"https://hooks.example.test/new"</span>.into()),
+<a href=#200 id=200 data-nosnippet>200</a>            secret: <span class="prelude-val">Some</span>(SECRET.into()),
+<a href=#201 id=201 data-nosnippet>201</a>            ..Default::default()
+<a href=#202 id=202 data-nosnippet>202</a>        };
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{rotating:?}"</span>);
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="macro">assert!</span>(
+<a href=#205 id=205 data-nosnippet>205</a>            !rendered.contains(SECRET),
+<a href=#206 id=206 data-nosnippet>206</a>            <span class="string">"rotated secret leaked: {rendered}"
+<a href=#207 id=207 data-nosnippet>207</a>        </span>);
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"[REDACTED]"</span>));
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"https://hooks.example.test/new"</span>));
+<a href=#210 id=210 data-nosnippet>210</a>
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">let </span>untouched = UpdateWebhook {
+<a href=#212 id=212 data-nosnippet>212</a>            enabled: <span class="prelude-val">Some</span>(<span class="bool-val">false</span>),
+<a href=#213 id=213 data-nosnippet>213</a>            ..Default::default()
+<a href=#214 id=214 data-nosnippet>214</a>        };
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{untouched:?}"</span>);
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="macro">assert!</span>(
+<a href=#217 id=217 data-nosnippet>217</a>            !rendered.contains(<span class="string">"[REDACTED]"</span>),
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="string">"a patch that rotates nothing must not read as a rotation: {rendered}"
+<a href=#219 id=219 data-nosnippet>219</a>        </span>);
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"None"</span>));
+<a href=#221 id=221 data-nosnippet>221</a>    }
+<a href=#222 id=222 data-nosnippet>222</a>
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="attr">#[test]
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">fn </span>the_default_retry_policy_is_the_documented_one() {
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="comment">// These three numbers are the delivery contract for every webhook
+<a href=#226 id=226 data-nosnippet>226</a>        // registered without an explicit policy, so they are pinned rather
+<a href=#227 id=227 data-nosnippet>227</a>        // than left to whatever a later edit makes them.
+<a href=#228 id=228 data-nosnippet>228</a>        </span><span class="kw">let </span>p = RetryPolicy::default();
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="macro">assert_eq!</span>(p.max_retries, <span class="number">5</span>);
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="macro">assert_eq!</span>(p.initial_delay_secs, <span class="number">10</span>);
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="macro">assert!</span>((p.backoff_multiplier - <span class="number">2.0</span>).abs() &lt; f64::EPSILON);
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="comment">// Exponential backoff with these values must actually grow, and the
+<a href=#234 id=234 data-nosnippet>234</a>        // last attempt must land somewhere a human would call "gave up after
+<a href=#235 id=235 data-nosnippet>235</a>        // a few minutes" rather than "gave up instantly" or "next week".
+<a href=#236 id=236 data-nosnippet>236</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>delay = p.initial_delay_secs <span class="kw">as </span>f64;
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw">let </span><span class="kw-2">mut </span>total = <span class="number">0.0</span>;
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="kw">for _ in </span><span class="number">0</span>..p.max_retries {
+<a href=#239 id=239 data-nosnippet>239</a>            total += delay;
+<a href=#240 id=240 data-nosnippet>240</a>            delay <span class="kw-2">*</span>= p.backoff_multiplier;
+<a href=#241 id=241 data-nosnippet>241</a>        }
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="macro">assert!</span>(total &gt; <span class="number">60.0 </span>&amp;&amp; total &lt; <span class="number">3600.0</span>, <span class="string">"total backoff was {total}s"</span>);
+<a href=#243 id=243 data-nosnippet>243</a>    }
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="attr">#[test]
+<a href=#246 id=246 data-nosnippet>246</a>    </span><span class="kw">fn </span>a_webhook_serialises_without_its_secret() {
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="comment">// `#[serde(skip_serializing)]` is the other half of the same rule: the
+<a href=#248 id=248 data-nosnippet>248</a>        // secret must not leave the process in an API response either.
+<a href=#249 id=249 data-nosnippet>249</a>        </span><span class="kw">let </span>json = serde_json::to_string(<span class="kw-2">&amp;</span>webhook()).expect(<span class="string">"serialises"</span>);
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="macro">assert!</span>(!json.contains(SECRET), <span class="string">"secret reached the wire: {json}"</span>);
+<a href=#251 id=251 data-nosnippet>251</a>        <span class="macro">assert!</span>(json.contains(<span class="string">"hooks.example.test"</span>));
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>}
 </code></pre></div></section></main></body></html>

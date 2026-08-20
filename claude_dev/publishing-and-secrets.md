@@ -31,8 +31,10 @@ exactly how to create them. All destinations are **free for open-source projects
 >   server's release workflow was reconciled from the old `axiam-server/v1.0.0` prefix to a
 >   plain `v1.0.0` too (`.github/workflows/release.yml` triggers on `v*`, which does not
 >   match a `axiam-server/…` ref). Tags are per-repo, so `v1.0.0` is unambiguous everywhere.
-> - **Secrets live in the SDK repos**, not here. This repo now needs **zero** publishing
->   secrets.
+> - **Secrets live in the SDK repos**, not here. This repo needs **two** publishing secrets,
+>   and only two: `CRATES_IO_TOKEN` and `NPM_TOKEN`, for the shared OPAQUE client core it
+>   publishes on its own `axiam-opaque-v*` tag (§4.14). Nothing else here publishes anywhere
+>   that needs a credential.
 > - **Two flows changed shape**, not just location — C# (§4.6) and PHP (§4.7). Read them.
 
 Nothing here is aspirational — every secret name below is one the workflows actually
@@ -47,6 +49,9 @@ reference.
 | Server + frontend images | `axiam` | **GHCR** (`ghcr.io`) | Yes | **None** — built-in `GITHUB_TOKEN` |
 | Image signatures | `axiam` | **Sigstore** (cosign keyless) | Yes | **None** — OIDC, no private key exists |
 | Server rustdoc + docs index | `axiam` | **GitHub Pages** | Yes | **None** — but Pages must be enabled |
+| Shared OPAQUE core (crate) | `axiam` | **crates.io** | Yes | `CRATES_IO_TOKEN` — §4.14 |
+| Shared OPAQUE core (wasm) | `axiam` | **npm** (`@axiam/opaque-wasm`) | Yes | `NPM_TOKEN` — §4.14, **and the `@axiam` org must exist** |
+| Shared OPAQUE core (C ABI) | `axiam` | **GitHub Releases** | Yes | **None** — `GITHUB_TOKEN` attaches the libraries |
 | Rust SDK | `axiam-rust-sdk` | **crates.io** | Yes | `CRATES_IO_TOKEN` |
 | Python SDK | `axiam-python-sdk` | **PyPI** | Yes | **None** — Trusted Publishing (OIDC) + one-time PyPI config |
 | TypeScript SDK | `axiam-typescript-sdk` | **npm** | Yes | `NPM_TOKEN` |
@@ -87,6 +92,8 @@ the old PHP mirror PAT is gone (§4.7).
 | CocoaPods | `AxiamSDK` (Swift; SwiftPM uses the git URL directly) |
 | vcpkg / Conan (C) | `axiam-c-sdk` (port/recipe name; consumed via overlay/remote) |
 | vcpkg / Conan (C++) | `axiam-cpp-sdk` (port/recipe name; consumed via overlay/remote) |
+| crates.io (OPAQUE core) | `axiam-opaque` — **not** `axiam-sdk`; scope the token accordingly |
+| npm (OPAQUE core) | `@axiam/opaque-wasm` — the **only scoped** AXIAM package, see §4.14 |
 | GHCR | `ghcr.io/ilpanich/axiam/server`, `.../frontend` |
 
 ---
@@ -386,6 +393,72 @@ repo secret). The in-repo recipes make that upstream PR mechanical when you choo
 
 Doxygen HTML for both is published to each repo's GitHub Pages (§3.2).
 
+### 4.14 The shared OPAQUE client core → `CRATES_IO_TOKEN` + `NPM_TOKEN` in `ilpanich/axiam`
+
+`.github/workflows/release-opaque.yml` fires on an `axiam-opaque-v*` tag **in this repo** and
+publishes three artifacts, because three groups of SDKs consume the same OPAQUE core three
+ways (CONTRACT.md §23.1):
+
+| Artifact | Destination | Secret | Consumed by |
+|---|---|---|---|
+| `axiam-opaque` | **crates.io** | `CRATES_IO_TOKEN` | the Rust SDK |
+| `@axiam/opaque-wasm` | **npm** | `NPM_TOKEN` | the TypeScript SDK, the React admin UI |
+| `libaxiam_opaque_ffi.{so,dylib,dll}` + `opaque.h` | **GitHub Release** | none — `GITHUB_TOKEN` | the eight SDKs that load the C ABI |
+
+This is the exception to "this repo needs zero publishing secrets" at the top of this
+document. That statement was true when the seven SDKs moved out; it stopped being true when
+the OPAQUE core became a published artifact of *this* repo rather than something each SDK
+vendored. Both secrets are repository secrets on `ilpanich/axiam`:
+
+```bash
+gh secret set CRATES_IO_TOKEN --repo ilpanich/axiam
+gh secret set NPM_TOKEN       --repo ilpanich/axiam
+```
+
+Create them exactly as in §4.3 (crates.io) and §4.4 (npm), with two differences that matter.
+
+**crates.io.** Scope the token to the `axiam-opaque` crate after the first publish — it is a
+different crate from the Rust SDK's `axiam-sdk`, so a token restricted to `axiam-sdk` will not
+work here.
+
+**npm — `@axiam` is an organisation scope, and it must exist before the first publish.**
+This is the one prerequisite that is not a secret and not in any manifest, and it is the
+reason the first `axiam-opaque-v*` tag ever pushed failed:
+
+```
+npm error 404 Not Found - PUT https://registry.npmjs.org/@axiam%2fopaque-wasm - Scope not found
+```
+
+`Scope not found` means `@axiam` resolves to no npm user and no npm organisation. It is not a
+missing package, a bad token or a permissions problem — the namespace does not exist. Note
+that no other AXIAM package is scoped: the TypeScript SDK publishes as **unscoped**
+`axiam-sdk` (§4.4), so nothing had ever caused `@axiam` to be created.
+
+To fix it, once:
+
+1. <https://www.npmjs.com/org/create> → organisation name `axiam` → **Free** plan. The free
+   plan publishes unlimited **public** packages, which is all this needs; `npm publish
+   --access public` in the workflow is what keeps a scoped package public (scoped packages
+   default to private, and the free plan cannot host those).
+2. Add the account that owns `NPM_TOKEN` as a **member** of the org, with publish rights on
+   the scope.
+3. If `NPM_TOKEN` is a **granular** access token, edit it to include the `@axiam` scope under
+   *Packages and scopes → Read and write*. A granular token restricted to `axiam-sdk` will
+   still get a 404 after the org exists — the same error, from a different cause. The
+   simplest first publish is to allow all packages for that one run, then restrict.
+
+**Re-running a tag is safe.** Both publish steps ask their registry whether the version is
+already there and skip if it is, so a tag whose npm leg failed can be re-run in full without
+the crates.io leg failing on a version it cannot reclaim. What is *not* recoverable is a
+version published with the wrong contents — neither registry lets you reuse a version number.
+
+**One failed leg withholds the GitHub Release.** The `release` job needs all three of `crate`,
+`wasm` and `cabi`, so an npm outage or a missing scope also withholds the C ABI binaries, even
+though they built. That coupling is deliberate — the release notes promise all three artifacts
+and a release that lists an npm package nobody can install is worse than a late release — but
+it means an npm problem blocks the eight `dlopen`-ing SDKs too, and is worth knowing before
+you start diagnosing why the binaries are missing.
+
 ---
 
 ## 5. What each tag publishes
@@ -401,6 +474,7 @@ Every component is versioned and released **independently** — and now from its
 | Repo | Tag you push | What happens |
 |---|---|---|
 | `axiam` | `v1.0.0` | Server **and** frontend images (amd64 + arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc + docs index → Pages |
+| `axiam` | `axiam-opaque-v1.0.0` | Shared OPAQUE client core, on its own cadence: `axiam-opaque` → crates.io, `@axiam/opaque-wasm` → npm, C ABI libraries + `opaque.h` → GitHub Release (§4.14) |
 | `axiam-rust-sdk` | `v1.0.0` | crates.io → docs.rs picks it up automatically |
 | `axiam-python-sdk` | `v1.0.0` | PyPI (Trusted Publishing) + API docs → that repo's Pages |
 | `axiam-typescript-sdk` | `v1.0.0` | npm (with provenance) + API docs → that repo's Pages |
@@ -420,6 +494,12 @@ ever want to ship a UI-only patch.
 The server tag is a plain `v1.0.0` (its workflow triggers on `v*`). Tags are per-repo, so
 even though *this* repo holds more than one releasable thing (server images, binaries, docs),
 a single `v1.0.0` tag drives them all — no prefix is needed to disambiguate.
+
+**The one exception is `axiam-opaque-v*`**, which is a deliberately separate namespace in this
+same repo. The OPAQUE wire format is a cross-language contract, and it should be publishable
+without implying a server release — and, more importantly, without a server release implying a
+new client artifact that nothing has been re-tested against. `release.yml` triggers on `v*`,
+`release-opaque.yml` on `axiam-opaque-v*`, and neither ref matches the other's pattern.
 
 ### Colons are not legal in git tags
 

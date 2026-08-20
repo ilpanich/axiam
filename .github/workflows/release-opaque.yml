@@ -60,11 +60,29 @@ jobs:
       - name: Package
         run: cargo package -p axiam-opaque
 
+      # Idempotent on purpose. This job's siblings can fail after it succeeds
+      # — the npm leg did, on the first `axiam-opaque-v*` tag ever pushed — and
+      # the obvious recovery is to re-run the workflow once the sibling's cause
+      # is fixed. A bare `cargo publish` turns that recovery into a second
+      # failure: crates.io refuses a version it already holds, and the version
+      # cannot be reclaimed to try again. Ask the registry first.
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish -p axiam-opaque
+        run: |
+          VERSION=$(cargo metadata --format-version 1 --no-deps \
+            --manifest-path crates/axiam-opaque/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "axiam-opaque") | .version')
+          # crates.io rejects requests without a User-Agent identifying the caller.
+          if curl -sf -o /dev/null \
+               -H 'User-Agent: axiam-release (https://github.com/ilpanich/axiam)' \
+               "https://crates.io/api/v1/crates/axiam-opaque/$VERSION"; then
+            echo "axiam-opaque $VERSION is already on crates.io — nothing to publish."
+            exit 0
+          fi
+          echo "publishing axiam-opaque $VERSION"
+          cargo publish -p axiam-opaque
 
   wasm:
     name: npm (@axiam/opaque-wasm)
@@ -135,6 +153,7 @@ jobs:
         # npm >= 11 refuses to publish a prerelease under `latest`, so derive
         # the dist-tag from the version rather than hard-coding one.
         run: |
+          NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           case "$VERSION" in
             *-alpha*) TAG=alpha ;;
@@ -142,8 +161,35 @@ jobs:
             *-rc*)    TAG=rc ;;
             *)        TAG=latest ;;
           esac
-          echo "publishing $VERSION under dist-tag $TAG"
-          npm publish --access public --tag "$TAG"
+
+          # Same reasoning as the crates.io leg: a re-run after a sibling job's
+          # failure must not fail on the version this job already published.
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm — nothing to publish."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN is not set on ilpanich/axiam. This repository" \
+                 "publishes @axiam/opaque-wasm and needs its own npm credential —" \
+                 "see claude_dev/publishing-and-secrets.md §4.14."
+            exit 1
+          fi
+
+          echo "publishing $NAME@$VERSION under dist-tag $TAG"
+          if npm publish --access public --tag "$TAG"; then
+            exit 0
+          fi
+
+          # `404 … Scope not found` is npm's answer when @axiam resolves to no
+          # user and no organisation, and it reads like the package is missing
+          # rather than the namespace. Say what it means, at the point of
+          # failure, rather than leaving the next person to decode it.
+          echo "::error::npm publish of $NAME@$VERSION failed. If the registry said" \
+               "'Scope not found', the @axiam organisation does not exist on" \
+               "npmjs.com — create it (free for public packages) and grant NPM_TOKEN" \
+               "write access to the scope. See claude_dev/publishing-and-secrets.md §4.14."
+          exit 1
 
   cabi:
     name: C ABI (${{ matrix.target }})

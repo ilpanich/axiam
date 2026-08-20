@@ -588,15 +588,17 @@ pub struct OpaqueLoginStartRequest {
 /// server derives a stable decoy credential identifier and produces a
 /// well-formed `KE2` from it, so this response cannot be used to enumerate
 /// accounts.
+///
+/// Note what is *not* here: the credential identifier itself. It keys the
+/// server's OPRF and never enters the client's computation, so returning it
+/// would be a gratuitous disclosure. This is a real difference from SRP, whose
+/// challenge had to carry the canonical `identity` because that string was
+/// inside the client's key derivation.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OpaqueLoginStartResponse {
     /// Opaque sealed server state. Must be echoed verbatim to
     /// `/auth/opaque/login/finish`; the client cannot read or forge it.
     pub opaque_session: String,
-    /// Lowercase-hex 32-byte credential identifier to bind into the client's
-    /// key schedule. The client MUST use this rather than anything derived
-    /// from what the human typed.
-    pub credential_identifier: String,
     /// Lowercase-hex serialized RFC 9807 `KE2`.
     pub ke2: String,
     /// Ciphersuite in use.

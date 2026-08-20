@@ -3,13 +3,13 @@
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use axiam_core::error::AxiamResult;
+use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
-    PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride, SettingsScope, SrpPolicy,
-    TenantSettingsOverride, TokenPolicy, diff_against_org, effective_settings,
+    OpaquePolicy, PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride,
+    SettingsScope, TenantSettingsOverride, TokenPolicy, diff_against_org, effective_settings,
     settings_from_org_input, system_defaults,
 };
-use axiam_core::models::srp::{SrpGroup, SrpKdf, SrpMode};
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -56,9 +56,9 @@ struct SettingsRow {
     // migration — which has no such column at all — still deserializes; it
     // resolves to the `disabled` default, which is what a deployment that has
     // never configured SRP means.
-    srp_mode: Option<String>,
-    srp_group: Option<String>,
-    srp_kdf: Option<String>,
+    opaque_mode: Option<String>,
+    opaque_suite: Option<String>,
+    opaque_ksf: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -104,9 +104,9 @@ struct SettingsRowWithId {
     // migration — which has no such column at all — still deserializes; it
     // resolves to the `disabled` default, which is what a deployment that has
     // never configured SRP means.
-    srp_mode: Option<String>,
-    srp_group: Option<String>,
-    srp_kdf: Option<String>,
+    opaque_mode: Option<String>,
+    opaque_suite: Option<String>,
+    opaque_ksf: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -120,18 +120,18 @@ struct SettingsRowWithId {
 /// An unparseable value is treated as absent rather than as an error: the
 /// alternative is a settings read that hard-fails for the whole org, which
 /// would take authentication down over a cosmetic column. The resulting
-/// `disabled` is the safe direction — it can only turn SRP *off*, never
+/// `disabled` is the safe direction — it can only turn OPAQUE *off*, never
 /// silently weaken a tenant that had it on.
-fn decode_srp(mode: Option<&str>, group: Option<&str>, kdf: Option<&str>) -> SrpPolicy {
-    SrpPolicy {
-        srp_mode: mode
-            .and_then(|v| v.parse::<SrpMode>().ok())
+fn decode_opaque(mode: Option<&str>, suite: Option<&str>, ksf: Option<&str>) -> OpaquePolicy {
+    OpaquePolicy {
+        opaque_mode: mode
+            .and_then(|v| v.parse::<OpaqueMode>().ok())
             .unwrap_or_default(),
-        srp_group: group
-            .and_then(|v| v.parse::<SrpGroup>().ok())
+        opaque_suite: suite
+            .and_then(|v| v.parse::<OpaqueSuite>().ok())
             .unwrap_or_default(),
-        srp_kdf: kdf
-            .and_then(|v| v.parse::<SrpKdf>().ok())
+        opaque_ksf: ksf
+            .and_then(|v| v.parse::<OpaqueKsf>().ok())
             .unwrap_or_default(),
     }
 }
@@ -185,10 +185,10 @@ impl SettingsRowWithId {
             notification: NotificationPolicy {
                 admin_notifications_enabled: self.notif_admin_enabled,
             },
-            srp: decode_srp(
-                self.srp_mode.as_deref(),
-                self.srp_group.as_deref(),
-                self.srp_kdf.as_deref(),
+            opaque: decode_opaque(
+                self.opaque_mode.as_deref(),
+                self.opaque_suite.as_deref(),
+                self.opaque_ksf.as_deref(),
             ),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -222,9 +222,9 @@ email_grace_period_hours = $email_grace_period_hours, \
 cert_default_validity = $cert_default_validity, \
 cert_max_validity = $cert_max_validity, \
 notif_admin_enabled = $notif_admin_enabled, \
-srp_mode = $srp_mode, \
-srp_group = $srp_group, \
-srp_kdf = $srp_kdf, \
+opaque_mode = $opaque_mode, \
+opaque_suite = $opaque_suite, \
+opaque_ksf = $opaque_ksf, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -339,14 +339,17 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             ),
         ];
         bindings.push((
-            "srp_mode",
-            BindValue::Str(settings.srp.srp_mode.to_string()),
+            "opaque_mode",
+            BindValue::Str(settings.opaque.opaque_mode.to_string()),
         ));
         bindings.push((
-            "srp_group",
-            BindValue::Str(settings.srp.srp_group.to_string()),
+            "opaque_suite",
+            BindValue::Str(settings.opaque.opaque_suite.to_string()),
         ));
-        bindings.push(("srp_kdf", BindValue::Str(settings.srp.srp_kdf.to_string())));
+        bindings.push((
+            "opaque_ksf",
+            BindValue::Str(settings.opaque.opaque_ksf.to_string()),
+        ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
     }
@@ -519,10 +522,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             notification: NotificationPolicy {
                 admin_notifications_enabled: row.notif_admin_enabled,
             },
-            srp: decode_srp(
-                row.srp_mode.as_deref(),
-                row.srp_group.as_deref(),
-                row.srp_kdf.as_deref(),
+            opaque: decode_opaque(
+                row.opaque_mode.as_deref(),
+                row.opaque_suite.as_deref(),
+                row.opaque_ksf.as_deref(),
             ),
             created_at: row.created_at,
             updated_at: row.updated_at,

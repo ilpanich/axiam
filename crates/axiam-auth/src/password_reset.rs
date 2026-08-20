@@ -354,7 +354,7 @@ where
             )
             .await?;
 
-        // The caller needs this to attach an SRP verifier for the password it
+        // The caller needs this to attach an OPAQUE record for the password it
         // just set; the reset body carries a token, never a user id.
         Ok(user.id)
     }

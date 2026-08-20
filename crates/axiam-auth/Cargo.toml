@@ -42,6 +42,8 @@ zeroize = { workspace = true }
 secrecy = { workspace = true }
 url = { workspace = true }
 webauthn-rs = { workspace = true }
+opaque-ke = { version = "4.0.1", default-features = false, features = ["ristretto255"] }
+sha2_v10 = { version = "0.10", package = "sha2" }
 # webauthn-rs-proto: removed — only webauthn-rs is used directly in axiam-auth; types come through webauthn-rs re-exports
 
 [dev-dependencies]

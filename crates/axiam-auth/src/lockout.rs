@@ -27,7 +27,7 @@ use crate::config::AuthConfig;
 /// Whether `user` is currently serving a lockout.
 ///
 /// [`crate::AuthService::login`] checks this inline against the user it just
-/// fetched. The SRP verify path needs the same question answered from the
+/// fetched. The OPAQUE login-finish path needs the same question answered from the
 /// outside, and a free function is the way to ask it without naming
 /// `AuthService`'s four repository type parameters at the call site.
 pub fn is_locked_out(user: &axiam_core::models::user::User) -> bool {

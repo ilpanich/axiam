@@ -19,7 +19,8 @@ import {
   verifyServerProof,
 } from "./srp";
 
-const { pad, sha256, modPow, bytesToHex, hexToBytes, multiplier, GROUPS } = __testing;
+const { pad, sha256, modPow, bytesToHex, hexToBytes, multiplier, GROUPS } =
+  __testing;
 
 type Vector = (typeof vectors.vectors)[number];
 
@@ -61,15 +62,26 @@ describe("SRP group constants", () => {
   // still agree with each other while the discrete-log hardness the protocol
   // rests on quietly vanished. A round-trip test cannot catch it, because both
   // sides share the same wrong constant.
-  it.each(Object.keys(GROUPS))("%s is a safe prime of the advertised width", (name) => {
-    const group = GROUPS[name as keyof typeof GROUPS];
-    const N = toBigInt(group.N);
-    expect(N.toString(2).length).toBe(group.byteLen * 8);
-    expect(isProbablePrime(N)).toBe(true);
-    expect(isProbablePrime((N - 1n) / 2n)).toBe(true);
-    // g generates the order-q subgroup iff g^q == N-1 for a safe prime.
-    expect(modPow(group.g, (N - 1n) / 2n, N)).toBe(N - 1n);
-  });
+  //
+  // The explicit timeout is not a workaround for flakiness: this is ~25
+  // full-width modular exponentiations per group, and at 4096 bits in JS
+  // `BigInt` that is seconds of real work, which overruns vitest's 5s default
+  // on a CI runner. Lowering the Miller-Rabin base count would be the other way
+  // to fit, and is the wrong trade — the assertion's strength is the point of
+  // the test. The cost is paid once.
+  it.each(Object.keys(GROUPS))(
+    "%s is a safe prime of the advertised width",
+    (name) => {
+      const group = GROUPS[name as keyof typeof GROUPS];
+      const N = toBigInt(group.N);
+      expect(N.toString(2).length).toBe(group.byteLen * 8);
+      expect(isProbablePrime(N)).toBe(true);
+      expect(isProbablePrime((N - 1n) / 2n)).toBe(true);
+      // g generates the order-q subgroup iff g^q == N-1 for a safe prime.
+      expect(modPow(group.g, (N - 1n) / 2n, N)).toBe(N - 1n);
+    },
+    60_000,
+  );
 });
 
 describe("PAD()", () => {
@@ -86,54 +98,67 @@ describe("cross-language vectors", () => {
   it("covers the leading-zero and non-ASCII cases the fixtures exist for", () => {
     // If these ever stop holding, the suite below silently stops testing the
     // two things it was built to test.
-    expect(vectors.vectors.some((v: Vector) => v.salt.startsWith("00"))).toBe(true);
-    expect(vectors.vectors.some((v: Vector) => v.x.startsWith("00"))).toBe(true);
-    expect(vectors.vectors.some((v: Vector) => v.identity === "renée")).toBe(true);
+    expect(vectors.vectors.some((v: Vector) => v.salt.startsWith("00"))).toBe(
+      true,
+    );
+    expect(vectors.vectors.some((v: Vector) => v.x.startsWith("00"))).toBe(
+      true,
+    );
+    expect(vectors.vectors.some((v: Vector) => v.identity === "renée")).toBe(
+      true,
+    );
   });
 
-  it.each(vectors.vectors.map((v: Vector) => [`${v.group}/${v.identity}`, v] as const))(
-    "%s reproduces every intermediate",
-    async (_label, v) => {
-      expect(isKnownGroup(v.group)).toBe(true);
-      const group = GROUPS[v.group as keyof typeof GROUPS];
-      const N = toBigInt(group.N);
-      const x = toBigInt(v.x) % N;
+  it.each(
+    vectors.vectors.map(
+      (v: Vector) => [`${v.group}/${v.identity}`, v] as const,
+    ),
+  )("%s reproduces every intermediate", async (_label, v) => {
+    expect(isKnownGroup(v.group)).toBe(true);
+    const group = GROUPS[v.group as keyof typeof GROUPS];
+    const N = toBigInt(group.N);
+    const x = toBigInt(v.x) % N;
 
-      // k = H(N | PAD(g))
-      expect(bytesToHex(pad(await multiplier(group), 32))).toBe(v.k);
+    // k = H(N | PAD(g))
+    expect(bytesToHex(pad(await multiplier(group), 32))).toBe(v.k);
 
-      // v = g^x mod N
-      expect(await computeVerifier(v.group as never, hexToBytes(v.x))).toBe(v.verifier);
+    // v = g^x mod N
+    expect(await computeVerifier(v.group as never, hexToBytes(v.x))).toBe(
+      v.verifier,
+    );
 
-      // A = g^a mod N, B = (k*v + g^b) mod N
-      const a = toBigInt(v.a_priv);
-      const b = toBigInt(v.b_priv);
-      const A = modPow(group.g, a, N);
-      expect(bytesToHex(pad(A, group.byteLen))).toBe(v.a_pub);
+    // A = g^a mod N, B = (k*v + g^b) mod N
+    const a = toBigInt(v.a_priv);
+    const b = toBigInt(v.b_priv);
+    const A = modPow(group.g, a, N);
+    expect(bytesToHex(pad(A, group.byteLen))).toBe(v.a_pub);
 
-      const k = await multiplier(group);
-      const verifier = modPow(group.g, x, N);
-      const B = (k * verifier + modPow(group.g, b, N)) % N;
-      expect(bytesToHex(pad(B, group.byteLen))).toBe(v.b_pub);
+    const k = await multiplier(group);
+    const verifier = modPow(group.g, x, N);
+    const B = (k * verifier + modPow(group.g, b, N)) % N;
+    expect(bytesToHex(pad(B, group.byteLen))).toBe(v.b_pub);
 
-      // u = H(PAD(A) | PAD(B))
-      const u = toBigInt(
-        bytesToHex(await sha256([pad(A, group.byteLen), pad(B, group.byteLen)]))
-      );
-      expect(bytesToHex(pad(u, 32))).toBe(v.u);
+    // u = H(PAD(A) | PAD(B))
+    const u = toBigInt(
+      bytesToHex(await sha256([pad(A, group.byteLen), pad(B, group.byteLen)])),
+    );
+    expect(bytesToHex(pad(u, 32))).toBe(v.u);
 
-      // S and K, from the client's derivation.
-      const kgx = (k * modPow(group.g, x, N)) % N;
-      const base = ((B % N) + N - kgx) % N;
-      const S = modPow(base, a + u * x, N);
-      expect(bytesToHex(pad(S, group.byteLen))).toBe(v.session_secret);
+    // S and K, from the client's derivation.
+    const kgx = (k * modPow(group.g, x, N)) % N;
+    const base = ((B % N) + N - kgx) % N;
+    const S = modPow(base, a + u * x, N);
+    expect(bytesToHex(pad(S, group.byteLen))).toBe(v.session_secret);
 
-      const K = await sha256([pad(S, group.byteLen)]);
-      expect(bytesToHex(K)).toBe(v.session_key);
-    }
-  );
+    const K = await sha256([pad(S, group.byteLen)]);
+    expect(bytesToHex(K)).toBe(v.session_key);
+  });
 
-  it.each(vectors.vectors.map((v: Vector) => [`${v.group}/${v.identity}`, v] as const))(
+  it.each(
+    vectors.vectors.map(
+      (v: Vector) => [`${v.group}/${v.identity}`, v] as const,
+    ),
+  )(
     "%s produces the contract's M1 and M2 through the public API",
     async (_label, v) => {
       // Drive the real `beginClientSession` rather than the internals, with `a`
@@ -165,7 +190,7 @@ describe("cross-language vectors", () => {
       expect(clientProof).toBe(v.client_proof);
       expect(expectedServerProof).toBe(v.server_proof);
       expect(N > 0n).toBe(true);
-    }
+    },
   );
 });
 
@@ -181,7 +206,7 @@ describe("protocol refusals", () => {
         saltHex: "00".repeat(32),
         serverPublicHex: zero,
         x: new Uint8Array(32).fill(1),
-      })
+      }),
     ).rejects.toThrow(/invalid public value/i);
   });
 

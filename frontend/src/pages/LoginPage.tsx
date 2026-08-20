@@ -16,7 +16,12 @@ import { cn } from "@/lib/utils";
 import api from "@/lib/api";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
-import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import {
+  SrpServerProofMismatchError,
+  SrpUnavailableError,
+  loginSrp,
+} from "@/services/srp";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
 
@@ -204,14 +209,44 @@ export function LoginPage() {
 
     setIsLoading(true);
     try {
-      const response = await api.post<LoginResponse>("/api/v1/auth/login", {
-        username,
-        password,
-        tenant_slug: orgTenantData.tenantSlug,
-        org_slug: orgTenantData.orgSlug,
-      });
+      // Try SRP first, fall back to password login when the tenant does not
+      // offer it. This order is what makes SRP actually get used: the reverse —
+      // password first, SRP only when refused — would mean a tenant on
+      // `srp_mode: optional` never sees a single SRP login from the browser,
+      // which is the mode operators run during a migration.
+      //
+      // The probe is not cached. One extra 404 per sign-in attempt is nothing
+      // (people log in rarely), and caching it would add both a staleness bug
+      // when an operator enables SRP and a place for an attacker to force a
+      // downgrade.
+      let data: LoginResponse;
+      try {
+        const outcome = await loginSrp({
+          usernameOrEmail: username,
+          password,
+          orgSlug: orgTenantData.orgSlug,
+          tenantSlug: orgTenantData.tenantSlug,
+        });
+        data = outcome.data as LoginResponse;
+      } catch (srpErr) {
+        if (srpErr instanceof SrpServerProofMismatchError) {
+          // The endpoint that answered does not hold the verifier, so it is not
+          // the server it claims to be. Whatever session it handed out must not
+          // be used — surface it plainly rather than retrying over the password
+          // path, which would hand that same endpoint the plaintext.
+          setError(srpErr.message);
+          return;
+        }
+        if (!(srpErr instanceof SrpUnavailableError)) throw srpErr;
 
-      const data = response.data;
+        const response = await api.post<LoginResponse>("/api/v1/auth/login", {
+          username,
+          password,
+          tenant_slug: orgTenantData.tenantSlug,
+          org_slug: orgTenantData.orgSlug,
+        });
+        data = response.data;
+      }
 
       if (data.mfa_required) {
         setMfaChallengeToken(data.challenge_token ?? "");
@@ -245,6 +280,17 @@ export function LoginPage() {
       }
     } catch (err) {
       if (getApiErrorStatus(err) === 403) {
+        // `srp_required` is not a credential failure — the password may be
+        // perfectly good, the tenant just refuses this route. Saying "invalid
+        // credentials" here would send a user off to reset a password that
+        // works. It is reachable when SRP is required but this browser could
+        // not complete the exchange.
+        if (getApiErrorCode(err) === "srp_required") {
+          setError(
+            "This organization requires Secure Remote Password sign-in, which this browser could not complete. Please update your browser or contact your administrator."
+          );
+          return;
+        }
         setError(
           "Request rejected for security reasons. Please refresh the page and try again."
         );

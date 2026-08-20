@@ -130,6 +130,30 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
                     .route(web::post().to(handlers::auth::login::<C>)),
             )
+            // SRP shares `/login`'s per-IP budget policy for the same reason:
+            // both are unauthenticated, both take a user identifier, and
+            // neither carries a client identity to key on. The challenge
+            // endpoint is rate-limited too, not just verify — it performs a
+            // full modular exponentiation per call, so leaving it open would
+            // hand an attacker a cheap way to burn server CPU.
+            .service(
+                web::resource("/srp/challenge")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "srp_challenge",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(web::post().to(handlers::srp::srp_challenge::<C>)),
+            )
+            .service(
+                web::resource("/srp/verify")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "srp_verify",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(web::post().to(handlers::srp::srp_verify::<C>)),
+            )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
             .route("/me", web::get().to(handlers::auth::me::<C>))
@@ -207,6 +231,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .route(
                 "/reset/confirm",
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
+            )
+            // Token-gated lookup that lets an unauthenticated reset page compute
+            // an SRP verifier. Shares `/reset`'s budget: it is unauthenticated
+            // and takes a token, so it must not be a cheaper probe than the
+            // endpoint it supports.
+            .service(
+                web::resource("/reset/context")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "password_reset_context",
+                        rate_limit_cfg.password_reset_per_min,
+                    ))
+                    .route(web::get().to(handlers::password_reset::reset_context::<C>)),
             )
             // --- GDPR delete-cancel (public — emailed single-use token, D-09) ---
             // Listed in PUBLIC_PATHS so AuthzMiddleware lets it through without a JWT.

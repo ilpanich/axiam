@@ -21,6 +21,11 @@ const JSONH = { headers: { 'Content-Type': 'application/json' } };
 // --- AXIAM ----------------------------------------------------------------
 // REST under /api/v1; OAuth2/OIDC under /oauth2 and /.well-known. Tenant context
 // is carried in the request body / query (?tenant_id=) per the REST handlers.
+// A fixed 2048-bit client public value for the SRP challenge probe. Any value
+// not congruent to zero modulo the group prime makes the server do the same
+// work, and this one is a long way from it.
+const SRP_FIXED_CLIENT_PUBLIC = '5a3f'.repeat(128);
+
 const axiam = {
   // Resource-owner login (AXIAM's first-party session/login endpoint).
   // Login requires BOTH org and tenant context (a tenant slug is only unique
@@ -37,6 +42,34 @@ const axiam = {
       url: `${baseUrl()}/api/v1/auth/login`,
       body: JSON.stringify(body),
       params: JSONH,
+      expect: 200,
+    };
+  },
+  // SRP-6a challenge (CONTRACT §23). Isolates the server's two modular
+  // exponentiations; see scenarios/srp_challenge.js for why the client half of
+  // the exchange is deliberately excluded.
+  //
+  // `A` is a fixed constant rather than a fresh ephemeral: the server does
+  // identical work for any A that is not congruent to zero mod N, and
+  // generating a real one would put a 2048-bit modexp inside the VU loop,
+  // measuring k6's CPU instead of AXIAM's.
+  srpChallenge() {
+    const body = {
+      username_or_email: cfg.username,
+      client_public: SRP_FIXED_CLIENT_PUBLIC,
+    };
+    if (cfg.orgId) body.org_id = cfg.orgId;
+    else if (cfg.orgSlug) body.org_slug = cfg.orgSlug;
+    if (cfg.tenantId) body.tenant_id = cfg.tenantId;
+    else if (cfg.tenantSlug) body.tenant_slug = cfg.tenantSlug;
+    return {
+      method: 'POST',
+      url: `${baseUrl()}/api/v1/auth/srp/challenge`,
+      body: JSON.stringify(body),
+      params: JSONH,
+      // 404 means the tenant has srp_mode=disabled — a configuration problem
+      // with this run, not a server failure, and it must not be measured as
+      // one.
       expect: 200,
     };
   },

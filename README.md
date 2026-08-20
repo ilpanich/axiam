@@ -86,6 +86,32 @@ AXIAM targets compliance with:
 - **ISO 27001** — Access control, cryptography, audit logging
 - **CyberSecurity Act** — Secure by design, vulnerability management
 
+### Secure Remote Password (optional)
+
+AXIAM can authenticate with **SRP-6a**, an augmented PAKE in which the password
+never reaches the server — only a verifier `v = g^x mod N` computed on the
+client. This closes the exposure TLS does not: a TLS-terminating proxy, an
+accidentally verbose request log, or a heap dump can no longer capture a
+plaintext password, because the server never has one.
+
+It does **not** defend against a compromised AXIAM server, and for browser
+clients it does not defend against AXIAM serving malicious JavaScript. The
+strong case is native SDK clients, IoT devices, and deployments sitting behind
+infrastructure the tenant does not control.
+
+It is **off by default** and enabled per organization or tenant
+(`srp_mode: disabled | optional | required`). `required` cannot be turned on
+safely until every user has enrolled, because a verifier needs the plaintext
+password and a stored Argon2id hash is not invertible — so nobody can be
+enrolled retroactively. See
+[`claude_dev/srp-design.md`](claude_dev/srp-design.md) for the migration
+runbook, and `sdks/CONTRACT.md` §23 for the cross-language protocol.
+
+```bash
+# Required whenever any org or tenant has srp_mode != disabled.
+export AXIAM__AUTH__SRP_SESSION_KEY="$(openssl rand -hex 32)"
+```
+
 ## Development Progress
 
 The project follows a structured roadmap of **64 tasks across 19 phases**:

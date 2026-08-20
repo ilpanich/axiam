@@ -51,7 +51,7 @@ use std::sync::Arc;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
     AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
-    PasswordResetService, WebauthnService,
+    PasswordResetService, SrpServer, WebauthnService,
 };
 use axiam_authz::AuthzConfig;
 use axiam_db::DbHandle;
@@ -69,8 +69,8 @@ use axiam_db::{
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealSrpCredentialRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
@@ -303,6 +303,14 @@ pub struct AppState<C: Connection + Clone> {
     pub password_history_repo: SurrealPasswordHistoryRepository<C>,
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
+    /// Stored SRP verifiers. Read by `/auth/srp/challenge` and written by
+    /// every path that legitimately holds a plaintext password.
+    pub srp_credential_repo: SurrealSrpCredentialRepository<C>,
+    /// The SRP-6a engine, present only when `AXIAM__AUTH__SRP_SESSION_KEY` is
+    /// configured. `None` makes the SRP endpoints answer `503` regardless of
+    /// policy — see [`axiam_auth::AuthConfig::srp_session_key`] for why that is
+    /// preferable to falling back to password login.
+    pub srp_server: Option<SrpServer>,
     pub http_client: reqwest::Client,
     /// Federation JWKS cache: caches REMOTE identity providers' JWKS
     /// documents fetched during OIDC federation login. NOT related to
@@ -475,6 +483,9 @@ impl<C: Connection + Clone> AppState<C> {
     /// ```
     pub fn for_test(db: impl Into<DbHandle<C>>, auth_config: AuthConfig) -> Self {
         let db: DbHandle<C> = db.into();
+        // `Option<[u8; 32]>` is `Copy`, so read it out before `auth_config` is
+        // moved into the struct literal below.
+        let srp_session_key = auth_config.srp_session_key;
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
@@ -628,6 +639,8 @@ impl<C: Connection + Clone> AppState<C> {
             password_history_repo,
             oauth2_client_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),
+            srp_credential_repo: SurrealSrpCredentialRepository::new(db.clone()),
+            srp_server: srp_session_key.map(SrpServer::new),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),
             crypto_semaphore,

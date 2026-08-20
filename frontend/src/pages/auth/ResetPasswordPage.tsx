@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { buildEnrollmentForReset } from "@/services/srp";
 
 // ---------------------------------------------------------------------------
 // API error response type
@@ -64,7 +65,11 @@ export function ResetPasswordPage() {
       }
 
       try {
-        await authService.confirmPasswordReset(tenantId, token, newPw);
+        // Without this, reset would be the hole in SRP coverage: the account
+        // would keep a verifier for the password it just stopped using, and
+        // under `srp_mode: required` would be unable to log in at all.
+        const srp = await buildEnrollmentForReset({ tenantId, token, password: newPw });
+        await authService.confirmPasswordReset(tenantId, token, newPw, srp);
         window.history.replaceState({}, document.title, window.location.pathname);
         return { error: null, success: true };
       } catch (err) {

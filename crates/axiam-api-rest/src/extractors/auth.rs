@@ -653,6 +653,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             pepper_previous: None,
             min_password_length: 12,
             mfa_encryption_key: None,
+            srp_session_key: None,
             federation_encryption_key: None,
             allow_missing_aud_as_user: true,
             cookie_secure: true,

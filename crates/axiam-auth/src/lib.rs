@@ -14,6 +14,7 @@ pub mod password;
 pub mod password_reset;
 pub mod policy;
 pub mod service;
+pub mod srp;
 pub mod token;
 pub mod totp;
 pub mod verification;
@@ -30,6 +31,7 @@ pub use service::{
     AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
     MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
 };
+pub use srp::{SrpRejection, SrpServer, SrpVerified};
 pub use token::{AccessTokenClaims, ValidatedClaims};
 pub use verification::EmailVerificationService;
 pub use webauthn::WebauthnService;

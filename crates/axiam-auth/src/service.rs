@@ -313,9 +313,45 @@ impl<
             return Err(AuthError::InvalidCredentials.into());
         }
 
+        self.complete_authenticated_login(
+            user,
+            input.tenant_id,
+            input.org_id,
+            input.ip_address,
+            input.user_agent,
+            input.mfa_policy,
+        )
+        .await
+    }
+
+    /// Everything a login does **after** the credential itself has been
+    /// checked: reset the failed-attempt counter, gate on account status, fire
+    /// the `login.post_auth` reactor hook, apply MFA policy, and either issue
+    /// tokens or return the appropriate challenge.
+    ///
+    /// This is a method rather than the tail of [`Self::login`] because there
+    /// is now more than one way to prove a password. SRP
+    /// ([`crate::srp::SrpServer::verify`]) establishes exactly the same fact —
+    /// "this principal knows the password" — by a different route, and it must
+    /// land in exactly the same place afterwards. Duplicating this sequence for
+    /// the SRP path is how a deployment ends up with lockout counters that only
+    /// move on one of the two paths, or an MFA policy that one of them quietly
+    /// skips.
+    ///
+    /// `mfa_policy` is the tenant-effective policy, or `None` to skip
+    /// enforcement (the caller could not resolve settings).
+    pub async fn complete_authenticated_login(
+        &self,
+        user: User,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+        mfa_policy: Option<MfaPolicy>,
+    ) -> AxiamResult<LoginResult> {
         // 4. Reset failed login counter on success.
         if user.failed_login_attempts > 0 {
-            self.reset_failed_logins(input.tenant_id, user.id).await?;
+            self.reset_failed_logins(tenant_id, user.id).await?;
         }
 
         // 5. Check account status.
@@ -336,11 +372,11 @@ impl<
         //     refusing a session that already exists.
         let reactor_requires_mfa = self
             .intercept_login_post_auth(
-                input.tenant_id,
-                input.org_id,
+                tenant_id,
+                org_id,
                 &user,
-                input.ip_address.as_deref(),
-                input.user_agent.as_deref(),
+                ip_address.as_deref(),
+                user_agent.as_deref(),
             )
             .await?;
 
@@ -351,14 +387,13 @@ impl<
         //     joining it, never by replacing it: it can only *add* a step-up
         //     demand, which is why it is OR-ed in below rather than consulted
         //     as an alternative.
-        let policy_enforces_mfa = input
-            .mfa_policy
+        let policy_enforces_mfa = mfa_policy
             .as_ref()
             .is_some_and(|policy| policy.mfa_enforced);
         if (policy_enforces_mfa || reactor_requires_mfa) && !user.mfa_enabled {
             let links = self
                 .federation_repo
-                .get_by_user_id(input.tenant_id, user.id)
+                .get_by_user_id(tenant_id, user.id)
                 .await?;
             // A reactor's demand is not waived for a federated user the way the
             // tenant policy's is. The federated carve-out exists because the
@@ -366,8 +401,7 @@ impl<
             // asked for step-up *after* seeing this login has, by definition,
             // seen that and asked anyway.
             if links.is_empty() || reactor_requires_mfa {
-                let setup_token =
-                    self.issue_mfa_setup_token(user.id, input.tenant_id, input.org_id)?;
+                let setup_token = self.issue_mfa_setup_token(user.id, tenant_id, org_id)?;
                 return Ok(LoginResult::MfaSetupRequired(MfaSetupOutput {
                     setup_token,
                 }));
@@ -377,8 +411,7 @@ impl<
         // 6. Check MFA — trigger for any user with mfa_enabled, regardless
         //    of whether they use TOTP or WebAuthn.
         if user.mfa_enabled {
-            let challenge_token =
-                self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
+            let challenge_token = self.issue_mfa_challenge(user.id, tenant_id, org_id)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
                 challenge_token,
                 available_methods: Vec::new(), // populated by REST handler
@@ -387,13 +420,7 @@ impl<
 
         // 7. No MFA — issue tokens directly.
         let output = self
-            .create_session_and_tokens(
-                user.id,
-                input.tenant_id,
-                input.org_id,
-                input.ip_address,
-                input.user_agent,
-            )
+            .create_session_and_tokens(user.id, tenant_id, org_id, ip_address, user_agent)
             .await?;
 
         Ok(LoginResult::Success(output))
@@ -1356,6 +1383,23 @@ impl<
             .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
 
         Ok((user_id, tenant_id, org_id))
+    }
+
+    /// Record one failed authentication attempt against `user_id`, for the
+    /// SRP path.
+    ///
+    /// SRP proves the password without the server seeing it, but a wrong proof
+    /// is still a wrong password and must accrue toward lockout exactly as a
+    /// wrong Argon2id verify does. Without this, turning SRP on would silently
+    /// remove brute-force protection from the accounts that adopted it — the
+    /// opposite of what enabling an extra security layer is supposed to do.
+    pub async fn record_failed_srp_attempt(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<()> {
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        self.record_failed_login(tenant_id, &user).await
     }
 
     async fn record_failed_login(

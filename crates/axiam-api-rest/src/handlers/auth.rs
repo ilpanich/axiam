@@ -79,6 +79,16 @@ pub struct LoginSuccessResponse {
     pub user: LoginUserInfo,
     pub session_id: Uuid,
     pub expires_in: u64,
+    /// Server proof `M2`, present only on the SRP path
+    /// (`POST /api/v1/auth/srp/verify`).
+    ///
+    /// It lives on this shared type — rather than in a separate SRP-only
+    /// response — so both login paths return one body shape and a client needs
+    /// one result handler. A client that completed an SRP exchange MUST verify
+    /// this; without it, it has proved itself to the server but has not proved
+    /// the server to itself, which is half the protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_proof: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -151,6 +161,20 @@ pub struct MfaSetupConfirmRequest {
 pub struct MeResponse {
     pub user: LoginUserInfo,
     pub permissions: Vec<String>,
+    /// The caller's own tenant's effective SRP policy.
+    ///
+    /// Here rather than behind an admin-only settings endpoint because every
+    /// authenticated user needs it for one non-administrative reason: setting a
+    /// password requires computing a verifier client-side, and the client
+    /// cannot do that without knowing the group and KDF to use. It discloses a
+    /// property of the caller's own tenant and nothing about any other tenant
+    /// or user.
+    ///
+    /// Omitted (not an error) when settings cannot be resolved, so a settings
+    /// outage degrades to "no SRP" rather than to a failed `/me` — the same
+    /// treatment `tenant_slug`/`org_slug` already get.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub srp: Option<axiam_core::models::settings::SrpPolicy>,
 }
 
 /// Request body for `POST /api/v1/auth/password/change`.
@@ -158,6 +182,14 @@ pub struct MeResponse {
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
+    /// Verifier for the NEW password, computed client-side.
+    ///
+    /// Optional so a client that predates SRP keeps working under
+    /// `srp_mode = optional`; required (and enforced server-side) under
+    /// `srp_mode = required`, where omitting it would leave the account unable
+    /// to authenticate at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srp: Option<axiam_core::models::srp::SrpEnrollment>,
 }
 
 /// Build an `HttpResponse` that sets all three auth cookies and returns
@@ -169,6 +201,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     user_repo: &SurrealUserRepository<C>,
     tenant_repo: &SurrealTenantRepository<C>,
     org_repo: &SurrealOrganizationRepository<C>,
+    server_proof: Option<String>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Decode the just-issued access token to get user_id.
     let claims = validate_access_token(&out.access_token, config).map_err(AxiamError::from)?;
@@ -238,6 +271,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
+            server_proof,
         }))
 }
 
@@ -326,16 +360,31 @@ pub async fn login<C: Connection + Clone>(
     }
     let org_id = tenant.organization_id;
 
-    // Fetch the effective MFA policy for the tenant.
+    // Fetch the effective security policy for the tenant.
     // Propagate errors instead of silently falling back to no-enforcement,
     // which could bypass MFA during DB outages.
-    let mfa_policy = Some(
-        state
-            .settings_repo
-            .get_effective_settings(org_id, tenant_id)
-            .await
-            .map(|s| s.mfa)?,
-    );
+    let settings = state
+        .settings_repo
+        .get_effective_settings(org_id, tenant_id)
+        .await?;
+
+    // SRP enforcement, checked BEFORE the credential is looked at.
+    //
+    // Ordering is the whole point. Refusing after a password check — or
+    // refusing only the users who happen to have a verifier — would split the
+    // response by a fact about the account, turning this endpoint into an
+    // enumeration oracle that tells an attacker which names exist for the cost
+    // of one junk password each. Refusing every caller in the tenant, before
+    // touching credentials, reveals only the tenant's own policy.
+    //
+    // This is also why `required` is documented as the *last* step of a
+    // migration: everyone without a verifier is locked out of password login
+    // here, and a verifier cannot be created retroactively.
+    if settings.srp.srp_mode == axiam_core::models::srp::SrpMode::Required {
+        return Err(AxiamApiError(AxiamError::SrpRequired));
+    }
+
+    let mfa_policy = Some(settings.mfa);
 
     let input = LoginInput {
         tenant_id,
@@ -357,6 +406,7 @@ pub async fn login<C: Connection + Clone>(
                 &state.user_repo,
                 &state.tenant_repo,
                 &state.org_repo,
+                None,
             )
             .await
         }
@@ -592,6 +642,7 @@ pub async fn verify_mfa<C: Connection + Clone>(
         &state.user_repo,
         &state.tenant_repo,
         &state.org_repo,
+        None,
     )
     .await
 }
@@ -705,6 +756,7 @@ pub async fn setup_confirm_mfa<C: Connection + Clone>(
         &state.user_repo,
         &state.tenant_repo,
         &state.org_repo,
+        None,
     )
     .await
 }
@@ -780,6 +832,16 @@ pub async fn me<C: Connection + Clone>(
         None => None,
     };
 
+    let srp = match tenant.as_ref() {
+        Some(t) => state
+            .settings_repo
+            .get_effective_settings(t.organization_id, user.tenant_id)
+            .await
+            .ok()
+            .map(|s| s.srp),
+        None => None,
+    };
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
@@ -790,6 +852,7 @@ pub async fn me<C: Connection + Clone>(
             org_slug,
         },
         permissions,
+        srp,
     }))
 }
 
@@ -876,6 +939,19 @@ pub async fn change_password<C: Connection + Clone>(
         .get_effective_settings(tenant.organization_id, user.tenant_id)
         .await?;
 
+    // Validate the verifier BEFORE the password is changed. Doing it after
+    // would leave a window where the Argon2id hash has moved on but the
+    // verifier still matches the old password — a user who is mid-migration
+    // would then be able to log in with two different passwords depending on
+    // which endpoint they used.
+    let record = state
+        .user_repo
+        .get_by_id(user.tenant_id, user.user_id)
+        .await?;
+    if let Some(enrollment) = body.srp.as_ref() {
+        enrollment.parse()?;
+    }
+
     state
         .auth_service
         .change_password(
@@ -889,6 +965,16 @@ pub async fn change_password<C: Connection + Clone>(
             Some(&state.http_client),
         )
         .await?;
+
+    crate::handlers::srp_enrollment::record_verifier(
+        &state,
+        &settings.srp,
+        user.tenant_id,
+        user.user_id,
+        &record.username,
+        body.srp.as_ref(),
+    )
+    .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

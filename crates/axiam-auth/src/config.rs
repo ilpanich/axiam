@@ -64,6 +64,20 @@ pub struct AuthConfig {
     /// config files). Federation is optional — absence is warned, not fatal.
     #[serde(skip)]
     pub federation_encryption_key: Option<[u8; 32]>,
+    /// 256-bit AES-GCM key that seals the SRP exchange's server state between
+    /// `/auth/srp/challenge` and `/auth/srp/verify`.
+    ///
+    /// `None` means the SRP endpoints answer `503`, whatever the org or tenant
+    /// policy says. That is deliberate: silently falling back to password login
+    /// when the key is missing would turn a misconfiguration into an
+    /// undetectable downgrade of a security control an operator believes is on.
+    ///
+    /// Deliberately its own key rather than a reuse of
+    /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
+    /// sharing one would couple an SRP outage to an unrelated TOTP rotation.
+    /// Set from `AXIAM__AUTH__SRP_SESSION_KEY` (not from config files).
+    #[serde(skip)]
+    pub srp_session_key: Option<[u8; 32]>,
     /// When `true`, access tokens decoded without an `aud` claim are treated as
     /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
     /// while pre-Phase-4 tokens are still circulating. Default: `true`.
@@ -233,6 +247,7 @@ impl Default for AuthConfig {
             pepper_previous: None,
             min_password_length: 12,
             mfa_encryption_key: None,
+            srp_session_key: None,
             federation_encryption_key: None,
             allow_missing_aud_as_user: true,
             cookie_secure: true,

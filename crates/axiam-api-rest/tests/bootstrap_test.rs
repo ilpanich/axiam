@@ -658,3 +658,226 @@ async fn bootstrap_admin_can_login() {
         String::from_utf8_lossy(&body)
     );
 }
+
+// ---------------------------------------------------------------------------
+// SRP at bootstrap
+// ---------------------------------------------------------------------------
+//
+// The first admin is the one account for which "enrol later" is not an option:
+// there is no second administrator to repair a deployment whose only login is
+// broken. These tests pin the three outcomes that matter.
+
+/// Build the SRP fields for a bootstrap request.
+///
+/// Uses the same reference client the SDKs are specified against, and the same
+/// stand-in KDF as `srp_login_test` — the server never runs the KDF, so a plain
+/// hash exercises everything the server actually checks.
+fn bootstrap_srp_fields(username: &str, password: &str) -> (String, Value) {
+    use axiam_auth::srp::reference_client;
+    use axiam_core::models::srp::SrpGroup;
+    use sha2::{Digest, Sha256};
+
+    // Fresh per call: §23.3 rule 11 wants a new salt per enrolment, and nothing
+    // here depends on the value — the verifier is recomputed from it below.
+    let mut salt_bytes = [0u8; 32];
+    salt_bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    salt_bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    let salt = hex::encode(salt_bytes);
+    let mut hasher = Sha256::new();
+    hasher.update(hex::decode(&salt).unwrap());
+    hasher.update(username.as_bytes());
+    hasher.update(b":");
+    hasher.update(password.as_bytes());
+    let x = hasher.finalize().to_vec();
+
+    let verifier = reference_client::verifier_hex(SrpGroup::Rfc5054_2048, &x);
+    (
+        salt.clone(),
+        serde_json::json!({
+            "group": "rfc5054_2048",
+            "kdf": "pbkdf2_sha256",
+            "iterations": 600_000,
+            "salt": salt,
+            "verifier": verifier,
+        }),
+    )
+}
+
+/// Bootstrap can seed an SRP-required organization and enrol the admin's
+/// verifier in the same call.
+#[actix_rt::test]
+async fn bootstrap_seeds_srp_policy_and_enrolls_the_admin_verifier() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "srp-admin@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let (_salt, srp) = bootstrap_srp_fields("srpadmin", TEST_PASSWORD);
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "organization_name": "SRP Org",
+            "organization_slug": "srp-org",
+            "tenant_slug": "default",
+            "email": "srp-admin@example.com",
+            "username": "srpadmin",
+            "password": TEST_PASSWORD,
+            "srp_mode": "required",
+            "srp_group": "rfc5054_2048",
+            "srp_kdf": "pbkdf2_sha256",
+            "srp": srp,
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body = test::read_body(resp).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    assert_eq!(
+        status,
+        201,
+        "bootstrap with SRP failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let body_json: Value = serde_json::from_slice(&body).unwrap();
+    let user_id: Uuid = body_json["user_id"].as_str().unwrap().parse().unwrap();
+    let tenant_id: Uuid = body_json["tenant_id"].as_str().unwrap().parse().unwrap();
+    let org_id: Uuid = body_json["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // The policy landed as the org baseline...
+    use axiam_core::repository::{SettingsRepository, SrpCredentialRepository};
+    let settings = axiam_db::repository::SurrealSettingsRepository::new(db.clone())
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        settings.srp.srp_mode,
+        axiam_core::models::srp::SrpMode::Required
+    );
+
+    // ...and the admin's verifier was written in the same transaction, bound
+    // to the username rather than the email.
+    let credential = axiam_db::SurrealSrpCredentialRepository::new(db.clone())
+        .get_by_user(tenant_id, user_id)
+        .await
+        .expect("the bootstrap admin must have a verifier under srp_mode=required");
+    assert_eq!(credential.identity, "srpadmin");
+    assert_eq!(
+        credential.group,
+        axiam_core::models::srp::SrpGroup::Rfc5054_2048
+    );
+}
+
+/// `srp_mode=required` without a verifier is refused, because it would create a
+/// deployment whose only administrator can never authenticate.
+#[actix_rt::test]
+async fn bootstrap_refuses_srp_required_without_a_verifier() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "locked-out@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "organization_name": "Locked Out Org",
+            "email": "locked-out@example.com",
+            "username": "lockedout",
+            "password": TEST_PASSWORD,
+            "srp_mode": "required",
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    assert_eq!(status, 400, "an unrecoverable deployment must be refused");
+
+    // Nothing was created — the refusal happens before any write.
+    assert!(
+        SurrealOrganizationRepository::new(db.clone())
+            .get_by_slug("locked-out-org")
+            .await
+            .is_err(),
+        "a refused bootstrap must not leave a half-created organization"
+    );
+}
+
+/// Omitting SRP entirely leaves it disabled, so an operator who has never heard
+/// of it gets exactly today's behaviour.
+#[actix_rt::test]
+async fn bootstrap_without_srp_leaves_it_disabled() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "plain@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "organization_name": "Plain Org",
+            "email": "plain@example.com",
+            "username": "plainadmin",
+            "password": TEST_PASSWORD,
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body = test::read_body(resp).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+
+    let body_json: Value = serde_json::from_slice(&body).unwrap();
+    let tenant_id: Uuid = body_json["tenant_id"].as_str().unwrap().parse().unwrap();
+    let org_id: Uuid = body_json["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    use axiam_core::repository::SettingsRepository;
+    let settings = axiam_db::repository::SurrealSettingsRepository::new(db.clone())
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        settings.srp.srp_mode,
+        axiam_core::models::srp::SrpMode::Disabled
+    );
+}

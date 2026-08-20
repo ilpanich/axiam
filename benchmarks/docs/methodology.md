@@ -44,6 +44,7 @@ Each cell produces one **result record** (JSON) under `results/`.
 | Scenario file                   | Logical operation                              | Protocol      | Comparative? |
 |---------------------------------|------------------------------------------------|---------------|--------------|
 | `oauth2_password_login.js`      | Resource-owner login → token (or session)      | HTTP/OAuth2   | Yes          |
+| `srp_challenge.js`              | SRP-6a handshake, server half (CONTRACT §23)   | HTTP/REST     | AXIAM-only*  |
 | `oauth2_client_credentials.js`  | Machine-to-machine token issuance              | HTTP/OAuth2   | Yes          |
 | `token_introspection.js`        | Validate an opaque/JWT token (RFC 7662)        | HTTP/OAuth2   | Yes          |
 | `token_refresh.js`              | Refresh-token rotation                          | HTTP/OAuth2   | Yes          |
@@ -91,6 +92,34 @@ active" check — forcing that equivalence would benchmark a different logical
 operation under a misleading label, which §1's "identical logical workload"
 principle rules out. `SessionService.CreateSession` (the gRPC login
 counterpart) is task D5's concern, not D4's.
+
+
+### `srp_challenge.js` — what it does and does not measure
+
+`srp_challenge.js` isolates the **server's** SRP cost: the two modular
+exponentiations in the tenant's RFC 5054 group, plus hashing and an AES-256-GCM
+seal. It is not a full SRP login and its numbers must not be presented as one.
+
+A complete exchange additionally costs the client-side KDF (Argon2id at
+m=19456 KiB by default) and one client-side exponentiation — both paid on the
+*client*, by design — plus `/auth/srp/verify`, which is cheap server-side (an
+AEAD open, a constant-time 32-byte compare, and the session issuance every login
+path already pays).
+
+The client half is excluded deliberately: running it inside a k6 VU would
+measure k6's CPU rather than AXIAM's and would depress throughput by an amount
+that says nothing about the server. `A` is therefore a fixed constant, which the
+server treats identically to a fresh ephemeral.
+
+The honest comparison for "what did SRP cost us server-side" is this scenario
+against `oauth2_password_login.js`, whose cost is dominated by one Argon2id
+verification. Expect SRP's server cost to be **lower** at the default
+parameters — the memory-hard work moved to the client — and the group size,
+not the KDF, to be the knob that moves it.
+
+The target tenant must have `srp_mode` set to `optional` or `required`; against
+a tenant with SRP disabled every request is a 404, which the scenario reports
+rather than silently measuring as latency.
 
 ## 4. Load model
 

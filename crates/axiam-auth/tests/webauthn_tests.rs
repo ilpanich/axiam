@@ -31,6 +31,7 @@ fn config(with_key: bool) -> AuthConfig {
         webauthn_rp_name: "AXIAM-Test".into(),
         mfa_challenge_lifetime_secs: 300,
         mfa_encryption_key: if with_key { Some([3u8; 32]) } else { None },
+        srp_session_key: None,
         ..Default::default()
     }
 }

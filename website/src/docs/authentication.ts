@@ -91,15 +91,23 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         tabs: [
           {
             label: "TypeScript",
-            code: "await axiam.login(email, password);\n\nif (axiam.mfaRequired) {\n  await axiam.submitTotp(code);\n}",
+            code: "const result = await client.login(email, password);\n\nswitch (result.status) {\n  case 'mfa_required': {\n    const code = await promptForMfaCode(result.availableMethods);\n    await client.verifyMfa(result.mfaToken, code);\n    break;\n  }\n  case 'authenticated':\n    console.log(`Authenticated as ${result.user.username}`);\n    break;\n}",
           },
           {
             label: "Python",
-            code: "await axiam.login(email, password)\n\nif axiam.mfa_required:\n    await axiam.submit_totp(code)",
+            code: "result = client.login(email, password)\n\nif result.mfa_required:\n    result = client.verify_mfa(result.mfa_token, totp_code)\n\nprint(result.session_id, result.expires_in)",
           },
           {
             label: "Rust",
-            code: "axiam.login(&email, &password).await?;\n\nif axiam.mfa_required() {\n    axiam.submit_totp(&code).await?;\n}",
+            code: "let result = client.login(\"user@acme.dev\", &password).await?;\n\nif result.mfa_required {\n    client.verify_mfa(\"123456\").await?;\n}",
+          },
+          {
+            label: "Go",
+            code: "result, err := client.Login(ctx, email, password)\nif err != nil {\n    return err\n}\n\nif result.MFARequired {\n    // complete the challenge before the session is established\n}",
+          },
+          {
+            label: "Java",
+            code: "LoginResult result = client.login(\"user@acme.dev\", password);\n\nif (result.mfaRequired()) {\n    result = client.verifyMfa(result.challengeToken(), \"123456\");\n}",
           },
         ],
       },

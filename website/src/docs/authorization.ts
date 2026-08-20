@@ -66,7 +66,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "checks", text: "Making a check" },
       {
         type: "p",
-        text: "Every SDK exposes the same `can(action, resource)` call, and a batched form for when one request needs several decisions. The transport underneath is a deployment choice, not a semantic one.",
+        text: "Every SDK exposes the same `can(action, resource)` call — a plain yes/no — alongside a fuller form that also returns *why* a refusal was refused (`no_grant` versus `denied_by_rule`), and a batched form for when one request needs several decisions. The transport underneath is a deployment choice, not a semantic one.",
       },
       {
         type: "api",
@@ -81,26 +81,30 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         tabs: [
           {
             label: "TypeScript",
-            code: "// one decision\nconst ok = await axiam.can('read', 'doc:1');\n\n// several in one round trip\nconst results = await axiam.canAll([\n  ['read', 'doc:1'],\n  ['write', 'doc:1'],\n]);",
+            code: "// one decision\nconst allowed = await client.can('read', 'doc:1');\n\n// several in one round trip — results preserve input order\nconst decisions = await client.batchCheck([\n  { action: 'read', resourceId: 'doc:1' },\n  { action: 'write', resourceId: 'doc:1' },\n]);",
           },
           {
             label: "Python",
-            code: "ok = await axiam.can(\"read\", \"doc:1\")\n\nresults = await axiam.can_all([\n    (\"read\", \"doc:1\"),\n    (\"write\", \"doc:1\"),\n])",
+            code: "allowed = client.can(\"read\", resource_id)\n\ndecisions = client.batch_check([\n    AccessCheck(action=\"read\", resource_id=resource_id),\n    AccessCheck(action=\"write\", resource_id=resource_id),\n])",
           },
           {
             label: "Rust",
-            code: "let ok = axiam.can(\"read\", \"doc:1\").await?;\n\nlet results = axiam\n    .can_all(&[(\"read\", \"doc:1\"), (\"write\", \"doc:1\")])\n    .await?;",
+            code: "// `can` answers yes/no; `check_access` returns the full decision,\n// including the reason a refusal was refused.\nlet allowed = client.can(\"read\", resource_id, None).await?;\nlet decision = client.check_access(\"read\", resource_id, None).await?;",
           },
           {
             label: "Go",
-            code: "ok, err := client.Can(ctx, \"read\", \"doc:1\")\n\nresults, err := client.CanAll(ctx, []axiam.Check{\n    {Action: \"read\", ResourceID: \"doc:1\"},\n    {Action: \"write\", ResourceID: \"doc:1\"},\n})",
+            code: "allowed, err := client.Can(ctx, \"read\", resourceID)\n\nallowed, reason, err := client.CheckAccess(ctx, \"read\", resourceID)\n\nresults, err := client.BatchCheck(ctx, []axiam.AccessCheck{\n    {Action: \"read\", ResourceID: resourceID},\n    {Action: \"write\", ResourceID: resourceID},\n})",
+          },
+          {
+            label: "Java",
+            code: "boolean allowed = client.can(\"read\", \"doc:1\");",
           },
         ],
       },
       { type: "h", id: "guards", text: "Declarative guards" },
       {
         type: "p",
-        text: "Calling `can()` by hand at the top of a handler works, and is easy to forget. Every SDK also ships the declarative form idiomatic to its language — an attribute, an annotation, a decorator, a macro or a middleware — so the requirement sits on the route rather than in its body.",
+        text: "Calling `can()` by hand at the top of a handler works, and is easy to forget. Every SDK also ships the declarative form idiomatic to its language — a middleware, a dependency, an attribute macro or an annotation — so the requirement sits on the route rather than buried in its body.",
       },
       {
         type: "codegroup",
@@ -108,21 +112,29 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         tabs: [
           {
             label: "TypeScript",
-            code: "app.get('/docs/:id',\n  requirePermission('read', (req) => `doc:${req.params.id}`),\n  handler);",
+            code: "import { requireAccess, fromParam } from 'axiam-sdk/middleware';\n\napp.get(\n  '/documents/:id',\n  requireAccess(authzSession, 'read', fromParam('id')),\n  (req, res) => res.json({ documentId: req.params.id }),\n);",
           },
           {
             label: "Python",
-            code: "@require_permission(\"read\", resource=lambda r: f\"doc:{r.path_params['id']}\")\nasync def get_doc(request):\n    ...",
+            code: "from axiam_sdk.fastapi import AxiamUser, require_access\n\nrequire_doc_read = require_access(\n    verifier, \"acme\", authz_client, \"documents:read\", resource_param=\"doc_id\"\n)\n\n\n@app.get(\"/docs/{doc_id}\")\nasync def get_doc(doc_id: str, user: AxiamUser = Depends(require_doc_read)):\n    return {\"message\": f\"user {user.user_id} may read document {doc_id}\"}",
           },
           {
             label: "Rust",
-            code: "#[axiam::require(action = \"read\", resource = \"doc:{id}\")]\nasync fn get_doc(id: web::Path<String>) -> impl Responder {\n    // ...\n}",
+            code: "use axiam_sdk::{require_access, require_auth};\nuse axiam_sdk::middleware::AxiamUser;\n\n#[require_access(action = \"read\", resource_param = \"id\")]\nasync fn get_document(user: AxiamUser) -> String {\n    format!(\"user {} may read this document\", user.user_id)\n}",
           },
           {
             label: "Java",
-            code: "@RequiresPermission(action = \"read\", resource = \"doc:{id}\")\npublic Document getDoc(@PathVariable String id) {\n    // ...\n}",
+            code: "@RestController\npublic class DocumentController {\n\n    @AxiamRequireAccess(action = \"read\", resourceParam = \"id\")\n    @GetMapping(\"/documents/{id}\")\n    public String read(@PathVariable(\"id\") String id) {\n        return \"document \" + id;\n    }\n}",
           },
         ],
+      },
+      {
+        type: "note",
+        text: "Each of these runs strictly **after** authentication, and issues the check for the *request's* authenticated caller — never for the application's own, usually service-account, session. That distinction is the one thing to get right when writing a guard by hand, and it is why using the shipped one is worth it.",
+      },
+      {
+        type: "warn",
+        text: "Every SDK also offers a `requireRole`-style helper. It is a **local, no-round-trip** check against the verified identity's roles: cheaper, coarser, and **not** a substitute for the authoritative resource-level check. A role check cannot see a deny grant on the resource.",
       },
       { type: "h", id: "perf", text: "The hot path" },
       {

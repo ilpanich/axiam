@@ -58,7 +58,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**Authentication** is `Authorization: Bearer <access_token>` — except in a browser, where the SDK uses `httpOnly` cookies and forwards a CSRF token.",
+          "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint. An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
           "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 113-permission registry the admin console uses.",
           "**Collections paginate** with `offset` and `limit`, and return the items plus a total.",
@@ -69,7 +69,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "create a user, put them in a group, check access",
-        code: "TOKEN=$(curl -s -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"production\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}' \\\n  | jq -r .access_token)\n\nUSER=$(curl -s -X POST https://iam.acme.dev/api/v1/users \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"email\":\"dana@acme.dev\",\"username\":\"dana\"}' | jq -r .id)\n\ncurl -X POST https://iam.acme.dev/api/v1/groups/$GROUP/members \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER\\\"}\"\n\ncurl -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+        code: "# A machine client gets a bearer token from the OAuth2 token endpoint.\n# (An interactive login sets cookies instead — see the Quickstart.)\nTOKEN=$(curl -sS -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  | jq -r .access_token)\n\nUSER=$(curl -sS -X POST https://iam.acme.dev/api/v1/users \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"email\":\"dana@acme.dev\",\"username\":\"dana\"}' | jq -r .id)\n\ncurl -sS -X POST \"https://iam.acme.dev/api/v1/groups/$GROUP/members\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER\\\"}\"\n\ncurl -sS -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
       },
       { type: "h", id: "gdpr", text: "GDPR endpoints" },
       {
@@ -140,12 +140,12 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "consume", text: "Consuming it" },
       {
         type: "p",
-        text: "The seven SDKs implementing the full contract — Rust, TypeScript, Python, Java, C#, PHP and Go — ship pre-generated stubs, so you consume gRPC without running codegen. The call surface mirrors the `can()` / `canAll()` you already know.",
+        text: "The seven SDKs implementing the full contract — Rust, TypeScript, Python, Java, C#, PHP and Go — ship pre-generated stubs, so you consume gRPC without running codegen yourself. gRPC is a **separate client** rather than a flag on the REST one — it is a different transport, with its own channel, TLS settings and connection lifetime — but it shares the session and the single-flight refresh guard, and the decisions it returns are the same ones REST returns.",
       },
       {
         type: "code",
-        caption: "authorization check over gRPC · Rust",
-        code: "use axiam_sdk::AxiamClient;\n\nlet axiam = AxiamClient::builder()\n    .base_url(\"https://iam.acme.dev\")\n    .org_slug(\"acme\")\n    .tenant_slug(\"production\")\n    .grpc(true) // route checks over the gRPC transport\n    .build()?;\n\nlet ok = axiam.can(\"read\", \"doc:1\").await?;",
+        caption: "building a gRPC channel · Rust",
+        code: "use axiam_sdk::grpc::{build_channel, GrpcChannelConfig};\n\n// gRPC is a separate channel rather than a flag on the REST client: it is a\n// different transport with its own TLS and connection settings.\nlet channel = build_channel(\n    \"https://iam.acme.dev:50051\",\n    &GrpcChannelConfig::default(),\n)?;\n\n// The channel then backs `AuthzGrpcClient`, which shares the REST client's\n// single-flight refresh guard. See the SDK's `grpc_check_access` example.",
       },
       { type: "h", id: "codegen", text: "Generating your own stubs" },
       {

@@ -175,23 +175,23 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         tabs: [
           {
             label: "TypeScript",
-            code: "import { AxiamClient } from 'axiam-sdk';\n\nconst axiam = new AxiamClient({\n  baseUrl: 'https://iam.acme.dev',\n  orgSlug: 'acme',\n  tenantSlug: 'acme',\n});\n\nawait axiam.login(email, password);\nconst ok = await axiam.can('read', 'doc:1');",
+            code: "import { AxiamClient } from 'axiam-sdk';\n\nconst client = new AxiamClient({\n  baseUrl: 'https://iam.acme.dev',\n  tenantSlug: 'acme',\n  orgSlug: 'acme',\n});\n\nconst result = await client.login(email, password);\nif (result.status === 'mfa_required') {\n  await client.verifyMfa(result.mfaToken, code);\n}\n\nconst allowed = await client.can('read', 'doc:1');",
           },
           {
             label: "Python",
-            code: "from axiam_sdk import AxiamClient\n\naxiam = AxiamClient(\n    base_url=\"https://iam.acme.dev\",\n    org_slug=\"acme\",\n    tenant_slug=\"acme\",\n)\n\nawait axiam.login(email, password)\nok = await axiam.can(\"read\", \"doc:1\")",
+            code: "from axiam_sdk import AxiamClient\n\nwith AxiamClient(\n    base_url=\"https://iam.acme.dev\",\n    tenant_slug=\"acme\",\n    org_slug=\"acme\",\n) as client:\n    result = client.login(email, password)\n    if result.mfa_required:\n        result = client.verify_mfa(result.mfa_token, totp_code)\n\n    allowed = client.can(\"read\", resource_id)",
           },
           {
             label: "Rust",
-            code: "use axiam_sdk::AxiamClient;\n\nlet axiam = AxiamClient::builder()\n    .base_url(\"https://iam.acme.dev\")\n    .org_slug(\"acme\")\n    .tenant_slug(\"acme\")\n    .build()?;\n\naxiam.login(&email, &password).await?;\nlet ok = axiam.can(\"read\", \"doc:1\").await?;",
+            code: "use axiam_sdk::AxiamClient;\n\nlet client = AxiamClient::builder()\n    .base_url(\"https://iam.acme.dev\")?\n    .tenant_slug(\"acme\")\n    .org_slug(\"acme\")\n    .build()?;\n\nlet result = client.login(\"user@acme.dev\", &password).await?;\nif result.mfa_required {\n    client.verify_mfa(\"123456\").await?;\n}\n\nlet allowed = client.can(\"read\", resource_id, None).await?;",
           },
           {
             label: "Go",
-            code: "import axiam \"github.com/ilpanich/axiam-go-sdk\"\n\nclient, err := axiam.New(axiam.Config{\n    BaseURL:    \"https://iam.acme.dev\",\n    OrgSlug:    \"acme\",\n    TenantSlug: \"acme\",\n})\n\nerr = client.Login(ctx, email, password)\nok, err := client.Can(ctx, \"read\", \"doc:1\")",
+            code: "import axiam \"github.com/ilpanich/axiam-go-sdk\"\n\n// tenantSlug is required — there is no default tenant. Login also needs\n// organization context: a tenant slug is only unique within an org.\nclient, err := axiam.NewClient(baseURL, \"acme\", axiam.WithOrgSlug(\"acme\"))\n\nresult, err := client.Login(ctx, email, password)\nif result.MFARequired {\n    // complete the challenge\n}\n\nallowed, err := client.Can(ctx, \"read\", resourceID)",
           },
           {
             label: "Java",
-            code: "AxiamClient axiam = AxiamClient.builder()\n    .baseUrl(\"https://iam.acme.dev\")\n    .orgSlug(\"acme\")\n    .tenantSlug(\"acme\")\n    .build();\n\naxiam.login(email, password);\nboolean ok = axiam.can(\"read\", \"doc:1\");",
+            code: "try (AxiamClient client = AxiamClient.builder(\"https://iam.acme.dev\", \"acme\")\n        .orgSlug(\"acme\")\n        .build()) {\n    LoginResult result = client.login(\"user@acme.dev\", password);\n    if (result.mfaRequired()) {\n        result = client.verifyMfa(result.challengeToken(), \"123456\");\n    }\n\n    boolean allowed = client.can(\"read\", \"doc:1\");\n}",
           },
         ],
       },
@@ -202,12 +202,16 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "curl", text: "The same thing over plain HTTP" },
       {
         type: "p",
-        text: "No SDK required — every capability is reachable with an HTTP client. Note that `tenant_id` is a query parameter on the OAuth2 endpoints and a path or body field elsewhere; it is never implicit.",
+        text: "No SDK required — every capability is reachable with an HTTP client. Two things to know before you start: **login returns no token in its body**. It sets three cookies — `axiam_access`, `axiam_refresh` and a non-`httpOnly` `axiam_csrf` — so a raw HTTP client needs a cookie jar. And every state-changing request must echo the CSRF cookie back in an `X-CSRF-Token` header; `/auth/login`, the OPAQUE start endpoints and everything under `/oauth2/` are exempt, because their callers have no CSRF cookie yet.",
       },
       {
         type: "code",
-        caption: "login, then check",
-        code: "# 1. authenticate\ncurl -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"acme\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}'\n\n# 2. check — the token from step 1 goes in the Authorization header\ncurl -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $ACCESS_TOKEN\" \\\n  -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+        caption: "login, then check — with a cookie jar",
+        code: "# 1. authenticate. The tokens come back as cookies, not in the body.\ncurl -sS -c jar.txt -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"production\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}'\n\n# 2. state-changing calls echo the CSRF cookie in a header.\nCSRF=$(awk '/axiam_csrf/ {print $7}' jar.txt)\n\ncurl -sS -b jar.txt -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"x-csrf-token: $CSRF\" \\\n  -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+      },
+      {
+        type: "note",
+        text: "A **machine** client does not do any of this. It uses the OAuth2 client-credentials grant, which *does* return `access_token` in the response body, and then sends `Authorization: Bearer <token>` — no cookie jar and no CSRF header. See [Service accounts](#/docs/service-accounts).",
       },
       { type: "h", id: "next", text: "Next steps" },
       {

@@ -330,13 +330,13 @@ impl<
     /// tokens or return the appropriate challenge.
     ///
     /// This is a method rather than the tail of [`Self::login`] because there
-    /// is now more than one way to prove a password. SRP
-    /// ([`crate::srp::SrpServer::verify`]) establishes exactly the same fact —
-    /// "this principal knows the password" — by a different route, and it must
-    /// land in exactly the same place afterwards. Duplicating this sequence for
-    /// the SRP path is how a deployment ends up with lockout counters that only
-    /// move on one of the two paths, or an MFA policy that one of them quietly
-    /// skips.
+    /// is now more than one way to prove a password. OPAQUE
+    /// ([`crate::opaque::OpaqueServer::login_finish`]) establishes exactly the
+    /// same fact — "this principal knows the password" — by a different route,
+    /// and it must land in exactly the same place afterwards. Duplicating this
+    /// sequence for the OPAQUE path is how a deployment ends up with lockout
+    /// counters that only move on one of the two paths, or an MFA policy that
+    /// one of them quietly skips.
     ///
     /// `mfa_policy` is the tenant-effective policy, or `None` to skip
     /// enforcement (the caller could not resolve settings).
@@ -1386,14 +1386,18 @@ impl<
     }
 
     /// Record one failed authentication attempt against `user_id`, for the
-    /// SRP path.
+    /// OPAQUE path.
     ///
-    /// SRP proves the password without the server seeing it, but a wrong proof
-    /// is still a wrong password and must accrue toward lockout exactly as a
-    /// wrong Argon2id verify does. Without this, turning SRP on would silently
-    /// remove brute-force protection from the accounts that adopted it — the
-    /// opposite of what enabling an extra security layer is supposed to do.
-    pub async fn record_failed_srp_attempt(
+    /// OPAQUE proves the password without the server seeing it, but a failed
+    /// `KE3` is still a wrong password and must accrue toward lockout exactly
+    /// as a wrong Argon2id verify does. Without this, turning OPAQUE on would
+    /// silently remove brute-force protection from the accounts that adopted
+    /// it — the opposite of what enabling an extra security layer is supposed
+    /// to do.
+    ///
+    /// This is why [`crate::opaque::OpaqueRejection`] has two variants rather
+    /// than one: the caller cannot accrue an attempt it cannot attribute.
+    pub async fn record_failed_opaque_attempt(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,

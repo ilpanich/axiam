@@ -53,6 +53,7 @@ secrecy = { workspace = true }
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
+axiam-opaque = { version = "1.0.0-alpha31", path = "../axiam-opaque" }
 
 [features]
 # SAML SP endpoints + DTOs. Forwards to axiam-federation/saml (→ samael).
@@ -88,3 +89,5 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # embedding literal PEM key material in source (GitGuardian: no new secret
 # literals). Already a workspace dependency (axiam-pki, axiam-server).
 rcgen = { workspace = true }
+axiam-opaque = { path = "../axiam-opaque" }
+getrandom = "0.4.3"

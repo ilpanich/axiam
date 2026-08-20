@@ -64,7 +64,8 @@ benchmarks/
 ├── scenarios/                # k6 load scenarios (vendor-neutral)
 │   ├── lib/{config,targets,metrics,auth}.js
 │   ├── oauth2_password_login.js
-│   ├── srp_challenge.js
+│   ├── opaque_login_start.js
+│   ├── opaque_register_start.js
 │   ├── oauth2_client_credentials.js
 │   ├── token_introspection.js
 │   ├── token_refresh.js

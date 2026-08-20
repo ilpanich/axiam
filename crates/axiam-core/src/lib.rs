@@ -4,3 +4,4 @@ pub mod error;
 pub mod id;
 pub mod models;
 pub mod repository;
+pub mod secrets;

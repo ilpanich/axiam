@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AxiamError, AxiamResult};
-use crate::models::srp::{SrpGroup, SrpKdf, SrpMode};
+use crate::models::opaque::{
+    OpaqueKsf, OpaqueMode, OpaqueSuite, opaque_ksf_is_at_least, opaque_suite_is_at_least,
+};
 
 // -----------------------------------------------------------------------
 // Sub-policy structs
@@ -73,41 +75,24 @@ pub struct NotificationPolicy {
 
 /// Secure Remote Password policy.
 ///
-/// `group` and `kdf` are the parameters a *new* verifier is enrolled with.
-/// They deliberately do not apply retroactively: an existing verifier is only
-/// valid under the group and KDF it was generated with, so tightening these
+/// `suite` and `ksf` are the parameters a *new* registration record is enrolled
+/// with. They deliberately do not apply retroactively: an existing record is
+/// only valid under the suite and KSF it was created with, so tightening these
 /// takes effect as users next set a password rather than invalidating
 /// everybody at once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct SrpPolicy {
-    /// Whether SRP is offered, and whether password login is still accepted.
+pub struct OpaquePolicy {
+    /// Whether OPAQUE is offered, and whether password login is still accepted.
     #[schema(value_type = String, example = "disabled")]
-    pub srp_mode: SrpMode,
-    /// RFC 5054 group new verifiers are enrolled under.
-    #[schema(value_type = String, example = "rfc5054_4096")]
-    pub srp_group: SrpGroup,
-    /// KDF new verifiers derive `x` with. A client that cannot perform this
-    /// KDF may enrol with `pbkdf2_sha256` instead — see
-    /// [`srp_kdf_is_at_least`].
+    pub opaque_mode: OpaqueMode,
+    /// RFC 9807 ciphersuite new records are enrolled under.
+    #[schema(value_type = String, example = "ristretto255_sha512")]
+    pub opaque_suite: OpaqueSuite,
+    /// Key-stretching function new records are enrolled under. Both variants
+    /// are memory-hard; see [`opaque_ksf_is_at_least`] for the tighten-only
+    /// ordering.
     #[schema(value_type = String, example = "argon2id")]
-    pub srp_kdf: SrpKdf,
-}
-
-/// Rank a KDF by resistance to offline attack on a leaked verifier.
-///
-/// Used by the tighten-only rule: a tenant may move from PBKDF2 to Argon2id
-/// but never the other way, because that would weaken every verifier enrolled
-/// after the change.
-fn srp_kdf_rank(kdf: SrpKdf) -> u8 {
-    match kdf {
-        SrpKdf::Pbkdf2Sha256 => 0,
-        SrpKdf::Argon2id => 1,
-    }
-}
-
-/// Whether `candidate` is at least as strong as `baseline`.
-pub fn srp_kdf_is_at_least(candidate: SrpKdf, baseline: SrpKdf) -> bool {
-    srp_kdf_rank(candidate) >= srp_kdf_rank(baseline)
+    pub opaque_ksf: OpaqueKsf,
 }
 
 // -----------------------------------------------------------------------
@@ -159,7 +144,7 @@ pub struct SecuritySettings {
     pub email: EmailVerificationPolicy,
     pub certificate: CertificatePolicy,
     pub notification: NotificationPolicy,
-    pub srp: SrpPolicy,
+    pub opaque: OpaquePolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -198,13 +183,13 @@ pub struct TenantSettingsOverride {
     pub max_cert_validity_days: Option<u32>,
     // Notification
     pub admin_notifications_enabled: Option<bool>,
-    // SRP
+    // OPAQUE
     #[schema(value_type = Option<String>)]
-    pub srp_mode: Option<SrpMode>,
+    pub opaque_mode: Option<OpaqueMode>,
     #[schema(value_type = Option<String>)]
-    pub srp_group: Option<SrpGroup>,
+    pub opaque_suite: Option<OpaqueSuite>,
     #[schema(value_type = Option<String>)]
-    pub srp_kdf: Option<SrpKdf>,
+    pub opaque_ksf: Option<OpaqueKsf>,
 }
 
 impl TenantSettingsOverride {
@@ -248,17 +233,17 @@ pub struct SetOrgSettings {
     pub max_cert_validity_days: u32,
     // Notification
     pub admin_notifications_enabled: bool,
-    // SRP — defaulted so an existing API client that has never heard of SRP
-    // keeps working unchanged and lands on `disabled`.
+    // OPAQUE — defaulted so an existing API client that has never heard of
+    // OPAQUE keeps working unchanged and lands on `disabled`.
     #[serde(default)]
     #[schema(value_type = String, example = "disabled")]
-    pub srp_mode: SrpMode,
+    pub opaque_mode: OpaqueMode,
     #[serde(default)]
-    #[schema(value_type = String, example = "rfc5054_4096")]
-    pub srp_group: SrpGroup,
+    #[schema(value_type = String, example = "ristretto255_sha512")]
+    pub opaque_suite: OpaqueSuite,
     #[serde(default)]
     #[schema(value_type = String, example = "argon2id")]
-    pub srp_kdf: SrpKdf,
+    pub opaque_ksf: OpaqueKsf,
 }
 
 /// Input for setting tenant-level overrides (partial).
@@ -298,12 +283,12 @@ pub fn system_defaults() -> SetOrgSettings {
         max_cert_validity_days: 730,
         // Notification
         admin_notifications_enabled: true,
-        // SRP — off by default. Turning it on is a deliberate operator
+        // OPAQUE — off by default. Turning it on is a deliberate operator
         // decision, and defaulting it on would change the login wire protocol
         // for every existing deployment on upgrade.
-        srp_mode: SrpMode::Disabled,
-        srp_group: SrpGroup::Rfc5054_4096,
-        srp_kdf: SrpKdf::Argon2id,
+        opaque_mode: OpaqueMode::Disabled,
+        opaque_suite: OpaqueSuite::Ristretto255Sha512,
+        opaque_ksf: OpaqueKsf::Argon2id,
     }
 }
 
@@ -452,10 +437,14 @@ pub fn effective_settings(
                 .admin_notifications_enabled
                 .unwrap_or(org.notification.admin_notifications_enabled),
         },
-        srp: SrpPolicy {
-            srp_mode: tenant_override.srp_mode.unwrap_or(org.srp.srp_mode),
-            srp_group: tenant_override.srp_group.unwrap_or(org.srp.srp_group),
-            srp_kdf: tenant_override.srp_kdf.unwrap_or(org.srp.srp_kdf),
+        opaque: OpaquePolicy {
+            opaque_mode: tenant_override
+                .opaque_mode
+                .unwrap_or(org.opaque.opaque_mode),
+            opaque_suite: tenant_override
+                .opaque_suite
+                .unwrap_or(org.opaque.opaque_suite),
+            opaque_ksf: tenant_override.opaque_ksf.unwrap_or(org.opaque.opaque_ksf),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -629,34 +618,34 @@ pub fn validate_tenant_override(
         "admin_notifications_enabled"
     );
 
-    // --- SRP: tighten-only ---
+    // --- OPAQUE: tighten-only ---
     //
-    // `SrpMode` derives `Ord` as Disabled < Optional < Required, which is
-    // exactly the restrictiveness order, so this is a plain comparison. Group
-    // strength is its bit width. KDF strength is ranked by resistance to
-    // offline attack on a leaked verifier.
-    if let Some(mode) = overrides.srp_mode
-        && mode < org.srp.srp_mode
+    // `OpaqueMode` derives `Ord` as Disabled < Optional < Required, which is
+    // exactly the restrictiveness order, so this is a plain comparison. Suite
+    // and KSF strength are ranked explicitly rather than by declaration order,
+    // so that adding a variant forces a decision about where it sits.
+    if let Some(mode) = overrides.opaque_mode
+        && mode < org.opaque.opaque_mode
     {
         violations.push(format!(
-            "srp_mode: tenant value {} is less restrictive than org baseline {}",
-            mode, org.srp.srp_mode,
+            "opaque_mode: tenant value {} is less restrictive than org baseline {}",
+            mode, org.opaque.opaque_mode,
         ));
     }
-    if let Some(group) = overrides.srp_group
-        && group.bits() < org.srp.srp_group.bits()
+    if let Some(suite) = overrides.opaque_suite
+        && !opaque_suite_is_at_least(suite, org.opaque.opaque_suite)
     {
         violations.push(format!(
-            "srp_group: tenant value {} is weaker than org baseline {}",
-            group, org.srp.srp_group,
+            "opaque_suite: tenant value {} is weaker than org baseline {}",
+            suite, org.opaque.opaque_suite,
         ));
     }
-    if let Some(kdf) = overrides.srp_kdf
-        && !srp_kdf_is_at_least(kdf, org.srp.srp_kdf)
+    if let Some(ksf) = overrides.opaque_ksf
+        && !opaque_ksf_is_at_least(ksf, org.opaque.opaque_ksf)
     {
         violations.push(format!(
-            "srp_kdf: tenant value {} is weaker than org baseline {}",
-            kdf, org.srp.srp_kdf,
+            "opaque_ksf: tenant value {} is weaker than org baseline {}",
+            ksf, org.opaque.opaque_ksf,
         ));
     }
 
@@ -828,9 +817,17 @@ pub fn diff_against_org(
             org.notification.admin_notifications_enabled,
             tenant.notification.admin_notifications_enabled
         ),
-        srp_mode: diff!(srp_mode, org.srp.srp_mode, tenant.srp.srp_mode),
-        srp_group: diff!(srp_group, org.srp.srp_group, tenant.srp.srp_group),
-        srp_kdf: diff!(srp_kdf, org.srp.srp_kdf, tenant.srp.srp_kdf),
+        opaque_mode: diff!(
+            opaque_mode,
+            org.opaque.opaque_mode,
+            tenant.opaque.opaque_mode
+        ),
+        opaque_suite: diff!(
+            opaque_suite,
+            org.opaque.opaque_suite,
+            tenant.opaque.opaque_suite
+        ),
+        opaque_ksf: diff!(opaque_ksf, org.opaque.opaque_ksf, tenant.opaque.opaque_ksf),
     }
 }
 
@@ -875,10 +872,10 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         notification: NotificationPolicy {
             admin_notifications_enabled: input.admin_notifications_enabled,
         },
-        srp: SrpPolicy {
-            srp_mode: input.srp_mode,
-            srp_group: input.srp_group,
-            srp_kdf: input.srp_kdf,
+        opaque: OpaquePolicy {
+            opaque_mode: input.opaque_mode,
+            opaque_suite: input.opaque_suite,
+            opaque_ksf: input.opaque_ksf,
         },
         created_at: now,
         updated_at: now,
@@ -916,90 +913,89 @@ mod tests {
         assert!(d.max_cert_validity_days >= d.default_cert_validity_days);
     }
 
-    // --- SRP policy ---
+    // --- OPAQUE policy ---
 
     #[test]
-    fn srp_defaults_to_disabled_so_an_upgrade_changes_no_wire_protocol() {
+    fn opaque_defaults_to_disabled_so_an_upgrade_changes_no_wire_protocol() {
         let org = org_settings();
-        assert_eq!(org.srp.srp_mode, SrpMode::Disabled);
-        assert_eq!(org.srp.srp_group, SrpGroup::Rfc5054_4096);
-        assert_eq!(org.srp.srp_kdf, SrpKdf::Argon2id);
+        assert_eq!(org.opaque.opaque_mode, OpaqueMode::Disabled);
+        assert_eq!(org.opaque.opaque_suite, OpaqueSuite::Ristretto255Sha512);
+        assert_eq!(org.opaque.opaque_ksf, OpaqueKsf::Argon2id);
     }
 
     #[test]
-    fn a_tenant_may_tighten_srp_mode_but_never_relax_it() {
+    fn a_tenant_may_tighten_opaque_mode_but_never_relax_it() {
         let mut org = org_settings();
-        org.srp.srp_mode = SrpMode::Optional;
+        org.opaque.opaque_mode = OpaqueMode::Optional;
 
         let tighten = TenantSettingsOverride {
-            srp_mode: Some(SrpMode::Required),
+            opaque_mode: Some(OpaqueMode::Required),
             ..Default::default()
         };
         assert!(validate_tenant_override(&org, &tighten).is_ok());
 
         let relax = TenantSettingsOverride {
-            srp_mode: Some(SrpMode::Disabled),
+            opaque_mode: Some(OpaqueMode::Disabled),
             ..Default::default()
         };
         let err = validate_tenant_override(&org, &relax).unwrap_err();
-        assert!(err.to_string().contains("srp_mode"), "{err}");
+        assert!(err.to_string().contains("opaque_mode"), "{err}");
     }
 
     #[test]
-    fn a_tenant_may_not_move_to_a_narrower_srp_group() {
-        let mut org = org_settings();
-        org.srp.srp_group = SrpGroup::Rfc5054_3072;
-
-        let wider = TenantSettingsOverride {
-            srp_group: Some(SrpGroup::Rfc5054_4096),
+    fn a_tenant_may_restate_the_org_suite_but_not_weaken_it() {
+        // One suite ships today, so the reachable assertion is that an equal
+        // value passes. The check itself is kept live (rather than deleted
+        // until a second suite exists) so that adding `P256Sha256` is an
+        // additive change to a lattice that already works.
+        let org = org_settings();
+        let same = TenantSettingsOverride {
+            opaque_suite: Some(OpaqueSuite::Ristretto255Sha512),
             ..Default::default()
         };
-        assert!(validate_tenant_override(&org, &wider).is_ok());
-
-        let narrower = TenantSettingsOverride {
-            srp_group: Some(SrpGroup::Rfc5054_2048),
-            ..Default::default()
-        };
-        assert!(validate_tenant_override(&org, &narrower).is_err());
+        assert!(validate_tenant_override(&org, &same).is_ok());
     }
 
     #[test]
-    fn a_tenant_may_not_downgrade_argon2id_to_pbkdf2() {
-        // Doing so would weaken every verifier enrolled after the change,
-        // which is exactly what the tighten-only rule exists to prevent.
+    fn a_tenant_may_not_downgrade_argon2id_to_scrypt() {
+        // Doing so would weaken every record enrolled after the change, which
+        // is exactly what the tighten-only rule exists to prevent.
         let org = org_settings(); // argon2id baseline
         let downgrade = TenantSettingsOverride {
-            srp_kdf: Some(SrpKdf::Pbkdf2Sha256),
+            opaque_ksf: Some(OpaqueKsf::Scrypt),
             ..Default::default()
         };
-        assert!(validate_tenant_override(&org, &downgrade).is_err());
+        let err = validate_tenant_override(&org, &downgrade).unwrap_err();
+        assert!(err.to_string().contains("opaque_ksf"), "{err}");
 
         let mut weak_org = org_settings();
-        weak_org.srp.srp_kdf = SrpKdf::Pbkdf2Sha256;
+        weak_org.opaque.opaque_ksf = OpaqueKsf::Scrypt;
         let upgrade = TenantSettingsOverride {
-            srp_kdf: Some(SrpKdf::Argon2id),
+            opaque_ksf: Some(OpaqueKsf::Argon2id),
             ..Default::default()
         };
         assert!(validate_tenant_override(&weak_org, &upgrade).is_ok());
     }
 
     #[test]
-    fn srp_overrides_flow_through_the_merge_and_back_out_of_the_diff() {
+    fn opaque_overrides_flow_through_the_merge_and_back_out_of_the_diff() {
         let mut org = org_settings();
-        org.srp.srp_mode = SrpMode::Optional;
+        org.opaque.opaque_mode = OpaqueMode::Optional;
 
         let overrides = TenantSettingsOverride {
-            srp_mode: Some(SrpMode::Required),
+            opaque_mode: Some(OpaqueMode::Required),
             ..Default::default()
         };
         let merged = effective_settings(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
-        assert_eq!(merged.srp.srp_mode, SrpMode::Required);
+        assert_eq!(merged.opaque.opaque_mode, OpaqueMode::Required);
         // Unset fields still inherit.
-        assert_eq!(merged.srp.srp_group, org.srp.srp_group);
+        assert_eq!(merged.opaque.opaque_suite, org.opaque.opaque_suite);
+        assert_eq!(merged.opaque.opaque_ksf, org.opaque.opaque_ksf);
 
         let round_tripped = diff_against_org(&org, &merged);
-        assert_eq!(round_tripped.srp_mode, Some(SrpMode::Required));
-        assert_eq!(round_tripped.srp_group, None);
+        assert_eq!(round_tripped.opaque_mode, Some(OpaqueMode::Required));
+        assert_eq!(round_tripped.opaque_suite, None);
+        assert_eq!(round_tripped.opaque_ksf, None);
     }
 
     // --- validate_org_settings ---

@@ -1,0 +1,29 @@
+[package]
+name = "axiam-opaque-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI for AXIAM's OPAQUE (RFC 9807) client, bound by the Python, Java, Kotlin, C#, PHP, Swift, C and C++ SDKs"
+publish = false
+
+[lib]
+# Deliberately NOT named `axiam_opaque`: that is the crate this one wraps, and
+# a matching lib name makes both an `--extern axiam_opaque` candidate. The
+# exported C symbols are `axiam_opaque_*` regardless of the library filename,
+# so bindings dlopen `libaxiam_opaque_ffi.{so,dylib,dll}` and find them.
+name = "axiam_opaque_ffi"
+# `cdylib` for the SDKs that dlopen or link dynamically (PHP's ext-ffi, C#'s
+# P/Invoke, Python's cffi, Java's FFM); `staticlib` for the C and C++ SDKs,
+# which prefer to vendor. `rlib` so the header-generation test can link it.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+axiam-opaque = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+getrandom = "0.4.3"

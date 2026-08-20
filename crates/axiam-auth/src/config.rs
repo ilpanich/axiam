@@ -64,20 +64,42 @@ pub struct AuthConfig {
     /// config files). Federation is optional — absence is warned, not fatal.
     #[serde(skip)]
     pub federation_encryption_key: Option<[u8; 32]>,
-    /// 256-bit AES-GCM key that seals the SRP exchange's server state between
-    /// `/auth/srp/challenge` and `/auth/srp/verify`.
+    /// 256-bit AES-GCM key that seals an OPAQUE exchange's server state
+    /// between its two messages, on both the login and the registration path.
     ///
-    /// `None` means the SRP endpoints answer `503`, whatever the org or tenant
-    /// policy says. That is deliberate: silently falling back to password login
-    /// when the key is missing would turn a misconfiguration into an
-    /// undetectable downgrade of a security control an operator believes is on.
+    /// `None` means the OPAQUE endpoints answer `503`, whatever the org or
+    /// tenant policy says. That is deliberate: silently falling back to
+    /// password login when the key is missing would turn a misconfiguration
+    /// into an undetectable downgrade of a security control an operator
+    /// believes is on.
     ///
     /// Deliberately its own key rather than a reuse of
     /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
-    /// sharing one would couple an SRP outage to an unrelated TOTP rotation.
-    /// Set from `AXIAM__AUTH__SRP_SESSION_KEY` (not from config files).
+    /// sharing one would couple an OPAQUE outage to an unrelated TOTP
+    /// rotation. Set from `AXIAM__AUTH__OPAQUE_SESSION_KEY` (not from config
+    /// files).
+    ///
+    /// Rotating this is cheap — it invalidates exchanges in flight and nothing
+    /// else. Contrast [`Self::opaque_setup_key`], which is the expensive one.
     #[serde(skip)]
-    pub srp_session_key: Option<[u8; 32]>,
+    pub opaque_session_key: Option<[u8; 32]>,
+    /// 256-bit AES-GCM key that encrypts each tenant's OPAQUE server key
+    /// material — the OPRF seed and the long-term AKE key pair — at rest.
+    ///
+    /// `None` means the OPAQUE endpoints answer `503`, for the same reason as
+    /// above.
+    ///
+    /// This is a **separate key from [`Self::opaque_session_key`] on purpose**,
+    /// and the reason is what rotating each one costs. The session key seals
+    /// 120 seconds of in-flight state and can be rotated on any schedule.
+    /// This key protects data at rest: rotating it means re-encrypting every
+    /// `opaque_server_setup` row, and **losing** it means every registration
+    /// record in every tenant becomes unopenable and the whole estate needs a
+    /// password reset. Sharing one key would put the cheap rotation and the
+    /// catastrophic one on the same schedule, which is how an operator ends up
+    /// doing neither. Set from `AXIAM__AUTH__OPAQUE_SETUP_KEY`.
+    #[serde(skip)]
+    pub opaque_setup_key: Option<[u8; 32]>,
     /// When `true`, access tokens decoded without an `aud` claim are treated as
     /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
     /// while pre-Phase-4 tokens are still circulating. Default: `true`.
@@ -247,7 +269,8 @@ impl Default for AuthConfig {
             pepper_previous: None,
             min_password_length: 12,
             mfa_encryption_key: None,
-            srp_session_key: None,
+            opaque_session_key: None,
+            opaque_setup_key: None,
             federation_encryption_key: None,
             allow_missing_aud_as_user: true,
             cookie_secure: true,

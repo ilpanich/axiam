@@ -442,10 +442,11 @@ CLAMP_SENSITIVE_SCENARIOS = {
     "authz_batch_rest", "authz_batch_grpc",
     "oauth2_client_credentials", "token_introspection",
     "oauth2_password_login",
-    # srp_challenge -> /api/v1/auth/srp/challenge, which shares the
+    # opaque_* -> /api/v1/auth/opaque/*, which share the
     # `login_per_min` family and the same wrapped-endpoint middleware as
     # /api/v1/auth/login. Listed for the same reason its sibling is.
-    "srp_challenge",
+    "opaque_login_start",
+    "opaque_register_start",
 }
 
 

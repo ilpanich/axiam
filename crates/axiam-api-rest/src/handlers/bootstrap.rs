@@ -27,9 +27,9 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
 use axiam_core::id::new_id;
+use axiam_core::models::opaque::{OpaqueKsf, OpaqueKsfParams, OpaqueMode, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::settings::SrpPolicy;
-use axiam_core::models::srp::{SrpEnrollment, SrpGroup, SrpKdf, SrpKdfParams, SrpMode};
+use axiam_core::models::settings::OpaquePolicy;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{seed_default_roles, seed_permissions};
@@ -75,33 +75,51 @@ pub struct BootstrapRequest {
     /// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise.
     #[serde(default)]
     pub setup_token: Option<String>,
-    /// Secure Remote Password policy to seed as the new organization's
-    /// baseline. Omitted means `disabled`, which is what an operator who has
-    /// not thought about SRP should get.
+    /// OPAQUE policy to seed as the new organization's baseline. Omitted means
+    /// `disabled`, which is what an operator who has not thought about OPAQUE
+    /// should get.
     ///
     /// Settable here — rather than only through `PUT /api/v1/settings/org`
     /// afterwards — because the alternative is a window in which the only
-    /// account on the deployment exists without a verifier. Turning
+    /// account on the deployment exists without a registration record. Turning
     /// `required` on later would then lock the sole administrator out of their
     /// own system, with no second admin to undo it.
+    ///
+    /// # Why bootstrap carries no client-built record
+    ///
+    /// Every other enrolment path takes an `opaque` object holding a record the
+    /// client built, because the server must never see the plaintext. Bootstrap
+    /// is the one place where that is not true and never was: it takes
+    /// `password` and hashes it with Argon2id server-side, so the plaintext is
+    /// in the request body by construction. The SRP version still asked the
+    /// client for a verifier, but that bought nothing — the password was in the
+    /// same request.
+    ///
+    /// So bootstrap runs the client half of the registration itself, from the
+    /// password it already holds, and stores the resulting record. The record
+    /// is indistinguishable from a client-built one and the admin can log in
+    /// through `/auth/opaque/*` immediately. It also keeps bootstrap a single
+    /// call: an OPAQUE registration needs a server round trip for the OPRF, and
+    /// a client-built record would have required either a second endpoint that
+    /// creates the organization before bootstrap does, or a three-call
+    /// first-run flow.
+    ///
+    /// An operator who wants a record the server provably never had material
+    /// for changes the admin password once after bootstrap, through
+    /// `/auth/password/change`, which is client-built like every other path.
     #[serde(default)]
     #[schema(value_type = Option<String>, example = "disabled")]
-    pub srp_mode: Option<SrpMode>,
-    /// RFC 5054 group for the seeded baseline. Defaults to `rfc5054_4096`.
+    pub opaque_mode: Option<OpaqueMode>,
+    /// RFC 9807 ciphersuite for the seeded baseline. Defaults to
+    /// `ristretto255_sha512`.
     #[serde(default)]
-    #[schema(value_type = Option<String>, example = "rfc5054_4096")]
-    pub srp_group: Option<SrpGroup>,
-    /// Client KDF for the seeded baseline. Defaults to `argon2id`.
+    #[schema(value_type = Option<String>, example = "ristretto255_sha512")]
+    pub opaque_suite: Option<OpaqueSuite>,
+    /// Client key-stretching function for the seeded baseline. Defaults to
+    /// `argon2id`.
     #[serde(default)]
     #[schema(value_type = Option<String>, example = "argon2id")]
-    pub srp_kdf: Option<SrpKdf>,
-    /// The admin's SRP verifier, computed client-side over `username`.
-    ///
-    /// Mandatory when `srp_mode` is `required`: without it bootstrap would
-    /// produce a deployment whose only administrator cannot authenticate by
-    /// any route, and which no one has the access to repair.
-    #[serde(default)]
-    pub srp: Option<SrpEnrollment>,
+    pub opaque_ksf: Option<OpaqueKsf>,
 }
 
 /// Convert an arbitrary display name into a URL-safe slug: ASCII alphanumerics
@@ -340,49 +358,25 @@ pub async fn bootstrap<C: Connection + Clone>(
     // completely untouched. Validating after the organization exists would
     // turn a bad request into a half-initialised system that the next
     // bootstrap attempt then collides with.
-    let srp_policy = SrpPolicy {
-        srp_mode: req.srp_mode.unwrap_or_default(),
-        srp_group: req.srp_group.unwrap_or_default(),
-        srp_kdf: req.srp_kdf.unwrap_or_default(),
+    let opaque_policy = OpaquePolicy {
+        opaque_mode: req.opaque_mode.unwrap_or_default(),
+        opaque_suite: req.opaque_suite.unwrap_or_default(),
+        opaque_ksf: req.opaque_ksf.unwrap_or_default(),
     };
 
     // Refuse the one combination that produces an unrecoverable deployment:
-    // SRP required, and the sole administrator has no verifier. There is no
-    // second admin to fix it and no password path to fall back to.
-    let srp_enrollment = match (srp_policy.srp_mode, req.srp.as_ref()) {
-        (SrpMode::Required, None) => {
-            return Err(AxiamApiError(AxiamError::Validation {
-                message: "srp_mode=required requires an `srp` verifier for the \
-                          bootstrap admin: without one this deployment would have \
-                          no way to authenticate its only administrator"
-                    .into(),
-            }));
-        }
-        (SrpMode::Disabled, Some(_)) => {
-            return Err(AxiamApiError(AxiamError::Validation {
-                message: "an `srp` verifier was supplied but srp_mode is disabled".into(),
-            }));
-        }
-        (_, enrollment) => enrollment,
-    };
-
-    // Parse before anything is written, so a malformed verifier is a 400 on an
-    // untouched deployment rather than a half-bootstrapped one.
-    let parsed_srp = match srp_enrollment {
-        Some(enrollment) => {
-            let (group, params, salt, verifier) = enrollment.parse()?;
-            if group.bits() < srp_policy.srp_group.bits() {
-                return Err(AxiamApiError(AxiamError::Validation {
-                    message: format!(
-                        "srp group {group} is weaker than the seeded baseline {}",
-                        srp_policy.srp_group
-                    ),
-                }));
-            }
-            Some((group, params, salt, verifier))
-        }
-        None => None,
-    };
+    // OPAQUE required, and no engine configured to enrol the sole
+    // administrator with. There is no second admin to fix it and no password
+    // path to fall back to.
+    if opaque_policy.opaque_mode != OpaqueMode::Disabled && state.opaque_server.is_none() {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: "opaque_mode is set but AXIAM__AUTH__OPAQUE_SESSION_KEY and \
+                      AXIAM__AUTH__OPAQUE_SETUP_KEY are not configured: bootstrapping \
+                      this way would produce a deployment whose only administrator \
+                      cannot authenticate"
+                .into(),
+        }));
+    }
 
     let org = match state.org_repo.get_by_slug(&org_slug).await {
         Ok(o) => o,
@@ -413,17 +407,17 @@ pub async fn bootstrap<C: Connection + Clone>(
     };
     let tenant_id = tenant.id;
 
-    // 4b. Seed the organization's security baseline, including the SRP policy
-    // validated above. Written before the admin transaction so the verifier is
-    // stored under the policy it was checked against.
+    // 4b. Seed the organization's security baseline, including the OPAQUE
+    // policy validated above. Written before the admin transaction so the
+    // record is stored under the policy it was checked against.
     {
         use axiam_core::models::settings::system_defaults;
         use axiam_core::repository::SettingsRepository as _;
 
         let mut baseline = system_defaults();
-        baseline.srp_mode = srp_policy.srp_mode;
-        baseline.srp_group = srp_policy.srp_group;
-        baseline.srp_kdf = srp_policy.srp_kdf;
+        baseline.opaque_mode = opaque_policy.opaque_mode;
+        baseline.opaque_suite = opaque_policy.opaque_suite;
+        baseline.opaque_ksf = opaque_policy.opaque_ksf;
         state
             .settings_repo
             .set_org_settings(org.id, baseline)
@@ -461,11 +455,42 @@ pub async fn bootstrap<C: Connection + Clone>(
     // the first statement result is at .take(1). (See MEMORY.md)
     let user_id = new_id();
     let user_id_str = user_id.to_string();
-    // Captured before `req.username` is consumed by the query bindings below.
-    let username_for_srp = req.username.clone();
     let role_id_str = seed_result.super_admin_role_id.to_string();
     let tenant_id_str = tenant_id.to_string();
     let ph_id_str = new_id().to_string();
+
+    // 6b. Enrol the admin in OPAQUE, running both halves of the registration
+    // here. See `BootstrapRequest::opaque_mode` for why the server doing the
+    // client's half is sound at this one endpoint and nowhere else: bootstrap
+    // already receives the plaintext password, because it has to hash it.
+    let opaque_enrolment = match opaque_policy.opaque_mode {
+        OpaqueMode::Disabled => None,
+        OpaqueMode::Optional | OpaqueMode::Required => {
+            let opaque = crate::handlers::opaque::opaque_server(&state)?;
+            let setup = crate::handlers::opaque::server_setup(
+                &state,
+                tenant_id,
+                opaque_policy.opaque_suite,
+            )
+            .await?;
+            let ksf_params = OpaqueKsfParams::defaults_for(opaque_policy.opaque_ksf);
+
+            let (client_state, request) =
+                axiam_opaque::ClientRegistrationState::start(&req.password)
+                    .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+            let started = opaque
+                .register_start(&setup, ksf_params, &request)
+                .map_err(AxiamError::from)?;
+            let ksf = ksf_from(ksf_params)?;
+            let outcome = client_state
+                .finish(&req.password, &started.registration_response, &ksf)
+                .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+            let enrolled = opaque
+                .register_finish(&started.opaque_session, &outcome.record)
+                .map_err(AxiamError::from)?;
+            Some(enrolled)
+        }
+    };
 
     // Apply the server-configured password pepper (REQ-14 AC-1) — the same
     // pepper the user repository uses at login-time verification. Previously
@@ -505,24 +530,26 @@ pub async fn bootstrap<C: Connection + Clone>(
            tenant_id = $tenant_id, user_id = $user_id, password_hash = $password_hash"
             .to_string(),
     ];
-    // The verifier goes in the SAME transaction as the admin user, not after
-    // it. A failure between the two would leave an administrator with no
-    // verifier on a deployment seeded as `required` — precisely the
-    // unrecoverable state the validation above exists to prevent, reachable
-    // instead by a mid-write crash.
-    if parsed_srp.is_some() {
+    // The record goes in the SAME transaction as the admin user, not after it.
+    // A failure between the two would leave an administrator with no record on
+    // a deployment seeded as `required` — precisely the unrecoverable state the
+    // validation above exists to prevent, reachable instead by a mid-write
+    // crash.
+    if opaque_enrolment.is_some() {
         txn_stmts.push(
-            "CREATE type::record('srp_credential', $srp_id) SET \
+            "CREATE type::record('opaque_credential', $opaque_id) SET \
                tenant_id = $tenant_id, \
                user_id = $user_id, \
-               identity = $srp_identity, \
-               srp_group = $srp_group, \
-               kdf = $srp_kdf, \
-               kdf_memory_kib = $srp_memory_kib, \
-               kdf_iterations = $srp_iterations, \
-               kdf_parallelism = $srp_parallelism, \
-               salt = $srp_salt, \
-               verifier = $srp_verifier"
+               credential_identifier = $opaque_cred_id, \
+               suite = $opaque_suite, \
+               ksf = $opaque_ksf, \
+               ksf_memory_kib = $opaque_memory_kib, \
+               ksf_iterations = $opaque_iterations, \
+               ksf_parallelism = $opaque_parallelism, \
+               ksf_log_n = $opaque_log_n, \
+               ksf_r = $opaque_r, \
+               ksf_p = $opaque_p, \
+               record = $opaque_record"
                 .to_string(),
         );
     }
@@ -550,28 +577,36 @@ pub async fn bootstrap<C: Connection + Clone>(
     if let Some(token_hash) = consumed_token_hash {
         query = query.bind(("token_hash", token_hash));
     }
-    if let Some((group, params, salt, verifier)) = parsed_srp {
-        let (memory_kib, iterations, parallelism) = match params {
-            SrpKdfParams::Argon2id {
+    if let Some(enrolled) = opaque_enrolment {
+        let (memory_kib, iterations, parallelism, log_n, r, p) = match enrolled.ksf_params {
+            OpaqueKsfParams::Argon2id {
                 memory_kib,
                 iterations,
                 parallelism,
-            } => (Some(memory_kib), iterations, Some(parallelism)),
-            SrpKdfParams::Pbkdf2Sha256 { iterations } => (None, iterations, None),
+            } => (
+                Some(memory_kib),
+                Some(iterations),
+                Some(parallelism),
+                None,
+                None,
+                None,
+            ),
+            OpaqueKsfParams::Scrypt { log_n, r, p } => {
+                (None, None, None, Some(log_n), Some(r), Some(p))
+            }
         };
         query = query
-            .bind(("srp_id", new_id().to_string()))
-            // `username_for_srp`, captured before `req.username` is moved into
-            // the bindings above: the verifier is bound to the identity, and
-            // binding it to anything else produces one no login can satisfy.
-            .bind(("srp_identity", username_for_srp))
-            .bind(("srp_group", group.to_string()))
-            .bind(("srp_kdf", params.kdf().to_string()))
-            .bind(("srp_memory_kib", memory_kib))
-            .bind(("srp_iterations", iterations))
-            .bind(("srp_parallelism", parallelism))
-            .bind(("srp_salt", salt))
-            .bind(("srp_verifier", verifier));
+            .bind(("opaque_id", new_id().to_string()))
+            .bind(("opaque_cred_id", enrolled.credential_identifier))
+            .bind(("opaque_suite", enrolled.suite.to_string()))
+            .bind(("opaque_ksf", enrolled.ksf_params.ksf().to_string()))
+            .bind(("opaque_memory_kib", memory_kib))
+            .bind(("opaque_iterations", iterations))
+            .bind(("opaque_parallelism", parallelism))
+            .bind(("opaque_log_n", log_n))
+            .bind(("opaque_r", r))
+            .bind(("opaque_p", p))
+            .bind(("opaque_record", enrolled.record));
     }
 
     let result = query
@@ -610,4 +645,20 @@ pub async fn bootstrap<C: Connection + Clone>(
         tenant_slug,
         user_id,
     }))
+}
+
+/// Translate stored KSF parameters into the client-side stretching function.
+///
+/// Only bootstrap needs this, because it is the only place the server runs the
+/// client half. Every other path receives a record a real client already built.
+fn ksf_from(params: OpaqueKsfParams) -> Result<axiam_opaque::AxiamKsf, AxiamApiError> {
+    let ksf = match params {
+        OpaqueKsfParams::Argon2id {
+            memory_kib,
+            iterations,
+            parallelism,
+        } => axiam_opaque::AxiamKsf::argon2id(memory_kib, iterations, parallelism),
+        OpaqueKsfParams::Scrypt { log_n, r, p } => axiam_opaque::AxiamKsf::scrypt(log_n, r, p),
+    };
+    ksf.map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))
 }

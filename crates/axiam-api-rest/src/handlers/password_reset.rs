@@ -46,14 +46,14 @@ pub struct ConfirmResetBody {
     pub tenant_id: Uuid,
     pub token: String,
     pub new_password: String,
-    /// SRP verifier for `new_password`, computed client-side.
+    /// OPAQUE registration record for `new_password`, built client-side.
     ///
-    /// Without this, reset would be the hole in SRP coverage: a tenant could
-    /// run `srp_mode = required`, and every "forgot password" would still put a
+    /// Without this, reset would be the hole in OPAQUE coverage: a tenant could
+    /// run `opaque_mode = required`, and every "forgot password" would still put a
     /// plaintext password on the wire and leave the account with a verifier for
     /// a password it no longer has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub srp: Option<axiam_core::models::srp::SrpEnrollment>,
+    pub opaque: Option<axiam_core::models::opaque::OpaqueEnrollment>,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ pub async fn confirm_reset<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    use axiam_core::repository::{SettingsRepository, TenantRepository, UserRepository as _};
+    use axiam_core::repository::{SettingsRepository, TenantRepository};
 
     let req = body.into_inner();
 
@@ -263,11 +263,14 @@ pub async fn confirm_reset<C: Connection + Clone>(
 
     // Reject a malformed verifier before the token is consumed. `confirm_reset`
     // burns the single-use token, so failing after it would leave the user with
-    // a changed password, no verifier, and no way to retry without requesting a
+    // a changed password, no record, and no way to retry without requesting a
     // second reset email.
-    if let Some(enrollment) = req.srp.as_ref() {
-        enrollment.parse()?;
-    }
+    let enrolled = crate::handlers::opaque_enrollment::validate_enrollment(
+        &state,
+        &settings.opaque,
+        req.tenant_id,
+        req.opaque.as_ref(),
+    )?;
 
     // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
     let user_id = state
@@ -283,19 +286,8 @@ pub async fn confirm_reset<C: Connection + Clone>(
         )
         .await?;
 
-    // Look the user up rather than trusting the request: the canonical
-    // identity bound into the verifier must be the stored username, and the
-    // reset body never carries one.
-    let record = state.user_repo.get_by_id(req.tenant_id, user_id).await?;
-    crate::handlers::srp_enrollment::record_verifier(
-        &state,
-        &settings.srp,
-        req.tenant_id,
-        user_id,
-        &record.username,
-        req.srp.as_ref(),
-    )
-    .await?;
+    crate::handlers::opaque_enrollment::store_credential(&state, req.tenant_id, user_id, enrolled)
+        .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "reset": true })))
 }
@@ -309,35 +301,42 @@ pub struct ResetContextQuery {
     pub token: String,
 }
 
-/// What a valid reset-token holder needs in order to compute an SRP verifier.
+/// What a valid reset-token holder needs in order to build an OPAQUE record.
+///
+/// The SRP version of this also returned the account's `identity`, because
+/// SRP derived its private key over `username ":" password` and the reset page
+/// had no other way to learn the username. OPAQUE binds to a server-chosen
+/// credential identifier that the client never handles, so the username is not
+/// needed and is no longer disclosed. The endpoint went from "tell an
+/// unauthenticated caller who this account is" to "tell them whether this
+/// tenant uses OPAQUE", which is strictly less.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ResetContextResponse {
-    /// The canonical identity the verifier must be bound to — the account's
-    /// username, which the reset page has no other way to learn.
-    pub identity: String,
-    /// The tenant's effective SRP policy, so the client knows which group and
-    /// KDF to use. Absent when the tenant does not use SRP.
+    /// The tenant's effective OPAQUE policy, so the client knows whether to
+    /// run an enrolment at all. Absent when the tenant does not use OPAQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub srp: Option<axiam_core::models::settings::SrpPolicy>,
+    pub opaque: Option<axiam_core::models::settings::OpaquePolicy>,
 }
 
 /// `GET /api/v1/auth/reset/context`
 ///
-/// Password reset would otherwise be a permanent hole in SRP coverage. The
-/// reset page is unauthenticated: it holds a token and a tenant id and knows
-/// neither the account's username — which the verifier is bound to — nor the
-/// tenant's group and KDF. Without those it cannot compute a verifier, so every
-/// "forgot password" would leave the account with a verifier for a password it
-/// no longer has, and under `srp_mode: required` would leave it unable to log
-/// in at all.
+/// Password reset would otherwise be a permanent hole in OPAQUE coverage. The
+/// reset page is unauthenticated and holds only a token and a tenant id, so it
+/// cannot tell whether the tenant expects an enrolment. Without that, every
+/// "forgot password" would leave the account with a record for a password it
+/// no longer has, and under `opaque_mode: required` would leave it unable to
+/// log in at all.
 ///
-/// # Why disclosing the username here is not a leak
+/// # What this no longer discloses
 ///
-/// The caller has presented an unconsumed, unexpired reset token, which was
-/// delivered to the account's own registered email address. They are the
-/// account holder, and the username is not a secret from the account holder.
-/// An attacker without a valid token gets `404` and learns nothing — the same
-/// answer for a wrong token, an expired token, and a token for a tenant that
+/// The SRP version returned the account's username, because that string was
+/// inside the client-side key derivation and the reset page had no other way
+/// to learn it. That was defensible — the caller holds a token delivered to
+/// the account's own email — but it is better not to need the argument.
+/// OPAQUE does not bind to the username, so it is not returned.
+///
+/// An attacker without a valid token still gets `404` and learns nothing — the
+/// same answer for a wrong token, an expired token, and a token for a tenant that
 /// does not exist.
 ///
 /// The token is **read, not consumed**: this is a lookup, and burning the
@@ -349,7 +348,7 @@ pub struct ResetContextResponse {
     params(("tenant_id" = Uuid, Query, description = "Tenant the reset link was issued for"),
            ("token" = String, Query, description = "Raw reset token from the emailed link")),
     responses(
-        (status = 200, description = "Identity and SRP policy for this reset", body = ResetContextResponse),
+        (status = 200, description = "OPAQUE policy for this reset", body = ResetContextResponse),
         (status = 404, description = "Unknown, expired or already-consumed token"),
     )
 )]
@@ -383,7 +382,11 @@ pub async fn reset_context<C: Connection + Clone>(
         .await
         .map_err(|_| not_found())?;
 
-    let user = state
+    // The token's user must still exist. Nothing from the row is returned any
+    // more — the SRP version needed the username from it — but a token
+    // pointing at a deleted account must answer `404` like any other invalid
+    // token rather than reporting the tenant's policy.
+    state
         .user_repo
         .get_by_id(q.tenant_id, token.user_id)
         .await
@@ -395,18 +398,15 @@ pub async fn reset_context<C: Connection + Clone>(
         .await
         .map_err(|_| not_found())?;
 
-    let srp = state
+    let opaque = state
         .settings_repo
         .get_effective_settings(tenant.organization_id, q.tenant_id)
         .await
         .ok()
-        .map(|s| s.srp)
-        .filter(|p| p.srp_mode != axiam_core::models::srp::SrpMode::Disabled);
+        .map(|s| s.opaque)
+        .filter(|p| p.opaque_mode != axiam_core::models::opaque::OpaqueMode::Disabled);
 
-    Ok(HttpResponse::Ok().json(ResetContextResponse {
-        identity: user.username,
-        srp,
-    }))
+    Ok(HttpResponse::Ok().json(ResetContextResponse { opaque }))
 }
 
 // ---------------------------------------------------------------------------

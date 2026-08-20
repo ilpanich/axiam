@@ -275,13 +275,20 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
 pub const PUBLIC_PATHS: &[&str] = &[
     // Authentication flows (under /api/v1/auth scope)
     "/api/v1/auth/login",
-    // SRP is a sibling of /login and is unauthenticated for the same reason:
-    // it is how a caller *becomes* authenticated. Both halves of the exchange
-    // must be listed — the challenge because the caller has no credential yet,
-    // and the verify because the credential it presents is `M1`, which this
-    // middleware knows nothing about.
-    "/api/v1/auth/srp/challenge",
-    "/api/v1/auth/srp/verify",
+    // OPAQUE login is a sibling of /login and is unauthenticated for the same
+    // reason: it is how a caller *becomes* authenticated. Both halves of the
+    // exchange must be listed — the start because the caller has no credential
+    // yet, and the finish because the credential it presents is a `KE3`, which
+    // this middleware knows nothing about.
+    //
+    // `register/start` is public by necessity rather than by analogy: it is
+    // called while creating a user who does not exist yet, so there is nobody
+    // to authenticate as. It is safe because the server mints the credential
+    // identifier itself, so the OPRF evaluations an anonymous caller can
+    // obtain are under identifiers they neither chose nor can predict.
+    "/api/v1/auth/opaque/register/start",
+    "/api/v1/auth/opaque/login/start",
+    "/api/v1/auth/opaque/login/finish",
     // Token-gated: the caller presents a reset token, which is the credential.
     "/api/v1/auth/reset/context",
     // Refresh authenticates via its own opaque `axiam_refresh` cookie, not the

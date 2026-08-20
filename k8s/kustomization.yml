@@ -16,6 +16,7 @@ resources:
   - frontend/deployment.yml
   - frontend/service.yml
   - ingress.yml
+  - vault/statefulset.yml
   - surrealdb/statefulset.yml
   - surrealdb/service.yml
   - surrealdb/secret.yml

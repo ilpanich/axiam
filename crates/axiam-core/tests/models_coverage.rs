@@ -232,14 +232,14 @@ fn many_less_restrictive_overrides_are_rejected() {
         hibp_check_enabled: Some(false),
         email_verification_required: Some(false),
         admin_notifications_enabled: Some(false),
-        // SRP: leave inherited. This case asserts that every violation is
-        // reported together, and the org baseline here has SRP disabled — the
-        // weakest value there is, so no override of it can violate the
-        // tighten-only rule. The SRP rules have their own cases in
+        // OPAQUE: leave inherited. This case asserts that every violation is
+        // reported together, and the org baseline here has OPAQUE disabled —
+        // the weakest value there is, so no override of it can violate the
+        // tighten-only rule. The OPAQUE rules have their own cases in
         // `models::settings::tests`.
-        srp_mode: None,
-        srp_group: None,
-        srp_kdf: None,
+        opaque_mode: None,
+        opaque_suite: None,
+        opaque_ksf: None,
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

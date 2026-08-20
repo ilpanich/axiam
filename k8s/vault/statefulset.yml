@@ -1,0 +1,161 @@
+# Single-node Vault with file storage.
+#
+# A StatefulSet rather than a Deployment because Vault owns durable state: the
+# encrypted secret store. A Deployment's rolling update could run two pods
+# against the same PVC, which the file backend does not tolerate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: axiam
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: axiam
+data:
+  vault.hcl: |
+    ui = false
+
+    storage "file" {
+      path = "/vault/file"
+    }
+
+    listener "tcp" {
+      address       = "0.0.0.0:8200"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file  = "/vault/tls/tls.key"
+      # TLS is not optional here. The token AXIAM presents on every fetch is a
+      # bearer credential for the OPAQUE setup key; over plaintext, anything on
+      # the pod network can take it.
+      tls_min_version = "tls13"
+    }
+
+    api_addr     = "https://vault.axiam.svc.cluster.local:8200"
+    cluster_addr = "https://vault.axiam.svc.cluster.local:8201"
+
+    # Auto-unseal. UNCOMMENT AND CONFIGURE ONE OF THESE FOR PRODUCTION.
+    #
+    # Without it, every Vault restart — a node drain, an upgrade, an OOM —
+    # leaves Vault sealed and AXIAM unable to start, until a human runs
+    # `vault operator unseal` three times with keys held by three people. That
+    # is a real outage waiting for a 3am page, and it is the single most
+    # important thing to fix before calling this production.
+    #
+    # seal "awskms" {
+    #   region     = "eu-west-1"
+    #   kms_key_id = "arn:aws:kms:eu-west-1:...:key/..."
+    # }
+    #
+    # seal "gcpckms" {
+    #   project    = "my-project"
+    #   region     = "europe-west1"
+    #   key_ring   = "vault"
+    #   crypto_key = "vault-unseal"
+    # }
+    #
+    # seal "transit" {
+    #   address    = "https://vault-central.example:8200"
+    #   key_name   = "autounseal"
+    #   mount_path = "transit/"
+    # }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: axiam
+spec:
+  # ClusterIP: Vault is reached by AXIAM inside the cluster and by an operator
+  # through `kubectl port-forward`. It is never published.
+  type: ClusterIP
+  selector:
+    app: vault
+  ports:
+    - name: https
+      port: 8200
+      targetPort: 8200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: axiam
+spec:
+  serviceName: vault
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      serviceAccountName: vault
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        fsGroup: 1000
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.20
+          args: ["server", "-config=/vault/config/vault.hcl"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # Vault locks its memory so secrets are never swapped to disk.
+              add: ["IPC_LOCK"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: VAULT_ADDR
+              value: "https://127.0.0.1:8200"
+            - name: VAULT_API_ADDR
+              value: "https://vault.axiam.svc.cluster.local:8200"
+            - name: SKIP_CHOWN
+              value: "true"
+          ports:
+            - name: https
+              containerPort: 8200
+          volumeMounts:
+            - name: config
+              mountPath: /vault/config
+            - name: tls
+              mountPath: /vault/tls
+              readOnly: true
+            - name: data
+              mountPath: /vault/file
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: 8200
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # No liveness probe on /sys/health, deliberately: a *sealed* Vault
+          # answers 503, and restarting it would not unseal it — it would just
+          # loop. Sealed is a condition for a human (or auto-unseal) to fix, not
+          # something a restart improves.
+      volumes:
+        - name: config
+          configMap:
+            name: vault-config
+        - name: tls
+          secret:
+            secretName: vault-tls
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            # Secrets are tiny; this is almost entirely headroom for Vault's
+            # own bookkeeping and audit device if one is enabled.
+            storage: 1Gi

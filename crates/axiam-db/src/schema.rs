@@ -247,6 +247,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "srp_credentials_and_policy",
         sql: SCHEMA_V41,
     },
+    Migration {
+        version: 42,
+        name: "opaque_replaces_srp",
+        sql: SCHEMA_V42,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2331,6 +2336,117 @@ DEFINE FIELD IF NOT EXISTS srp_kdf ON TABLE security_settings TYPE string \
 UPDATE security_settings SET srp_mode = 'disabled' WHERE srp_mode = NONE;
 UPDATE security_settings SET srp_group = 'rfc5054_4096' WHERE srp_group = NONE;
 UPDATE security_settings SET srp_kdf = 'argon2id' WHERE srp_kdf = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v42 — OPAQUE (RFC 9807) replaces SRP-6a
+// -----------------------------------------------------------------------
+//
+// v41 is left exactly as it was rather than rewritten in place. Migration
+// history is linear and every developer and CI database that has already run
+// v41 is sitting at that version; editing it would leave those databases with
+// SRP tables and no path forward, because the migration runner would consider
+// v41 already applied. A fresh install therefore creates the SRP table and
+// drops it moments later, which is a small, one-off cost for a history that is
+// true.
+//
+// Nothing is preserved across the change and nothing needs to be. An SRP
+// verifier cannot be converted into an OPAQUE registration record — both are
+// sealed against the plaintext password, which the server has never had — and
+// AXIAM is unreleased, so no deployment holds verifiers worth carrying.
+//
+// Three parts:
+//
+// 1. Drop `srp_credential`, and the three SRP columns on `security_settings`.
+//
+// 2. `opaque_credential` — at most one record per user. There is deliberately
+//    no history table: a record is a password equivalent, and keeping
+//    superseded ones would keep superseded passwords attackable for no
+//    operational benefit. Note the absence of an `identity` column, which
+//    `srp_credential` had: OPAQUE binds to a random `credential_identifier`
+//    instead, so renaming a user no longer invalidates their credential.
+//
+// 3. `opaque_server_setup` — per-tenant OPRF seed and AKE keypair, encrypted
+//    at rest. One row per (tenant, suite), UNIQUE, which is what makes
+//    `get_or_create` idempotent under two concurrent first logins.
+
+const SCHEMA_V42: &str = "\
+-- =======================================================================
+-- Remove SRP
+-- =======================================================================
+REMOVE TABLE IF EXISTS srp_credential;
+REMOVE FIELD IF EXISTS srp_mode ON TABLE security_settings;
+REMOVE FIELD IF EXISTS srp_group ON TABLE security_settings;
+REMOVE FIELD IF EXISTS srp_kdf ON TABLE security_settings;
+
+-- =======================================================================
+-- OPAQUE registration records (tenant scope)
+-- =======================================================================
+DEFINE TABLE opaque_credential SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE opaque_credential TYPE string;
+DEFINE FIELD user_id ON TABLE opaque_credential TYPE string;
+-- Random 32 bytes, hex. Keys the server's OPRF and is bound into the record.
+-- Deliberately unrelated to the username: that is what makes a rename free,
+-- where SRP's equivalent binding was the username itself.
+DEFINE FIELD credential_identifier ON TABLE opaque_credential TYPE string;
+DEFINE FIELD suite ON TABLE opaque_credential TYPE string \
+    ASSERT $value IN ['ristretto255_sha512'];
+DEFINE FIELD ksf ON TABLE opaque_credential TYPE string \
+    ASSERT $value IN ['argon2id', 'scrypt'];
+-- Argon2id costs.
+DEFINE FIELD ksf_memory_kib ON TABLE opaque_credential TYPE option<int>;
+DEFINE FIELD ksf_iterations ON TABLE opaque_credential TYPE option<int>;
+DEFINE FIELD ksf_parallelism ON TABLE opaque_credential TYPE option<int>;
+-- scrypt costs.
+DEFINE FIELD ksf_log_n ON TABLE opaque_credential TYPE option<int>;
+DEFINE FIELD ksf_r ON TABLE opaque_credential TYPE option<int>;
+DEFINE FIELD ksf_p ON TABLE opaque_credential TYPE option<int>;
+-- Serialized RFC 9807 RegistrationRecord, hex.
+DEFINE FIELD record ON TABLE opaque_credential TYPE string;
+DEFINE FIELD created_at ON TABLE opaque_credential TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE opaque_credential TYPE datetime \
+    DEFAULT time::now();
+-- One record per user. UNIQUE is what makes upsert-by-user safe under
+-- concurrent password changes.
+DEFINE INDEX idx_opaque_cred_user ON TABLE opaque_credential \
+    COLUMNS tenant_id, user_id UNIQUE;
+
+-- =======================================================================
+-- OPAQUE server key material (tenant scope)
+-- =======================================================================
+DEFINE TABLE opaque_server_setup SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE opaque_server_setup TYPE string;
+DEFINE FIELD suite ON TABLE opaque_server_setup TYPE string \
+    ASSERT $value IN ['ristretto255_sha512'];
+-- AES-256-GCM sealed. A database dump alone must not hand over the OPRF seed,
+-- because that seed is the thing standing between a stolen record and an
+-- offline dictionary attack.
+DEFINE FIELD sealed_setup ON TABLE opaque_server_setup TYPE string;
+DEFINE FIELD sealed_decoy_key ON TABLE opaque_server_setup TYPE string;
+DEFINE FIELD created_at ON TABLE opaque_server_setup TYPE datetime \
+    DEFAULT time::now();
+-- One setup per (tenant, suite). UNIQUE is load-bearing: it is what decides
+-- the race between two concurrent first logins, so a tenant cannot end up
+-- with two seeds and records that only sometimes open.
+DEFINE INDEX idx_opaque_setup_tenant ON TABLE opaque_server_setup \
+    COLUMNS tenant_id, suite UNIQUE;
+
+-- =======================================================================
+-- OPAQUE policy on security_settings
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS opaque_mode ON TABLE security_settings TYPE string \
+    DEFAULT 'disabled' ASSERT $value IN ['disabled', 'optional', 'required'];
+DEFINE FIELD IF NOT EXISTS opaque_suite ON TABLE security_settings TYPE string \
+    DEFAULT 'ristretto255_sha512' \
+    ASSERT $value IN ['ristretto255_sha512'];
+DEFINE FIELD IF NOT EXISTS opaque_ksf ON TABLE security_settings TYPE string \
+    DEFAULT 'argon2id' ASSERT $value IN ['argon2id', 'scrypt'];
+-- Backfill rows that predate the columns. DEFAULT only applies on write.
+UPDATE security_settings SET opaque_mode = 'disabled' WHERE opaque_mode = NONE;
+UPDATE security_settings SET opaque_suite = 'ristretto255_sha512' \
+    WHERE opaque_suite = NONE;
+UPDATE security_settings SET opaque_ksf = 'argon2id' WHERE opaque_ksf = NONE;
 ";
 
 #[cfg(test)]

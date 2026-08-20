@@ -15,14 +15,14 @@ export interface AuthUser {
   tenantSlug?: string;
   orgSlug?: string;
   /**
-   * The caller's own tenant's effective SRP policy, from /auth/me.
+   * The caller's own tenant's effective OPAQUE policy, from /auth/me.
    *
-   * Carried here because setting a password requires computing a verifier
-   * client-side, and the client cannot do that without knowing the group and
-   * KDF. Absent means the tenant does not use SRP (or settings could not be
+   * Carried here because setting a password requires building a registration
+   * record client-side, and the client needs to know whether to do that at all.
+   * Absent means the tenant does not use OPAQUE (or settings could not be
    * resolved), in which case password-set requests simply omit the field.
    */
-  srp?: { srp_mode: string; srp_group: string; srp_kdf: string };
+  opaque?: { opaque_mode: string; opaque_suite: string; opaque_ksf: string };
 }
 
 interface AuthState {

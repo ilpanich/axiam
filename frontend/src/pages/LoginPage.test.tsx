@@ -59,7 +59,7 @@ async function goToCredentials(route = "/login") {
  * A password minted for this run rather than written as a literal.
  *
  * CodeQL's hard-coded-cryptographic-value rule flags a literal password that
- * reaches a KDF, and on the SRP path this one does. Nothing here depends on the
+ * reaches a KDF, and on the OPAQUE path this one does. Nothing here depends on the
  * value -- the assertions below compare the request body against this same
  * constant -- so generating it keeps the rule pointed at shipping code.
  */
@@ -74,25 +74,26 @@ async function submitCredentials(username = "alice", password = TEST_PASSWORD) {
 }
 
 /**
- * `/auth/srp/challenge` answering 404 — i.e. the tenant has SRP disabled.
+ * `/auth/opaque/login/start` answering 404 — i.e. the tenant has OPAQUE
+ * disabled.
  *
- * The login page probes SRP before falling back to password login, so every
+ * The login page probes OPAQUE before falling back to password login, so every
  * password-path test has to answer that probe. A 404 is what the server sends
- * for `srp_mode: disabled`, and it is the branch these tests are about.
+ * for `opaque_mode: disabled`, and it is the branch these tests are about.
  */
-const srpDisabled = () =>
+const opaqueDisabled = () =>
   Promise.reject(
-    Object.assign(new Error("srp disabled"), { response: { status: 404 } }),
+    Object.assign(new Error("opaque disabled"), { response: { status: 404 } }),
   );
 
-const SRP_CHALLENGE = "/api/v1/auth/srp/challenge";
+const OPAQUE_LOGIN_START = "/api/v1/auth/opaque/login/start";
 /**
- * A post mock that answers the SRP probe with 404 and every other call with
- * `payload` — the shape most of these tests want, now that the page probes SRP
+ * A post mock that answers the OPAQUE probe with 404 and every other call with
+ * `payload` — the shape most of these tests want, now that the page probes OPAQUE
  * before falling back to password login.
  */
-const postWithSrpDisabled = (payload: unknown) => (url: string) =>
-  url === SRP_CHALLENGE ? srpDisabled() : Promise.resolve(payload);
+const postWithOpaqueDisabled = (payload: unknown) => (url: string) =>
+  url === OPAQUE_LOGIN_START ? opaqueDisabled() : Promise.resolve(payload);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -159,7 +160,7 @@ describe("LoginPage — credentials step", () => {
 
   it("logs in, hydrates via /auth/me, updates the store and navigates to /dashboard", async () => {
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/login") {
         return Promise.resolve(
           res({ user: loginUser, session_id: "s1", expires_in: 900 }),
@@ -200,7 +201,7 @@ describe("LoginPage — credentials step", () => {
 
   it("treats a null /auth/me after login as a hard failure (CQ-F30) — never silently logs in with no permissions", async () => {
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/login") {
         return Promise.resolve(res({ user: loginUser }));
       }
@@ -221,7 +222,7 @@ describe("LoginPage — credentials step", () => {
 
   it("moves to the MFA step when mfa_required is returned", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(
+      postWithOpaqueDisabled(
         res({ mfa_required: true, challenge_token: "chal-1" }),
       ),
     );
@@ -234,7 +235,7 @@ describe("LoginPage — credentials step", () => {
 
   it("navigates to mfa-setup with the setup token when mfa_setup_required is returned", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(
+      postWithOpaqueDisabled(
         res({ mfa_setup_required: true, setup_token: "setup-abc" }),
       ),
     );
@@ -249,7 +250,7 @@ describe("LoginPage — credentials step", () => {
 
   it("navigates to mfa-setup with an empty token when setup_token is missing", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(res({ mfa_setup_required: true })),
+      postWithOpaqueDisabled(res({ mfa_setup_required: true })),
     );
     await goToCredentials();
     await submitCredentials();
@@ -259,7 +260,7 @@ describe("LoginPage — credentials step", () => {
   });
 
   it("shows a generic auth error and redirects to /login when no user or mfa flags come back", async () => {
-    apiMock.post.mockImplementation(postWithSrpDisabled(res({})));
+    apiMock.post.mockImplementation(postWithOpaqueDisabled(res({})));
     await goToCredentials();
     await submitCredentials();
     expect(
@@ -308,11 +309,11 @@ describe("LoginPage — credentials step", () => {
 
   it("shows a signing-in busy state while the login request is pending", async () => {
     let resolvePost: (v: unknown) => void = () => {};
-    // The SRP probe must resolve immediately (404 = SRP off); only the password
+    // The OPAQUE probe must resolve immediately (404 = OPAQUE off); only the password
     // login is held open, otherwise the busy state under test is the probe's.
     apiMock.post.mockImplementation((url: string) =>
-      url === SRP_CHALLENGE
-        ? srpDisabled()
+      url === OPAQUE_LOGIN_START
+        ? opaqueDisabled()
         : new Promise((resolve) => {
             resolvePost = resolve;
           }),
@@ -330,7 +331,7 @@ describe("LoginPage — credentials step", () => {
 describe("LoginPage — MFA step", () => {
   async function goToMfa() {
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/login") {
         return Promise.resolve(
           res({ mfa_required: true, challenge_token: "chal-1" }),
@@ -384,7 +385,7 @@ describe("LoginPage — MFA step", () => {
     // the verify handler AFTER reaching the MFA step or it would be clobbered.
     await goToMfa();
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/mfa/verify") {
         return Promise.resolve(res({ user: loginUser }));
       }
@@ -415,7 +416,7 @@ describe("LoginPage — MFA step", () => {
   it("shows a generic auth error and redirects to /login when verify returns no user", async () => {
     await goToMfa();
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/mfa/verify") {
         return Promise.resolve(res({}));
       }
@@ -435,7 +436,7 @@ describe("LoginPage — MFA step", () => {
   it("shows a security-rejection message on a 403 verify response", async () => {
     await goToMfa();
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/mfa/verify") {
         return Promise.reject({ response: { status: 403 } });
       }
@@ -455,7 +456,7 @@ describe("LoginPage — MFA step", () => {
 
   it("shows the default invalid-or-expired message for a bare verify failure", async () => {
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/login") {
         return Promise.resolve(
           res({ mfa_required: true, challenge_token: "chal-1" }),
@@ -481,7 +482,7 @@ describe("LoginPage — MFA step", () => {
     let resolveVerify: (v: unknown) => void = () => {};
     await goToMfa();
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
       if (url === "/api/v1/auth/mfa/verify") {
         return new Promise((resolve) => {
           resolveVerify = resolve;
@@ -610,7 +611,7 @@ describe("LoginPage — passkeys (C2)", () => {
 
   it("offers a passkey as a second factor when the account has one", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(
+      postWithOpaqueDisabled(
         res({
           mfa_required: true,
           challenge_token: "chal-1",
@@ -638,7 +639,7 @@ describe("LoginPage — passkeys (C2)", () => {
 
   it("does not offer a passkey second factor to a TOTP-only account", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(
+      postWithOpaqueDisabled(
         res({
           mfa_required: true,
           challenge_token: "chal-1",
@@ -660,7 +661,7 @@ describe("LoginPage — passkeys (C2)", () => {
 
   it("keeps TOTP available alongside the passkey option", async () => {
     apiMock.post.mockImplementation(
-      postWithSrpDisabled(
+      postWithOpaqueDisabled(
         res({
           mfa_required: true,
           challenge_token: "chal-1",
@@ -685,230 +686,166 @@ describe("LoginPage — passkeys (C2)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SRP (CONTRACT §23)
+// OPAQUE (CONTRACT §23)
 // ---------------------------------------------------------------------------
 //
-// These drive the page through `services/srp`, which drives the real crypto in
-// `lib/srp` — no crypto is stubbed. The server side is faked, which is exactly
-// the seam worth faking: `lib/srp.test.ts` already proves the arithmetic
-// against the cross-language vectors, so what is left to assert here is the
-// page's *behaviour* around it.
+// The SRP version of this block drove the page through `services/srp` into
+// real modular arithmetic in the old `lib/srp`, because that arithmetic lived
+// here and nowhere else. It does not any more: CONTRACT §23.1 forbids a client
+// from implementing OPAQUE, so `lib/opaque.ts` is a loader around the same
+// WebAssembly build of `crates/axiam-opaque` that the server and every SDK use,
+// and the protocol is proven in that crate's own tests and against a live
+// server in `crates/axiam-api-rest/tests/opaque_login_test.rs`.
+//
+// What is left to assert here is the page's *behaviour* around it, which is
+// where the browser-specific decisions live: that OPAQUE is tried first, that
+// a failed exchange is never retried over the password endpoint, and that
+// `opaque_required` is not reported as a wrong password. So the WASM module is
+// mocked — the one seam worth faking, since a checkout that has not run the
+// Rust toolchain has no artifact to load.
 
-describe("LoginPage — SRP", () => {
-  /**
-   * Answer a challenge the way the server would for a tenant with SRP on.
-   *
-   * The verifier is derived from the same password the test types, so a real
-   * exchange completes and `M2` genuinely matches — nothing here is a
-   * hand-written constant that could drift from the implementation.
-   */
-  async function srpServer(password: string) {
-    const { computeVerifier, deriveX, generateSalt, __testing } =
-      await import("@/lib/srp");
-    const { GROUPS, pad, sha256, modPow, bytesToHex, hexToBytes, multiplier } =
-      __testing;
-    const groupName = "rfc5054_2048" as const;
-    const group = GROUPS[groupName];
-    const N = BigInt("0x" + group.N);
-    const salt = generateSalt();
-    const kdf = { kdf: "pbkdf2_sha256", iterations: 210000 };
-
-    const x = await deriveX("alice", password, salt, kdf);
-    const verifierHex = await computeVerifier(groupName, x);
-    const v = BigInt("0x" + verifierHex);
-
-    // b is fixed here purely so the fake server is deterministic; the client's
-    // `a` is still fresh from the real implementation.
-    const b = BigInt("0x" + "33".repeat(32));
-    const k = await multiplier(group);
-    const B = (k * v + modPow(group.g, b, N)) % N;
-
-    return {
-      salt,
-      kdf,
-      groupName,
-      bPubHex: bytesToHex(pad(B, group.byteLen)),
-      /** Recompute what the server would return as `M2` for a given `A`/`M1`. */
-      async serverProof(aPubHex: string, clientProofHex: string) {
-        const A = BigInt("0x" + aPubHex);
-        const u = BigInt(
-          "0x" +
-            bytesToHex(
-              await sha256([pad(A, group.byteLen), pad(B, group.byteLen)]),
-            ),
-        );
-        const S = modPow((A * modPow(v, u, N)) % N, b, N);
-        const K = await sha256([pad(S, group.byteLen)]);
-        return bytesToHex(
-          await sha256([pad(A, group.byteLen), hexToBytes(clientProofHex), K]),
-        );
-      },
-    };
-  }
-
-  it("signs in over SRP without ever posting the password", async () => {
-    const server = await srpServer(TEST_PASSWORD);
-    let challengeA = "";
-    apiMock.post.mockImplementation(
-      async (url: string, body: Record<string, string>) => {
-        if (url === SRP_CHALLENGE) {
-          challengeA = body.client_public;
-          return res({
-            srp_session: "sealed",
-            identity: "alice",
-            salt: server.salt,
-            group: server.groupName,
-            kdf: server.kdf.kdf,
-            iterations: server.kdf.iterations,
-            b_pub: server.bPubHex,
-          });
-        }
-        if (url === "/api/v1/auth/srp/verify") {
-          return res({
-            user: loginUser,
-            session_id: "s1",
-            expires_in: 900,
-            server_proof: await server.serverProof(
-              challengeA,
-              body.client_proof,
-            ),
-          });
-        }
-        throw new Error("unexpected post " + url);
-      },
-    );
-    apiMock.get.mockImplementation((url: string) =>
-      url === "/api/v1/auth/me"
-        ? Promise.resolve(res({ user: loginUser, permissions: ["*"] }))
-        : Promise.reject(new Error("unexpected get " + url)),
-    );
-
-    await goToCredentials();
-    await submitCredentials();
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
-
-    // The whole point: no request carried the password, and /auth/login was
-    // never called.
-    const posts = apiMock.post.mock.calls;
-    expect(posts.some(([url]) => url === "/api/v1/auth/login")).toBe(false);
-    for (const [, body] of posts) {
-      expect(JSON.stringify(body ?? {})).not.toContain(TEST_PASSWORD);
+const opaqueModuleMock = {
+  default: vi.fn(async () => undefined),
+  opaqueAvailable: () => true,
+  OpaqueKsf: {
+    argon2id: (memoryKib: number, iterations: number, parallelism: number) => ({
+      kind: "argon2id",
+      memoryKib,
+      iterations,
+      parallelism,
+    }),
+    scrypt: (logN: number, r: number, p: number) => ({ kind: "scrypt", logN, r, p }),
+  },
+  OpaqueLogin: class {
+    ke1 = "aa".repeat(96);
+    // A plain field rather than a parameter property: `erasableSyntaxOnly`
+    // rejects the shorthand, and the mock has no reason to need it.
+    constructor(_password: string) {}
+    finish(password: string, _ke2: string) {
+      // Stands in for "the envelope opened", which in the real module happens
+      // only under the right password.
+      if (password !== TEST_PASSWORD) throw new Error("envelope did not open");
+      return { ke3: "bb".repeat(64), sessionKey: "cc".repeat(64), exportKey: "dd".repeat(64) };
     }
+  },
+  OpaqueRegistration: class {
+    request = "ee".repeat(32);
+    constructor(_password: string) {}
+    finish() {
+      return { record: "ff".repeat(192), exportKey: "dd".repeat(64) };
+    }
+  },
+};
+
+describe("LoginPage — OPAQUE", () => {
+  beforeEach(async () => {
+    // Injected rather than `vi.mock`ed: `lib/opaque` resolves the package
+    // through a runtime specifier so a checkout without the Rust artifact still
+    // builds, which also puts it out of `vi.mock`'s reach.
+    const { __setOpaqueModuleForTests } = await import("@/lib/opaque");
+    __setOpaqueModuleForTests(opaqueModuleMock);
   });
 
-  it("aborts sign-in when the server cannot prove itself", async () => {
-    // A server that returns a wrong M2 does not hold the verifier, so it is not
-    // the server it claims to be. Accepting its session would throw away the
-    // half of SRP that authenticates the server to the client.
-    const server = await srpServer(TEST_PASSWORD);
-    apiMock.post.mockImplementation(async (url: string) => {
-      if (url === SRP_CHALLENGE) {
-        return res({
-          srp_session: "sealed",
-          identity: "alice",
-          salt: server.salt,
-          group: server.groupName,
-          kdf: server.kdf.kdf,
-          iterations: server.kdf.iterations,
-          b_pub: server.bPubHex,
-        });
-      }
-      if (url === "/api/v1/auth/srp/verify") {
-        return res({
-          user: loginUser,
-          session_id: "s1",
-          server_proof: "00".repeat(32),
-        });
-      }
-      throw new Error("unexpected post " + url);
+  afterEach(async () => {
+    const { __resetOpaqueModuleForTests } = await import("@/lib/opaque");
+    __resetOpaqueModuleForTests();
+  });
+
+  /** A `login/start` response shaped the way the server sends one. */
+  const loginStarted = () =>
+    res({
+      opaque_session: "sealed-session-token",
+      ke2: "12".repeat(320),
+      suite: "ristretto255_sha512",
+      ksf: "argon2id",
+      memory_kib: 19456,
+      iterations: 2,
+      parallelism: 1,
+    });
+
+  it("signs in over OPAQUE without ever posting the password", async () => {
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === OPAQUE_LOGIN_START) return loginStarted();
+      if (url === "/api/v1/auth/opaque/login/finish") return res({ user: { id: "u1" } });
+      return res({});
     });
 
     await goToCredentials();
     await submitCredentials();
 
-    expect(
-      await screen.findByText(/server failed to prove its identity/i),
-    ).toBeInTheDocument();
-    expect(navigate).not.toHaveBeenCalledWith("/dashboard");
-    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    await waitFor(() => {
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/opaque/login/finish",
+        expect.objectContaining({ ke3: expect.any(String) })
+      );
+    });
+
+    // The whole point: no request body anywhere in this sign-in carries the
+    // plaintext.
+    for (const call of apiMock.post.mock.calls) {
+      expect(JSON.stringify(call[1] ?? {})).not.toContain(TEST_PASSWORD);
+    }
+    // And the password endpoint was never reached.
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/login",
+      expect.anything()
+    );
   });
 
-  it("falls back to password login when the tenant has SRP disabled", async () => {
-    apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
-      if (url === "/api/v1/auth/login") {
-        return Promise.resolve(res({ user: loginUser, session_id: "s1" }));
-      }
-      return Promise.reject(new Error("unexpected post " + url));
-    });
-    apiMock.get.mockImplementation((url: string) =>
-      url === "/api/v1/auth/me"
-        ? Promise.resolve(res({ user: loginUser, permissions: [] }))
-        : Promise.reject(new Error("unexpected get " + url)),
+  it("falls back to password login when the tenant has OPAQUE disabled", async () => {
+    apiMock.post.mockImplementation((url: string) =>
+      url === OPAQUE_LOGIN_START ? opaqueDisabled() : res({ user: { id: "u1" } })
     );
 
     await goToCredentials();
     await submitCredentials();
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
-    expect(
-      apiMock.post.mock.calls.some(([url]) => url === "/api/v1/auth/login"),
-    ).toBe(true);
+
+    await waitFor(() => {
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/login",
+        expect.objectContaining({ password: TEST_PASSWORD })
+      );
+    });
   });
 
-  it("explains srp_required rather than blaming the password", async () => {
-    // The password may be perfectly good; the tenant just refuses this route.
-    // Showing "invalid credentials" would send the user off to reset a working
-    // password.
+  it("does not retry over the password endpoint when the exchange fails", async () => {
+    // The security property that replaced SRP's server-proof branch: a failed
+    // OPAQUE exchange is a failed login. Retrying it with the plaintext would
+    // hand the password to a server that just failed to prove it holds the
+    // record.
     apiMock.post.mockImplementation((url: string) => {
-      if (url === SRP_CHALLENGE) return srpDisabled();
-      return Promise.reject({
-        response: { status: 403, data: { error: "srp_required" } },
-      });
+      if (url === OPAQUE_LOGIN_START) return loginStarted();
+      return res({});
+    });
+
+    await goToCredentials();
+    await submitCredentials("alice", "wrong-password-entirely");
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+    });
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/login",
+      expect.anything()
+    );
+  });
+
+  it("reports opaque_required as a protocol refusal, not a wrong password", async () => {
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
+      return Promise.reject(
+        Object.assign(new Error("refused"), {
+          response: { status: 403, data: { error: "opaque_required" } },
+        })
+      );
     });
 
     await goToCredentials();
     await submitCredentials();
 
-    const message = await screen.findByText(/requires Secure Remote Password/i);
-    expect(message).toBeInTheDocument();
-    expect(screen.queryByText(/invalid credentials/i)).not.toBeInTheDocument();
-  });
-
-  it("carries an MFA challenge through the SRP path exactly as the password path does", async () => {
-    const server = await srpServer(TEST_PASSWORD);
-    let challengeA = "";
-    apiMock.post.mockImplementation(
-      async (url: string, body: Record<string, string>) => {
-        if (url === SRP_CHALLENGE) {
-          challengeA = body.client_public;
-          return res({
-            srp_session: "sealed",
-            identity: "alice",
-            salt: server.salt,
-            group: server.groupName,
-            kdf: server.kdf.kdf,
-            iterations: server.kdf.iterations,
-            b_pub: server.bPubHex,
-          });
-        }
-        if (url === "/api/v1/auth/srp/verify") {
-          return res({
-            mfa_required: true,
-            challenge_token: "chal-1",
-            server_proof: await server.serverProof(
-              challengeA,
-              body.client_proof,
-            ),
-          });
-        }
-        throw new Error("unexpected post " + url);
-      },
-    );
-
-    await goToCredentials();
-    await submitCredentials();
-    expect(
-      await screen.findByText("Two-factor authentication"),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/OPAQUE sign-in/i);
+    });
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/invalid credentials/i);
   });
 });

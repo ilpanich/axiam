@@ -893,12 +893,14 @@ dependencies = [
  "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
+ "axiam-opaque",
  "axiam-pki",
  "axiam-test-support",
  "base64 0.23.1",
  "chrono",
  "futures",
  "futures-lite",
+ "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 11.0.0",
@@ -954,15 +956,16 @@ dependencies = [
  "argon2",
  "axiam-core",
  "axiam-db",
+ "axiam-opaque",
  "axiam-test-support",
  "base64 0.23.1",
  "chrono",
  "criterion",
+ "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 11.0.0",
- "num-bigint",
- "num-traits",
+ "opaque-ke",
  "rand 0.10.2",
  "rand_core 0.6.4",
  "reqwest 0.12.28",
@@ -970,6 +973,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "subtle",
  "surrealdb",
@@ -982,6 +986,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "webauthn-rs",
+ "wiremock",
  "zeroize",
 ]
 
@@ -1014,6 +1019,7 @@ dependencies = [
  "thiserror 2.0.20",
  "utoipa",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1117,6 +1123,29 @@ dependencies = [
  "utoipa",
  "uuid",
  "x509-parser 0.18.1",
+]
+
+[[package]]
+name = "axiam-opaque"
+version = "1.0.0-alpha31"
+dependencies = [
+ "argon2",
+ "getrandom 0.4.3",
+ "hex",
+ "opaque-ke",
+ "rand 0.8.7",
+ "scrypt",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "axiam-opaque-ffi"
+version = "1.0.0-alpha31"
+dependencies = [
+ "axiam-opaque",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -2270,6 +2299,7 @@ dependencies = [
  "curve25519-dalek-derive",
  "digest 0.10.7",
  "fiat-crypto",
+ "rand_core 0.6.4",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -2442,6 +2472,17 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
+name = "derive-where"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d08b3a0bcc0d079199cd476b2cae8435016ec11d1c0986c6901c5ac223041534"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "derive_arbitrary"
@@ -4862,6 +4903,27 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "opaque-ke"
+version = "4.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a"
+dependencies = [
+ "curve25519-dalek",
+ "derive-where",
+ "digest 0.10.7",
+ "displaydoc",
+ "elliptic-curve",
+ "generic-array 0.14.7",
+ "getrandom 0.2.17",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "rand 0.8.7",
+ "subtle",
+ "voprf",
+ "zeroize",
+]
 
 [[package]]
 name = "openssl"
@@ -8335,6 +8397,24 @@ name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
+
+[[package]]
+name = "voprf"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f59c30c76e2fea54cdece6a054e2662feffa7ab19658a7887524265ee39470"
+dependencies = [
+ "curve25519-dalek",
+ "derive-where",
+ "digest 0.10.7",
+ "displaydoc",
+ "elliptic-curve",
+ "generic-array 0.14.7",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "wait-timeout"

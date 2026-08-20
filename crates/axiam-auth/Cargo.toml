@@ -36,12 +36,13 @@ utoipa = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 aes-gcm = { workspace = true }
-num-bigint = { workspace = true }
-num-traits = { workspace = true }
 zeroize = { workspace = true }
 secrecy = { workspace = true }
 url = { workspace = true }
 webauthn-rs = { workspace = true }
+opaque-ke = { version = "4.0.1", default-features = false, features = ["ristretto255", "std"] }
+sha2_v10 = { version = "0.10", package = "sha2" }
+axiam-opaque = { version = "1.0.0-alpha31", path = "../axiam-opaque" }
 # webauthn-rs-proto: removed — only webauthn-rs is used directly in axiam-auth; types come through webauthn-rs re-exports
 
 [dev-dependencies]
@@ -50,6 +51,9 @@ axiam-db = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
+getrandom = "0.4.3"
+wiremock = "0.6.5"
+serde_json.workspace = true
 
 [[bench]]
 name = "auth_bench"

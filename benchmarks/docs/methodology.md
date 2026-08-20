@@ -44,7 +44,8 @@ Each cell produces one **result record** (JSON) under `results/`.
 | Scenario file                   | Logical operation                              | Protocol      | Comparative? |
 |---------------------------------|------------------------------------------------|---------------|--------------|
 | `oauth2_password_login.js`      | Resource-owner login → token (or session)      | HTTP/OAuth2   | Yes          |
-| `srp_challenge.js`              | SRP-6a handshake, server half (CONTRACT §23)   | HTTP/REST     | AXIAM-only*  |
+| `opaque_login_start.js`         | OPAQUE handshake, server half (CONTRACT §23)   | HTTP/REST     | AXIAM-only*  |
+| `opaque_register_start.js`      | OPAQUE enrolment OPRF, server half             | HTTP/REST     | AXIAM-only*  |
 | `oauth2_client_credentials.js`  | Machine-to-machine token issuance              | HTTP/OAuth2   | Yes          |
 | `token_introspection.js`        | Validate an opaque/JWT token (RFC 7662)        | HTTP/OAuth2   | Yes          |
 | `token_refresh.js`              | Refresh-token rotation                          | HTTP/OAuth2   | Yes          |
@@ -94,31 +95,58 @@ principle rules out. `SessionService.CreateSession` (the gRPC login
 counterpart) is task D5's concern, not D4's.
 
 
-### `srp_challenge.js` — what it does and does not measure
+### `opaque_login_start.js` — what it does and does not measure
 
-`srp_challenge.js` isolates the **server's** SRP cost: the two modular
-exponentiations in the tenant's RFC 5054 group, plus hashing and an AES-256-GCM
-seal. It is not a full SRP login and its numbers must not be presented as one.
+`opaque_login_start.js` isolates the **server's** OPAQUE cost: one OPRF
+evaluation, the envelope masking, the server's ephemeral share and the 3DH
+inputs for `KE2`, plus an AES-256-GCM seal of the exchange state. It is not a
+full OPAQUE login and its numbers must not be presented as one.
 
-A complete exchange additionally costs the client-side KDF (Argon2id at
-m=19456 KiB by default) and one client-side exponentiation — both paid on the
-*client*, by design — plus `/auth/srp/verify`, which is cheap server-side (an
-AEAD open, a constant-time 32-byte compare, and the session issuance every login
-path already pays).
+A complete exchange additionally costs the client-side key-stretching function
+(Argon2id at m=19456 KiB by default) and the client's own elliptic-curve work —
+both paid on the *client*, by design — plus `/auth/opaque/login/finish`, which is
+cheap server-side (an AEAD open, a constant-time MAC verification, and the
+session issuance every login path already pays).
 
 The client half is excluded deliberately: running it inside a k6 VU would
 measure k6's CPU rather than AXIAM's and would depress throughput by an amount
-that says nothing about the server. `A` is therefore a fixed constant, which the
-server treats identically to a fresh ephemeral.
+that says nothing about the server. `KE1` is therefore a fixed, valid constant,
+which the server treats identically to a fresh one. Note that this also means
+the scenario cannot distinguish a real account from an unknown one — the decoy
+path is designed to cost the same, and a measurable difference here would itself
+be a finding.
 
-The honest comparison for "what did SRP cost us server-side" is this scenario
-against `oauth2_password_login.js`, whose cost is dominated by one Argon2id
-verification. Expect SRP's server cost to be **lower** at the default
-parameters — the memory-hard work moved to the client — and the group size,
-not the KDF, to be the knob that moves it.
+The honest comparison for "what does OPAQUE cost us server-side" is this
+scenario plus login/finish against `oauth2_password_login.js`, whose cost is
+dominated by one Argon2id verification. Expect OPAQUE's server cost to be
+**lower** — the memory-hard work moved to the client — which is the trade the
+design makes.
 
-The target tenant must have `srp_mode` set to `optional` or `required`; against
-a tenant with SRP disabled every request is a 404, which the scenario reports
+### `opaque_register_start.js` — and why enrolment now has a cost at all
+
+Under SRP, enrolment cost the server nothing: a verifier was computed entirely
+client-side from a self-chosen salt, and the server only ever saw the finished
+value arrive on an already-authenticated endpoint. OPAQUE needs a server round
+trip for the OPRF, and `POST /api/v1/auth/opaque/register/start` is
+**unauthenticated by necessity** — it is called while creating a user who does
+not exist yet.
+
+That makes it the OPAQUE endpoint an attacker can reach most cheaply, and
+therefore the one whose per-request cost matters when sizing a rate-limit
+budget. It is benchmarked separately for that reason rather than folded into the
+login numbers.
+
+### Comparing OPAQUE against the retired SRP numbers
+
+Do not chart them together. SRP's server cost was two modular exponentiations in
+a 2048–4096-bit group and scaled with the group size; OPAQUE's is a handful of
+ristretto255 scalar multiplications and does not. OPAQUE will look dramatically
+cheaper, and that is a property of elliptic curves over finite-field groups, not
+evidence about the two protocols' security. Any historical `srp_challenge`
+series should be closed out rather than continued.
+
+The target tenant must have `opaque_mode` set to `optional` or `required`; against
+a tenant with OPAQUE disabled every request is a 404, which the scenario reports
 rather than silently measuring as latency.
 
 ## 4. Load model

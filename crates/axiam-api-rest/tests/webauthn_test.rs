@@ -51,7 +51,8 @@ fn test_auth_config() -> AuthConfig {
         jwt_issuer: "axiam-test".into(),
         // Required for WebauthnService's ceremony-state encryption.
         mfa_encryption_key: Some([5u8; 32]),
-        srp_session_key: None,
+        opaque_session_key: None,
+        opaque_setup_key: None,
         webauthn_rp_id: "localhost".into(),
         webauthn_rp_origin: "http://localhost:8090".into(),
         webauthn_rp_name: "AXIAM-Test".into(),

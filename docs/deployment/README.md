@@ -914,3 +914,10 @@ This satisfies CRA's SBOM/supply-chain-transparency expectation and ISO
 27001 Annex A.5 asset-inventory theme; see `docs/compliance/FINDINGS.md`
 (#SBOM-01) and `docs/compliance/asvs-l2-checklist.md` (§V14, SBOM-01 row)
 for the compliance disposition.
+
+## Secrets
+
+- [**Secrets and HashiCorp Vault**](vault.md) — where AXIAM's ten long-lived
+  secrets come from, what each one costs to lose, running Vault for them, and
+  the AWS/GCP/Azure/PKCS#11 alternatives. Read §5 before going to production:
+  auto-unseal is the step most often deferred and the one that pages you at 3am.

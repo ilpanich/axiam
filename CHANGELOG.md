@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: replaced SRP-6a with OPAQUE (RFC 9807).** SRP is removed
+  entirely — endpoints, domain model, storage, SDK surface and fixtures.
+  Nothing migrates and nothing needs to: an SRP verifier cannot be converted
+  into an OPAQUE record (both are sealed against a plaintext the server has
+  never had), and AXIAM is unreleased.
+  - `srp_mode`/`srp_group`/`srp_kdf` become
+    `opaque_mode`/`opaque_suite`/`opaque_ksf`, keeping the org-baseline plus
+    tenant-tighten-only shape and the `disabled` default.
+  - `POST /auth/srp/challenge` and `/auth/srp/verify` become
+    `POST /auth/opaque/login/start` and `/auth/opaque/login/finish`, joined by
+    `POST /auth/opaque/register/start` — OPAQUE needs a server round trip for
+    the OPRF, which a client-side SRP verifier did not.
+  - `AXIAM__AUTH__SRP_SESSION_KEY` becomes `AXIAM__AUTH__OPAQUE_SESSION_KEY`
+    **and** `AXIAM__AUTH__OPAQUE_SETUP_KEY`, split by what rotating them costs.
+
+### Added
+
+- `crates/axiam-opaque` (layer 0): the single definition of AXIAM's OPAQUE
+  ciphersuite, key-stretching functions and client operations, bound by every
+  SDK and the admin UI. OPAQUE is not a protocol it is reasonable to hand-write
+  once per language, which is what SRP's eleven implementations required.
+- Schema v42: `opaque_credential` and `opaque_server_setup` (per-tenant OPRF
+  seed and AKE keypair, AES-256-GCM at rest); drops `srp_credential`.
+- `opaque_login_start` and `opaque_register_start` benchmark scenarios. The
+  second is new in kind: SRP enrolment cost the server nothing, whereas
+  `register/start` is unauthenticated by necessity and needs its own budget.
+
+### Removed
+
+- `server_proof` from the login response. RFC 9807's AKE authenticates the
+  server during the handshake, so the client-side `M2` check that CONTRACT
+  §23.3 rule 6 had to mandate in capitals no longer exists to be forgotten.
+- Verifier invalidation on username change. OPAQUE binds to a random
+  server-chosen credential identifier, so a rename is free.
+- The account username from `GET /auth/reset/context`, which disclosed it only
+  because SRP bound its key derivation to it.
+- `pbkdf2_sha256` as a KSF option, and CONTRACT 1.25's errata about the four
+  SDKs that could not compute Argon2id. One shared core makes it universal; the
+  weaker rung is now scrypt, which is memory-hard.
+- `num-bigint` and `num-traits` from `axiam-auth`, whose only consumer was
+  SRP's modular exponentiation.
+
+### Fixed
+
+- A malformed OPAQUE message from a client returned `500`. Client-supplied
+  input (`400`) is now separated from corrupt stored state (`500`) by
+  `AuthError::OpaqueMalformed` and distinct hex decoders.
+
 ## [1.0.0-alpha31] - 2026-08-20
 
 ### Changed

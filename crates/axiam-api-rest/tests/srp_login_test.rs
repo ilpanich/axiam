@@ -14,7 +14,7 @@
 //! the SRP path and the password path issue the same cookies.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
@@ -41,11 +41,38 @@ use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 const TEST_PEER: &str = "127.0.0.1:12345";
-/// Test-only placeholder — not a real credential. gitleaks:allow
-const PASSWORD: &str = "InitialPassw0rdStrong";
-/// Test-only placeholder — not a real credential. gitleaks:allow
-const NEW_PASSWORD: &str = "NewStr0ngPassword123X";
 const USERNAME: &str = "alice";
+
+/// The account's password, minted per test run rather than written as a literal.
+///
+/// CodeQL's `rust/hardcoded-cryptographic-value` flags a literal that reaches a
+/// KDF as a password, and that rule is right about shipping code: keeping it
+/// sharp is worth more than a fixed string here. Nothing in this file depends on
+/// the value — every assertion is about what the server does with it — so the
+/// only requirement is that it satisfies the password policy, which the
+/// uppercase/lowercase/digit shape below guarantees.
+///
+/// Generated once per process so that a login and the enrolment that follows it
+/// agree, and distinct per run so a test that accidentally hard-codes an
+/// expectation about the password fails immediately.
+fn password() -> &'static str {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE.get_or_init(|| format!("Ax{}1", Uuid::new_v4().simple()))
+}
+
+/// The password the account is CHANGED to, and therefore the one its verifier is
+/// enrolled under. See [`password`] for why it is generated.
+fn new_password() -> &'static str {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE.get_or_init(|| format!("Bx{}2", Uuid::new_v4().simple()))
+}
+
+/// A password that is emphatically not the account's, for the paths that must
+/// refuse. Distinct from both of the above by construction.
+fn wrong_password() -> &'static str {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE.get_or_init(|| format!("Cx{}3", Uuid::new_v4().simple()))
+}
 const SRP_KEY: [u8; 32] = [0x5Au8; 32];
 
 type TestDb = surrealdb::engine::local::Db;
@@ -117,7 +144,7 @@ async fn setup_db(slug: &str) -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
             tenant_id: tenant.id,
             username: USERNAME.into(),
             email: "alice@example.com".into(),
-            password: PASSWORD.into(),
+            password: password().into(),
             metadata: None,
         })
         .await
@@ -324,15 +351,16 @@ async fn a_full_srp_exchange_issues_the_same_cookies_as_a_password_login() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .expect("password login should work before SRP is enrolled");
     assert_eq!(
-        enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await,
+        enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await,
         204
     );
 
-    let (status, body, cookies) = srp_login(&app, org_id, tenant_id, USERNAME, NEW_PASSWORD).await;
+    let (status, body, cookies) =
+        srp_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
     assert_eq!(status, 200, "SRP login failed: {body}");
 
     // Mutual authentication: the client can verify the server too.
@@ -361,13 +389,13 @@ async fn a_user_may_authenticate_by_email_because_the_server_names_the_identity(
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
-    enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await;
+    enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await;
 
     let (status, body, _) =
-        srp_login(&app, org_id, tenant_id, "alice@example.com", NEW_PASSWORD).await;
+        srp_login(&app, org_id, tenant_id, "alice@example.com", new_password()).await;
     assert_eq!(status, 200, "{body}");
 }
 
@@ -381,15 +409,15 @@ async fn a_wrong_password_is_refused_and_moves_the_lockout_counter() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
-    enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await;
+    enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await;
 
     let user_repo = SurrealUserRepository::new(db.clone());
     let before = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
 
-    let (status, _, _) = srp_login(&app, org_id, tenant_id, USERNAME, "wrong-password").await;
+    let (status, _, _) = srp_login(&app, org_id, tenant_id, USERNAME, wrong_password()).await;
     assert_eq!(status, 401);
 
     let after = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
@@ -408,10 +436,10 @@ async fn an_unknown_identity_is_indistinguishable_from_a_known_one() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
-    enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await;
+    enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await;
 
     let client = reference_client::begin(SrpGroup::Rfc5054_2048);
     let mut shapes = Vec::new();
@@ -445,7 +473,7 @@ async fn an_unknown_identity_is_indistinguishable_from_a_known_one() {
     assert_eq!(shapes[0], shapes[2], "unknown identity is distinguishable");
 
     // An unknown identity can never complete, whatever proof is offered.
-    let (status, _, _) = srp_login(&app, org_id, tenant_id, "nobody-at-all", NEW_PASSWORD).await;
+    let (status, _, _) = srp_login(&app, org_id, tenant_id, "nobody-at-all", new_password()).await;
     assert_eq!(status, 401);
 }
 
@@ -500,7 +528,7 @@ async fn srp_disabled_hides_the_endpoint_entirely() {
 
     // ...and password login still works, unchanged.
     assert!(
-        password_login(&app, org_id, tenant_id, PASSWORD)
+        password_login(&app, org_id, tenant_id, password())
             .await
             .is_some()
     );
@@ -516,7 +544,10 @@ async fn srp_required_refuses_password_login_for_everyone_with_a_distinct_code()
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    for (label, password) in [("right password", PASSWORD), ("wrong password", "nope")] {
+    for (label, password) in [
+        ("right password", password()),
+        ("wrong password", wrong_password()),
+    ] {
         let req = test::TestRequest::post()
             .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri("/api/v1/auth/login")
@@ -544,7 +575,7 @@ async fn srp_required_refuses_password_login_for_everyone_with_a_distinct_code()
             "org_id": org_id,
             "tenant_id": tenant_id,
             "username_or_email": "no-such-person",
-            "password": PASSWORD,
+            "password": password(),
         }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 403);
@@ -559,11 +590,11 @@ async fn a_verifier_is_refused_when_the_tenant_has_srp_disabled() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
     assert_eq!(
-        enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await,
+        enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await,
         400
     );
 }
@@ -578,13 +609,13 @@ async fn renaming_a_user_drops_the_verifier_bound_to_the_old_name() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
-    enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await;
+    enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await;
 
     // Confirm it works before the rename.
-    let (status, _, _) = srp_login(&app, org_id, tenant_id, USERNAME, NEW_PASSWORD).await;
+    let (status, _, _) = srp_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
     assert_eq!(status, 200);
 
     let req = test::TestRequest::put()
@@ -645,10 +676,10 @@ async fn a_session_cannot_be_replayed_against_a_different_exchange() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let (access, csrf) = password_login(&app, org_id, tenant_id, PASSWORD)
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
         .await
         .unwrap();
-    enroll_via_password_change(&app, &access, &csrf, PASSWORD, NEW_PASSWORD).await;
+    enroll_via_password_change(&app, &access, &csrf, password(), new_password()).await;
 
     // Two challenges, then cross the proof of one with the session of the other.
     let mut sessions = Vec::new();
@@ -669,7 +700,7 @@ async fn a_session_cannot_be_replayed_against_a_different_exchange() {
             test::read_body_json(test::call_service(&app, req).await).await;
         let identity = body["identity"].as_str().unwrap().to_string();
         let salt = body["salt"].as_str().unwrap().to_string();
-        let x = derive_x(&identity, NEW_PASSWORD, &salt);
+        let x = derive_x(&identity, new_password(), &salt);
         let (m1, _) = client
             .finish(&identity, &salt, body["b_pub"].as_str().unwrap(), &x)
             .unwrap();

@@ -2,7 +2,20 @@
 name = "axiam-opaque"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Explicit, NOT `workspace = true`, and this is the one crate in the workspace
+# where that matters.
+#
+# axiam-opaque is vendored into the Rust SDK, whose MSRV is 1.88 and is CI-
+# enforced. Inheriting the workspace's 1.93 made that SDK's MSRV job fail with
+# "axiam-opaque requires rustc 1.93" — a floor nothing in this crate actually
+# needs: its only non-trivial dependency, opaque-ke, declares 1.85, and the
+# rest of the tree is far below.
+#
+# So this states the crate's real floor. Raising it is a breaking change for
+# every SDK that vendors or depends on it, which is exactly the kind of thing
+# that should be a deliberate edit here rather than a side effect of bumping
+# the server's toolchain.
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 description = "AXIAM's OPAQUE (RFC 9807) ciphersuite, key-stretching functions and client operations"

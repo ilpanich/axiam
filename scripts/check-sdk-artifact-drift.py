@@ -131,7 +131,31 @@ REST_ONLY_REPOS = {
 FLAT_ARTIFACTS = [
     ("sdks/CONTRACT.md", "CONTRACT.md"),
     ("sdks/openapi.json", "openapi.json"),
+    ("sdks/opaque-test-vectors.json", "opaque-test-vectors.json"),
 ]
+
+#: Source files vendored into ONE repo rather than all of them.
+#:
+#: ``crates/axiam-opaque`` is the single implementation of AXIAM's OPAQUE
+#: client (CONTRACT §23.1). The Rust SDK vendors its source because the crate
+#: is not published to crates.io yet; when it is, the vendored copy goes away
+#: and this entry with it.
+#:
+#: It is gated for the same reason the contract and the OpenAPI export are: a
+#: copy nobody compares is a copy that drifts, and a drifted copy of *this*
+#: file is a client that no longer interoperates with the server — the exact
+#: failure §23.1 exists to prevent, reintroduced by the mechanism meant to
+#: avoid it.
+#:
+#: ``Cargo.toml`` is deliberately absent from the file list. The vendored
+#: manifest legitimately differs: it names its dependencies by version rather
+#: than by ``workspace = true``, because it is built outside this workspace.
+#: The SOURCE is what must match.
+PER_REPO_VENDORED_TREES = {
+    "axiam-rust-sdk": [
+        ("crates/axiam-opaque/src", "vendor/axiam-opaque/src"),
+    ],
+}
 
 #: Directory holding the vendored proto set, identical on both sides.
 PROTO_DIR = "proto/axiam/v1"
@@ -193,7 +217,19 @@ def source_hashes() -> dict[str, str]:
     if not proto_sources:
         sys.exit(f"error: no protos found under {PROTO_DIR} — wrong working directory?")
 
-    paths = [src for src, _ in FLAT_ARTIFACTS] + proto_sources
+    tree_sources: dict[str, str] = {}
+    for trees in PER_REPO_VENDORED_TREES.values():
+        for src_dir, dst_dir in trees:
+            root = REPO_ROOT / src_dir
+            if not root.is_dir():
+                sys.exit(f"error: vendored source tree {src_dir} is missing from this repo")
+            for f in sorted(root.rglob("*")):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(root).as_posix()
+                tree_sources[f.relative_to(REPO_ROOT).as_posix()] = f"{dst_dir}/{rel}"
+
+    paths = [src for src, _ in FLAT_ARTIFACTS] + proto_sources + sorted(tree_sources)
     for path in paths:
         if not (REPO_ROOT / path).is_file():
             sys.exit(f"error: source artifact {path} is missing from this repo")
@@ -208,7 +244,7 @@ def source_hashes() -> dict[str, str]:
     out: dict[str, str] = {}
     for path, blob in zip(paths, hashes):
         # Map source path -> the path the SDK repo is expected to carry it at.
-        vendored = dict(FLAT_ARTIFACTS).get(path, path)
+        vendored = dict(FLAT_ARTIFACTS).get(path) or tree_sources.get(path) or path
         out[vendored] = blob
     return out
 
@@ -354,10 +390,17 @@ class LocalReader(Reader):
 # ---------------------------------------------------------------------------
 
 
+def vendored_tree_paths(repo: str, sources: dict[str, str]) -> list[str]:
+    """The paths `repo` is expected to carry from PER_REPO_VENDORED_TREES."""
+    prefixes = [dst for _, dst in PER_REPO_VENDORED_TREES.get(repo, [])]
+    return sorted(p for p in sources if any(p.startswith(f"{d}/") for d in prefixes))
+
+
 def check_repo(repo: str, reader: Reader, sources: dict[str, str]) -> RepoReport:
     report = RepoReport(repo=repo)
     try:
-        for _, vendored in FLAT_ARTIFACTS:
+        expected_paths = [v for _, v in FLAT_ARTIFACTS] + vendored_tree_paths(repo, sources)
+        for vendored in expected_paths:
             expected = sources[vendored]
             actual = reader.blob(repo, vendored)
             if actual is None:

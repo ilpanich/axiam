@@ -3,9 +3,19 @@ name: SDK Artifact Drift (cross-repo)
 # publishing-and-secrets.md §8 — the second half of R5.8.
 #
 # Three artifacts are authored HERE and vendored into every SDK repo:
-#   sdks/CONTRACT.md       -> <sdk repo>/CONTRACT.md
-#   sdks/openapi.json      -> <sdk repo>/openapi.json
-#   proto/axiam/v1/*.proto -> <sdk repo>/proto/axiam/v1/*.proto
+#   sdks/CONTRACT.md              -> <sdk repo>/CONTRACT.md
+#   sdks/openapi.json             -> <sdk repo>/openapi.json
+#   sdks/opaque-test-vectors.json -> <sdk repo>/opaque-test-vectors.json
+#   proto/axiam/v1/*.proto        -> <sdk repo>/proto/axiam/v1/*.proto
+#
+# Plus one tree vendored into a SINGLE repo:
+#   crates/axiam-opaque/src -> axiam-rust-sdk/vendor/axiam-opaque/src
+#
+# That last one is the OPAQUE client implementation itself. CONTRACT §23.1
+# forbids an SDK from writing its own precisely so there is one; a vendored
+# copy that drifts reintroduces the problem the rule exists to prevent, by way
+# of the mechanism meant to avoid it. It disappears from this list when the
+# crate is published to crates.io and the SDK depends on it by version.
 #
 # A second job runs the §8b enforcement gate (scripts/check-sdk-amqps.py). That
 # is the same shape of problem one layer down: this job asks whether the SDKs

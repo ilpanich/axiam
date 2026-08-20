@@ -1,0 +1,72 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OPAQUE (RFC 9807) domain model."><title>axiam_core::models::opaque - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module opaque</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-alpha32</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module opaque</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-buys-axiam" title="What this buys AXIAM">What this buys AXIAM</a></li><li><a href="#why-opaque-rather-than-srp" title="Why OPAQUE rather than SRP">Why OPAQUE rather than SRP</a></li><li><a href="#identifiers-and-why-a-rename-no-longer-breaks-a-credential" title="Identifiers, and why a rename no longer breaks a credential">Identifiers, and why a rename no longer breaks a credential</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>core::<wbr>models</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_core</a>::<wbr><a href="../index.html">models</a></div><h1>Module <span>opaque</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_core/models/opaque.rs.html#1-979">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OPAQUE (RFC 9807) domain model.</p>
+<p>OPAQUE is an <strong>augmented PAKE</strong>: the client proves knowledge of the
+password without the password — or anything from which the password can be
+cheaply recovered — ever crossing the wire. What the server stores instead
+is a <em>registration record</em>: an envelope sealed under a key the client can
+only reconstruct by running the password through the server’s oblivious
+PRF.</p>
+<h2 id="what-this-buys-axiam"><a class="doc-anchor" href="#what-this-buys-axiam">§</a>What this buys AXIAM</h2>
+<p>TLS 1.3 already protects the password in transit against a network
+attacker. OPAQUE closes a different set of holes, all of which are real in
+a multi-tenant deployment the tenant does not fully own:</p>
+<ul>
+<li>a reverse proxy, ingress controller, CDN or service mesh that terminates
+TLS sees every plaintext password today; under OPAQUE it sees a blinded
+group element and a MAC, which are useless without the record <em>and</em> the
+tenant’s OPRF seed;</li>
+<li>an accidental request-body log, a heap dump, or a crash reporter can no
+longer capture a plaintext password, because the server never has one;</li>
+<li>a stolen record database is <strong>not</strong> offline-crackable on its own. This is
+the property SRP could not offer: recovering a password from a stolen
+OPAQUE record additionally requires the tenant’s OPRF seed, and without
+it there is no offline dictionary attack to mount at any cost.</li>
+</ul>
+<p>It does <strong>not</strong> protect against a fully compromised AXIAM server, and for
+browser clients it does not protect against AXIAM serving malicious
+JavaScript. Those are outside OPAQUE’s threat model and must not be
+claimed.</p>
+<h2 id="why-opaque-rather-than-srp"><a class="doc-anchor" href="#why-opaque-rather-than-srp">§</a>Why OPAQUE rather than SRP</h2>
+<p>AXIAM shipped SRP-6a first and replaced it wholesale. Three reasons, in
+descending order of weight:</p>
+<ol>
+<li><strong>Pre-computation resistance.</strong> A stolen SRP verifier database is
+offline-attackable at exactly the cost of the KDF, which is why the SRP
+design had to bolt a memory-hard KDF onto RFC 5054’s bare hash simply to
+match the Argon2id hashes it replaced. OPAQUE’s OPRF removes the offline
+attack rather than repricing it.</li>
+<li><strong>It is a specification, not a construction.</strong> RFC 9807 pins every byte;
+AXIAM’s SRP had two documented divergences from RFC 5054 (SHA-256 for
+SHA-1, and <code>x</code> as a KDF output) that existed because the RFC was not
+good enough to adopt as written.</li>
+<li><strong>One implementation instead of eleven.</strong> SRP is arithmetic simple
+enough that every SDK hand-rolled it — including a bundled Montgomery
+modular exponentiation in Swift. OPAQUE is not, so every AXIAM client
+binds the same audited core (see <code>crates/axiam-opaque</code>). Eleven
+hand-written OPRF and hash-to-curve implementations on an authentication
+path is a risk this project declined to take.</li>
+</ol>
+<p>A consequence worth naming: the KSF fallback SRP needed no longer exists.
+<code>pbkdf2_sha256</code> was in the SRP wire format only because PHP, Swift and
+pre-3.2 OpenSSL had no usable Argon2id, and a tenant serving those clients
+had to weaken its whole KDF policy. One shared core makes Argon2id
+universal, so <a href="enum.OpaqueKsf.html" title="enum axiam_core::models::opaque::OpaqueKsf"><code>OpaqueKsf</code></a>’s second variant is <code>scrypt</code> — memory-hard
+either way, and no tenant can land on a KDF that is not.</p>
+<h2 id="identifiers-and-why-a-rename-no-longer-breaks-a-credential"><a class="doc-anchor" href="#identifiers-and-why-a-rename-no-longer-breaks-a-credential">§</a>Identifiers, and why a rename no longer breaks a credential</h2>
+<p>Under SRP the private key <code>x</code> was derived over <code>username ":" password</code>, so
+renaming a user silently invalidated their verifier. OPAQUE binds the
+record to a <code>credential_identifier</code> chosen by the <em>server</em>, so AXIAM stores
+a random 32-byte value per credential
+(<a href="struct.OpaqueCredential.html#structfield.credential_identifier" title="field axiam_core::models::opaque::OpaqueCredential::credential_identifier"><code>OpaqueCredential::credential_identifier</code></a>) that has no relationship to
+any human-readable name. Renames are therefore free, and the identifier
+leaks nothing if observed.</p>
+<p>The same shape is what makes the unknown-identity path honest: for a
+username that does not exist the server derives a <em>deterministic</em> 32-byte
+identifier from a per-tenant key, so repeated probes for the same
+non-existent name get a stable answer, and the answer is drawn from the
+same distribution as a real one.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CreateOpaqueCredential.html" title="struct axiam_core::models::opaque::CreateOpaqueCredential">Create<wbr>Opaque<wbr>Credential</a></dt><dd>Input for creating or replacing a user’s OPAQUE record.</dd><dt><a class="struct" href="struct.OpaqueCredential.html" title="struct axiam_core::models::opaque::OpaqueCredential">Opaque<wbr>Credential</a></dt><dd>A stored OPAQUE registration record for one user.</dd><dt><a class="struct" href="struct.OpaqueEnrollment.html" title="struct axiam_core::models::opaque::OpaqueEnrollment">Opaque<wbr>Enrollment</a></dt><dd>The client-supplied half of an OPAQUE enrolment, as it appears inside
+registration / change-password / reset-completion / bootstrap request
+bodies.</dd><dt><a class="struct" href="struct.OpaqueLoginFinishRequest.html" title="struct axiam_core::models::opaque::OpaqueLoginFinishRequest">Opaque<wbr>Login<wbr>Finish<wbr>Request</a></dt><dd>Client request to <code>POST /api/v1/auth/opaque/login/finish</code>.</dd><dt><a class="struct" href="struct.OpaqueLoginStartRequest.html" title="struct axiam_core::models::opaque::OpaqueLoginStartRequest">Opaque<wbr>Login<wbr>Start<wbr>Request</a></dt><dd>Client request to <code>POST /api/v1/auth/opaque/login/start</code>.</dd><dt><a class="struct" href="struct.OpaqueLoginStartResponse.html" title="struct axiam_core::models::opaque::OpaqueLoginStartResponse">Opaque<wbr>Login<wbr>Start<wbr>Response</a></dt><dd>Server response to <code>POST /api/v1/auth/opaque/login/start</code>.</dd><dt><a class="struct" href="struct.OpaqueRegisterStartRequest.html" title="struct axiam_core::models::opaque::OpaqueRegisterStartRequest">Opaque<wbr>Register<wbr>Start<wbr>Request</a></dt><dd>Client request to <code>POST /api/v1/auth/opaque/register/start</code>.</dd><dt><a class="struct" href="struct.OpaqueRegisterStartResponse.html" title="struct axiam_core::models::opaque::OpaqueRegisterStartResponse">Opaque<wbr>Register<wbr>Start<wbr>Response</a></dt><dd>Server response to <code>POST /api/v1/auth/opaque/register/start</code>.</dd><dt><a class="struct" href="struct.OpaqueServerSetup.html" title="struct axiam_core::models::opaque::OpaqueServerSetup">Opaque<wbr>Server<wbr>Setup</a></dt><dd>Per-tenant OPAQUE server key material.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.OpaqueKsf.html" title="enum axiam_core::models::opaque::OpaqueKsf">Opaque<wbr>Ksf</a></dt><dd>The key-stretching function applied to the OPRF output before it seals the
+envelope (RFC 9807 §3.1, <code>Stretch</code>).</dd><dt><a class="enum" href="enum.OpaqueKsfParams.html" title="enum axiam_core::models::opaque::OpaqueKsfParams">Opaque<wbr>KsfParams</a></dt><dd>Concrete cost parameters for an <a href="enum.OpaqueKsf.html" title="enum axiam_core::models::opaque::OpaqueKsf"><code>OpaqueKsf</code></a>.</dd><dt><a class="enum" href="enum.OpaqueMode.html" title="enum axiam_core::models::opaque::OpaqueMode">Opaque<wbr>Mode</a></dt><dd>Whether OPAQUE is offered, and whether password login is still accepted.</dd><dt><a class="enum" href="enum.OpaqueSuite.html" title="enum axiam_core::models::opaque::OpaqueSuite">Opaque<wbr>Suite</a></dt><dd>The RFC 9807 ciphersuite a registration record was created under.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.ksf_wire_fields.html" title="fn axiam_core::models::opaque::ksf_wire_fields">ksf_<wbr>wire_<wbr>fields</a></dt><dd>Split <a href="enum.OpaqueKsfParams.html" title="enum axiam_core::models::opaque::OpaqueKsfParams"><code>OpaqueKsfParams</code></a> into the flat, optional wire fields the
+register/start and login/start responses carry.</dd><dt><a class="fn" href="fn.normalize_hex.html" title="fn axiam_core::models::opaque::normalize_hex">normalize_<wbr>hex</a></dt><dd>Lowercase and validate a hex string, rejecting odd lengths, non-hex
+characters and anything outside <code>expected_len</code> bytes when one is given.</dd><dt><a class="fn" href="fn.opaque_ksf_is_at_least.html" title="fn axiam_core::models::opaque::opaque_ksf_is_at_least">opaque_<wbr>ksf_<wbr>is_<wbr>at_<wbr>least</a></dt><dd>True when <code>candidate</code> is at least as strong as <code>baseline</code>.</dd><dt><a class="fn" href="fn.opaque_suite_is_at_least.html" title="fn axiam_core::models::opaque::opaque_suite_is_at_least">opaque_<wbr>suite_<wbr>is_<wbr>at_<wbr>least</a></dt><dd>True when <code>candidate</code> is at least as strong as <code>baseline</code>.</dd></dl></section></div></main></body></html>

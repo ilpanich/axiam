@@ -1,0 +1,96 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OPAQUE (RFC 9807) — server side."><title>axiam_auth::opaque - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module opaque</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_auth/index.html">axiam_<wbr>auth</a><span class="version">1.0.0-alpha32</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module opaque</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-exchanges" title="The exchanges">The exchanges</a></li><li><a href="#why-this-module-is-thin" title="Why this module is thin">Why this module is thin</a></li><li><a href="#why-the-server-state-is-sealed-into-a-token-rather-than-stored" title="Why the server state is sealed into a token rather than stored">Why the server state is sealed into a token rather than stored</a></li><li><a href="#account-enumeration" title="Account enumeration">Account enumeration</a></li><li><a href="#what-is-never-logged" title="What is never logged">What is never logged</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>auth</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_auth</a></div><h1>Module <span>opaque</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_auth/opaque.rs.html#1-1629">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OPAQUE (RFC 9807) — server side.</p>
+<p>The domain types, the enforcement modes, and the rationale for adopting
+OPAQUE at all live in [<code>axiam_core::models::opaque</code>]. This module is the
+protocol engine behind the four endpoints:</p>
+<ul>
+<li><code>POST /api/v1/auth/opaque/register/start</code></li>
+<li><code>POST /api/v1/auth/opaque/register/finish</code></li>
+<li><code>POST /api/v1/auth/opaque/login/start</code></li>
+<li><code>POST /api/v1/auth/opaque/login/finish</code></li>
+</ul>
+<h2 id="the-exchanges"><a class="doc-anchor" href="#the-exchanges">§</a>The exchanges</h2><div class="example-wrap"><pre class="language-text"><code>  REGISTRATION                                     server
+    |  RegistrationRequest (blinded password)         |
+    | ----------------------------------------------&gt; |  evaluate OPRF
+    |  RegistrationResponse, ksf params, session      |
+    | &lt;---------------------------------------------- |
+    |   stretch, seal an envelope under the OPRF output
+    |  RegistrationRecord, session                    |
+    | ----------------------------------------------&gt; |  store verbatim
+
+  LOGIN                                            server
+    |  KE1 (blinded password + client ephemeral)      |
+    | ----------------------------------------------&gt; |  evaluate OPRF,
+    |                                                  |  mask the envelope
+    |  KE2, ksf params, session                       |
+    | &lt;---------------------------------------------- |
+    |   stretch, open the envelope, derive the AKE keys
+    |  KE3 (client MAC), session                      |
+    | ----------------------------------------------&gt; |  verify the MAC
+    |  the ordinary login result                      |
+    | &lt;---------------------------------------------- |</code></pre></div><h2 id="why-this-module-is-thin"><a class="doc-anchor" href="#why-this-module-is-thin">§</a>Why this module is thin</h2>
+<p>Every byte of the protocol is [<code>opaque_ke</code>], which implements RFC 9807 and
+has been independently audited. This module supplies four things the crate
+deliberately leaves to the application, and nothing else:</p>
+<ol>
+<li><strong>Where the server’s key material lives</strong> — per tenant, encrypted at
+rest (see <a href="struct.OpaqueServer.html#method.create_server_setup" title="method axiam_auth::opaque::OpaqueServer::create_server_setup"><code>OpaqueServer::create_server_setup</code></a>).</li>
+<li><strong>How state survives between the two messages</strong> — sealed into a token
+rather than a table.</li>
+<li><strong>What a credential identifier is</strong> — random per credential, so a
+rename cannot invalidate a record.</li>
+<li><strong>How a failure is attributed</strong> — so a wrong password still counts
+toward lockout.</li>
+</ol>
+<p>Resisting the temptation to “improve” anything inside the protocol is the
+point. AXIAM’s SRP implementation carried two deliberate divergences from
+RFC 5054 because that RFC was not good enough to adopt as written; RFC 9807
+is, and a divergence here would be a defect.</p>
+<h2 id="why-the-server-state-is-sealed-into-a-token-rather-than-stored"><a class="doc-anchor" href="#why-the-server-state-is-sealed-into-a-token-rather-than-stored">§</a>Why the server state is sealed into a token rather than stored</h2>
+<p>Between the two messages of each exchange the server has to remember what
+it derived. The obvious approach is a session table with a TTL; this module
+instead seals the state into an AES-256-GCM token the client carries back,
+exactly as <a href="../service/struct.AuthService.html" title="struct axiam_auth::service::AuthService"><code>crate::service::AuthService</code></a> already does for the MFA
+challenge, and as the SRP implementation this replaces did. Three reasons:</p>
+<ol>
+<li><strong>It works across replicas with no coordination.</strong> A DB-backed session
+would add a write and a read to every login on the hot path, in a system
+whose whole point is horizontal scaling.</li>
+<li><strong>There is nothing to garbage-collect.</strong> Expiry is a field inside the
+sealed blob, checked on open; an abandoned exchange costs nothing.</li>
+<li><strong>A replayed token grants no new power.</strong> Opening it requires the server
+key, and <em>using</em> it still requires a valid <code>KE3</code>, which still requires
+the password. An attacker who can replay a captured pair has, by
+construction, already broken TLS — at which point they have the session
+cookie the exchange would have produced anyway. The 120-second lifetime
+bounds even that.</li>
+</ol>
+<p>A registration session and a login session are sealed under the same key
+but carry distinct <code>kind</code> tags that are checked on open, so a token minted
+by one exchange cannot be presented to the other.</p>
+<h2 id="account-enumeration"><a class="doc-anchor" href="#account-enumeration">§</a>Account enumeration</h2>
+<p>An unknown identity must produce a response indistinguishable from a known
+one, or <code>/auth/opaque/login/start</code> becomes a faster user-enumeration oracle
+than anything else in the API.</p>
+<p>Under SRP this needed hand-built machinery: a fabricated but <em>stable</em> salt
+derived by HMAC, plus a dummy verifier chosen so the modular exponentiation
+cost matched. RFC 9807 designs the case in, and <code>opaque_ke</code> implements it:
+passing <code>password_file: None</code> to <code>ServerLogin::start</code> produces a <code>KE2</code> of
+identical shape from the setup’s dummy public key. What this module adds is
+the <em>stability</em> half — a decoy credential identifier derived as
+<code>HMAC(decoy_key, tenant_id || identity)</code> so that probing the same
+non-existent name twice yields the same answer, where a random identifier
+would announce non-existence as loudly as a <code>404</code>.</p>
+<p>One residual is worth stating rather than hiding: the KSF parameters
+returned for a decoy are the tenant’s <em>current</em> policy, while a real user
+carries whatever they enrolled under. An attacker who knows a tenant
+changed its KSF cost, and who can find a user still on the old cost, learns
+that that account exists. The window closes as users rotate passwords, it
+requires knowledge of the tenant’s policy history, and it is the same
+residual the SRP design carried for the same reason.</p>
+<h2 id="what-is-never-logged"><a class="doc-anchor" href="#what-is-never-logged">§</a>What is never logged</h2>
+<p>No value in this module — sealed sessions, KE messages, registration
+records, the server setup, session keys — may appear in a log record at any
+level. <a href="struct.OpaqueServer.html" title="struct axiam_auth::opaque::OpaqueServer"><code>OpaqueServer</code></a> and <a href="struct.OpaqueServerKeys.html" title="struct axiam_auth::opaque::OpaqueServerKeys"><code>OpaqueServerKeys</code></a> have hand-written <code>Debug</code>
+impls that render nothing for exactly this reason.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.OpaqueEnrolled.html" title="struct axiam_auth::opaque::OpaqueEnrolled">Opaque<wbr>Enrolled</a></dt><dd>A validated registration, ready for the caller to bind to a user.</dd><dt><a class="struct" href="struct.OpaqueServer.html" title="struct axiam_auth::opaque::OpaqueServer">Opaque<wbr>Server</a></dt><dd>OPAQUE server operations.</dd><dt><a class="struct" href="struct.OpaqueServerKeys.html" title="struct axiam_auth::opaque::OpaqueServerKeys">Opaque<wbr>Server<wbr>Keys</a></dt><dd>The two keys the OPAQUE server needs, which are deliberately <em>not</em> the same
+key.</dd><dt><a class="struct" href="struct.OpaqueVerified.html" title="struct axiam_auth::opaque::OpaqueVerified">Opaque<wbr>Verified</a></dt><dd>Outcome of a successful <code>login/finish</code>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.OpaqueRejection.html" title="enum axiam_auth::opaque::OpaqueRejection">Opaque<wbr>Rejection</a></dt><dd>Why an OPAQUE login was refused.</dd></dl></section></div></main></body></html>

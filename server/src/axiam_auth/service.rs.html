@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-auth/src/service.rs`."><title>service.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_auth/</div>service.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Authentication service — login, logout, token refresh, and MFA.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-auth/src/service.rs`."><title>service.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_auth/</div>service.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Authentication service — login, logout, token refresh, and MFA.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>axiam_core::models::password_history::CreatePasswordHistoryEntry;
@@ -330,13 +330,13 @@
 <a href=#330 id=330 data-nosnippet>330</a>    /// tokens or return the appropriate challenge.
 <a href=#331 id=331 data-nosnippet>331</a>    ///
 <a href=#332 id=332 data-nosnippet>332</a>    /// This is a method rather than the tail of [`Self::login`] because there
-<a href=#333 id=333 data-nosnippet>333</a>    /// is now more than one way to prove a password. SRP
-<a href=#334 id=334 data-nosnippet>334</a>    /// ([`crate::srp::SrpServer::verify`]) establishes exactly the same fact —
-<a href=#335 id=335 data-nosnippet>335</a>    /// "this principal knows the password" — by a different route, and it must
-<a href=#336 id=336 data-nosnippet>336</a>    /// land in exactly the same place afterwards. Duplicating this sequence for
-<a href=#337 id=337 data-nosnippet>337</a>    /// the SRP path is how a deployment ends up with lockout counters that only
-<a href=#338 id=338 data-nosnippet>338</a>    /// move on one of the two paths, or an MFA policy that one of them quietly
-<a href=#339 id=339 data-nosnippet>339</a>    /// skips.
+<a href=#333 id=333 data-nosnippet>333</a>    /// is now more than one way to prove a password. OPAQUE
+<a href=#334 id=334 data-nosnippet>334</a>    /// ([`crate::opaque::OpaqueServer::login_finish`]) establishes exactly the
+<a href=#335 id=335 data-nosnippet>335</a>    /// same fact — "this principal knows the password" — by a different route,
+<a href=#336 id=336 data-nosnippet>336</a>    /// and it must land in exactly the same place afterwards. Duplicating this
+<a href=#337 id=337 data-nosnippet>337</a>    /// sequence for the OPAQUE path is how a deployment ends up with lockout
+<a href=#338 id=338 data-nosnippet>338</a>    /// counters that only move on one of the two paths, or an MFA policy that
+<a href=#339 id=339 data-nosnippet>339</a>    /// one of them quietly skips.
 <a href=#340 id=340 data-nosnippet>340</a>    ///
 <a href=#341 id=341 data-nosnippet>341</a>    /// `mfa_policy` is the tenant-effective policy, or `None` to skip
 <a href=#342 id=342 data-nosnippet>342</a>    /// enforcement (the caller could not resolve settings).
@@ -1386,47 +1386,51 @@
 <a href=#1386 id=1386 data-nosnippet>1386</a>    }
 <a href=#1387 id=1387 data-nosnippet>1387</a>
 <a href=#1388 id=1388 data-nosnippet>1388</a>    <span class="doccomment">/// Record one failed authentication attempt against `user_id`, for the
-<a href=#1389 id=1389 data-nosnippet>1389</a>    /// SRP path.
+<a href=#1389 id=1389 data-nosnippet>1389</a>    /// OPAQUE path.
 <a href=#1390 id=1390 data-nosnippet>1390</a>    ///
-<a href=#1391 id=1391 data-nosnippet>1391</a>    /// SRP proves the password without the server seeing it, but a wrong proof
-<a href=#1392 id=1392 data-nosnippet>1392</a>    /// is still a wrong password and must accrue toward lockout exactly as a
-<a href=#1393 id=1393 data-nosnippet>1393</a>    /// wrong Argon2id verify does. Without this, turning SRP on would silently
-<a href=#1394 id=1394 data-nosnippet>1394</a>    /// remove brute-force protection from the accounts that adopted it — the
-<a href=#1395 id=1395 data-nosnippet>1395</a>    /// opposite of what enabling an extra security layer is supposed to do.
-<a href=#1396 id=1396 data-nosnippet>1396</a>    </span><span class="kw">pub async fn </span>record_failed_srp_attempt(
-<a href=#1397 id=1397 data-nosnippet>1397</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#1398 id=1398 data-nosnippet>1398</a>        tenant_id: Uuid,
-<a href=#1399 id=1399 data-nosnippet>1399</a>        user_id: Uuid,
-<a href=#1400 id=1400 data-nosnippet>1400</a>    ) -&gt; AxiamResult&lt;()&gt; {
-<a href=#1401 id=1401 data-nosnippet>1401</a>        <span class="kw">let </span>user = <span class="self">self</span>.user_repo.get_by_id(tenant_id, user_id).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1402 id=1402 data-nosnippet>1402</a>        <span class="self">self</span>.record_failed_login(tenant_id, <span class="kw-2">&amp;</span>user).<span class="kw">await
-<a href=#1403 id=1403 data-nosnippet>1403</a>    </span>}
-<a href=#1404 id=1404 data-nosnippet>1404</a>
-<a href=#1405 id=1405 data-nosnippet>1405</a>    <span class="kw">async fn </span>record_failed_login(
-<a href=#1406 id=1406 data-nosnippet>1406</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#1407 id=1407 data-nosnippet>1407</a>        tenant_id: Uuid,
-<a href=#1408 id=1408 data-nosnippet>1408</a>        user: <span class="kw-2">&amp;</span>axiam_core::models::user::User,
-<a href=#1409 id=1409 data-nosnippet>1409</a>    ) -&gt; AxiamResult&lt;()&gt; {
-<a href=#1410 id=1410 data-nosnippet>1410</a>        <span class="comment">// D-06: delegate to the shared lockout helper — the single source of
-<a href=#1411 id=1411 data-nosnippet>1411</a>        // truth for failed-attempt accrual, also called by gRPC
-<a href=#1412 id=1412 data-nosnippet>1412</a>        // `UserService::validate_credentials` (SEC-026b).
-<a href=#1413 id=1413 data-nosnippet>1413</a>        </span><span class="kw">crate</span>::lockout::record_failed_login(<span class="kw-2">&amp;</span><span class="self">self</span>.user_repo, <span class="kw-2">&amp;</span><span class="self">self</span>.config, tenant_id, user).<span class="kw">await
-<a href=#1414 id=1414 data-nosnippet>1414</a>    </span>}
-<a href=#1415 id=1415 data-nosnippet>1415</a>
-<a href=#1416 id=1416 data-nosnippet>1416</a>    <span class="kw">async fn </span>reset_failed_logins(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;()&gt; {
-<a href=#1417 id=1417 data-nosnippet>1417</a>        <span class="self">self</span>.user_repo
-<a href=#1418 id=1418 data-nosnippet>1418</a>            .update(
-<a href=#1419 id=1419 data-nosnippet>1419</a>                tenant_id,
-<a href=#1420 id=1420 data-nosnippet>1420</a>                user_id,
-<a href=#1421 id=1421 data-nosnippet>1421</a>                UpdateUser {
-<a href=#1422 id=1422 data-nosnippet>1422</a>                    failed_login_attempts: <span class="prelude-val">Some</span>(<span class="number">0</span>),
-<a href=#1423 id=1423 data-nosnippet>1423</a>                    last_failed_login_at: <span class="prelude-val">Some</span>(<span class="prelude-val">None</span>),
-<a href=#1424 id=1424 data-nosnippet>1424</a>                    locked_until: <span class="prelude-val">Some</span>(<span class="prelude-val">None</span>),
-<a href=#1425 id=1425 data-nosnippet>1425</a>                    ..Default::default()
-<a href=#1426 id=1426 data-nosnippet>1426</a>                },
-<a href=#1427 id=1427 data-nosnippet>1427</a>            )
-<a href=#1428 id=1428 data-nosnippet>1428</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1429 id=1429 data-nosnippet>1429</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1430 id=1430 data-nosnippet>1430</a>    }
-<a href=#1431 id=1431 data-nosnippet>1431</a>}
+<a href=#1391 id=1391 data-nosnippet>1391</a>    /// OPAQUE proves the password without the server seeing it, but a failed
+<a href=#1392 id=1392 data-nosnippet>1392</a>    /// `KE3` is still a wrong password and must accrue toward lockout exactly
+<a href=#1393 id=1393 data-nosnippet>1393</a>    /// as a wrong Argon2id verify does. Without this, turning OPAQUE on would
+<a href=#1394 id=1394 data-nosnippet>1394</a>    /// silently remove brute-force protection from the accounts that adopted
+<a href=#1395 id=1395 data-nosnippet>1395</a>    /// it — the opposite of what enabling an extra security layer is supposed
+<a href=#1396 id=1396 data-nosnippet>1396</a>    /// to do.
+<a href=#1397 id=1397 data-nosnippet>1397</a>    ///
+<a href=#1398 id=1398 data-nosnippet>1398</a>    /// This is why [`crate::opaque::OpaqueRejection`] has two variants rather
+<a href=#1399 id=1399 data-nosnippet>1399</a>    /// than one: the caller cannot accrue an attempt it cannot attribute.
+<a href=#1400 id=1400 data-nosnippet>1400</a>    </span><span class="kw">pub async fn </span>record_failed_opaque_attempt(
+<a href=#1401 id=1401 data-nosnippet>1401</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1402 id=1402 data-nosnippet>1402</a>        tenant_id: Uuid,
+<a href=#1403 id=1403 data-nosnippet>1403</a>        user_id: Uuid,
+<a href=#1404 id=1404 data-nosnippet>1404</a>    ) -&gt; AxiamResult&lt;()&gt; {
+<a href=#1405 id=1405 data-nosnippet>1405</a>        <span class="kw">let </span>user = <span class="self">self</span>.user_repo.get_by_id(tenant_id, user_id).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1406 id=1406 data-nosnippet>1406</a>        <span class="self">self</span>.record_failed_login(tenant_id, <span class="kw-2">&amp;</span>user).<span class="kw">await
+<a href=#1407 id=1407 data-nosnippet>1407</a>    </span>}
+<a href=#1408 id=1408 data-nosnippet>1408</a>
+<a href=#1409 id=1409 data-nosnippet>1409</a>    <span class="kw">async fn </span>record_failed_login(
+<a href=#1410 id=1410 data-nosnippet>1410</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1411 id=1411 data-nosnippet>1411</a>        tenant_id: Uuid,
+<a href=#1412 id=1412 data-nosnippet>1412</a>        user: <span class="kw-2">&amp;</span>axiam_core::models::user::User,
+<a href=#1413 id=1413 data-nosnippet>1413</a>    ) -&gt; AxiamResult&lt;()&gt; {
+<a href=#1414 id=1414 data-nosnippet>1414</a>        <span class="comment">// D-06: delegate to the shared lockout helper — the single source of
+<a href=#1415 id=1415 data-nosnippet>1415</a>        // truth for failed-attempt accrual, also called by gRPC
+<a href=#1416 id=1416 data-nosnippet>1416</a>        // `UserService::validate_credentials` (SEC-026b).
+<a href=#1417 id=1417 data-nosnippet>1417</a>        </span><span class="kw">crate</span>::lockout::record_failed_login(<span class="kw-2">&amp;</span><span class="self">self</span>.user_repo, <span class="kw-2">&amp;</span><span class="self">self</span>.config, tenant_id, user).<span class="kw">await
+<a href=#1418 id=1418 data-nosnippet>1418</a>    </span>}
+<a href=#1419 id=1419 data-nosnippet>1419</a>
+<a href=#1420 id=1420 data-nosnippet>1420</a>    <span class="kw">async fn </span>reset_failed_logins(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;()&gt; {
+<a href=#1421 id=1421 data-nosnippet>1421</a>        <span class="self">self</span>.user_repo
+<a href=#1422 id=1422 data-nosnippet>1422</a>            .update(
+<a href=#1423 id=1423 data-nosnippet>1423</a>                tenant_id,
+<a href=#1424 id=1424 data-nosnippet>1424</a>                user_id,
+<a href=#1425 id=1425 data-nosnippet>1425</a>                UpdateUser {
+<a href=#1426 id=1426 data-nosnippet>1426</a>                    failed_login_attempts: <span class="prelude-val">Some</span>(<span class="number">0</span>),
+<a href=#1427 id=1427 data-nosnippet>1427</a>                    last_failed_login_at: <span class="prelude-val">Some</span>(<span class="prelude-val">None</span>),
+<a href=#1428 id=1428 data-nosnippet>1428</a>                    locked_until: <span class="prelude-val">Some</span>(<span class="prelude-val">None</span>),
+<a href=#1429 id=1429 data-nosnippet>1429</a>                    ..Default::default()
+<a href=#1430 id=1430 data-nosnippet>1430</a>                },
+<a href=#1431 id=1431 data-nosnippet>1431</a>            )
+<a href=#1432 id=1432 data-nosnippet>1432</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1433 id=1433 data-nosnippet>1433</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1434 id=1434 data-nosnippet>1434</a>    }
+<a href=#1435 id=1435 data-nosnippet>1435</a>}
 </code></pre></div></section></main></body></html>

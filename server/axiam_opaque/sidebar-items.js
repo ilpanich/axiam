@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AxiamKsf","OpaqueError"],"mod":["testing"],"struct":["AxiamOpaqueSuite","ClientLoginState","ClientRegistrationState","LoginOutcome","RegistrationOutcome"]};

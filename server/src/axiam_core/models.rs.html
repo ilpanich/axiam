@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/models.rs`."><title>models.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/</div>models.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Domain models for AXIAM.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/models.rs`."><title>models.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/</div>models.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Domain models for AXIAM.
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! All tenant-scoped models include a `tenant_id` field.
 <a href=#4 id=4 data-nosnippet>4</a>//! Organization and Tenant are the top-level multi-tenancy types.
@@ -16,20 +16,20 @@
 <a href=#16 id=16 data-nosnippet>16</a><span class="kw">pub mod </span>mfa_method;
 <a href=#17 id=17 data-nosnippet>17</a><span class="kw">pub mod </span>notification_rule;
 <a href=#18 id=18 data-nosnippet>18</a><span class="kw">pub mod </span>oauth2_client;
-<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>organization;
-<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>password_history;
-<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>password_reset;
-<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>permission;
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>pgp_key;
-<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub mod </span>reactor;
-<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub mod </span>resource;
-<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub mod </span>role;
-<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub mod </span>scim_token;
-<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub mod </span>scope;
-<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub mod </span>service_account;
-<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub mod </span>session;
-<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub mod </span>settings;
-<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub mod </span>srp;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>opaque;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>organization;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>password_history;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>password_reset;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>permission;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub mod </span>pgp_key;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub mod </span>reactor;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub mod </span>resource;
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub mod </span>role;
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub mod </span>scim_token;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub mod </span>scope;
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub mod </span>service_account;
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub mod </span>session;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub mod </span>settings;
 <a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub mod </span>tenant;
 <a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub mod </span>uma;
 <a href=#35 id=35 data-nosnippet>35</a><span class="kw">pub mod </span>user;

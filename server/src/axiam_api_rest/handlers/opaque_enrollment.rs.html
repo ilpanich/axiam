@@ -1,0 +1,176 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/handlers/opaque_enrollment.rs`."><title>opaque_enrollment.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/handlers/</div>opaque_enrollment.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Recording an OPAQUE registration record at the moments a plaintext password
+<a href=#2 id=2 data-nosnippet>2</a>//! legitimately exists.
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! There are exactly four such moments — user creation, an authenticated
+<a href=#5 id=5 data-nosnippet>5</a>//! password change, password-reset completion, and first-run bootstrap — and
+<a href=#6 id=6 data-nosnippet>6</a>//! this module is the one place that handles all of them, so the validation
+<a href=#7 id=7 data-nosnippet>7</a>//! and the policy checks cannot drift between them.
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! # Why enrolment has to be client-driven
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! The server cannot compute a record. The envelope is sealed under a key
+<a href=#12 id=12 data-nosnippet>12</a>//! derived from the password by way of the OPRF, and the whole point of OPAQUE
+<a href=#13 id=13 data-nosnippet>13</a>//! is that the server never sees the password. So the client builds the record
+<a href=#14 id=14 data-nosnippet>14</a>//! and posts it; the server's job is to check that what arrived is well-formed,
+<a href=#15 id=15 data-nosnippet>15</a>//! meets the tenant's policy, and is attributed to the right account — never to
+<a href=#16 id=16 data-nosnippet>16</a>//! trust the client about *whose* account it is. That is why [`OpaqueEnrollment`]
+<a href=#17 id=17 data-nosnippet>17</a>//! carries no user id: the tenant and the user are taken from the authenticated
+<a href=#18 id=18 data-nosnippet>18</a>//! server-side context, and the credential identifier from the sealed session
+<a href=#19 id=19 data-nosnippet>19</a>//! the server itself minted.
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! # Why a missing record is sometimes an error
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! Under [`OpaqueMode::Required`] a password set without a record produces an
+<a href=#24 id=24 data-nosnippet>24</a>//! account that cannot authenticate at all: password login is refused
+<a href=#25 id=25 data-nosnippet>25</a>//! tenant-wide, and there is nothing for `/auth/opaque/login/start` to answer
+<a href=#26 id=26 data-nosnippet>26</a>//! with. Accepting it silently would mean an admin creating a user, seeing
+<a href=#27 id=27 data-nosnippet>27</a>//! `201`, and discovering only later that the account was born unusable. So it
+<a href=#28 id=28 data-nosnippet>28</a>//! is rejected at the point of creation, where the message can say what to do
+<a href=#29 id=29 data-nosnippet>29</a>//! about it.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! # What is *not* here any more
+<a href=#32 id=32 data-nosnippet>32</a>//!
+<a href=#33 id=33 data-nosnippet>33</a>//! The SRP version of this module had an `invalidate_on_rename` that
+<a href=#34 id=34 data-nosnippet>34</a>//! `PUT /api/v1/users/{id}` called on every username change. SRP derived its
+<a href=#35 id=35 data-nosnippet>35</a>//! private key over `username ":" password`, so a rename silently produced a
+<a href=#36 id=36 data-nosnippet>36</a>//! verifier no client could satisfy — an entirely correct password reported as
+<a href=#37 id=37 data-nosnippet>37</a>//! "invalid credentials", discovered at the worst possible moment. OPAQUE binds
+<a href=#38 id=38 data-nosnippet>38</a>//! to a random server-chosen credential identifier that has no relationship to
+<a href=#39 id=39 data-nosnippet>39</a>//! any name, so there is nothing to invalidate and the function is gone rather
+<a href=#40 id=40 data-nosnippet>40</a>//! than ported.
+<a href=#41 id=41 data-nosnippet>41</a>
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">use </span>axiam_auth::OpaqueEnrolled;
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>axiam_core::models::opaque::{
+<a href=#45 id=45 data-nosnippet>45</a>    CreateOpaqueCredential, OpaqueEnrollment, OpaqueMode, opaque_ksf_is_at_least,
+<a href=#46 id=46 data-nosnippet>46</a>    opaque_suite_is_at_least,
+<a href=#47 id=47 data-nosnippet>47</a>};
+<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span>axiam_core::models::settings::OpaquePolicy;
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span>axiam_core::repository::OpaqueCredentialRepository;
+<a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span>surrealdb::Connection;
+<a href=#51 id=51 data-nosnippet>51</a><span class="kw">use </span>uuid::Uuid;
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">use </span><span class="kw">crate</span>::handlers::opaque::opaque_server;
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span><span class="kw">crate</span>::state::AppState;
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a><span class="doccomment">/// Validate a client-built registration record against tenant policy, without
+<a href=#57 id=57 data-nosnippet>57</a>/// writing anything.
+<a href=#58 id=58 data-nosnippet>58</a>///
+<a href=#59 id=59 data-nosnippet>59</a>/// Split from [`store_credential`] on purpose. Every call site has to validate
+<a href=#60 id=60 data-nosnippet>60</a>/// *before* it moves the password and store *after*, because doing both
+<a href=#61 id=61 data-nosnippet>61</a>/// afterwards leaves a window in which the Argon2id hash has advanced while
+<a href=#62 id=62 data-nosnippet>62</a>/// the OPAQUE record still answers to the old password — a user mid-migration
+<a href=#63 id=63 data-nosnippet>63</a>/// could then log in with two different passwords depending on which endpoint
+<a href=#64 id=64 data-nosnippet>64</a>/// they used. Making that ordering expressible is what the split is for.
+<a href=#65 id=65 data-nosnippet>65</a>///
+<a href=#66 id=66 data-nosnippet>66</a>/// A `None` enrolment is accepted under `disabled` and `optional`, and refused
+<a href=#67 id=67 data-nosnippet>67</a>/// under `required`.
+<a href=#68 id=68 data-nosnippet>68</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>validate_enrollment&lt;C: Connection + Clone&gt;(
+<a href=#69 id=69 data-nosnippet>69</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#70 id=70 data-nosnippet>70</a>    policy: <span class="kw-2">&amp;</span>OpaquePolicy,
+<a href=#71 id=71 data-nosnippet>71</a>    tenant_id: Uuid,
+<a href=#72 id=72 data-nosnippet>72</a>    enrollment: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>OpaqueEnrollment&gt;,
+<a href=#73 id=73 data-nosnippet>73</a>) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;OpaqueEnrolled&gt;&gt; {
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="kw">match </span>(policy.opaque_mode, enrollment) {
+<a href=#75 id=75 data-nosnippet>75</a>        <span class="comment">// Nothing offered, nothing expected.
+<a href=#76 id=76 data-nosnippet>76</a>        </span>(OpaqueMode::Disabled, <span class="prelude-val">None</span>) =&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="comment">// A record for a tenant that does not do OPAQUE is refused rather than
+<a href=#79 id=79 data-nosnippet>79</a>        // dropped on the floor: storing it would be dead weight, and silently
+<a href=#80 id=80 data-nosnippet>80</a>        // discarding it would let a client believe OPAQUE is active when the
+<a href=#81 id=81 data-nosnippet>81</a>        // very next login will be a password login.
+<a href=#82 id=82 data-nosnippet>82</a>        </span>(OpaqueMode::Disabled, <span class="prelude-val">Some</span>(<span class="kw">_</span>)) =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#83 id=83 data-nosnippet>83</a>            message: <span class="string">"OPAQUE is not enabled for this tenant"</span>.into(),
+<a href=#84 id=84 data-nosnippet>84</a>        }),
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a>        <span class="comment">// The migration state: clients that can do OPAQUE enrol, clients that
+<a href=#87 id=87 data-nosnippet>87</a>        // cannot keep working.
+<a href=#88 id=88 data-nosnippet>88</a>        </span>(OpaqueMode::Optional, <span class="prelude-val">None</span>) =&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a>        (OpaqueMode::Required, <span class="prelude-val">None</span>) =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#91 id=91 data-nosnippet>91</a>            message: <span class="string">"this tenant requires OPAQUE: the request must include an \
+<a href=#92 id=92 data-nosnippet>92</a>                      `opaque` registration record, or the account will be unable \
+<a href=#93 id=93 data-nosnippet>93</a>                      to authenticate"
+<a href=#94 id=94 data-nosnippet>94</a>                </span>.into(),
+<a href=#95 id=95 data-nosnippet>95</a>        }),
+<a href=#96 id=96 data-nosnippet>96</a>
+<a href=#97 id=97 data-nosnippet>97</a>        (OpaqueMode::Optional | OpaqueMode::Required, <span class="prelude-val">Some</span>(enrollment)) =&gt; {
+<a href=#98 id=98 data-nosnippet>98</a>            <span class="kw">let </span>opaque = opaque_server(state).map_err(|e| e.<span class="number">0</span>)<span class="question-mark">?</span>;
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a>            <span class="comment">// Opening the sealed session is what binds the record to a
+<a href=#101 id=101 data-nosnippet>101</a>            // credential identifier the *server* chose, and to the suite and
+<a href=#102 id=102 data-nosnippet>102</a>            // KSF parameters it dictated. A client cannot substitute any of
+<a href=#103 id=103 data-nosnippet>103</a>            // them, because it never held them in the clear.
+<a href=#104 id=104 data-nosnippet>104</a>            </span><span class="kw">let </span>enrolled = opaque
+<a href=#105 id=105 data-nosnippet>105</a>                .register_finish(<span class="kw-2">&amp;</span>enrollment.opaque_session, <span class="kw-2">&amp;</span>enrollment.registration_record)
+<a href=#106 id=106 data-nosnippet>106</a>                .map_err(AxiamError::from)<span class="question-mark">?</span>;
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a>            <span class="comment">// The session is tenant-scoped, and the caller's tenant comes from
+<a href=#109 id=109 data-nosnippet>109</a>            // its own authenticated context. A mismatch means a session minted
+<a href=#110 id=110 data-nosnippet>110</a>            // for one tenant is being redeemed against another.
+<a href=#111 id=111 data-nosnippet>111</a>            </span><span class="kw">if </span>enrolled.tenant_id != tenant_id {
+<a href=#112 id=112 data-nosnippet>112</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#113 id=113 data-nosnippet>113</a>                    message: <span class="string">"the OPAQUE session was issued for a different tenant"</span>.into(),
+<a href=#114 id=114 data-nosnippet>114</a>                });
+<a href=#115 id=115 data-nosnippet>115</a>            }
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a>            <span class="comment">// Policy is a floor, not an exact match. A client that enrols with
+<a href=#118 id=118 data-nosnippet>118</a>            // a *stronger* suite or KSF than the tenant asks for is doing
+<a href=#119 id=119 data-nosnippet>119</a>            // nothing wrong, and refusing it would block a client that had
+<a href=#120 id=120 data-nosnippet>120</a>            // already moved ahead of a tenant's configuration.
+<a href=#121 id=121 data-nosnippet>121</a>            //
+<a href=#122 id=122 data-nosnippet>122</a>            // In practice both values came from the server's own
+<a href=#123 id=123 data-nosnippet>123</a>            // register/start response, so this can only fire if the tenant's
+<a href=#124 id=124 data-nosnippet>124</a>            // policy was tightened in the seconds between the two calls. It is
+<a href=#125 id=125 data-nosnippet>125</a>            // kept because "the server told the client what to use" is an
+<a href=#126 id=126 data-nosnippet>126</a>            // invariant worth enforcing rather than assuming.
+<a href=#127 id=127 data-nosnippet>127</a>            </span><span class="kw">if </span>!opaque_suite_is_at_least(enrolled.suite, policy.opaque_suite) {
+<a href=#128 id=128 data-nosnippet>128</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#129 id=129 data-nosnippet>129</a>                    message: <span class="macro">format!</span>(
+<a href=#130 id=130 data-nosnippet>130</a>                        <span class="string">"opaque suite {} is weaker than the tenant minimum {}"</span>,
+<a href=#131 id=131 data-nosnippet>131</a>                        enrolled.suite, policy.opaque_suite
+<a href=#132 id=132 data-nosnippet>132</a>                    ),
+<a href=#133 id=133 data-nosnippet>133</a>                });
+<a href=#134 id=134 data-nosnippet>134</a>            }
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="kw">if </span>!opaque_ksf_is_at_least(enrolled.ksf_params.ksf(), policy.opaque_ksf) {
+<a href=#136 id=136 data-nosnippet>136</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#137 id=137 data-nosnippet>137</a>                    message: <span class="macro">format!</span>(
+<a href=#138 id=138 data-nosnippet>138</a>                        <span class="string">"opaque ksf {} is weaker than the tenant minimum {}"</span>,
+<a href=#139 id=139 data-nosnippet>139</a>                        enrolled.ksf_params.ksf(),
+<a href=#140 id=140 data-nosnippet>140</a>                        policy.opaque_ksf
+<a href=#141 id=141 data-nosnippet>141</a>                    ),
+<a href=#142 id=142 data-nosnippet>142</a>                });
+<a href=#143 id=143 data-nosnippet>143</a>            }
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(enrolled))
+<a href=#146 id=146 data-nosnippet>146</a>        }
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>}
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a><span class="doccomment">/// Persist a validated record against `user_id`.
+<a href=#151 id=151 data-nosnippet>151</a>///
+<a href=#152 id=152 data-nosnippet>152</a>/// `None` is a no-op, which is what the `disabled` and `optional`-without-a-
+<a href=#153 id=153 data-nosnippet>153</a>/// record cases resolve to.
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>store_credential&lt;C: Connection + Clone&gt;(
+<a href=#155 id=155 data-nosnippet>155</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#156 id=156 data-nosnippet>156</a>    tenant_id: Uuid,
+<a href=#157 id=157 data-nosnippet>157</a>    user_id: Uuid,
+<a href=#158 id=158 data-nosnippet>158</a>    enrolled: <span class="prelude-ty">Option</span>&lt;OpaqueEnrolled&gt;,
+<a href=#159 id=159 data-nosnippet>159</a>) -&gt; AxiamResult&lt;()&gt; {
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(enrolled) = enrolled <span class="kw">else </span>{
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#162 id=162 data-nosnippet>162</a>    };
+<a href=#163 id=163 data-nosnippet>163</a>    state
+<a href=#164 id=164 data-nosnippet>164</a>        .opaque_credential_repo
+<a href=#165 id=165 data-nosnippet>165</a>        .upsert(CreateOpaqueCredential {
+<a href=#166 id=166 data-nosnippet>166</a>            tenant_id,
+<a href=#167 id=167 data-nosnippet>167</a>            user_id,
+<a href=#168 id=168 data-nosnippet>168</a>            credential_identifier: enrolled.credential_identifier,
+<a href=#169 id=169 data-nosnippet>169</a>            suite: enrolled.suite,
+<a href=#170 id=170 data-nosnippet>170</a>            ksf_params: enrolled.ksf_params,
+<a href=#171 id=171 data-nosnippet>171</a>            record: enrolled.record,
+<a href=#172 id=172 data-nosnippet>172</a>        })
+<a href=#173 id=173 data-nosnippet>173</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="prelude-val">Ok</span>(())
+<a href=#175 id=175 data-nosnippet>175</a>}
+</code></pre></div></section></main></body></html>

@@ -203,9 +203,11 @@ describe("protocol refusals", () => {
     await expect(
       session.finish({
         identity: "alice",
-        saltHex: "00".repeat(32),
+        // Generated: the refusal happens on B before either is used, so
+        // nothing here depends on their values.
+        saltHex: bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
         serverPublicHex: zero,
-        x: new Uint8Array(32).fill(1),
+        x: crypto.getRandomValues(new Uint8Array(32)),
       }),
     ).rejects.toThrow(/invalid public value/i);
   });

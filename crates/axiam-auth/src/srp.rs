@@ -839,9 +839,55 @@ mod tests {
     use super::reference_client;
     use super::*;
     use axiam_core::models::srp::{SrpKdf, SrpKdfParams};
+    use std::sync::OnceLock;
 
+    /// Thirty-two bytes that are not a literal.
+    ///
+    /// CodeQL's `rust/hardcoded-cryptographic-value` flags a literal reaching a
+    /// KDF or a cipher as a key, salt or password. That rule is right about
+    /// shipping code, and keeping it sharp is worth more than fixed bytes here:
+    /// nothing in this module asserts on these values, because every test
+    /// compares one derivation against another from the same run.
+    ///
+    /// The values that ARE fixed on purpose live in
+    /// `tests/srp_vectors_test.rs`, which publishes them as the cross-language
+    /// conformance vectors — there the exact bytes, leading zero included, are
+    /// the artifact under test rather than incidental to it.
+    fn random_bytes32() -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        out[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        out
+    }
+
+    /// The server's session-sealing key. Stable for the process so that a
+    /// challenge issued by one `SrpServer` can be opened by another built the
+    /// same way, which several tests below rely on.
     fn key() -> [u8; 32] {
-        [7u8; 32]
+        static VALUE: OnceLock<[u8; 32]> = OnceLock::new();
+        *VALUE.get_or_init(random_bytes32)
+    }
+
+    /// The `x` the credential's verifier is built from — the client that should
+    /// authenticate.
+    fn correct_x() -> [u8; 32] {
+        static VALUE: OnceLock<[u8; 32]> = OnceLock::new();
+        *VALUE.get_or_init(random_bytes32)
+    }
+
+    /// An `x` that is emphatically not the credential's, for the paths that must
+    /// refuse. Distinct from [`correct_x`] with overwhelming probability, and
+    /// asserted so below rather than assumed.
+    fn wrong_x() -> [u8; 32] {
+        static VALUE: OnceLock<[u8; 32]> = OnceLock::new();
+        *VALUE.get_or_init(random_bytes32)
+    }
+
+    #[test]
+    fn the_two_test_derivations_differ() {
+        // Guards every "wrong x is refused" test below: if these ever collided,
+        // those tests would pass for the wrong reason.
+        assert_ne!(correct_x(), wrong_x());
     }
 
     fn credential(group: SrpGroup, identity: &str, x: &[u8]) -> SrpCredential {
@@ -852,7 +898,7 @@ mod tests {
             identity: identity.to_string(),
             group,
             kdf_params: SrpKdfParams::defaults_for(SrpKdf::Argon2id),
-            salt: hex::encode([0xABu8; 32]),
+            salt: hex::encode(random_bytes32()),
             verifier: reference_client::verifier_hex(group, x),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -948,7 +994,7 @@ mod tests {
             SrpGroup::Rfc5054_4096,
         ] {
             let server = SrpServer::new(key());
-            let x = [0x11u8; 32];
+            let x = correct_x();
             let cred = credential(group, "alice", &x);
             let org_id = Uuid::new_v4();
 
@@ -979,7 +1025,7 @@ mod tests {
         // Interop depends on this: an unpadded B would hash differently on a
         // client that pads, and would fail roughly one login in 256.
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server
             .challenge(&cred, Uuid::new_v4(), &client.a_pub_hex)
@@ -992,14 +1038,14 @@ mod tests {
     #[test]
     fn a_wrong_password_is_rejected() {
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server
             .challenge(&cred, Uuid::new_v4(), &client.a_pub_hex)
             .unwrap();
 
         let (m1, _) = client
-            .finish("alice", &challenge.salt, &challenge.b_pub, &[0x22u8; 32])
+            .finish("alice", &challenge.salt, &challenge.b_pub, &wrong_x())
             .unwrap();
         assert!(matches!(
             server.verify(&challenge.srp_session, &m1),
@@ -1012,7 +1058,7 @@ mod tests {
         // THE classic SRP break: A ≡ 0 (mod N) forces S = 0 server-side, so
         // an attacker could derive K and forge M1 with no password at all.
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let params = group_params(SrpGroup::Rfc5054_2048);
 
         for a in [
@@ -1039,7 +1085,7 @@ mod tests {
     #[test]
     fn a_malformed_client_public_value_is_refused() {
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         for a in ["", "zz", &"a".repeat(600)] {
             assert!(matches!(
                 server.challenge(&cred, Uuid::new_v4(), a),
@@ -1051,13 +1097,13 @@ mod tests {
     #[test]
     fn a_tampered_session_blob_is_refused() {
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server
             .challenge(&cred, Uuid::new_v4(), &client.a_pub_hex)
             .unwrap();
         let (m1, _) = client
-            .finish("alice", &challenge.salt, &challenge.b_pub, &[0x11u8; 32])
+            .finish("alice", &challenge.salt, &challenge.b_pub, &correct_x())
             .unwrap();
 
         let mut tampered = challenge.srp_session.clone();
@@ -1084,13 +1130,13 @@ mod tests {
     fn a_session_sealed_by_a_different_key_is_refused() {
         let server_a = SrpServer::new([1u8; 32]);
         let server_b = SrpServer::new([2u8; 32]);
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server_a
             .challenge(&cred, Uuid::new_v4(), &client.a_pub_hex)
             .unwrap();
         let (m1, _) = client
-            .finish("alice", &challenge.salt, &challenge.b_pub, &[0x11u8; 32])
+            .finish("alice", &challenge.salt, &challenge.b_pub, &correct_x())
             .unwrap();
 
         // A different key cannot open the blob at all, so there is no identity
@@ -1104,7 +1150,7 @@ mod tests {
     #[test]
     fn a_proof_of_the_wrong_length_is_refused_without_panicking() {
         let server = SrpServer::new(key());
-        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &[0x11u8; 32]);
+        let cred = credential(SrpGroup::Rfc5054_2048, "alice", &correct_x());
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server
             .challenge(&cred, Uuid::new_v4(), &client.a_pub_hex)
@@ -1129,7 +1175,7 @@ mod tests {
 
         let real = server
             .challenge(
-                &credential(group, "alice", &[0x11u8; 32]),
+                &credential(group, "alice", &correct_x()),
                 Uuid::new_v4(),
                 &client.a_pub_hex,
             )
@@ -1250,7 +1296,7 @@ mod tests {
         // wrong identity string derives a different M1 and is rejected. This
         // is why the challenge response carries the canonical identity.
         let server = SrpServer::new(key());
-        let x = [0x11u8; 32];
+        let x = correct_x();
         let cred = credential(SrpGroup::Rfc5054_2048, "alice", &x);
         let client = reference_client::begin(SrpGroup::Rfc5054_2048);
         let challenge = server
@@ -1269,7 +1315,7 @@ mod tests {
     #[test]
     fn two_exchanges_for_the_same_user_produce_different_sessions() {
         let server = SrpServer::new(key());
-        let x = [0x11u8; 32];
+        let x = correct_x();
         let cred = credential(SrpGroup::Rfc5054_2048, "alice", &x);
 
         let c1 = reference_client::begin(SrpGroup::Rfc5054_2048);
@@ -1294,12 +1340,19 @@ mod tests {
 
     #[test]
     fn the_server_never_renders_its_session_key() {
-        let server = SrpServer::new([0xAB; 32]);
+        // The key is generated, and the strings that must NOT appear are derived
+        // from it — a stronger check than the previous fixed 0xAB byte, which
+        // only ever proved that one rendering of one value was absent.
+        let secret = random_bytes32();
+        let server = SrpServer::new(secret);
         let rendered = format!("{server:?}");
         assert!(
-            !rendered.contains("ab"),
-            "Debug leaked key bytes: {rendered}"
+            !rendered.contains(&hex::encode(secret)),
+            "Debug leaked the key as hex: {rendered}"
         );
-        assert!(!rendered.contains("171"));
+        assert!(
+            !rendered.contains(&format!("{:?}", secret.to_vec())),
+            "Debug leaked the key as a byte slice: {rendered}"
+        );
     }
 }

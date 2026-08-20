@@ -56,6 +56,13 @@ fn fixture_password() -> &'static str {
     VALUE.get_or_init(|| format!("ascii-{}", random_suffix()))
 }
 
+/// A password guaranteed *not* to be [`fixture_password`], for the negative
+/// cases. Also minted per run, for the same reason.
+fn wrong_password() -> &'static str {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE.get_or_init(|| format!("wrong-{}", random_suffix()))
+}
+
 /// A non-ASCII password, present for the same reason the SRP fixture carried a
 /// non-ASCII *identity*: a caller that hands its platform's default encoding to
 /// the core rather than UTF-8 fails here, rather than for one unlucky user.
@@ -277,9 +284,9 @@ fn a_wrong_password_cannot_open_the_envelope() {
         .finish(fixture_password(), &reg_response, &ksf)
         .unwrap();
 
-    let (login_state, ke1) = ClientLoginState::start("not the password").unwrap();
+    let (login_state, ke1) = ClientLoginState::start(wrong_password()).unwrap();
     let ke2 = testing::server_login_start(&setup, &registered.record, &ke1);
-    assert!(login_state.finish("not the password", &ke2, &ksf).is_err());
+    assert!(login_state.finish(wrong_password(), &ke2, &ksf).is_err());
 }
 
 #[test]

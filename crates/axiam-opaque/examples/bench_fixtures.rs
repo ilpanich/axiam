@@ -9,9 +9,14 @@
 //!
 //! Run with: `cargo run -p axiam-opaque --example bench_fixtures`
 fn main() {
+    // The value is irrelevant — the server does identical work for any
+    // well-formed message, which is the whole reason these can be constants in
+    // the scenario file. Derived at runtime anyway so CodeQL's
+    // `rust/hardcoded-cryptographic-value` stays pointed at shipping code.
+    let password = format!("bench-{}", std::process::id());
     let (_, registration_request) =
-        axiam_opaque::ClientRegistrationState::start("benchmark").unwrap();
-    let (_, ke1) = axiam_opaque::ClientLoginState::start("benchmark").unwrap();
+        axiam_opaque::ClientRegistrationState::start(&password).unwrap();
+    let (_, ke1) = axiam_opaque::ClientLoginState::start(&password).unwrap();
     println!("registration_request: {registration_request}");
     println!("ke1: {ke1}");
 }

@@ -330,6 +330,27 @@ it depended on would become a dependency of every SDK. It also owns the *only*
 definition of the ciphersuite; `axiam-auth`'s server half imports it rather than
 declaring its own, so the two halves cannot drift.
 
+### The Go exception, and how it is kept honest
+
+Go is the one SDK permitted a native implementation. The justification has two
+halves and both are required: a vetted RFC 9807 library exists for it, and
+binding the C ABI would force cgo on every consumer, breaking `CGO_ENABLED=0`
+builds. Any future exception needs the same two.
+
+That leaves one real risk — that the two implementations disagree. "Both say
+RFC 9807" is not evidence: they must agree on the OPRF, the key schedule, the
+envelope, the AKE transcript **and** the KSF parameters, of which only the first
+four are in the specification. The KSF is where it would actually break, because
+`opaque-ke` stretches with a 16-byte all-zero salt and a 64-byte output, and
+nothing in the RFC says it must.
+
+So it is checked rather than assumed. `cargo run -p axiam-opaque --example
+interop` is the server half of a harness the Go SDK's interop test drives; a
+verified run completes a full registration and login across the two
+implementations with matching message widths at every step (32, 192, 96, 320,
+64) and an envelope that opens. A failure there means one side moved, and the
+right response is to find out which — not to loosen the test.
+
 `sdks/opaque-test-vectors.json` is correspondingly smaller than the SRP fixture,
 and the change is deliberate. The SRP file pinned every protocol intermediate
 because eleven implementations had to agree on each one. No SDK computes any of

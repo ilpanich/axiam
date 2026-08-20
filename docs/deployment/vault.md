@@ -35,10 +35,45 @@ else here.
 | `federation_encryption_key` | 32-byte hex | Stored IdP client secrets become undecryptable. |
 | `email_encryption_key` | 32-byte hex | Stored email addresses become undecryptable. |
 | `gdpr_pseudonym_pepper` | 32-byte hex | Existing audit pseudonyms stop linking to new ones; the audit trail breaks. |
+| `amqp_signing_key` | 32-byte hex | AMQP message signing is mandatory and has no unsigned path, so a release build **refuses to start** without it. Rotating it needs producers and consumers moved together. |
 | `jwt_public_key_pem` | Ed25519 PEM | Not secret, but a mismatched pair is a confusing outage. |
 
 `just vault-status` prints which of these your Vault holds — presence only,
 never values.
+
+### Seeding them
+
+`just vault-seed` mints every one of the above that is missing and leaves every
+one that is present alone. It targets whatever Vault you point it at:
+
+```sh
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_TOKEN=<a token with create/update on the KV path>
+export VAULT_CACERT=/etc/ssl/certs/your-ca.pem   # recommended
+just vault-seed
+```
+
+Everything is generated from a CSPRNG — `secrets.token_hex(32)` for the keys,
+`secrets.token_urlsafe(48)` for the pepper, and `openssl genpkey -algorithm
+ed25519` for the signing keypair, which is piped between processes and **never
+written to disk**.
+
+The idempotence is not politeness. Re-running the seeder is something you will
+do — after adding a key, after a restore, by accident — and regenerating
+`opaque_setup_key` costs a password reset for every user in every tenant while
+regenerating `jwt_private_key_pem` invalidates every token in flight. An
+existing value is always preserved. The one deliberate exception is a keypair
+you supply explicitly through `JWT_PRIVATE_KEY_PEM` / `JWT_PUBLIC_KEY_PEM`,
+which is how `just prod-up` moves the pair it generated on disk into Vault.
+
+**X.509 material is not seeded here, and that is deliberate.** The broker's
+AMQPS certificate reaches the server as a *file path*
+(`AXIAM__AMQP__TLS__CA_CERT_PATH`), mounted into a container that cannot read
+Vault; and Vault cannot hold the certificate that fronts Vault. `just tls-certs`
+generates both, idempotently. Tenant CA certificates are different again — they
+are issued at runtime through the API and owned by `axiam-pki`, so putting them
+in Vault would create a second source of truth for something the database
+already owns.
 
 ---
 

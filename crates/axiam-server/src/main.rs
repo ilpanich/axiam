@@ -295,6 +295,30 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Email encryption key loaded");
     }
 
+    // The AMQP message-signing key (SEC-022/055, SECHRD-08). Mandatory: there
+    // is no unsigned code path, and a release build refuses to start without
+    // it. Routing it through the provider is what lets a deployment keep it in
+    // a KMS alongside every other key rather than as the one secret still
+    // living in a container spec.
+    //
+    // Hex-encoded here because `AmqpConfig::signing_key` is a hex string,
+    // whereas the port models it as the 256-bit key it actually is. The
+    // adaptation belongs at the composition root, not in the port.
+    //
+    // Backwards compatible: under the `env` provider this reads
+    // `AXIAM__AUTH__AMQP_SIGNING_KEY`, which is a *different* variable from the
+    // `AXIAM__AMQP__SIGNING_KEY` that `load_config` already honours. An
+    // existing deployment setting the latter is untouched, because the provider
+    // answers `None` and the loaded value stands. Setting both makes the
+    // provider win, which is the same precedence the JWT keys use above.
+    if let Some(key) = read_key(keys::AMQP_SIGNING_KEY) {
+        config.amqp.signing_key = Some(hex::encode(key));
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "AMQP signing key loaded"
+        );
+    }
+
     // Load GDPR pseudonym pepper (D-02).
     config.gdpr_pseudonym_pepper = read_key(keys::GDPR_PSEUDONYM_PEPPER);
     if config.gdpr_pseudonym_pepper.is_some() {

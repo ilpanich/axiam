@@ -352,7 +352,7 @@ pub async fn bootstrap<C: Connection + Clone>(
     //    so a retry after a transient mid-flight failure reuses the same
     //    org/tenant instead of leaking duplicates (the `bootstrap_lock:global`
     //    invariant below still guarantees exactly one successful bootstrap).
-    // 3b. Resolve and validate the SRP baseline BEFORE anything is written.
+    // 3b. Resolve and validate the OPAQUE baseline BEFORE anything is written.
     //
     // Placement is the point: a refusal here must leave the deployment
     // completely untouched. Validating after the organization exists would

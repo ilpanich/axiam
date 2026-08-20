@@ -59,12 +59,25 @@
 <a href=#59 id=59 data-nosnippet>59</a>    <span class="attr">#[error(<span class="string">"Service unavailable: {0}"</span>)]
 <a href=#60 id=60 data-nosnippet>60</a>    </span>ServiceUnavailable(String),
 <a href=#61 id=61 data-nosnippet>61</a>
-<a href=#62 id=62 data-nosnippet>62</a>    <span class="attr">#[error(<span class="string">"SAML assertion replay detected"</span>)]
-<a href=#63 id=63 data-nosnippet>63</a>    </span>ReplayDetected,
-<a href=#64 id=64 data-nosnippet>64</a>
-<a href=#65 id=65 data-nosnippet>65</a>    <span class="attr">#[error(<span class="string">"Internal error: {0}"</span>)]
-<a href=#66 id=66 data-nosnippet>66</a>    </span>Internal(String),
-<a href=#67 id=67 data-nosnippet>67</a>}
-<a href=#68 id=68 data-nosnippet>68</a>
-<a href=#69 id=69 data-nosnippet>69</a><span class="kw">pub type </span>AxiamResult&lt;T&gt; = <span class="prelude-ty">Result</span>&lt;T, AxiamError&gt;;
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// The tenant requires Secure Remote Password, so password login is
+<a href=#63 id=63 data-nosnippet>63</a>    /// refused (`SrpMode::Required`).
+<a href=#64 id=64 data-nosnippet>64</a>    ///
+<a href=#65 id=65 data-nosnippet>65</a>    /// Its own variant rather than an `AuthenticationFailed` because it is the
+<a href=#66 id=66 data-nosnippet>66</a>    /// opposite kind of answer: nothing about the caller's credentials was
+<a href=#67 id=67 data-nosnippet>67</a>    /// wrong, they used the wrong *protocol*. A client that cannot distinguish
+<a href=#68 id=68 data-nosnippet>68</a>    /// the two would show "invalid username or password" to a user whose
+<a href=#69 id=69 data-nosnippet>69</a>    /// password is perfectly good, and an SDK could not auto-switch to the SRP
+<a href=#70 id=70 data-nosnippet>70</a>    /// endpoints. It reveals only a tenant-level policy, never anything about
+<a href=#71 id=71 data-nosnippet>71</a>    /// which accounts exist — see `models::srp::SrpMode::Required`.
+<a href=#72 id=72 data-nosnippet>72</a>    </span><span class="attr">#[error(<span class="string">"this tenant requires Secure Remote Password authentication"</span>)]
+<a href=#73 id=73 data-nosnippet>73</a>    </span>SrpRequired,
+<a href=#74 id=74 data-nosnippet>74</a>
+<a href=#75 id=75 data-nosnippet>75</a>    <span class="attr">#[error(<span class="string">"SAML assertion replay detected"</span>)]
+<a href=#76 id=76 data-nosnippet>76</a>    </span>ReplayDetected,
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="attr">#[error(<span class="string">"Internal error: {0}"</span>)]
+<a href=#79 id=79 data-nosnippet>79</a>    </span>Internal(String),
+<a href=#80 id=80 data-nosnippet>80</a>}
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">pub type </span>AxiamResult&lt;T&gt; = <span class="prelude-ty">Result</span>&lt;T, AxiamError&gt;;
 </code></pre></div></section></main></body></html>

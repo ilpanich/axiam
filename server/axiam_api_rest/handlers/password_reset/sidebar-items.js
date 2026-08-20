@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["confirm_reset","request_reset"],"struct":["ConfirmResetBody","RequestResetBody"]};
+window.SIDEBAR_ITEMS = {"fn":["confirm_reset","request_reset","reset_context"],"struct":["ConfirmResetBody","RequestResetBody","ResetContextQuery","ResetContextResponse"]};

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Secure Remote Password (SRP-6a) domain model."><title>axiam_core::models::srp - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module srp</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-alpha29</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module srp</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-actually-buys-axiam" title="What this actually buys AXIAM">What this actually buys AXIAM</a></li><li><a href="#divergence-from-rfc-5054-and-why" title="Divergence from RFC 5054, and why">Divergence from RFC 5054, and why</a></li><li><a href="#why-not-opaque" title="Why not OPAQUE">Why not OPAQUE</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>core::<wbr>models</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_core</a>::<wbr><a href="../index.html">models</a></div><h1>Module <span>srp</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_core/models/srp.rs.html#1-735">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Secure Remote Password (SRP-6a) domain model.</p>
+<p>SRP is an <strong>augmented PAKE</strong>: the client proves knowledge of the password
+without the password — or anything from which the password can be cheaply
+recovered — ever crossing the wire. What the server stores instead is a
+<em>verifier</em> <code>v = g^x mod N</code>, where <code>x</code> is derived from the password with a
+deliberately expensive KDF.</p>
+<h2 id="what-this-actually-buys-axiam"><a class="doc-anchor" href="#what-this-actually-buys-axiam">§</a>What this actually buys AXIAM</h2>
+<p>TLS 1.3 already protects the password in transit against a network
+attacker. SRP closes a different set of holes, all of which are real in a
+multi-tenant deployment the tenant does not fully own:</p>
+<ul>
+<li>a reverse proxy, ingress controller, CDN or service mesh that terminates
+TLS sees every plaintext password today; under SRP it sees only <code>A</code>/<code>M1</code>,
+which are useless without the verifier;</li>
+<li>an accidental request-body log, a heap dump, or a crash reporter can no
+longer capture a plaintext password, because the server never has one;</li>
+<li>a stolen verifier database still costs the attacker a full KDF evaluation
+per candidate password, exactly as a stolen Argon2id hash database does.</li>
+</ul>
+<p>It does <strong>not</strong> protect against a fully compromised AXIAM server, and for
+browser clients it does not protect against AXIAM serving malicious
+JavaScript. Those are outside SRP’s threat model and must not be claimed.</p>
+<h2 id="divergence-from-rfc-5054-and-why"><a class="doc-anchor" href="#divergence-from-rfc-5054-and-why">§</a>Divergence from RFC 5054, and why</h2>
+<p>RFC 5054 §2.6 defines <code>x = SHA1(s | SHA1(I | ":" | p))</code>. Two deliberate
+changes:</p>
+<ol>
+<li><strong>SHA-256 everywhere instead of SHA-1.</strong> SHA-1 is not acceptable in a
+system whose own security standards mandate Argon2id and Ed25519.</li>
+<li><strong>A memory-hard KDF instead of a bare hash for <code>x</code>.</strong> A bare hash makes
+a leaked verifier database <em>cheaper</em> to attack offline than the
+Argon2id password hashes AXIAM stores today — adopting SRP would then be
+a net security regression at rest, which is not a trade worth making.
+So <code>x = OS2IP(KDF(I ":" p, s)) mod N</code>, where KDF is <a href="enum.SrpKdf.html" title="enum axiam_core::models::srp::SrpKdf"><code>SrpKdf</code></a>.</li>
+</ol>
+<p>The identity <code>I</code> stays inside the KDF input exactly as RFC 5054 intends, so
+a verifier remains bound to one identity and cannot be replayed against a
+different account. Because AXIAM lets a user log in with <em>either</em> username
+or email, the server tells the client which identity string to use in the
+challenge response (<a href="struct.SrpChallenge.html#structfield.identity" title="field axiam_core::models::srp::SrpChallenge::identity"><code>SrpChallenge::identity</code></a>) — the client must never
+guess it from what the human typed.</p>
+<h2 id="why-not-opaque"><a class="doc-anchor" href="#why-not-opaque">§</a>Why not OPAQUE</h2>
+<p>OPAQUE is the CFRG-selected aPAKE and is cryptographically stronger than
+SRP: it has a security proof, uses standard elliptic curves, and resists
+the pre-computation attack SRP is open to. It was not chosen here only
+because vetted implementations do not exist across all eleven AXIAM SDK
+languages. The wire format below is versioned (<code>group</code>, <code>kdf</code>) precisely so
+a future OPAQUE mode can be added without breaking deployed clients.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CreateSrpCredential.html" title="struct axiam_core::models::srp::CreateSrpCredential">Create<wbr>SrpCredential</a></dt><dd>Input for creating or replacing a user’s SRP verifier.</dd><dt><a class="struct" href="struct.SrpChallenge.html" title="struct axiam_core::models::srp::SrpChallenge">SrpChallenge</a></dt><dd>Server response to <code>POST /api/v1/auth/srp/challenge</code>.</dd><dt><a class="struct" href="struct.SrpCredential.html" title="struct axiam_core::models::srp::SrpCredential">SrpCredential</a></dt><dd>A stored SRP verifier for one user.</dd><dt><a class="struct" href="struct.SrpEnrollment.html" title="struct axiam_core::models::srp::SrpEnrollment">SrpEnrollment</a></dt><dd>The client-supplied half of an SRP enrolment, as it appears inside
+registration / change-password / reset-completion request bodies.</dd><dt><a class="struct" href="struct.SrpVerifyRequest.html" title="struct axiam_core::models::srp::SrpVerifyRequest">SrpVerify<wbr>Request</a></dt><dd>Client request to <code>POST /api/v1/auth/srp/verify</code>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SrpGroup.html" title="enum axiam_core::models::srp::SrpGroup">SrpGroup</a></dt><dd>The RFC 5054 Appendix A safe-prime group a verifier was created under.</dd><dt><a class="enum" href="enum.SrpKdf.html" title="enum axiam_core::models::srp::SrpKdf">SrpKdf</a></dt><dd>The key-derivation function used to turn a password into the SRP private
+key <code>x</code>.</dd><dt><a class="enum" href="enum.SrpKdfParams.html" title="enum axiam_core::models::srp::SrpKdfParams">SrpKdf<wbr>Params</a></dt><dd>Concrete cost parameters for an <a href="enum.SrpKdf.html" title="enum axiam_core::models::srp::SrpKdf"><code>SrpKdf</code></a>.</dd><dt><a class="enum" href="enum.SrpMode.html" title="enum axiam_core::models::srp::SrpMode">SrpMode</a></dt><dd>Whether SRP is offered, and whether password login is still accepted.</dd></dl></section></div></main></body></html>

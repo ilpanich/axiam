@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["record_failed_login"]};
+window.SIDEBAR_ITEMS = {"fn":["is_locked_out","record_failed_login"]};

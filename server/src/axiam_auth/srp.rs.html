@@ -1,0 +1,1359 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-auth/src/srp.rs`."><title>srp.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_auth/</div>srp.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Secure Remote Password (SRP-6a) — server side.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The domain types, the enforcement modes, and the rationale for adopting SRP
+<a href=#4 id=4 data-nosnippet>4</a>//! at all live in [`axiam_core::models::srp`]. This module is the arithmetic
+<a href=#5 id=5 data-nosnippet>5</a>//! and the two-message exchange that sits behind `POST /api/v1/auth/srp/challenge`
+<a href=#6 id=6 data-nosnippet>6</a>//! and `POST /api/v1/auth/srp/verify`.
+<a href=#7 id=7 data-nosnippet>7</a>//!
+<a href=#8 id=8 data-nosnippet>8</a>//! # The exchange
+<a href=#9 id=9 data-nosnippet>9</a>//!
+<a href=#10 id=10 data-nosnippet>10</a>//! ```text
+<a href=#11 id=11 data-nosnippet>11</a>//!   client                                            server
+<a href=#12 id=12 data-nosnippet>12</a>//!     |  I, A = g^a mod N                               |
+<a href=#13 id=13 data-nosnippet>13</a>//!     | ----------------------------------------------&gt; |   challenge
+<a href=#14 id=14 data-nosnippet>14</a>//!     |                                                  |   b &lt;- random
+<a href=#15 id=15 data-nosnippet>15</a>//!     |                                                  |   B = (k*v + g^b) mod N
+<a href=#16 id=16 data-nosnippet>16</a>//!     |  s, B, group, kdf, params, srp_session           |
+<a href=#17 id=17 data-nosnippet>17</a>//!     | &lt;---------------------------------------------- |
+<a href=#18 id=18 data-nosnippet>18</a>//!     |   x = KDF(I ":" p, s)                           |
+<a href=#19 id=19 data-nosnippet>19</a>//!     |   S = (B - k*g^x)^(a + u*x) mod N               |
+<a href=#20 id=20 data-nosnippet>20</a>//!     |   K = H(S);  M1 = H(H(N)^H(g) | H(I) | s | A | B | K)
+<a href=#21 id=21 data-nosnippet>21</a>//!     |  srp_session, M1                                |
+<a href=#22 id=22 data-nosnippet>22</a>//!     | ----------------------------------------------&gt; |   verify
+<a href=#23 id=23 data-nosnippet>23</a>//!     |                                                  |   compare M1 in constant time
+<a href=#24 id=24 data-nosnippet>24</a>//!     |  M2 = H(A | M1 | K), + the ordinary login result |
+<a href=#25 id=25 data-nosnippet>25</a>//!     | &lt;---------------------------------------------- |
+<a href=#26 id=26 data-nosnippet>26</a>//! ```
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! Both sides arrive at the same `S` — the client from `a` and `x`, the server
+<a href=#29 id=29 data-nosnippet>29</a>//! from `b` and `v` — without either learning the other's secret.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! # Why the server state is sealed into a token rather than stored
+<a href=#32 id=32 data-nosnippet>32</a>//!
+<a href=#33 id=33 data-nosnippet>33</a>//! Between the two messages the server has to remember what it derived. The
+<a href=#34 id=34 data-nosnippet>34</a>//! obvious approach is a `srp_session` table with a TTL; this module instead
+<a href=#35 id=35 data-nosnippet>35</a>//! seals the derived state into an AES-256-GCM token the client carries back,
+<a href=#36 id=36 data-nosnippet>36</a>//! exactly as [`crate::service::AuthService`] already does for the MFA
+<a href=#37 id=37 data-nosnippet>37</a>//! challenge. Three reasons:
+<a href=#38 id=38 data-nosnippet>38</a>//!
+<a href=#39 id=39 data-nosnippet>39</a>//! 1. **It works across replicas with no coordination.** A DB-backed session
+<a href=#40 id=40 data-nosnippet>40</a>//!    would add a write and a read to every login on the hot path, in a system
+<a href=#41 id=41 data-nosnippet>41</a>//!    whose whole point is horizontal scaling.
+<a href=#42 id=42 data-nosnippet>42</a>//! 2. **There is nothing to garbage-collect.** Expiry is a field inside the
+<a href=#43 id=43 data-nosnippet>43</a>//!    sealed blob, checked on open; an abandoned exchange costs nothing.
+<a href=#44 id=44 data-nosnippet>44</a>//! 3. **A replayed token grants no new power.** Opening it requires the server
+<a href=#45 id=45 data-nosnippet>45</a>//!    key, and *using* it still requires `M1`, which still requires the
+<a href=#46 id=46 data-nosnippet>46</a>//!    password. An attacker who can replay a captured `(srp_session, M1)` pair
+<a href=#47 id=47 data-nosnippet>47</a>//!    has, by construction, already broken TLS — at which point they have the
+<a href=#48 id=48 data-nosnippet>48</a>//!    session cookie the exchange would have produced anyway. The 120-second
+<a href=#49 id=49 data-nosnippet>49</a>//!    lifetime bounds even that.
+<a href=#50 id=50 data-nosnippet>50</a>//!
+<a href=#51 id=51 data-nosnippet>51</a>//! # Constant-time properties, stated precisely
+<a href=#52 id=52 data-nosnippet>52</a>//!
+<a href=#53 id=53 data-nosnippet>53</a>//! `num_bigint::BigUint::modpow` is **not** constant-time, so it is worth being
+<a href=#54 id=54 data-nosnippet>54</a>//! exact about what that does and does not expose here.
+<a href=#55 id=55 data-nosnippet>55</a>//!
+<a href=#56 id=56 data-nosnippet>56</a>//! - The verifier `v` — the only long-term secret — is used as a *base*
+<a href=#57 id=57 data-nosnippet>57</a>//!   (`v.modpow(&amp;u, n)`), never as an exponent. Exponent-dependent timing is
+<a href=#58 id=58 data-nosnippet>58</a>//!   the leak `modpow` has; base-dependent timing is not, so `v` is not
+<a href=#59 id=59 data-nosnippet>59</a>//!   exposed.
+<a href=#60 id=60 data-nosnippet>60</a>//! - The exponent `b` is freshly generated per request and discarded when the
+<a href=#61 id=61 data-nosnippet>61</a>//!   exchange completes. Recovering it would let an attacker finish one
+<a href=#62 id=62 data-nosnippet>62</a>//!   already-in-flight exchange for which they would still need `M1`.
+<a href=#63 id=63 data-nosnippet>63</a>//! - The password never reaches this module in any form.
+<a href=#64 id=64 data-nosnippet>64</a>//!
+<a href=#65 id=65 data-nosnippet>65</a>//! The `M1` comparison — the one place a timing signal would be directly
+<a href=#66 id=66 data-nosnippet>66</a>//! exploitable — uses [`subtle::ConstantTimeEq`].
+<a href=#67 id=67 data-nosnippet>67</a>//!
+<a href=#68 id=68 data-nosnippet>68</a>//! # Account enumeration
+<a href=#69 id=69 data-nosnippet>69</a>//!
+<a href=#70 id=70 data-nosnippet>70</a>//! An unknown identity must produce a response indistinguishable from a known
+<a href=#71 id=71 data-nosnippet>71</a>//! one, or `/auth/srp/challenge` becomes a faster user-enumeration oracle than
+<a href=#72 id=72 data-nosnippet>72</a>//! anything else in the API. [`SrpServer::challenge`] handles this by
+<a href=#73 id=73 data-nosnippet>73</a>//! fabricating a *stable* salt — `HMAC(server_key, tenant_id || identity)`, so
+<a href=#74 id=74 data-nosnippet>74</a>//! the same unknown user yields the same salt on every attempt, which a random
+<a href=#75 id=75 data-nosnippet>75</a>//! salt would not — and a well-formed `B` derived from a dummy verifier. The
+<a href=#76 id=76 data-nosnippet>76</a>//! full modular exponentiation is performed in that branch too, so the timing
+<a href=#77 id=77 data-nosnippet>77</a>//! matches. The caller cannot tell the difference, and the subsequent
+<a href=#78 id=78 data-nosnippet>78</a>//! `/auth/srp/verify` fails as an ordinary bad-password would.
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">use </span>std::sync::OnceLock;
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">use </span>base64::Engine;
+<a href=#83 id=83 data-nosnippet>83</a><span class="kw">use </span>base64::engine::general_purpose::URL_SAFE_NO_PAD;
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">use </span>chrono::{DateTime, Duration, Utc};
+<a href=#85 id=85 data-nosnippet>85</a><span class="kw">use </span>hmac::{Hmac, KeyInit, Mac};
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">use </span>num_bigint::BigUint;
+<a href=#87 id=87 data-nosnippet>87</a><span class="kw">use </span>num_traits::Zero;
+<a href=#88 id=88 data-nosnippet>88</a><span class="kw">use </span>rand::Rng;
+<a href=#89 id=89 data-nosnippet>89</a><span class="kw">use </span>serde::{Deserialize, Serialize};
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">use </span>subtle::ConstantTimeEq;
+<a href=#92 id=92 data-nosnippet>92</a><span class="kw">use </span>uuid::Uuid;
+<a href=#93 id=93 data-nosnippet>93</a>
+<a href=#94 id=94 data-nosnippet>94</a><span class="kw">use </span>axiam_core::models::srp::{SrpChallenge, SrpCredential, SrpGroup, SrpKdfParams};
+<a href=#95 id=95 data-nosnippet>95</a>
+<a href=#96 id=96 data-nosnippet>96</a><span class="kw">use </span><span class="kw">crate</span>::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
+<a href=#97 id=97 data-nosnippet>97</a><span class="kw">use </span><span class="kw">crate</span>::error::AuthError;
+<a href=#98 id=98 data-nosnippet>98</a>
+<a href=#99 id=99 data-nosnippet>99</a><span class="kw">type </span>HmacSha256 = Hmac&lt;Sha256&gt;;
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a><span class="doccomment">/// How long a `srp_session` stays openable. Long enough for a client to run
+<a href=#102 id=102 data-nosnippet>102</a>/// Argon2id on a slow phone, short enough that an abandoned exchange is not a
+<a href=#103 id=103 data-nosnippet>103</a>/// standing replay target.
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="kw">const </span>SESSION_LIFETIME_SECS: i64 = <span class="number">120</span>;
+<a href=#105 id=105 data-nosnippet>105</a>
+<a href=#106 id=106 data-nosnippet>106</a><span class="doccomment">/// Width of the server's private ephemeral `b`. RFC 5054 §3 requires at least
+<a href=#107 id=107 data-nosnippet>107</a>/// 256 bits; 256 is used because `b`'s only job is to be unguessable for the
+<a href=#108 id=108 data-nosnippet>108</a>/// ~2 minutes the exchange lives.
+<a href=#109 id=109 data-nosnippet>109</a></span><span class="kw">const </span>EPHEMERAL_BITS: usize = <span class="number">256</span>;
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#112 id=112 data-nosnippet>112</a>// RFC 5054 Appendix A groups
+<a href=#113 id=113 data-nosnippet>113</a>// ---------------------------------------------------------------------------
+<a href=#114 id=114 data-nosnippet>114</a>//
+<a href=#115 id=115 data-nosnippet>115</a>// These are verbatim RFC 5054 Appendix A (the 3072- and 4096-bit entries are
+<a href=#116 id=116 data-nosnippet>116</a>// the RFC 3526 MODP groups the RFC adopts). Each is asserted in the unit tests
+<a href=#117 id=117 data-nosnippet>117</a>// below to be the right width, prime, a *safe* prime, and to have `g`
+<a href=#118 id=118 data-nosnippet>118</a>// generating the order-(N-1)/2 subgroup — a transcription error in any of
+<a href=#119 id=119 data-nosnippet>119</a>// these constants is a silent, total break of the protocol's security, and it
+<a href=#120 id=120 data-nosnippet>120</a>// would not otherwise show up in a test where client and server share the
+<a href=#121 id=121 data-nosnippet>121</a>// same wrong constant.
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">const </span>N_2048_HEX: <span class="kw-2">&amp;</span>str = <span class="macro">concat!</span>(
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="string">"AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050"</span>,
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="string">"A37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50"</span>,
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="string">"E8083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B8"</span>,
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="string">"55F97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773B"</span>,
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="string">"CA97B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F87748"</span>,
+<a href=#129 id=129 data-nosnippet>129</a>    <span class="string">"544523B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE6"</span>,
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="string">"AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB6"</span>,
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="string">"94B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73"</span>,
+<a href=#132 id=132 data-nosnippet>132</a>);
+<a href=#133 id=133 data-nosnippet>133</a><span class="kw">const </span>G_2048: u32 = <span class="number">2</span>;
+<a href=#134 id=134 data-nosnippet>134</a>
+<a href=#135 id=135 data-nosnippet>135</a><span class="kw">const </span>N_3072_HEX: <span class="kw-2">&amp;</span>str = <span class="macro">concat!</span>(
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="string">"FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"</span>,
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="string">"020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"</span>,
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="string">"4FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"</span>,
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="string">"EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF05"</span>,
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="string">"98DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB"</span>,
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="string">"9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B"</span>,
+<a href=#142 id=142 data-nosnippet>142</a>    <span class="string">"E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"</span>,
+<a href=#143 id=143 data-nosnippet>143</a>    <span class="string">"3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33"</span>,
+<a href=#144 id=144 data-nosnippet>144</a>    <span class="string">"A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7"</span>,
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="string">"ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864"</span>,
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="string">"D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E2"</span>,
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="string">"08E24FA074E5AB3143DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF"</span>,
+<a href=#148 id=148 data-nosnippet>148</a>);
+<a href=#149 id=149 data-nosnippet>149</a><span class="kw">const </span>G_3072: u32 = <span class="number">5</span>;
+<a href=#150 id=150 data-nosnippet>150</a>
+<a href=#151 id=151 data-nosnippet>151</a><span class="kw">const </span>N_4096_HEX: <span class="kw-2">&amp;</span>str = <span class="macro">concat!</span>(
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="string">"FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"</span>,
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="string">"020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"</span>,
+<a href=#154 id=154 data-nosnippet>154</a>    <span class="string">"4FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"</span>,
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="string">"EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF05"</span>,
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="string">"98DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB"</span>,
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="string">"9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B"</span>,
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="string">"E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"</span>,
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="string">"3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33"</span>,
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="string">"A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7"</span>,
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="string">"ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864"</span>,
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="string">"D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E2"</span>,
+<a href=#163 id=163 data-nosnippet>163</a>    <span class="string">"08E24FA074E5AB3143DB5BFCE0FD108E4B82D120A92108011A723C12A787E6D7"</span>,
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="string">"88719A10BDBA5B2699C327186AF4E23C1A946834B6150BDA2583E9CA2AD44CE8"</span>,
+<a href=#165 id=165 data-nosnippet>165</a>    <span class="string">"DBBBC2DB04DE8EF92E8EFC141FBECAA6287C59474E6BC05D99B2964FA090C3A2"</span>,
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="string">"233BA186515BE7ED1F612970CEE2D7AFB81BDD762170481CD0069127D5B05AA9"</span>,
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="string">"93B4EA988D8FDDC186FFB7DC90A6C08F4DF435C934063199FFFFFFFFFFFFFFFF"</span>,
+<a href=#168 id=168 data-nosnippet>168</a>);
+<a href=#169 id=169 data-nosnippet>169</a><span class="kw">const </span>G_4096: u32 = <span class="number">5</span>;
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a><span class="doccomment">/// Parsed, cached group parameters.
+<a href=#172 id=172 data-nosnippet>172</a></span><span class="kw">struct </span>GroupParams {
+<a href=#173 id=173 data-nosnippet>173</a>    n: BigUint,
+<a href=#174 id=174 data-nosnippet>174</a>    g: BigUint,
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="doccomment">/// `k = H(N | PAD(g))` — the SRP-6a multiplier, cached because it depends
+<a href=#176 id=176 data-nosnippet>176</a>    /// only on the group.
+<a href=#177 id=177 data-nosnippet>177</a>    </span>k: BigUint,
+<a href=#178 id=178 data-nosnippet>178</a>    byte_len: usize,
+<a href=#179 id=179 data-nosnippet>179</a>}
+<a href=#180 id=180 data-nosnippet>180</a>
+<a href=#181 id=181 data-nosnippet>181</a><span class="kw">fn </span>group_params(group: SrpGroup) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>GroupParams {
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="kw">static </span>G2048: OnceLock&lt;GroupParams&gt; = OnceLock::new();
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="kw">static </span>G3072: OnceLock&lt;GroupParams&gt; = OnceLock::new();
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="kw">static </span>G4096: OnceLock&lt;GroupParams&gt; = OnceLock::new();
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="kw">fn </span>build(n_hex: <span class="kw-2">&amp;</span>str, g: u32, byte_len: usize) -&gt; GroupParams {
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="kw">let </span>n = BigUint::parse_bytes(n_hex.as_bytes(), <span class="number">16</span>)
+<a href=#188 id=188 data-nosnippet>188</a>            .expect(<span class="string">"compile-time SRP group modulus is valid hex"</span>);
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">let </span>g = BigUint::from(g);
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">let </span>k = hash_to_int(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>n, byte_len), <span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>g, byte_len)]);
+<a href=#191 id=191 data-nosnippet>191</a>        GroupParams { n, g, k, byte_len }
+<a href=#192 id=192 data-nosnippet>192</a>    }
+<a href=#193 id=193 data-nosnippet>193</a>
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="kw">match </span>group {
+<a href=#195 id=195 data-nosnippet>195</a>        SrpGroup::Rfc5054_2048 =&gt; G2048.get_or_init(|| build(N_2048_HEX, G_2048, <span class="number">256</span>)),
+<a href=#196 id=196 data-nosnippet>196</a>        SrpGroup::Rfc5054_3072 =&gt; G3072.get_or_init(|| build(N_3072_HEX, G_3072, <span class="number">384</span>)),
+<a href=#197 id=197 data-nosnippet>197</a>        SrpGroup::Rfc5054_4096 =&gt; G4096.get_or_init(|| build(N_4096_HEX, G_4096, <span class="number">512</span>)),
+<a href=#198 id=198 data-nosnippet>198</a>    }
+<a href=#199 id=199 data-nosnippet>199</a>}
+<a href=#200 id=200 data-nosnippet>200</a>
+<a href=#201 id=201 data-nosnippet>201</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#202 id=202 data-nosnippet>202</a>// Primitives
+<a href=#203 id=203 data-nosnippet>203</a>// ---------------------------------------------------------------------------
+<a href=#204 id=204 data-nosnippet>204</a>
+<a href=#205 id=205 data-nosnippet>205</a></span><span class="doccomment">/// `PAD(x)`: big-endian bytes, left-padded with zeros to the group width.
+<a href=#206 id=206 data-nosnippet>206</a>///
+<a href=#207 id=207 data-nosnippet>207</a>/// Every hash input in SRP-6a is padded to the modulus width. Skipping it is
+<a href=#208 id=208 data-nosnippet>208</a>/// the classic SRP interop bug — two implementations agree until the day a
+<a href=#209 id=209 data-nosnippet>209</a>/// value happens to have a leading zero byte, and then one login in 256 fails.
+<a href=#210 id=210 data-nosnippet>210</a></span><span class="kw">fn </span>to_bytes(value: <span class="kw-2">&amp;</span>BigUint, byte_len: usize) -&gt; Vec&lt;u8&gt; {
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="kw">let </span>raw = value.to_bytes_be();
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="kw">if </span>raw.len() &gt;= byte_len {
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="kw">return </span>raw;
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = <span class="macro">vec!</span>[<span class="number">0u8</span>; byte_len - raw.len()];
+<a href=#216 id=216 data-nosnippet>216</a>    out.extend_from_slice(<span class="kw-2">&amp;</span>raw);
+<a href=#217 id=217 data-nosnippet>217</a>    out
+<a href=#218 id=218 data-nosnippet>218</a>}
+<a href=#219 id=219 data-nosnippet>219</a>
+<a href=#220 id=220 data-nosnippet>220</a><span class="kw">fn </span>hash_parts(parts: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>[u8]]) -&gt; [u8; <span class="number">32</span>] {
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="kw">let </span><span class="kw-2">mut </span>hasher = Sha256::new();
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="kw">for </span>part <span class="kw">in </span>parts {
+<a href=#223 id=223 data-nosnippet>223</a>        hasher.update(part);
+<a href=#224 id=224 data-nosnippet>224</a>    }
+<a href=#225 id=225 data-nosnippet>225</a>    hasher.finalize().into()
+<a href=#226 id=226 data-nosnippet>226</a>}
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a><span class="kw">fn </span>hash_to_int(parts: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>[u8]]) -&gt; BigUint {
+<a href=#229 id=229 data-nosnippet>229</a>    BigUint::from_bytes_be(<span class="kw-2">&amp;</span>hash_parts(parts))
+<a href=#230 id=230 data-nosnippet>230</a>}
+<a href=#231 id=231 data-nosnippet>231</a>
+<a href=#232 id=232 data-nosnippet>232</a><span class="doccomment">/// `u = H(PAD(A) | PAD(B))`.
+<a href=#233 id=233 data-nosnippet>233</a></span><span class="kw">fn </span>compute_u(a_pub: <span class="kw-2">&amp;</span>BigUint, b_pub: <span class="kw-2">&amp;</span>BigUint, byte_len: usize) -&gt; BigUint {
+<a href=#234 id=234 data-nosnippet>234</a>    hash_to_int(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(a_pub, byte_len), <span class="kw-2">&amp;</span>to_bytes(b_pub, byte_len)])
+<a href=#235 id=235 data-nosnippet>235</a>}
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a><span class="doccomment">/// `M1 = H( H(N) XOR H(PAD(g)) | H(I) | s | PAD(A) | PAD(B) | K )`.
+<a href=#238 id=238 data-nosnippet>238</a></span><span class="kw">fn </span>compute_m1(
+<a href=#239 id=239 data-nosnippet>239</a>    params: <span class="kw-2">&amp;</span>GroupParams,
+<a href=#240 id=240 data-nosnippet>240</a>    identity: <span class="kw-2">&amp;</span>str,
+<a href=#241 id=241 data-nosnippet>241</a>    salt: <span class="kw-2">&amp;</span>[u8],
+<a href=#242 id=242 data-nosnippet>242</a>    a_pub: <span class="kw-2">&amp;</span>BigUint,
+<a href=#243 id=243 data-nosnippet>243</a>    b_pub: <span class="kw-2">&amp;</span>BigUint,
+<a href=#244 id=244 data-nosnippet>244</a>    session_key: <span class="kw-2">&amp;</span>[u8; <span class="number">32</span>],
+<a href=#245 id=245 data-nosnippet>245</a>) -&gt; [u8; <span class="number">32</span>] {
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="kw">let </span>h_n = hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>params.n, params.byte_len)]);
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">let </span>h_g = hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>params.g, params.byte_len)]);
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">let </span><span class="kw-2">mut </span>xored = [<span class="number">0u8</span>; <span class="number">32</span>];
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">32 </span>{
+<a href=#250 id=250 data-nosnippet>250</a>        xored[i] = h_n[i] ^ h_g[i];
+<a href=#251 id=251 data-nosnippet>251</a>    }
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="kw">let </span>h_i = hash_parts(<span class="kw-2">&amp;</span>[identity.as_bytes()]);
+<a href=#253 id=253 data-nosnippet>253</a>
+<a href=#254 id=254 data-nosnippet>254</a>    hash_parts(<span class="kw-2">&amp;</span>[
+<a href=#255 id=255 data-nosnippet>255</a>        <span class="kw-2">&amp;</span>xored,
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw-2">&amp;</span>h_i,
+<a href=#257 id=257 data-nosnippet>257</a>        salt,
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw-2">&amp;</span>to_bytes(a_pub, params.byte_len),
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw-2">&amp;</span>to_bytes(b_pub, params.byte_len),
+<a href=#260 id=260 data-nosnippet>260</a>        session_key,
+<a href=#261 id=261 data-nosnippet>261</a>    ])
+<a href=#262 id=262 data-nosnippet>262</a>}
+<a href=#263 id=263 data-nosnippet>263</a>
+<a href=#264 id=264 data-nosnippet>264</a><span class="doccomment">/// `M2 = H( PAD(A) | M1 | K )`.
+<a href=#265 id=265 data-nosnippet>265</a></span><span class="kw">fn </span>compute_m2(a_pub: <span class="kw-2">&amp;</span>BigUint, m1: <span class="kw-2">&amp;</span>[u8; <span class="number">32</span>], session_key: <span class="kw-2">&amp;</span>[u8; <span class="number">32</span>], byte_len: usize) -&gt; [u8; <span class="number">32</span>] {
+<a href=#266 id=266 data-nosnippet>266</a>    hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(a_pub, byte_len), m1, session_key])
+<a href=#267 id=267 data-nosnippet>267</a>}
+<a href=#268 id=268 data-nosnippet>268</a>
+<a href=#269 id=269 data-nosnippet>269</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#270 id=270 data-nosnippet>270</a>// Sealed session state
+<a href=#271 id=271 data-nosnippet>271</a>// ---------------------------------------------------------------------------
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a></span><span class="doccomment">/// What the server carries between the two messages, sealed under
+<a href=#274 id=274 data-nosnippet>274</a>/// AES-256-GCM. Never readable or forgeable by the client.
+<a href=#275 id=275 data-nosnippet>275</a></span><span class="attr">#[derive(Debug, Serialize, Deserialize)]
+<a href=#276 id=276 data-nosnippet>276</a></span><span class="kw">struct </span>SealedSession {
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="doccomment">/// Format version, so the sealed layout can change without a flag day.
+<a href=#278 id=278 data-nosnippet>278</a>    </span>v: u8,
+<a href=#279 id=279 data-nosnippet>279</a>    tenant_id: Uuid,
+<a href=#280 id=280 data-nosnippet>280</a>    org_id: Uuid,
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="doccomment">/// `None` for a simulated (unknown-identity) exchange.
+<a href=#282 id=282 data-nosnippet>282</a>    </span>user_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="doccomment">/// The identity the client was told to use. Echoed into audit records.
+<a href=#284 id=284 data-nosnippet>284</a>    </span>identity: String,
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="doccomment">/// Hex `M1` the client must produce.
+<a href=#286 id=286 data-nosnippet>286</a>    </span>expected_client_proof: String,
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="doccomment">/// Hex `M2` to return once `M1` matches.
+<a href=#288 id=288 data-nosnippet>288</a>    </span>server_proof: String,
+<a href=#289 id=289 data-nosnippet>289</a>    expires_at: DateTime&lt;Utc&gt;,
+<a href=#290 id=290 data-nosnippet>290</a>}
+<a href=#291 id=291 data-nosnippet>291</a>
+<a href=#292 id=292 data-nosnippet>292</a><span class="doccomment">/// Why an SRP verification was refused.
+<a href=#293 id=293 data-nosnippet>293</a>///
+<a href=#294 id=294 data-nosnippet>294</a>/// The split exists for exactly one reason: a wrong `M1` is a wrong password
+<a href=#295 id=295 data-nosnippet>295</a>/// and MUST accrue toward account lockout, and accruing it needs to know
+<a href=#296 id=296 data-nosnippet>296</a>/// *whose* account. Collapsing both cases into one opaque error — the obvious
+<a href=#297 id=297 data-nosnippet>297</a>/// shape, and what this originally was — would mean that turning SRP on
+<a href=#298 id=298 data-nosnippet>298</a>/// silently removed brute-force protection from every account that adopted it.
+<a href=#299 id=299 data-nosnippet>299</a>/// An attacker could then grind passwords against `/auth/srp/verify` without
+<a href=#300 id=300 data-nosnippet>300</a>/// ever tripping a lockout that the password endpoint would have tripped in
+<a href=#301 id=301 data-nosnippet>301</a>/// five attempts.
+<a href=#302 id=302 data-nosnippet>302</a>///
+<a href=#303 id=303 data-nosnippet>303</a>/// The distinction never reaches the HTTP response; both map to one `401`.
+<a href=#304 id=304 data-nosnippet>304</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#305 id=305 data-nosnippet>305</a></span><span class="kw">pub enum </span>SrpRejection {
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// The session blob could not be opened, was tampered with, had the wrong
+<a href=#307 id=307 data-nosnippet>307</a>    /// version, or has expired. There is no identity to attribute this to.
+<a href=#308 id=308 data-nosnippet>308</a>    </span>Unusable,
+<a href=#309 id=309 data-nosnippet>309</a>    <span class="doccomment">/// The session opened and the proof did not match — one failed password
+<a href=#310 id=310 data-nosnippet>310</a>    /// attempt by whoever this is.
+<a href=#311 id=311 data-nosnippet>311</a>    </span>BadProof {
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="doccomment">/// Tenant the exchange was scoped to.
+<a href=#313 id=313 data-nosnippet>313</a>        </span>tenant_id: Uuid,
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="doccomment">/// The account, when the exchange was a real one. `None` for a
+<a href=#315 id=315 data-nosnippet>315</a>        /// simulated exchange against an identity that does not exist, where
+<a href=#316 id=316 data-nosnippet>316</a>        /// there is nothing to lock out.
+<a href=#317 id=317 data-nosnippet>317</a>        </span>user_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#318 id=318 data-nosnippet>318</a>    },
+<a href=#319 id=319 data-nosnippet>319</a>}
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a><span class="doccomment">/// Outcome of opening and checking a `srp_session` + `M1` pair.
+<a href=#322 id=322 data-nosnippet>322</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#323 id=323 data-nosnippet>323</a></span><span class="kw">pub struct </span>SrpVerified {
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="doccomment">/// Tenant the exchange was scoped to.
+<a href=#325 id=325 data-nosnippet>325</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
+<a href=#326 id=326 data-nosnippet>326</a>    <span class="doccomment">/// Organization the exchange was scoped to.
+<a href=#327 id=327 data-nosnippet>327</a>    </span><span class="kw">pub </span>org_id: Uuid,
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="doccomment">/// The authenticated user.
+<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">pub </span>user_id: Uuid,
+<a href=#330 id=330 data-nosnippet>330</a>    <span class="doccomment">/// Canonical identity used in the exchange.
+<a href=#331 id=331 data-nosnippet>331</a>    </span><span class="kw">pub </span>identity: String,
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="doccomment">/// Hex `M2`, the server's proof to return so the client can authenticate
+<a href=#333 id=333 data-nosnippet>333</a>    /// *the server*. Withholding it would drop half of SRP's mutual
+<a href=#334 id=334 data-nosnippet>334</a>    /// authentication and leave clients unable to detect a rogue endpoint.
+<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">pub </span>server_proof: String,
+<a href=#336 id=336 data-nosnippet>336</a>}
+<a href=#337 id=337 data-nosnippet>337</a>
+<a href=#338 id=338 data-nosnippet>338</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#339 id=339 data-nosnippet>339</a>// Server
+<a href=#340 id=340 data-nosnippet>340</a>// ---------------------------------------------------------------------------
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a></span><span class="doccomment">/// SRP-6a server operations, parameterised by the key that seals session
+<a href=#343 id=343 data-nosnippet>343</a>/// state.
+<a href=#344 id=344 data-nosnippet>344</a>///
+<a href=#345 id=345 data-nosnippet>345</a>/// The key is a dedicated 256-bit secret (`AXIAM__AUTH__SRP_SESSION_KEY`),
+<a href=#346 id=346 data-nosnippet>346</a>/// deliberately not shared with TOTP or federation encryption: those keys have
+<a href=#347 id=347 data-nosnippet>347</a>/// different rotation cadences, and reusing one would couple an SRP outage to
+<a href=#348 id=348 data-nosnippet>348</a>/// an unrelated key rotation.
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="attr">#[derive(Clone)]
+<a href=#350 id=350 data-nosnippet>350</a></span><span class="kw">pub struct </span>SrpServer {
+<a href=#351 id=351 data-nosnippet>351</a>    session_key: [u8; <span class="number">32</span>],
+<a href=#352 id=352 data-nosnippet>352</a>}
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>SrpServer {
+<a href=#355 id=355 data-nosnippet>355</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="comment">// Never render the key, not even as a length.
+<a href=#357 id=357 data-nosnippet>357</a>        </span>f.debug_struct(<span class="string">"SrpServer"</span>).finish_non_exhaustive()
+<a href=#358 id=358 data-nosnippet>358</a>    }
+<a href=#359 id=359 data-nosnippet>359</a>}
+<a href=#360 id=360 data-nosnippet>360</a>
+<a href=#361 id=361 data-nosnippet>361</a><span class="kw">impl </span>SrpServer {
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="doccomment">/// Build a server bound to `session_key`.
+<a href=#363 id=363 data-nosnippet>363</a>    </span><span class="kw">pub fn </span>new(session_key: [u8; <span class="number">32</span>]) -&gt; <span class="self">Self </span>{
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="self">Self </span>{ session_key }
+<a href=#365 id=365 data-nosnippet>365</a>    }
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// Produce the challenge for a *known* user.
+<a href=#368 id=368 data-nosnippet>368</a>    ///
+<a href=#369 id=369 data-nosnippet>369</a>    /// `a_pub_hex` is the client's `A`. Returns the wire challenge; the sealed
+<a href=#370 id=370 data-nosnippet>370</a>    /// session inside it is what [`Self::verify`] consumes.
+<a href=#371 id=371 data-nosnippet>371</a>    </span><span class="kw">pub fn </span>challenge(
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#373 id=373 data-nosnippet>373</a>        credential: <span class="kw-2">&amp;</span>SrpCredential,
+<a href=#374 id=374 data-nosnippet>374</a>        org_id: Uuid,
+<a href=#375 id=375 data-nosnippet>375</a>        a_pub_hex: <span class="kw-2">&amp;</span>str,
+<a href=#376 id=376 data-nosnippet>376</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SrpChallenge, AuthError&gt; {
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span>params = group_params(credential.group);
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="kw">let </span>a_pub = parse_public_value(a_pub_hex, params)<span class="question-mark">?</span>;
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="kw">let </span>verifier = BigUint::parse_bytes(credential.verifier.as_bytes(), <span class="number">16</span>)
+<a href=#381 id=381 data-nosnippet>381</a>            .ok_or_else(|| AuthError::Crypto(<span class="string">"stored SRP verifier is not valid hex"</span>.into()))<span class="question-mark">?</span>;
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">let </span>salt = hex::decode(<span class="kw-2">&amp;</span>credential.salt)
+<a href=#383 id=383 data-nosnippet>383</a>            .map_err(|<span class="kw">_</span>| AuthError::Crypto(<span class="string">"stored SRP salt is not valid hex"</span>.into()))<span class="question-mark">?</span>;
+<a href=#384 id=384 data-nosnippet>384</a>
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="self">self</span>.build_challenge(
+<a href=#386 id=386 data-nosnippet>386</a>            params,
+<a href=#387 id=387 data-nosnippet>387</a>            credential.group,
+<a href=#388 id=388 data-nosnippet>388</a>            credential.kdf_params,
+<a href=#389 id=389 data-nosnippet>389</a>            <span class="kw-2">&amp;</span>credential.identity,
+<a href=#390 id=390 data-nosnippet>390</a>            <span class="kw-2">&amp;</span>salt,
+<a href=#391 id=391 data-nosnippet>391</a>            <span class="kw-2">&amp;</span>verifier,
+<a href=#392 id=392 data-nosnippet>392</a>            <span class="kw-2">&amp;</span>a_pub,
+<a href=#393 id=393 data-nosnippet>393</a>            credential.tenant_id,
+<a href=#394 id=394 data-nosnippet>394</a>            org_id,
+<a href=#395 id=395 data-nosnippet>395</a>            <span class="prelude-val">Some</span>(credential.user_id),
+<a href=#396 id=396 data-nosnippet>396</a>        )
+<a href=#397 id=397 data-nosnippet>397</a>    }
+<a href=#398 id=398 data-nosnippet>398</a>
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="doccomment">/// Produce a challenge indistinguishable from a real one for an identity
+<a href=#400 id=400 data-nosnippet>400</a>    /// that has no verifier — an unknown user, or a known user who has never
+<a href=#401 id=401 data-nosnippet>401</a>    /// enrolled.
+<a href=#402 id=402 data-nosnippet>402</a>    ///
+<a href=#403 id=403 data-nosnippet>403</a>    /// The salt is `HMAC(session_key, "srp-fake-salt" | tenant_id | identity)`
+<a href=#404 id=404 data-nosnippet>404</a>    /// so that it is **stable**: an attacker who probes the same name twice
+<a href=#405 id=405 data-nosnippet>405</a>    /// and sees two different salts learns immediately that the account does
+<a href=#406 id=406 data-nosnippet>406</a>    /// not exist, which is precisely the leak this branch exists to close.
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#408 id=408 data-nosnippet>408</a>    </span><span class="kw">pub fn </span>simulated_challenge(
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#410 id=410 data-nosnippet>410</a>        group: SrpGroup,
+<a href=#411 id=411 data-nosnippet>411</a>        kdf_params: SrpKdfParams,
+<a href=#412 id=412 data-nosnippet>412</a>        identity: <span class="kw-2">&amp;</span>str,
+<a href=#413 id=413 data-nosnippet>413</a>        tenant_id: Uuid,
+<a href=#414 id=414 data-nosnippet>414</a>        org_id: Uuid,
+<a href=#415 id=415 data-nosnippet>415</a>        a_pub_hex: <span class="kw-2">&amp;</span>str,
+<a href=#416 id=416 data-nosnippet>416</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SrpChallenge, AuthError&gt; {
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="kw">let </span>params = group_params(group);
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">let </span>a_pub = parse_public_value(a_pub_hex, params)<span class="question-mark">?</span>;
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="kw">let </span>salt = <span class="self">self</span>.stable_fake_salt(tenant_id, identity);
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="comment">// A dummy verifier derived the same deterministic way, so the
+<a href=#422 id=422 data-nosnippet>422</a>        // exponentiation below costs exactly what a real one costs.
+<a href=#423 id=423 data-nosnippet>423</a>        </span><span class="kw">let </span>dummy = BigUint::from_bytes_be(<span class="kw-2">&amp;</span><span class="self">self</span>.derive(<span class="string">b"srp-fake-verifier"</span>, tenant_id, identity))
+<a href=#424 id=424 data-nosnippet>424</a>            % <span class="kw-2">&amp;</span>params.n;
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw">let </span>verifier = <span class="kw">if </span>dummy.is_zero() {
+<a href=#426 id=426 data-nosnippet>426</a>            BigUint::from(<span class="number">2u32</span>)
+<a href=#427 id=427 data-nosnippet>427</a>        } <span class="kw">else </span>{
+<a href=#428 id=428 data-nosnippet>428</a>            dummy
+<a href=#429 id=429 data-nosnippet>429</a>        };
+<a href=#430 id=430 data-nosnippet>430</a>
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="self">self</span>.build_challenge(
+<a href=#432 id=432 data-nosnippet>432</a>            params, group, kdf_params, identity, <span class="kw-2">&amp;</span>salt, <span class="kw-2">&amp;</span>verifier, <span class="kw-2">&amp;</span>a_pub, tenant_id, org_id, <span class="prelude-val">None</span>,
+<a href=#433 id=433 data-nosnippet>433</a>        )
+<a href=#434 id=434 data-nosnippet>434</a>    }
+<a href=#435 id=435 data-nosnippet>435</a>
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="doccomment">/// Open a `srp_session` and check the client's `M1`.
+<a href=#437 id=437 data-nosnippet>437</a>    ///
+<a href=#438 id=438 data-nosnippet>438</a>    /// The [`SrpRejection`] variants are for the *caller's* lockout accounting
+<a href=#439 id=439 data-nosnippet>439</a>    /// only — every one of them must be rendered to the client as the same
+<a href=#440 id=440 data-nosnippet>440</a>    /// `401`, or the distinction becomes a progress signal for an attacker.
+<a href=#441 id=441 data-nosnippet>441</a>    </span><span class="kw">pub fn </span>verify(
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#443 id=443 data-nosnippet>443</a>        srp_session: <span class="kw-2">&amp;</span>str,
+<a href=#444 id=444 data-nosnippet>444</a>        client_proof_hex: <span class="kw-2">&amp;</span>str,
+<a href=#445 id=445 data-nosnippet>445</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SrpVerified, SrpRejection&gt; {
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>sealed = URL_SAFE_NO_PAD
+<a href=#447 id=447 data-nosnippet>447</a>            .decode(srp_session)
+<a href=#448 id=448 data-nosnippet>448</a>            .map_err(|<span class="kw">_</span>| SrpRejection::Unusable)<span class="question-mark">?</span>;
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="kw">let </span>plaintext = aes256gcm_decrypt(
+<a href=#450 id=450 data-nosnippet>450</a>            <span class="kw-2">&amp;</span><span class="self">self</span>.session_key,
+<a href=#451 id=451 data-nosnippet>451</a>            <span class="kw-2">&amp;</span>base64::engine::general_purpose::STANDARD.encode(<span class="kw-2">&amp;</span>sealed),
+<a href=#452 id=452 data-nosnippet>452</a>        )
+<a href=#453 id=453 data-nosnippet>453</a>        .map_err(|<span class="kw">_</span>| SrpRejection::Unusable)<span class="question-mark">?</span>;
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">let </span>session: SealedSession =
+<a href=#455 id=455 data-nosnippet>455</a>            serde_json::from_slice(<span class="kw-2">&amp;</span>plaintext).map_err(|<span class="kw">_</span>| SrpRejection::Unusable)<span class="question-mark">?</span>;
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">if </span>session.v != <span class="number">1 </span>{
+<a href=#458 id=458 data-nosnippet>458</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(SrpRejection::Unusable);
+<a href=#459 id=459 data-nosnippet>459</a>        }
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">if </span>Utc::now() &gt; session.expires_at {
+<a href=#461 id=461 data-nosnippet>461</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(SrpRejection::Unusable);
+<a href=#462 id=462 data-nosnippet>462</a>        }
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="comment">// From here on the session is authentic, so a refusal is attributable
+<a href=#465 id=465 data-nosnippet>465</a>        // and must count against the account.
+<a href=#466 id=466 data-nosnippet>466</a>        </span><span class="kw">let </span>bad_proof = SrpRejection::BadProof {
+<a href=#467 id=467 data-nosnippet>467</a>            tenant_id: session.tenant_id,
+<a href=#468 id=468 data-nosnippet>468</a>            user_id: session.user_id,
+<a href=#469 id=469 data-nosnippet>469</a>        };
+<a href=#470 id=470 data-nosnippet>470</a>
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="comment">// Constant-time over the raw bytes, not the hex text: comparing hex
+<a href=#472 id=472 data-nosnippet>472</a>        // strings would leak through length and through early-exit on the
+<a href=#473 id=473 data-nosnippet>473</a>        // first differing nibble.
+<a href=#474 id=474 data-nosnippet>474</a>        </span><span class="kw">let </span>expected =
+<a href=#475 id=475 data-nosnippet>475</a>            hex::decode(<span class="kw-2">&amp;</span>session.expected_client_proof).map_err(|<span class="kw">_</span>| SrpRejection::Unusable)<span class="question-mark">?</span>;
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="kw">let </span><span class="prelude-val">Ok</span>(supplied) = hex::decode(client_proof_hex) <span class="kw">else </span>{
+<a href=#477 id=477 data-nosnippet>477</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(bad_proof);
+<a href=#478 id=478 data-nosnippet>478</a>        };
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="kw">if </span>expected.len() != supplied.len() {
+<a href=#480 id=480 data-nosnippet>480</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(bad_proof);
+<a href=#481 id=481 data-nosnippet>481</a>        }
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">if </span>!bool::from(expected.ct_eq(<span class="kw-2">&amp;</span>supplied)) {
+<a href=#483 id=483 data-nosnippet>483</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(bad_proof);
+<a href=#484 id=484 data-nosnippet>484</a>        }
+<a href=#485 id=485 data-nosnippet>485</a>
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="comment">// A simulated exchange can, with negligible probability, be "passed"
+<a href=#487 id=487 data-nosnippet>487</a>        // only by someone who guessed a 256-bit value; it still must not
+<a href=#488 id=488 data-nosnippet>488</a>        // authenticate anybody, because there is nobody to authenticate.
+<a href=#489 id=489 data-nosnippet>489</a>        </span><span class="kw">let </span><span class="prelude-val">Some</span>(user_id) = session.user_id <span class="kw">else </span>{
+<a href=#490 id=490 data-nosnippet>490</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(SrpRejection::Unusable);
+<a href=#491 id=491 data-nosnippet>491</a>        };
+<a href=#492 id=492 data-nosnippet>492</a>
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="prelude-val">Ok</span>(SrpVerified {
+<a href=#494 id=494 data-nosnippet>494</a>            tenant_id: session.tenant_id,
+<a href=#495 id=495 data-nosnippet>495</a>            org_id: session.org_id,
+<a href=#496 id=496 data-nosnippet>496</a>            user_id,
+<a href=#497 id=497 data-nosnippet>497</a>            identity: session.identity,
+<a href=#498 id=498 data-nosnippet>498</a>            server_proof: session.server_proof,
+<a href=#499 id=499 data-nosnippet>499</a>        })
+<a href=#500 id=500 data-nosnippet>500</a>    }
+<a href=#501 id=501 data-nosnippet>501</a>
+<a href=#502 id=502 data-nosnippet>502</a>    <span class="comment">// -- internals ------------------------------------------------------
+<a href=#503 id=503 data-nosnippet>503</a>
+<a href=#504 id=504 data-nosnippet>504</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#505 id=505 data-nosnippet>505</a>    </span><span class="kw">fn </span>build_challenge(
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#507 id=507 data-nosnippet>507</a>        params: <span class="kw-2">&amp;</span>GroupParams,
+<a href=#508 id=508 data-nosnippet>508</a>        group: SrpGroup,
+<a href=#509 id=509 data-nosnippet>509</a>        kdf_params: SrpKdfParams,
+<a href=#510 id=510 data-nosnippet>510</a>        identity: <span class="kw-2">&amp;</span>str,
+<a href=#511 id=511 data-nosnippet>511</a>        salt: <span class="kw-2">&amp;</span>[u8],
+<a href=#512 id=512 data-nosnippet>512</a>        verifier: <span class="kw-2">&amp;</span>BigUint,
+<a href=#513 id=513 data-nosnippet>513</a>        a_pub: <span class="kw-2">&amp;</span>BigUint,
+<a href=#514 id=514 data-nosnippet>514</a>        tenant_id: Uuid,
+<a href=#515 id=515 data-nosnippet>515</a>        org_id: Uuid,
+<a href=#516 id=516 data-nosnippet>516</a>        user_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#517 id=517 data-nosnippet>517</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SrpChallenge, AuthError&gt; {
+<a href=#518 id=518 data-nosnippet>518</a>        <span class="comment">// b &lt;- random, B = (k*v + g^b) mod N
+<a href=#519 id=519 data-nosnippet>519</a>        </span><span class="kw">let </span>b_priv = random_ephemeral();
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="kw">let </span>b_pub = (<span class="kw-2">&amp;</span>params.k * verifier + params.g.modpow(<span class="kw-2">&amp;</span>b_priv, <span class="kw-2">&amp;</span>params.n)) % <span class="kw-2">&amp;</span>params.n;
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="kw">if </span>b_pub.is_zero() {
+<a href=#522 id=522 data-nosnippet>522</a>            <span class="comment">// B ≡ 0 (mod N) would let any client authenticate. Astronomically
+<a href=#523 id=523 data-nosnippet>523</a>            // improbable, but the cost of handling it is one branch.
+<a href=#524 id=524 data-nosnippet>524</a>            </span><span class="kw">return </span><span class="prelude-val">Err</span>(AuthError::Crypto(<span class="string">"SRP server ephemeral was zero"</span>.into()));
+<a href=#525 id=525 data-nosnippet>525</a>        }
+<a href=#526 id=526 data-nosnippet>526</a>
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="kw">let </span>u = compute_u(a_pub, <span class="kw-2">&amp;</span>b_pub, params.byte_len);
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="kw">if </span>u.is_zero() {
+<a href=#529 id=529 data-nosnippet>529</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AuthError::Crypto(
+<a href=#530 id=530 data-nosnippet>530</a>                <span class="string">"SRP scrambling parameter was zero"</span>.into(),
+<a href=#531 id=531 data-nosnippet>531</a>            ));
+<a href=#532 id=532 data-nosnippet>532</a>        }
+<a href=#533 id=533 data-nosnippet>533</a>
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="comment">// S = (A * v^u)^b mod N
+<a href=#535 id=535 data-nosnippet>535</a>        </span><span class="kw">let </span>s = ((a_pub * verifier.modpow(<span class="kw-2">&amp;</span>u, <span class="kw-2">&amp;</span>params.n)) % <span class="kw-2">&amp;</span>params.n).modpow(<span class="kw-2">&amp;</span>b_priv, <span class="kw-2">&amp;</span>params.n);
+<a href=#536 id=536 data-nosnippet>536</a>        <span class="kw">let </span>session_key = hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>s, params.byte_len)]);
+<a href=#537 id=537 data-nosnippet>537</a>
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="kw">let </span>m1 = compute_m1(params, identity, salt, a_pub, <span class="kw-2">&amp;</span>b_pub, <span class="kw-2">&amp;</span>session_key);
+<a href=#539 id=539 data-nosnippet>539</a>        <span class="kw">let </span>m2 = compute_m2(a_pub, <span class="kw-2">&amp;</span>m1, <span class="kw-2">&amp;</span>session_key, params.byte_len);
+<a href=#540 id=540 data-nosnippet>540</a>
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="kw">let </span>sealed = SealedSession {
+<a href=#542 id=542 data-nosnippet>542</a>            v: <span class="number">1</span>,
+<a href=#543 id=543 data-nosnippet>543</a>            tenant_id,
+<a href=#544 id=544 data-nosnippet>544</a>            org_id,
+<a href=#545 id=545 data-nosnippet>545</a>            user_id,
+<a href=#546 id=546 data-nosnippet>546</a>            identity: identity.to_string(),
+<a href=#547 id=547 data-nosnippet>547</a>            expected_client_proof: hex::encode(m1),
+<a href=#548 id=548 data-nosnippet>548</a>            server_proof: hex::encode(m2),
+<a href=#549 id=549 data-nosnippet>549</a>            expires_at: Utc::now() + Duration::seconds(SESSION_LIFETIME_SECS),
+<a href=#550 id=550 data-nosnippet>550</a>        };
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">let </span>plaintext =
+<a href=#552 id=552 data-nosnippet>552</a>            serde_json::to_vec(<span class="kw-2">&amp;</span>sealed).map_err(|e| AuthError::Crypto(<span class="macro">format!</span>(<span class="string">"seal: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="kw">let </span>standard_b64 = aes256gcm_encrypt(<span class="kw-2">&amp;</span><span class="self">self</span>.session_key, <span class="kw-2">&amp;</span>plaintext)<span class="question-mark">?</span>;
+<a href=#554 id=554 data-nosnippet>554</a>        <span class="comment">// Re-encode as URL-safe so the token survives being put in a header,
+<a href=#555 id=555 data-nosnippet>555</a>        // a query string, or a JSON body without escaping.
+<a href=#556 id=556 data-nosnippet>556</a>        </span><span class="kw">let </span>raw = base64::engine::general_purpose::STANDARD
+<a href=#557 id=557 data-nosnippet>557</a>            .decode(<span class="kw-2">&amp;</span>standard_b64)
+<a href=#558 id=558 data-nosnippet>558</a>            .map_err(|e| AuthError::Crypto(<span class="macro">format!</span>(<span class="string">"seal re-encode: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#559 id=559 data-nosnippet>559</a>
+<a href=#560 id=560 data-nosnippet>560</a>        <span class="kw">let </span>(memory_kib, iterations, parallelism) = <span class="kw">match </span>kdf_params {
+<a href=#561 id=561 data-nosnippet>561</a>            SrpKdfParams::Argon2id {
+<a href=#562 id=562 data-nosnippet>562</a>                memory_kib,
+<a href=#563 id=563 data-nosnippet>563</a>                iterations,
+<a href=#564 id=564 data-nosnippet>564</a>                parallelism,
+<a href=#565 id=565 data-nosnippet>565</a>            } =&gt; (<span class="prelude-val">Some</span>(memory_kib), iterations, <span class="prelude-val">Some</span>(parallelism)),
+<a href=#566 id=566 data-nosnippet>566</a>            SrpKdfParams::Pbkdf2Sha256 { iterations } =&gt; (<span class="prelude-val">None</span>, iterations, <span class="prelude-val">None</span>),
+<a href=#567 id=567 data-nosnippet>567</a>        };
+<a href=#568 id=568 data-nosnippet>568</a>
+<a href=#569 id=569 data-nosnippet>569</a>        <span class="prelude-val">Ok</span>(SrpChallenge {
+<a href=#570 id=570 data-nosnippet>570</a>            srp_session: URL_SAFE_NO_PAD.encode(raw),
+<a href=#571 id=571 data-nosnippet>571</a>            identity: identity.to_string(),
+<a href=#572 id=572 data-nosnippet>572</a>            salt: hex::encode(salt),
+<a href=#573 id=573 data-nosnippet>573</a>            group: group.to_string(),
+<a href=#574 id=574 data-nosnippet>574</a>            kdf: kdf_params.kdf().to_string(),
+<a href=#575 id=575 data-nosnippet>575</a>            memory_kib,
+<a href=#576 id=576 data-nosnippet>576</a>            iterations,
+<a href=#577 id=577 data-nosnippet>577</a>            parallelism,
+<a href=#578 id=578 data-nosnippet>578</a>            b_pub: hex::encode(to_bytes(<span class="kw-2">&amp;</span>b_pub, params.byte_len)),
+<a href=#579 id=579 data-nosnippet>579</a>        })
+<a href=#580 id=580 data-nosnippet>580</a>    }
+<a href=#581 id=581 data-nosnippet>581</a>
+<a href=#582 id=582 data-nosnippet>582</a>    <span class="doccomment">/// Domain-separated HMAC over the server key — the one place fake material
+<a href=#583 id=583 data-nosnippet>583</a>    /// is derived from, so that it is deterministic per (tenant, identity).
+<a href=#584 id=584 data-nosnippet>584</a>    </span><span class="kw">fn </span>derive(<span class="kw-2">&amp;</span><span class="self">self</span>, domain: <span class="kw-2">&amp;</span>[u8], tenant_id: Uuid, identity: <span class="kw-2">&amp;</span>str) -&gt; [u8; <span class="number">32</span>] {
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">let </span><span class="kw-2">mut </span>mac = &lt;HmacSha256 <span class="kw">as </span>KeyInit&gt;::new_from_slice(<span class="kw-2">&amp;</span><span class="self">self</span>.session_key)
+<a href=#586 id=586 data-nosnippet>586</a>            .expect(<span class="string">"HMAC accepts a 32-byte key"</span>);
+<a href=#587 id=587 data-nosnippet>587</a>        mac.update(domain);
+<a href=#588 id=588 data-nosnippet>588</a>        mac.update(tenant_id.as_bytes());
+<a href=#589 id=589 data-nosnippet>589</a>        mac.update(identity.as_bytes());
+<a href=#590 id=590 data-nosnippet>590</a>        mac.finalize().into_bytes().into()
+<a href=#591 id=591 data-nosnippet>591</a>    }
+<a href=#592 id=592 data-nosnippet>592</a>
+<a href=#593 id=593 data-nosnippet>593</a>    <span class="kw">fn </span>stable_fake_salt(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, identity: <span class="kw-2">&amp;</span>str) -&gt; Vec&lt;u8&gt; {
+<a href=#594 id=594 data-nosnippet>594</a>        <span class="self">self</span>.derive(<span class="string">b"srp-fake-salt"</span>, tenant_id, identity).to_vec()
+<a href=#595 id=595 data-nosnippet>595</a>    }
+<a href=#596 id=596 data-nosnippet>596</a>}
+<a href=#597 id=597 data-nosnippet>597</a>
+<a href=#598 id=598 data-nosnippet>598</a><span class="doccomment">/// Parse and validate a client public value `A`.
+<a href=#599 id=599 data-nosnippet>599</a>///
+<a href=#600 id=600 data-nosnippet>600</a>/// `A ≡ 0 (mod N)` must be rejected: it forces `S = 0` on the server for any
+<a href=#601 id=601 data-nosnippet>601</a>/// `b`, so an attacker who sends it can compute `K` — and therefore `M1` —
+<a href=#602 id=602 data-nosnippet>602</a>/// with no knowledge of the password at all. This is *the* classic SRP
+<a href=#603 id=603 data-nosnippet>603</a>/// implementation break.
+<a href=#604 id=604 data-nosnippet>604</a></span><span class="kw">fn </span>parse_public_value(hex_value: <span class="kw-2">&amp;</span>str, params: <span class="kw-2">&amp;</span>GroupParams) -&gt; <span class="prelude-ty">Result</span>&lt;BigUint, AuthError&gt; {
+<a href=#605 id=605 data-nosnippet>605</a>    <span class="kw">if </span>hex_value.is_empty()
+<a href=#606 id=606 data-nosnippet>606</a>        || hex_value.len() &gt; params.byte_len * <span class="number">2
+<a href=#607 id=607 data-nosnippet>607</a>        </span>|| !hex_value.chars().all(|c| c.is_ascii_hexdigit())
+<a href=#608 id=608 data-nosnippet>608</a>    {
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AuthError::InvalidCredentials);
+<a href=#610 id=610 data-nosnippet>610</a>    }
+<a href=#611 id=611 data-nosnippet>611</a>    <span class="kw">let </span>value =
+<a href=#612 id=612 data-nosnippet>612</a>        BigUint::parse_bytes(hex_value.as_bytes(), <span class="number">16</span>).ok_or(AuthError::InvalidCredentials)<span class="question-mark">?</span>;
+<a href=#613 id=613 data-nosnippet>613</a>    <span class="kw">if </span>(<span class="kw-2">&amp;</span>value % <span class="kw-2">&amp;</span>params.n).is_zero() {
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AuthError::InvalidCredentials);
+<a href=#615 id=615 data-nosnippet>615</a>    }
+<a href=#616 id=616 data-nosnippet>616</a>    <span class="prelude-val">Ok</span>(value)
+<a href=#617 id=617 data-nosnippet>617</a>}
+<a href=#618 id=618 data-nosnippet>618</a>
+<a href=#619 id=619 data-nosnippet>619</a><span class="kw">fn </span>random_ephemeral() -&gt; BigUint {
+<a href=#620 id=620 data-nosnippet>620</a>    <span class="kw">let </span><span class="kw-2">mut </span>rng = rand::rng();
+<a href=#621 id=621 data-nosnippet>621</a>    <span class="kw">let </span><span class="kw-2">mut </span>bytes = [<span class="number">0u8</span>; EPHEMERAL_BITS / <span class="number">8</span>];
+<a href=#622 id=622 data-nosnippet>622</a>    rng.fill_bytes(<span class="kw-2">&amp;mut </span>bytes);
+<a href=#623 id=623 data-nosnippet>623</a>    <span class="comment">// Force the top bit so `b` is always full-width; a short `b` is not a
+<a href=#624 id=624 data-nosnippet>624</a>    // security problem at 256 bits but makes test vectors non-uniform.
+<a href=#625 id=625 data-nosnippet>625</a>    </span>bytes[<span class="number">0</span>] |= <span class="number">0x80</span>;
+<a href=#626 id=626 data-nosnippet>626</a>    BigUint::from_bytes_be(<span class="kw-2">&amp;</span>bytes)
+<a href=#627 id=627 data-nosnippet>627</a>}
+<a href=#628 id=628 data-nosnippet>628</a>
+<a href=#629 id=629 data-nosnippet>629</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#630 id=630 data-nosnippet>630</a>// Cross-language conformance vectors
+<a href=#631 id=631 data-nosnippet>631</a>// ---------------------------------------------------------------------------
+<a href=#632 id=632 data-nosnippet>632</a>
+<a href=#633 id=633 data-nosnippet>633</a></span><span class="doccomment">/// A fully-determined SRP-6a exchange, for cross-language conformance testing.
+<a href=#634 id=634 data-nosnippet>634</a>///
+<a href=#635 id=635 data-nosnippet>635</a>/// Eleven SDKs implement this protocol independently. Without a shared,
+<a href=#636 id=636 data-nosnippet>636</a>/// executable definition they will agree right up until the first value with a
+<a href=#637 id=637 data-nosnippet>637</a>/// leading zero byte, and then fail roughly one login in 256 in a way that
+<a href=#638 id=638 data-nosnippet>638</a>/// looks like a flaky network. These vectors pin every intermediate — not just
+<a href=#639 id=639 data-nosnippet>639</a>/// the final proof — so an SDK that gets `u` wrong finds out at `u` rather
+<a href=#640 id=640 data-nosnippet>640</a>/// than at "login sometimes fails".
+<a href=#641 id=641 data-nosnippet>641</a>///
+<a href=#642 id=642 data-nosnippet>642</a>/// Every field is lowercase hex, left-padded to the group width wherever the
+<a href=#643 id=643 data-nosnippet>643</a>/// protocol calls for `PAD()`.
+<a href=#644 id=644 data-nosnippet>644</a></span><span class="attr">#[derive(Debug, Clone, serde::Serialize)]
+<a href=#645 id=645 data-nosnippet>645</a></span><span class="kw">pub struct </span>ExchangeVector {
+<a href=#646 id=646 data-nosnippet>646</a>    <span class="doccomment">/// Group name, e.g. `rfc5054_4096`.
+<a href=#647 id=647 data-nosnippet>647</a>    </span><span class="kw">pub </span>group: String,
+<a href=#648 id=648 data-nosnippet>648</a>    <span class="doccomment">/// The identity `I` bound into `x`.
+<a href=#649 id=649 data-nosnippet>649</a>    </span><span class="kw">pub </span>identity: String,
+<a href=#650 id=650 data-nosnippet>650</a>    <span class="doccomment">/// Salt `s`.
+<a href=#651 id=651 data-nosnippet>651</a>    </span><span class="kw">pub </span>salt: String,
+<a href=#652 id=652 data-nosnippet>652</a>    <span class="doccomment">/// The KDF output `x`, supplied rather than derived — the KDF differs per
+<a href=#653 id=653 data-nosnippet>653</a>    /// language and is specified separately in `sdks/CONTRACT.md`.
+<a href=#654 id=654 data-nosnippet>654</a>    </span><span class="kw">pub </span>x: String,
+<a href=#655 id=655 data-nosnippet>655</a>    <span class="doccomment">/// Multiplier `k = H(N | PAD(g))`.
+<a href=#656 id=656 data-nosnippet>656</a>    </span><span class="kw">pub </span>k: String,
+<a href=#657 id=657 data-nosnippet>657</a>    <span class="doccomment">/// Verifier `v = g^x mod N`.
+<a href=#658 id=658 data-nosnippet>658</a>    </span><span class="kw">pub </span>verifier: String,
+<a href=#659 id=659 data-nosnippet>659</a>    <span class="doccomment">/// Client private ephemeral `a`.
+<a href=#660 id=660 data-nosnippet>660</a>    </span><span class="kw">pub </span>a_priv: String,
+<a href=#661 id=661 data-nosnippet>661</a>    <span class="doccomment">/// Client public `A = g^a mod N`.
+<a href=#662 id=662 data-nosnippet>662</a>    </span><span class="kw">pub </span>a_pub: String,
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="doccomment">/// Server private ephemeral `b`.
+<a href=#664 id=664 data-nosnippet>664</a>    </span><span class="kw">pub </span>b_priv: String,
+<a href=#665 id=665 data-nosnippet>665</a>    <span class="doccomment">/// Server public `B = (k*v + g^b) mod N`.
+<a href=#666 id=666 data-nosnippet>666</a>    </span><span class="kw">pub </span>b_pub: String,
+<a href=#667 id=667 data-nosnippet>667</a>    <span class="doccomment">/// Scrambling parameter `u = H(PAD(A) | PAD(B))`.
+<a href=#668 id=668 data-nosnippet>668</a>    </span><span class="kw">pub </span>u: String,
+<a href=#669 id=669 data-nosnippet>669</a>    <span class="doccomment">/// Shared secret `S`, which both sides must reach independently.
+<a href=#670 id=670 data-nosnippet>670</a>    </span><span class="kw">pub </span>session_secret: String,
+<a href=#671 id=671 data-nosnippet>671</a>    <span class="doccomment">/// Session key `K = H(S)`.
+<a href=#672 id=672 data-nosnippet>672</a>    </span><span class="kw">pub </span>session_key: String,
+<a href=#673 id=673 data-nosnippet>673</a>    <span class="doccomment">/// Client proof `M1`.
+<a href=#674 id=674 data-nosnippet>674</a>    </span><span class="kw">pub </span>client_proof: String,
+<a href=#675 id=675 data-nosnippet>675</a>    <span class="doccomment">/// Server proof `M2`.
+<a href=#676 id=676 data-nosnippet>676</a>    </span><span class="kw">pub </span>server_proof: String,
+<a href=#677 id=677 data-nosnippet>677</a>}
+<a href=#678 id=678 data-nosnippet>678</a>
+<a href=#679 id=679 data-nosnippet>679</a><span class="doccomment">/// Compute a complete exchange from fixed inputs.
+<a href=#680 id=680 data-nosnippet>680</a>///
+<a href=#681 id=681 data-nosnippet>681</a>/// Deterministic by construction — `a` and `b` are parameters rather than
+<a href=#682 id=682 data-nosnippet>682</a>/// random — which is what makes the output usable as a committed test vector.
+<a href=#683 id=683 data-nosnippet>683</a>/// Both the client-side and server-side derivations of `S` are computed and
+<a href=#684 id=684 data-nosnippet>684</a>/// asserted equal, so a vector can never be published that the two halves of
+<a href=#685 id=685 data-nosnippet>685</a>/// the protocol disagree about.
+<a href=#686 id=686 data-nosnippet>686</a>///
+<a href=#687 id=687 data-nosnippet>687</a>/// # Panics
+<a href=#688 id=688 data-nosnippet>688</a>///
+<a href=#689 id=689 data-nosnippet>689</a>/// If the two derivations of `S` disagree, which would mean this module's own
+<a href=#690 id=690 data-nosnippet>690</a>/// client and server halves are inconsistent — a bug that must never reach a
+<a href=#691 id=691 data-nosnippet>691</a>/// published vector.
+<a href=#692 id=692 data-nosnippet>692</a></span><span class="kw">pub fn </span>deterministic_exchange(
+<a href=#693 id=693 data-nosnippet>693</a>    group: SrpGroup,
+<a href=#694 id=694 data-nosnippet>694</a>    identity: <span class="kw-2">&amp;</span>str,
+<a href=#695 id=695 data-nosnippet>695</a>    salt: <span class="kw-2">&amp;</span>[u8],
+<a href=#696 id=696 data-nosnippet>696</a>    x_bytes: <span class="kw-2">&amp;</span>[u8],
+<a href=#697 id=697 data-nosnippet>697</a>    a_priv: <span class="kw-2">&amp;</span>[u8],
+<a href=#698 id=698 data-nosnippet>698</a>    b_priv: <span class="kw-2">&amp;</span>[u8],
+<a href=#699 id=699 data-nosnippet>699</a>) -&gt; ExchangeVector {
+<a href=#700 id=700 data-nosnippet>700</a>    <span class="kw">let </span>params = group_params(group);
+<a href=#701 id=701 data-nosnippet>701</a>    <span class="kw">let </span>n = <span class="kw-2">&amp;</span>params.n;
+<a href=#702 id=702 data-nosnippet>702</a>    <span class="kw">let </span>g = <span class="kw-2">&amp;</span>params.g;
+<a href=#703 id=703 data-nosnippet>703</a>    <span class="kw">let </span>len = params.byte_len;
+<a href=#704 id=704 data-nosnippet>704</a>
+<a href=#705 id=705 data-nosnippet>705</a>    <span class="kw">let </span>x = BigUint::from_bytes_be(x_bytes) % n;
+<a href=#706 id=706 data-nosnippet>706</a>    <span class="kw">let </span>a_priv_n = BigUint::from_bytes_be(a_priv);
+<a href=#707 id=707 data-nosnippet>707</a>    <span class="kw">let </span>b_priv_n = BigUint::from_bytes_be(b_priv);
+<a href=#708 id=708 data-nosnippet>708</a>
+<a href=#709 id=709 data-nosnippet>709</a>    <span class="kw">let </span>verifier = g.modpow(<span class="kw-2">&amp;</span>x, n);
+<a href=#710 id=710 data-nosnippet>710</a>    <span class="kw">let </span>a_pub = g.modpow(<span class="kw-2">&amp;</span>a_priv_n, n);
+<a href=#711 id=711 data-nosnippet>711</a>    <span class="kw">let </span>b_pub = (<span class="kw-2">&amp;</span>params.k * <span class="kw-2">&amp;</span>verifier + g.modpow(<span class="kw-2">&amp;</span>b_priv_n, n)) % n;
+<a href=#712 id=712 data-nosnippet>712</a>    <span class="kw">let </span>u = compute_u(<span class="kw-2">&amp;</span>a_pub, <span class="kw-2">&amp;</span>b_pub, len);
+<a href=#713 id=713 data-nosnippet>713</a>
+<a href=#714 id=714 data-nosnippet>714</a>    <span class="comment">// Server: S = (A * v^u)^b mod N
+<a href=#715 id=715 data-nosnippet>715</a>    </span><span class="kw">let </span>s_server = ((<span class="kw-2">&amp;</span>a_pub * verifier.modpow(<span class="kw-2">&amp;</span>u, n)) % n).modpow(<span class="kw-2">&amp;</span>b_priv_n, n);
+<a href=#716 id=716 data-nosnippet>716</a>    <span class="comment">// Client: S = (B - k*g^x)^(a + u*x) mod N
+<a href=#717 id=717 data-nosnippet>717</a>    </span><span class="kw">let </span>kgx = (<span class="kw-2">&amp;</span>params.k * g.modpow(<span class="kw-2">&amp;</span>x, n)) % n;
+<a href=#718 id=718 data-nosnippet>718</a>    <span class="kw">let </span>base = ((<span class="kw-2">&amp;</span>b_pub % n) + n - kgx) % n;
+<a href=#719 id=719 data-nosnippet>719</a>    <span class="kw">let </span>s_client = base.modpow(<span class="kw-2">&amp;</span>(<span class="kw-2">&amp;</span>a_priv_n + <span class="kw-2">&amp;</span>u * <span class="kw-2">&amp;</span>x), n);
+<a href=#720 id=720 data-nosnippet>720</a>    <span class="macro">assert_eq!</span>(
+<a href=#721 id=721 data-nosnippet>721</a>        s_server, s_client,
+<a href=#722 id=722 data-nosnippet>722</a>        <span class="string">"client and server derivations of S disagree; a vector must never be \
+<a href=#723 id=723 data-nosnippet>723</a>         published from an inconsistent implementation"
+<a href=#724 id=724 data-nosnippet>724</a>    </span>);
+<a href=#725 id=725 data-nosnippet>725</a>
+<a href=#726 id=726 data-nosnippet>726</a>    <span class="kw">let </span>session_key = hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>s_server, len)]);
+<a href=#727 id=727 data-nosnippet>727</a>    <span class="kw">let </span>m1 = compute_m1(params, identity, salt, <span class="kw-2">&amp;</span>a_pub, <span class="kw-2">&amp;</span>b_pub, <span class="kw-2">&amp;</span>session_key);
+<a href=#728 id=728 data-nosnippet>728</a>    <span class="kw">let </span>m2 = compute_m2(<span class="kw-2">&amp;</span>a_pub, <span class="kw-2">&amp;</span>m1, <span class="kw-2">&amp;</span>session_key, len);
+<a href=#729 id=729 data-nosnippet>729</a>
+<a href=#730 id=730 data-nosnippet>730</a>    ExchangeVector {
+<a href=#731 id=731 data-nosnippet>731</a>        group: group.to_string(),
+<a href=#732 id=732 data-nosnippet>732</a>        identity: identity.to_string(),
+<a href=#733 id=733 data-nosnippet>733</a>        salt: hex::encode(salt),
+<a href=#734 id=734 data-nosnippet>734</a>        x: hex::encode(to_bytes(<span class="kw-2">&amp;</span>x, <span class="number">32</span>)),
+<a href=#735 id=735 data-nosnippet>735</a>        k: hex::encode(to_bytes(<span class="kw-2">&amp;</span>params.k, <span class="number">32</span>)),
+<a href=#736 id=736 data-nosnippet>736</a>        verifier: hex::encode(to_bytes(<span class="kw-2">&amp;</span>verifier, len)),
+<a href=#737 id=737 data-nosnippet>737</a>        a_priv: hex::encode(a_priv),
+<a href=#738 id=738 data-nosnippet>738</a>        a_pub: hex::encode(to_bytes(<span class="kw-2">&amp;</span>a_pub, len)),
+<a href=#739 id=739 data-nosnippet>739</a>        b_priv: hex::encode(b_priv),
+<a href=#740 id=740 data-nosnippet>740</a>        b_pub: hex::encode(to_bytes(<span class="kw-2">&amp;</span>b_pub, len)),
+<a href=#741 id=741 data-nosnippet>741</a>        u: hex::encode(to_bytes(<span class="kw-2">&amp;</span>u, <span class="number">32</span>)),
+<a href=#742 id=742 data-nosnippet>742</a>        session_secret: hex::encode(to_bytes(<span class="kw-2">&amp;</span>s_server, len)),
+<a href=#743 id=743 data-nosnippet>743</a>        session_key: hex::encode(session_key),
+<a href=#744 id=744 data-nosnippet>744</a>        client_proof: hex::encode(m1),
+<a href=#745 id=745 data-nosnippet>745</a>        server_proof: hex::encode(m2),
+<a href=#746 id=746 data-nosnippet>746</a>    }
+<a href=#747 id=747 data-nosnippet>747</a>}
+<a href=#748 id=748 data-nosnippet>748</a>
+<a href=#749 id=749 data-nosnippet>749</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#750 id=750 data-nosnippet>750</a>// Reference client — test-only
+<a href=#751 id=751 data-nosnippet>751</a>// ---------------------------------------------------------------------------
+<a href=#752 id=752 data-nosnippet>752</a>
+<a href=#753 id=753 data-nosnippet>753</a></span><span class="doccomment">/// A minimal SRP-6a **client**, used by this crate's tests and by the
+<a href=#754 id=754 data-nosnippet>754</a>/// integration tests in `axiam-api-rest`.
+<a href=#755 id=755 data-nosnippet>755</a>///
+<a href=#756 id=756 data-nosnippet>756</a>/// It is deliberately compiled into the library rather than living in a test
+<a href=#757 id=757 data-nosnippet>757</a>/// module: the eleven SDKs each implement this same computation, and this is
+<a href=#758 id=758 data-nosnippet>758</a>/// the executable definition they are checked against. It performs no KDF —
+<a href=#759 id=759 data-nosnippet>759</a>/// callers pass `x` directly — because the KDF is the one part that differs by
+<a href=#760 id=760 data-nosnippet>760</a>/// language and is specified in `sdks/CONTRACT.md` rather than here.
+<a href=#761 id=761 data-nosnippet>761</a></span><span class="kw">pub mod </span>reference_client {
+<a href=#762 id=762 data-nosnippet>762</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#763 id=763 data-nosnippet>763</a>
+<a href=#764 id=764 data-nosnippet>764</a>    <span class="doccomment">/// The client's ephemeral state between the two messages.
+<a href=#765 id=765 data-nosnippet>765</a>    </span><span class="kw">pub struct </span>ClientSession {
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="doccomment">/// Client public value `A`, lowercase hex.
+<a href=#767 id=767 data-nosnippet>767</a>        </span><span class="kw">pub </span>a_pub_hex: String,
+<a href=#768 id=768 data-nosnippet>768</a>        a_priv: BigUint,
+<a href=#769 id=769 data-nosnippet>769</a>        group: SrpGroup,
+<a href=#770 id=770 data-nosnippet>770</a>    }
+<a href=#771 id=771 data-nosnippet>771</a>
+<a href=#772 id=772 data-nosnippet>772</a>    <span class="doccomment">/// Start an exchange: pick `a`, compute `A = g^a mod N`.
+<a href=#773 id=773 data-nosnippet>773</a>    </span><span class="kw">pub fn </span>begin(group: SrpGroup) -&gt; ClientSession {
+<a href=#774 id=774 data-nosnippet>774</a>        <span class="kw">let </span>params = group_params(group);
+<a href=#775 id=775 data-nosnippet>775</a>        <span class="kw">let </span>a_priv = random_ephemeral();
+<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">let </span>a_pub = params.g.modpow(<span class="kw-2">&amp;</span>a_priv, <span class="kw-2">&amp;</span>params.n);
+<a href=#777 id=777 data-nosnippet>777</a>        ClientSession {
+<a href=#778 id=778 data-nosnippet>778</a>            a_pub_hex: hex::encode(to_bytes(<span class="kw-2">&amp;</span>a_pub, params.byte_len)),
+<a href=#779 id=779 data-nosnippet>779</a>            a_priv,
+<a href=#780 id=780 data-nosnippet>780</a>            group,
+<a href=#781 id=781 data-nosnippet>781</a>        }
+<a href=#782 id=782 data-nosnippet>782</a>    }
+<a href=#783 id=783 data-nosnippet>783</a>
+<a href=#784 id=784 data-nosnippet>784</a>    <span class="doccomment">/// Compute the verifier `v = g^x mod N` for enrolment.
+<a href=#785 id=785 data-nosnippet>785</a>    </span><span class="kw">pub fn </span>verifier_hex(group: SrpGroup, x: <span class="kw-2">&amp;</span>[u8]) -&gt; String {
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="kw">let </span>params = group_params(group);
+<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">let </span>x = BigUint::from_bytes_be(x) % <span class="kw-2">&amp;</span>params.n;
+<a href=#788 id=788 data-nosnippet>788</a>        hex::encode(to_bytes(<span class="kw-2">&amp;</span>params.g.modpow(<span class="kw-2">&amp;</span>x, <span class="kw-2">&amp;</span>params.n), params.byte_len))
+<a href=#789 id=789 data-nosnippet>789</a>    }
+<a href=#790 id=790 data-nosnippet>790</a>
+<a href=#791 id=791 data-nosnippet>791</a>    <span class="kw">impl </span>ClientSession {
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="doccomment">/// Finish the exchange from the server's challenge, returning
+<a href=#793 id=793 data-nosnippet>793</a>        /// `(M1_hex, expected_M2_hex)`.
+<a href=#794 id=794 data-nosnippet>794</a>        ///
+<a href=#795 id=795 data-nosnippet>795</a>        /// `S = (B - k*g^x)^(a + u*x) mod N`. The subtraction is done modulo
+<a href=#796 id=796 data-nosnippet>796</a>        /// `N` with an added `N` first, because `k*g^x` can exceed `B` and
+<a href=#797 id=797 data-nosnippet>797</a>        /// `BigUint` has no negative values.
+<a href=#798 id=798 data-nosnippet>798</a>        </span><span class="kw">pub fn </span>finish(
+<a href=#799 id=799 data-nosnippet>799</a>            <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#800 id=800 data-nosnippet>800</a>            identity: <span class="kw-2">&amp;</span>str,
+<a href=#801 id=801 data-nosnippet>801</a>            salt_hex: <span class="kw-2">&amp;</span>str,
+<a href=#802 id=802 data-nosnippet>802</a>            b_pub_hex: <span class="kw-2">&amp;</span>str,
+<a href=#803 id=803 data-nosnippet>803</a>            x: <span class="kw-2">&amp;</span>[u8],
+<a href=#804 id=804 data-nosnippet>804</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(String, String), AuthError&gt; {
+<a href=#805 id=805 data-nosnippet>805</a>            <span class="kw">let </span>params = group_params(<span class="self">self</span>.group);
+<a href=#806 id=806 data-nosnippet>806</a>            <span class="kw">let </span>b_pub = BigUint::parse_bytes(b_pub_hex.as_bytes(), <span class="number">16</span>)
+<a href=#807 id=807 data-nosnippet>807</a>                .ok_or(AuthError::InvalidCredentials)<span class="question-mark">?</span>;
+<a href=#808 id=808 data-nosnippet>808</a>            <span class="kw">if </span>(<span class="kw-2">&amp;</span>b_pub % <span class="kw-2">&amp;</span>params.n).is_zero() {
+<a href=#809 id=809 data-nosnippet>809</a>                <span class="comment">// B ≡ 0 means the server is broken or hostile.
+<a href=#810 id=810 data-nosnippet>810</a>                </span><span class="kw">return </span><span class="prelude-val">Err</span>(AuthError::InvalidCredentials);
+<a href=#811 id=811 data-nosnippet>811</a>            }
+<a href=#812 id=812 data-nosnippet>812</a>            <span class="kw">let </span>salt = hex::decode(salt_hex).map_err(|<span class="kw">_</span>| AuthError::InvalidCredentials)<span class="question-mark">?</span>;
+<a href=#813 id=813 data-nosnippet>813</a>            <span class="kw">let </span>x = BigUint::from_bytes_be(x) % <span class="kw-2">&amp;</span>params.n;
+<a href=#814 id=814 data-nosnippet>814</a>
+<a href=#815 id=815 data-nosnippet>815</a>            <span class="kw">let </span>u = compute_u(
+<a href=#816 id=816 data-nosnippet>816</a>                <span class="kw-2">&amp;</span>BigUint::parse_bytes(<span class="self">self</span>.a_pub_hex.as_bytes(), <span class="number">16</span>)
+<a href=#817 id=817 data-nosnippet>817</a>                    .ok_or(AuthError::InvalidCredentials)<span class="question-mark">?</span>,
+<a href=#818 id=818 data-nosnippet>818</a>                <span class="kw-2">&amp;</span>b_pub,
+<a href=#819 id=819 data-nosnippet>819</a>                params.byte_len,
+<a href=#820 id=820 data-nosnippet>820</a>            );
+<a href=#821 id=821 data-nosnippet>821</a>
+<a href=#822 id=822 data-nosnippet>822</a>            <span class="kw">let </span>kgx = (<span class="kw-2">&amp;</span>params.k * params.g.modpow(<span class="kw-2">&amp;</span>x, <span class="kw-2">&amp;</span>params.n)) % <span class="kw-2">&amp;</span>params.n;
+<a href=#823 id=823 data-nosnippet>823</a>            <span class="kw">let </span>base = ((<span class="kw-2">&amp;</span>b_pub % <span class="kw-2">&amp;</span>params.n) + <span class="kw-2">&amp;</span>params.n - kgx) % <span class="kw-2">&amp;</span>params.n;
+<a href=#824 id=824 data-nosnippet>824</a>            <span class="kw">let </span>exp = <span class="kw-2">&amp;</span><span class="self">self</span>.a_priv + <span class="kw-2">&amp;</span>u * <span class="kw-2">&amp;</span>x;
+<a href=#825 id=825 data-nosnippet>825</a>            <span class="kw">let </span>s = base.modpow(<span class="kw-2">&amp;</span>exp, <span class="kw-2">&amp;</span>params.n);
+<a href=#826 id=826 data-nosnippet>826</a>            <span class="kw">let </span>session_key = hash_parts(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>to_bytes(<span class="kw-2">&amp;</span>s, params.byte_len)]);
+<a href=#827 id=827 data-nosnippet>827</a>
+<a href=#828 id=828 data-nosnippet>828</a>            <span class="kw">let </span>a_pub = BigUint::parse_bytes(<span class="self">self</span>.a_pub_hex.as_bytes(), <span class="number">16</span>)
+<a href=#829 id=829 data-nosnippet>829</a>                .ok_or(AuthError::InvalidCredentials)<span class="question-mark">?</span>;
+<a href=#830 id=830 data-nosnippet>830</a>            <span class="kw">let </span>m1 = compute_m1(params, identity, <span class="kw-2">&amp;</span>salt, <span class="kw-2">&amp;</span>a_pub, <span class="kw-2">&amp;</span>b_pub, <span class="kw-2">&amp;</span>session_key);
+<a href=#831 id=831 data-nosnippet>831</a>            <span class="kw">let </span>m2 = compute_m2(<span class="kw-2">&amp;</span>a_pub, <span class="kw-2">&amp;</span>m1, <span class="kw-2">&amp;</span>session_key, params.byte_len);
+<a href=#832 id=832 data-nosnippet>832</a>            <span class="prelude-val">Ok</span>((hex::encode(m1), hex::encode(m2)))
+<a href=#833 id=833 data-nosnippet>833</a>        }
+<a href=#834 id=834 data-nosnippet>834</a>    }
+<a href=#835 id=835 data-nosnippet>835</a>}
+<a href=#836 id=836 data-nosnippet>836</a>
+<a href=#837 id=837 data-nosnippet>837</a><span class="attr">#[cfg(test)]
+<a href=#838 id=838 data-nosnippet>838</a></span><span class="kw">mod </span>tests {
+<a href=#839 id=839 data-nosnippet>839</a>    <span class="kw">use </span><span class="kw">super</span>::reference_client;
+<a href=#840 id=840 data-nosnippet>840</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#841 id=841 data-nosnippet>841</a>    <span class="kw">use </span>axiam_core::models::srp::{SrpKdf, SrpKdfParams};
+<a href=#842 id=842 data-nosnippet>842</a>    <span class="kw">use </span>std::sync::OnceLock;
+<a href=#843 id=843 data-nosnippet>843</a>
+<a href=#844 id=844 data-nosnippet>844</a>    <span class="doccomment">/// Thirty-two bytes that are not a literal.
+<a href=#845 id=845 data-nosnippet>845</a>    ///
+<a href=#846 id=846 data-nosnippet>846</a>    /// CodeQL's `rust/hardcoded-cryptographic-value` flags a literal reaching a
+<a href=#847 id=847 data-nosnippet>847</a>    /// KDF or a cipher as a key, salt or password. That rule is right about
+<a href=#848 id=848 data-nosnippet>848</a>    /// shipping code, and keeping it sharp is worth more than fixed bytes here:
+<a href=#849 id=849 data-nosnippet>849</a>    /// nothing in this module asserts on these values, because every test
+<a href=#850 id=850 data-nosnippet>850</a>    /// compares one derivation against another from the same run.
+<a href=#851 id=851 data-nosnippet>851</a>    ///
+<a href=#852 id=852 data-nosnippet>852</a>    /// The values that ARE fixed on purpose live in
+<a href=#853 id=853 data-nosnippet>853</a>    /// `tests/srp_vectors_test.rs`, which publishes them as the cross-language
+<a href=#854 id=854 data-nosnippet>854</a>    /// conformance vectors — there the exact bytes, leading zero included, are
+<a href=#855 id=855 data-nosnippet>855</a>    /// the artifact under test rather than incidental to it.
+<a href=#856 id=856 data-nosnippet>856</a>    </span><span class="kw">fn </span>random_bytes32() -&gt; [u8; <span class="number">32</span>] {
+<a href=#857 id=857 data-nosnippet>857</a>        <span class="kw">let </span><span class="kw-2">mut </span>out = [<span class="number">0u8</span>; <span class="number">32</span>];
+<a href=#858 id=858 data-nosnippet>858</a>        out[..<span class="number">16</span>].copy_from_slice(Uuid::new_v4().as_bytes());
+<a href=#859 id=859 data-nosnippet>859</a>        out[<span class="number">16</span>..].copy_from_slice(Uuid::new_v4().as_bytes());
+<a href=#860 id=860 data-nosnippet>860</a>        out
+<a href=#861 id=861 data-nosnippet>861</a>    }
+<a href=#862 id=862 data-nosnippet>862</a>
+<a href=#863 id=863 data-nosnippet>863</a>    <span class="doccomment">/// The server's session-sealing key. Stable for the process so that a
+<a href=#864 id=864 data-nosnippet>864</a>    /// challenge issued by one `SrpServer` can be opened by another built the
+<a href=#865 id=865 data-nosnippet>865</a>    /// same way, which several tests below rely on.
+<a href=#866 id=866 data-nosnippet>866</a>    </span><span class="kw">fn </span>key() -&gt; [u8; <span class="number">32</span>] {
+<a href=#867 id=867 data-nosnippet>867</a>        <span class="kw">static </span>VALUE: OnceLock&lt;[u8; <span class="number">32</span>]&gt; = OnceLock::new();
+<a href=#868 id=868 data-nosnippet>868</a>        <span class="kw-2">*</span>VALUE.get_or_init(random_bytes32)
+<a href=#869 id=869 data-nosnippet>869</a>    }
+<a href=#870 id=870 data-nosnippet>870</a>
+<a href=#871 id=871 data-nosnippet>871</a>    <span class="doccomment">/// The `x` the credential's verifier is built from — the client that should
+<a href=#872 id=872 data-nosnippet>872</a>    /// authenticate.
+<a href=#873 id=873 data-nosnippet>873</a>    </span><span class="kw">fn </span>correct_x() -&gt; [u8; <span class="number">32</span>] {
+<a href=#874 id=874 data-nosnippet>874</a>        <span class="kw">static </span>VALUE: OnceLock&lt;[u8; <span class="number">32</span>]&gt; = OnceLock::new();
+<a href=#875 id=875 data-nosnippet>875</a>        <span class="kw-2">*</span>VALUE.get_or_init(random_bytes32)
+<a href=#876 id=876 data-nosnippet>876</a>    }
+<a href=#877 id=877 data-nosnippet>877</a>
+<a href=#878 id=878 data-nosnippet>878</a>    <span class="doccomment">/// An `x` that is emphatically not the credential's, for the paths that must
+<a href=#879 id=879 data-nosnippet>879</a>    /// refuse. Distinct from [`correct_x`] with overwhelming probability, and
+<a href=#880 id=880 data-nosnippet>880</a>    /// asserted so below rather than assumed.
+<a href=#881 id=881 data-nosnippet>881</a>    </span><span class="kw">fn </span>wrong_x() -&gt; [u8; <span class="number">32</span>] {
+<a href=#882 id=882 data-nosnippet>882</a>        <span class="kw">static </span>VALUE: OnceLock&lt;[u8; <span class="number">32</span>]&gt; = OnceLock::new();
+<a href=#883 id=883 data-nosnippet>883</a>        <span class="kw-2">*</span>VALUE.get_or_init(random_bytes32)
+<a href=#884 id=884 data-nosnippet>884</a>    }
+<a href=#885 id=885 data-nosnippet>885</a>
+<a href=#886 id=886 data-nosnippet>886</a>    <span class="attr">#[test]
+<a href=#887 id=887 data-nosnippet>887</a>    </span><span class="kw">fn </span>the_two_test_derivations_differ() {
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="comment">// Guards every "wrong x is refused" test below: if these ever collided,
+<a href=#889 id=889 data-nosnippet>889</a>        // those tests would pass for the wrong reason.
+<a href=#890 id=890 data-nosnippet>890</a>        </span><span class="macro">assert_ne!</span>(correct_x(), wrong_x());
+<a href=#891 id=891 data-nosnippet>891</a>    }
+<a href=#892 id=892 data-nosnippet>892</a>
+<a href=#893 id=893 data-nosnippet>893</a>    <span class="kw">fn </span>credential(group: SrpGroup, identity: <span class="kw-2">&amp;</span>str, x: <span class="kw-2">&amp;</span>[u8]) -&gt; SrpCredential {
+<a href=#894 id=894 data-nosnippet>894</a>        SrpCredential {
+<a href=#895 id=895 data-nosnippet>895</a>            id: Uuid::new_v4(),
+<a href=#896 id=896 data-nosnippet>896</a>            tenant_id: Uuid::new_v4(),
+<a href=#897 id=897 data-nosnippet>897</a>            user_id: Uuid::new_v4(),
+<a href=#898 id=898 data-nosnippet>898</a>            identity: identity.to_string(),
+<a href=#899 id=899 data-nosnippet>899</a>            group,
+<a href=#900 id=900 data-nosnippet>900</a>            kdf_params: SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#901 id=901 data-nosnippet>901</a>            salt: hex::encode(random_bytes32()),
+<a href=#902 id=902 data-nosnippet>902</a>            verifier: reference_client::verifier_hex(group, x),
+<a href=#903 id=903 data-nosnippet>903</a>            created_at: Utc::now(),
+<a href=#904 id=904 data-nosnippet>904</a>            updated_at: Utc::now(),
+<a href=#905 id=905 data-nosnippet>905</a>        }
+<a href=#906 id=906 data-nosnippet>906</a>    }
+<a href=#907 id=907 data-nosnippet>907</a>
+<a href=#908 id=908 data-nosnippet>908</a>    <span class="comment">// --- group constants -------------------------------------------------
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a>    </span><span class="doccomment">/// Miller-Rabin, deterministic enough at 40 rounds for a test.
+<a href=#911 id=911 data-nosnippet>911</a>    </span><span class="kw">fn </span>is_probable_prime(n: <span class="kw-2">&amp;</span>BigUint) -&gt; bool {
+<a href=#912 id=912 data-nosnippet>912</a>        <span class="kw">use </span>num_traits::One;
+<a href=#913 id=913 data-nosnippet>913</a>        <span class="kw">let </span>one = BigUint::one();
+<a href=#914 id=914 data-nosnippet>914</a>        <span class="kw">let </span>two = BigUint::from(<span class="number">2u32</span>);
+<a href=#915 id=915 data-nosnippet>915</a>        <span class="kw">if </span><span class="kw-2">*</span>n &lt; two {
+<a href=#916 id=916 data-nosnippet>916</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#917 id=917 data-nosnippet>917</a>        }
+<a href=#918 id=918 data-nosnippet>918</a>        <span class="kw">let </span>n_minus_1 = n - <span class="kw-2">&amp;</span>one;
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="kw">let </span><span class="kw-2">mut </span>d = n_minus_1.clone();
+<a href=#920 id=920 data-nosnippet>920</a>        <span class="kw">let </span><span class="kw-2">mut </span>r = <span class="number">0u32</span>;
+<a href=#921 id=921 data-nosnippet>921</a>        <span class="kw">while </span>(<span class="kw-2">&amp;</span>d % <span class="kw-2">&amp;</span>two).is_zero() {
+<a href=#922 id=922 data-nosnippet>922</a>            d /= <span class="kw-2">&amp;</span>two;
+<a href=#923 id=923 data-nosnippet>923</a>            r += <span class="number">1</span>;
+<a href=#924 id=924 data-nosnippet>924</a>        }
+<a href=#925 id=925 data-nosnippet>925</a>        <span class="comment">// Fixed small bases: for numbers this size a fixed base set is a
+<a href=#926 id=926 data-nosnippet>926</a>        // strong probabilistic check and keeps the test deterministic.
+<a href=#927 id=927 data-nosnippet>927</a>        </span><span class="kw">for </span>base <span class="kw">in </span>[<span class="number">2u32</span>, <span class="number">3</span>, <span class="number">5</span>, <span class="number">7</span>, <span class="number">11</span>, <span class="number">13</span>, <span class="number">17</span>, <span class="number">19</span>, <span class="number">23</span>, <span class="number">29</span>, <span class="number">31</span>, <span class="number">37</span>] {
+<a href=#928 id=928 data-nosnippet>928</a>            <span class="kw">let </span>a = BigUint::from(base);
+<a href=#929 id=929 data-nosnippet>929</a>            <span class="kw">let </span><span class="kw-2">mut </span>x = a.modpow(<span class="kw-2">&amp;</span>d, n);
+<a href=#930 id=930 data-nosnippet>930</a>            <span class="kw">if </span>x == one || x == n_minus_1 {
+<a href=#931 id=931 data-nosnippet>931</a>                <span class="kw">continue</span>;
+<a href=#932 id=932 data-nosnippet>932</a>            }
+<a href=#933 id=933 data-nosnippet>933</a>            <span class="kw">let </span><span class="kw-2">mut </span>passed = <span class="bool-val">false</span>;
+<a href=#934 id=934 data-nosnippet>934</a>            <span class="kw">for _ in </span><span class="number">0</span>..r - <span class="number">1 </span>{
+<a href=#935 id=935 data-nosnippet>935</a>                x = x.modpow(<span class="kw-2">&amp;</span>two, n);
+<a href=#936 id=936 data-nosnippet>936</a>                <span class="kw">if </span>x == n_minus_1 {
+<a href=#937 id=937 data-nosnippet>937</a>                    passed = <span class="bool-val">true</span>;
+<a href=#938 id=938 data-nosnippet>938</a>                    <span class="kw">break</span>;
+<a href=#939 id=939 data-nosnippet>939</a>                }
+<a href=#940 id=940 data-nosnippet>940</a>            }
+<a href=#941 id=941 data-nosnippet>941</a>            <span class="kw">if </span>!passed {
+<a href=#942 id=942 data-nosnippet>942</a>                <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#943 id=943 data-nosnippet>943</a>            }
+<a href=#944 id=944 data-nosnippet>944</a>        }
+<a href=#945 id=945 data-nosnippet>945</a>        <span class="bool-val">true
+<a href=#946 id=946 data-nosnippet>946</a>    </span>}
+<a href=#947 id=947 data-nosnippet>947</a>
+<a href=#948 id=948 data-nosnippet>948</a>    <span class="attr">#[test]
+<a href=#949 id=949 data-nosnippet>949</a>    </span><span class="kw">fn </span>every_group_modulus_is_a_safe_prime_of_the_advertised_width() {
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="comment">// A transcription slip in these constants is a total, silent break:
+<a href=#951 id=951 data-nosnippet>951</a>        // client and server would still agree with each other while the
+<a href=#952 id=952 data-nosnippet>952</a>        // discrete-log hardness the whole protocol rests on quietly vanished.
+<a href=#953 id=953 data-nosnippet>953</a>        </span><span class="kw">for </span>group <span class="kw">in </span>[
+<a href=#954 id=954 data-nosnippet>954</a>            SrpGroup::Rfc5054_2048,
+<a href=#955 id=955 data-nosnippet>955</a>            SrpGroup::Rfc5054_3072,
+<a href=#956 id=956 data-nosnippet>956</a>            SrpGroup::Rfc5054_4096,
+<a href=#957 id=957 data-nosnippet>957</a>        ] {
+<a href=#958 id=958 data-nosnippet>958</a>            <span class="kw">let </span>params = group_params(group);
+<a href=#959 id=959 data-nosnippet>959</a>            <span class="macro">assert_eq!</span>(
+<a href=#960 id=960 data-nosnippet>960</a>                params.n.bits() <span class="kw">as </span>u32,
+<a href=#961 id=961 data-nosnippet>961</a>                group.bits(),
+<a href=#962 id=962 data-nosnippet>962</a>                <span class="string">"{group} modulus is the wrong width"
+<a href=#963 id=963 data-nosnippet>963</a>            </span>);
+<a href=#964 id=964 data-nosnippet>964</a>            <span class="macro">assert_eq!</span>(params.byte_len, group.byte_len());
+<a href=#965 id=965 data-nosnippet>965</a>            <span class="macro">assert!</span>(is_probable_prime(<span class="kw-2">&amp;</span>params.n), <span class="string">"{group} modulus is not prime"</span>);
+<a href=#966 id=966 data-nosnippet>966</a>            <span class="kw">let </span>q = (<span class="kw-2">&amp;</span>params.n - BigUint::from(<span class="number">1u32</span>)) / BigUint::from(<span class="number">2u32</span>);
+<a href=#967 id=967 data-nosnippet>967</a>            <span class="macro">assert!</span>(is_probable_prime(<span class="kw-2">&amp;</span>q), <span class="string">"{group} modulus is not a safe prime"</span>);
+<a href=#968 id=968 data-nosnippet>968</a>            <span class="comment">// g generates the order-q subgroup iff g^q == N-1 for a safe prime.
+<a href=#969 id=969 data-nosnippet>969</a>            </span><span class="macro">assert_eq!</span>(
+<a href=#970 id=970 data-nosnippet>970</a>                params.g.modpow(<span class="kw-2">&amp;</span>q, <span class="kw-2">&amp;</span>params.n),
+<a href=#971 id=971 data-nosnippet>971</a>                <span class="kw-2">&amp;</span>params.n - BigUint::from(<span class="number">1u32</span>),
+<a href=#972 id=972 data-nosnippet>972</a>                <span class="string">"{group} generator does not generate the large subgroup"
+<a href=#973 id=973 data-nosnippet>973</a>            </span>);
+<a href=#974 id=974 data-nosnippet>974</a>        }
+<a href=#975 id=975 data-nosnippet>975</a>    }
+<a href=#976 id=976 data-nosnippet>976</a>
+<a href=#977 id=977 data-nosnippet>977</a>    <span class="comment">// --- padding ---------------------------------------------------------
+<a href=#978 id=978 data-nosnippet>978</a>
+<a href=#979 id=979 data-nosnippet>979</a>    </span><span class="attr">#[test]
+<a href=#980 id=980 data-nosnippet>980</a>    </span><span class="kw">fn </span>pad_left_pads_to_the_group_width() {
+<a href=#981 id=981 data-nosnippet>981</a>        <span class="kw">let </span>small = BigUint::from(<span class="number">1u32</span>);
+<a href=#982 id=982 data-nosnippet>982</a>        <span class="macro">assert_eq!</span>(to_bytes(<span class="kw-2">&amp;</span>small, <span class="number">4</span>), <span class="macro">vec!</span>[<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>]);
+<a href=#983 id=983 data-nosnippet>983</a>        <span class="comment">// Already wide enough: unchanged.
+<a href=#984 id=984 data-nosnippet>984</a>        </span><span class="macro">assert_eq!</span>(to_bytes(<span class="kw-2">&amp;</span>BigUint::from(<span class="number">0x0102u32</span>), <span class="number">2</span>), <span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>]);
+<a href=#985 id=985 data-nosnippet>985</a>    }
+<a href=#986 id=986 data-nosnippet>986</a>
+<a href=#987 id=987 data-nosnippet>987</a>    <span class="comment">// --- happy path ------------------------------------------------------
+<a href=#988 id=988 data-nosnippet>988</a>
+<a href=#989 id=989 data-nosnippet>989</a>    </span><span class="attr">#[test]
+<a href=#990 id=990 data-nosnippet>990</a>    </span><span class="kw">fn </span>a_correct_password_completes_the_exchange_in_every_group() {
+<a href=#991 id=991 data-nosnippet>991</a>        <span class="kw">for </span>group <span class="kw">in </span>[
+<a href=#992 id=992 data-nosnippet>992</a>            SrpGroup::Rfc5054_2048,
+<a href=#993 id=993 data-nosnippet>993</a>            SrpGroup::Rfc5054_3072,
+<a href=#994 id=994 data-nosnippet>994</a>            SrpGroup::Rfc5054_4096,
+<a href=#995 id=995 data-nosnippet>995</a>        ] {
+<a href=#996 id=996 data-nosnippet>996</a>            <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#997 id=997 data-nosnippet>997</a>            <span class="kw">let </span>x = correct_x();
+<a href=#998 id=998 data-nosnippet>998</a>            <span class="kw">let </span>cred = credential(group, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>x);
+<a href=#999 id=999 data-nosnippet>999</a>            <span class="kw">let </span>org_id = Uuid::new_v4();
+<a href=#1000 id=1000 data-nosnippet>1000</a>
+<a href=#1001 id=1001 data-nosnippet>1001</a>            <span class="kw">let </span>client = reference_client::begin(group);
+<a href=#1002 id=1002 data-nosnippet>1002</a>            <span class="kw">let </span>challenge = server
+<a href=#1003 id=1003 data-nosnippet>1003</a>                .challenge(<span class="kw-2">&amp;</span>cred, org_id, <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1004 id=1004 data-nosnippet>1004</a>                .expect(<span class="string">"challenge"</span>);
+<a href=#1005 id=1005 data-nosnippet>1005</a>
+<a href=#1006 id=1006 data-nosnippet>1006</a>            <span class="macro">assert_eq!</span>(challenge.identity, <span class="string">"alice"</span>);
+<a href=#1007 id=1007 data-nosnippet>1007</a>            <span class="macro">assert_eq!</span>(challenge.salt, cred.salt);
+<a href=#1008 id=1008 data-nosnippet>1008</a>            <span class="macro">assert_eq!</span>(challenge.group, group.to_string());
+<a href=#1009 id=1009 data-nosnippet>1009</a>
+<a href=#1010 id=1010 data-nosnippet>1010</a>            <span class="kw">let </span>(m1, expected_m2) = client
+<a href=#1011 id=1011 data-nosnippet>1011</a>                .finish(<span class="string">"alice"</span>, <span class="kw-2">&amp;</span>challenge.salt, <span class="kw-2">&amp;</span>challenge.b_pub, <span class="kw-2">&amp;</span>x)
+<a href=#1012 id=1012 data-nosnippet>1012</a>                .expect(<span class="string">"client finish"</span>);
+<a href=#1013 id=1013 data-nosnippet>1013</a>
+<a href=#1014 id=1014 data-nosnippet>1014</a>            <span class="kw">let </span>verified = server.verify(<span class="kw-2">&amp;</span>challenge.srp_session, <span class="kw-2">&amp;</span>m1).expect(<span class="string">"verify"</span>);
+<a href=#1015 id=1015 data-nosnippet>1015</a>            <span class="macro">assert_eq!</span>(verified.user_id, cred.user_id);
+<a href=#1016 id=1016 data-nosnippet>1016</a>            <span class="macro">assert_eq!</span>(verified.tenant_id, cred.tenant_id);
+<a href=#1017 id=1017 data-nosnippet>1017</a>            <span class="macro">assert_eq!</span>(verified.org_id, org_id);
+<a href=#1018 id=1018 data-nosnippet>1018</a>            <span class="comment">// Mutual auth: the client can check the server too.
+<a href=#1019 id=1019 data-nosnippet>1019</a>            </span><span class="macro">assert_eq!</span>(verified.server_proof, expected_m2);
+<a href=#1020 id=1020 data-nosnippet>1020</a>        }
+<a href=#1021 id=1021 data-nosnippet>1021</a>    }
+<a href=#1022 id=1022 data-nosnippet>1022</a>
+<a href=#1023 id=1023 data-nosnippet>1023</a>    <span class="attr">#[test]
+<a href=#1024 id=1024 data-nosnippet>1024</a>    </span><span class="kw">fn </span>b_pub_is_padded_to_the_full_group_width() {
+<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="comment">// Interop depends on this: an unpadded B would hash differently on a
+<a href=#1026 id=1026 data-nosnippet>1026</a>        // client that pads, and would fail roughly one login in 256.
+<a href=#1027 id=1027 data-nosnippet>1027</a>        </span><span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1028 id=1028 data-nosnippet>1028</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1029 id=1029 data-nosnippet>1029</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1030 id=1030 data-nosnippet>1030</a>        <span class="kw">let </span>challenge = server
+<a href=#1031 id=1031 data-nosnippet>1031</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1032 id=1032 data-nosnippet>1032</a>            .unwrap();
+<a href=#1033 id=1033 data-nosnippet>1033</a>        <span class="macro">assert_eq!</span>(challenge.b_pub.len(), <span class="number">256 </span>* <span class="number">2</span>);
+<a href=#1034 id=1034 data-nosnippet>1034</a>    }
+<a href=#1035 id=1035 data-nosnippet>1035</a>
+<a href=#1036 id=1036 data-nosnippet>1036</a>    <span class="comment">// --- failure modes ---------------------------------------------------
+<a href=#1037 id=1037 data-nosnippet>1037</a>
+<a href=#1038 id=1038 data-nosnippet>1038</a>    </span><span class="attr">#[test]
+<a href=#1039 id=1039 data-nosnippet>1039</a>    </span><span class="kw">fn </span>a_wrong_password_is_rejected() {
+<a href=#1040 id=1040 data-nosnippet>1040</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1041 id=1041 data-nosnippet>1041</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1042 id=1042 data-nosnippet>1042</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1043 id=1043 data-nosnippet>1043</a>        <span class="kw">let </span>challenge = server
+<a href=#1044 id=1044 data-nosnippet>1044</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1045 id=1045 data-nosnippet>1045</a>            .unwrap();
+<a href=#1046 id=1046 data-nosnippet>1046</a>
+<a href=#1047 id=1047 data-nosnippet>1047</a>        <span class="kw">let </span>(m1, <span class="kw">_</span>) = client
+<a href=#1048 id=1048 data-nosnippet>1048</a>            .finish(<span class="string">"alice"</span>, <span class="kw-2">&amp;</span>challenge.salt, <span class="kw-2">&amp;</span>challenge.b_pub, <span class="kw-2">&amp;</span>wrong_x())
+<a href=#1049 id=1049 data-nosnippet>1049</a>            .unwrap();
+<a href=#1050 id=1050 data-nosnippet>1050</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1051 id=1051 data-nosnippet>1051</a>            server.verify(<span class="kw-2">&amp;</span>challenge.srp_session, <span class="kw-2">&amp;</span>m1),
+<a href=#1052 id=1052 data-nosnippet>1052</a>            <span class="prelude-val">Err</span>(SrpRejection::BadProof { .. })
+<a href=#1053 id=1053 data-nosnippet>1053</a>        ));
+<a href=#1054 id=1054 data-nosnippet>1054</a>    }
+<a href=#1055 id=1055 data-nosnippet>1055</a>
+<a href=#1056 id=1056 data-nosnippet>1056</a>    <span class="attr">#[test]
+<a href=#1057 id=1057 data-nosnippet>1057</a>    </span><span class="kw">fn </span>a_client_public_value_congruent_to_zero_is_refused() {
+<a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="comment">// THE classic SRP break: A ≡ 0 (mod N) forces S = 0 server-side, so
+<a href=#1059 id=1059 data-nosnippet>1059</a>        // an attacker could derive K and forge M1 with no password at all.
+<a href=#1060 id=1060 data-nosnippet>1060</a>        </span><span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1061 id=1061 data-nosnippet>1061</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1062 id=1062 data-nosnippet>1062</a>        <span class="kw">let </span>params = group_params(SrpGroup::Rfc5054_2048);
+<a href=#1063 id=1063 data-nosnippet>1063</a>
+<a href=#1064 id=1064 data-nosnippet>1064</a>        <span class="kw">for </span>a <span class="kw">in </span>[
+<a href=#1065 id=1065 data-nosnippet>1065</a>            <span class="string">"00"</span>,
+<a href=#1066 id=1066 data-nosnippet>1066</a>            <span class="kw-2">&amp;</span><span class="string">"0"</span>.repeat(<span class="number">512</span>),
+<a href=#1067 id=1067 data-nosnippet>1067</a>            <span class="kw-2">&amp;</span>hex::encode(to_bytes(<span class="kw-2">&amp;</span>params.n, <span class="number">256</span>)),
+<a href=#1068 id=1068 data-nosnippet>1068</a>        ] {
+<a href=#1069 id=1069 data-nosnippet>1069</a>            <span class="macro">assert!</span>(
+<a href=#1070 id=1070 data-nosnippet>1070</a>                <span class="macro">matches!</span>(
+<a href=#1071 id=1071 data-nosnippet>1071</a>                    server.challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), a),
+<a href=#1072 id=1072 data-nosnippet>1072</a>                    <span class="prelude-val">Err</span>(AuthError::InvalidCredentials)
+<a href=#1073 id=1073 data-nosnippet>1073</a>                ),
+<a href=#1074 id=1074 data-nosnippet>1074</a>                <span class="string">"A={a} should be refused"
+<a href=#1075 id=1075 data-nosnippet>1075</a>            </span>);
+<a href=#1076 id=1076 data-nosnippet>1076</a>        }
+<a href=#1077 id=1077 data-nosnippet>1077</a>        <span class="comment">// 2N is also ≡ 0.
+<a href=#1078 id=1078 data-nosnippet>1078</a>        </span><span class="kw">let </span>two_n = <span class="kw-2">&amp;</span>params.n * BigUint::from(<span class="number">2u32</span>);
+<a href=#1079 id=1079 data-nosnippet>1079</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1080 id=1080 data-nosnippet>1080</a>            server.challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>hex::encode(two_n.to_bytes_be())),
+<a href=#1081 id=1081 data-nosnippet>1081</a>            <span class="prelude-val">Err</span>(AuthError::InvalidCredentials)
+<a href=#1082 id=1082 data-nosnippet>1082</a>        ));
+<a href=#1083 id=1083 data-nosnippet>1083</a>    }
+<a href=#1084 id=1084 data-nosnippet>1084</a>
+<a href=#1085 id=1085 data-nosnippet>1085</a>    <span class="attr">#[test]
+<a href=#1086 id=1086 data-nosnippet>1086</a>    </span><span class="kw">fn </span>a_malformed_client_public_value_is_refused() {
+<a href=#1087 id=1087 data-nosnippet>1087</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1088 id=1088 data-nosnippet>1088</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1089 id=1089 data-nosnippet>1089</a>        <span class="kw">for </span>a <span class="kw">in </span>[<span class="string">""</span>, <span class="string">"zz"</span>, <span class="kw-2">&amp;</span><span class="string">"a"</span>.repeat(<span class="number">600</span>)] {
+<a href=#1090 id=1090 data-nosnippet>1090</a>            <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1091 id=1091 data-nosnippet>1091</a>                server.challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), a),
+<a href=#1092 id=1092 data-nosnippet>1092</a>                <span class="prelude-val">Err</span>(AuthError::InvalidCredentials)
+<a href=#1093 id=1093 data-nosnippet>1093</a>            ));
+<a href=#1094 id=1094 data-nosnippet>1094</a>        }
+<a href=#1095 id=1095 data-nosnippet>1095</a>    }
+<a href=#1096 id=1096 data-nosnippet>1096</a>
+<a href=#1097 id=1097 data-nosnippet>1097</a>    <span class="attr">#[test]
+<a href=#1098 id=1098 data-nosnippet>1098</a>    </span><span class="kw">fn </span>a_tampered_session_blob_is_refused() {
+<a href=#1099 id=1099 data-nosnippet>1099</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1100 id=1100 data-nosnippet>1100</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1101 id=1101 data-nosnippet>1101</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1102 id=1102 data-nosnippet>1102</a>        <span class="kw">let </span>challenge = server
+<a href=#1103 id=1103 data-nosnippet>1103</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1104 id=1104 data-nosnippet>1104</a>            .unwrap();
+<a href=#1105 id=1105 data-nosnippet>1105</a>        <span class="kw">let </span>(m1, <span class="kw">_</span>) = client
+<a href=#1106 id=1106 data-nosnippet>1106</a>            .finish(<span class="string">"alice"</span>, <span class="kw-2">&amp;</span>challenge.salt, <span class="kw-2">&amp;</span>challenge.b_pub, <span class="kw-2">&amp;</span>correct_x())
+<a href=#1107 id=1107 data-nosnippet>1107</a>            .unwrap();
+<a href=#1108 id=1108 data-nosnippet>1108</a>
+<a href=#1109 id=1109 data-nosnippet>1109</a>        <span class="kw">let </span><span class="kw-2">mut </span>tampered = challenge.srp_session.clone();
+<a href=#1110 id=1110 data-nosnippet>1110</a>        <span class="comment">// Flip one character in the AEAD ciphertext.
+<a href=#1111 id=1111 data-nosnippet>1111</a>        </span><span class="kw">let </span>idx = tampered.len() / <span class="number">2</span>;
+<a href=#1112 id=1112 data-nosnippet>1112</a>        <span class="kw">let </span>replacement = <span class="kw">if </span>tampered.as_bytes()[idx] == <span class="string">b'A' </span>{
+<a href=#1113 id=1113 data-nosnippet>1113</a>            <span class="string">'B'
+<a href=#1114 id=1114 data-nosnippet>1114</a>        </span>} <span class="kw">else </span>{
+<a href=#1115 id=1115 data-nosnippet>1115</a>            <span class="string">'A'
+<a href=#1116 id=1116 data-nosnippet>1116</a>        </span>};
+<a href=#1117 id=1117 data-nosnippet>1117</a>        tampered.replace_range(idx..idx + <span class="number">1</span>, <span class="kw-2">&amp;</span>replacement.to_string());
+<a href=#1118 id=1118 data-nosnippet>1118</a>
+<a href=#1119 id=1119 data-nosnippet>1119</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1120 id=1120 data-nosnippet>1120</a>            server.verify(<span class="kw-2">&amp;</span>tampered, <span class="kw-2">&amp;</span>m1),
+<a href=#1121 id=1121 data-nosnippet>1121</a>            <span class="prelude-val">Err</span>(SrpRejection::Unusable)
+<a href=#1122 id=1122 data-nosnippet>1122</a>        ));
+<a href=#1123 id=1123 data-nosnippet>1123</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1124 id=1124 data-nosnippet>1124</a>            server.verify(<span class="string">"not-base64-$$$"</span>, <span class="kw-2">&amp;</span>m1),
+<a href=#1125 id=1125 data-nosnippet>1125</a>            <span class="prelude-val">Err</span>(SrpRejection::Unusable)
+<a href=#1126 id=1126 data-nosnippet>1126</a>        ));
+<a href=#1127 id=1127 data-nosnippet>1127</a>    }
+<a href=#1128 id=1128 data-nosnippet>1128</a>
+<a href=#1129 id=1129 data-nosnippet>1129</a>    <span class="attr">#[test]
+<a href=#1130 id=1130 data-nosnippet>1130</a>    </span><span class="kw">fn </span>a_session_sealed_by_a_different_key_is_refused() {
+<a href=#1131 id=1131 data-nosnippet>1131</a>        <span class="kw">let </span>server_a = SrpServer::new([<span class="number">1u8</span>; <span class="number">32</span>]);
+<a href=#1132 id=1132 data-nosnippet>1132</a>        <span class="kw">let </span>server_b = SrpServer::new([<span class="number">2u8</span>; <span class="number">32</span>]);
+<a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1134 id=1134 data-nosnippet>1134</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1135 id=1135 data-nosnippet>1135</a>        <span class="kw">let </span>challenge = server_a
+<a href=#1136 id=1136 data-nosnippet>1136</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1137 id=1137 data-nosnippet>1137</a>            .unwrap();
+<a href=#1138 id=1138 data-nosnippet>1138</a>        <span class="kw">let </span>(m1, <span class="kw">_</span>) = client
+<a href=#1139 id=1139 data-nosnippet>1139</a>            .finish(<span class="string">"alice"</span>, <span class="kw-2">&amp;</span>challenge.salt, <span class="kw-2">&amp;</span>challenge.b_pub, <span class="kw-2">&amp;</span>correct_x())
+<a href=#1140 id=1140 data-nosnippet>1140</a>            .unwrap();
+<a href=#1141 id=1141 data-nosnippet>1141</a>
+<a href=#1142 id=1142 data-nosnippet>1142</a>        <span class="comment">// A different key cannot open the blob at all, so there is no identity
+<a href=#1143 id=1143 data-nosnippet>1143</a>        // to attribute the failure to.
+<a href=#1144 id=1144 data-nosnippet>1144</a>        </span><span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1145 id=1145 data-nosnippet>1145</a>            server_b.verify(<span class="kw-2">&amp;</span>challenge.srp_session, <span class="kw-2">&amp;</span>m1),
+<a href=#1146 id=1146 data-nosnippet>1146</a>            <span class="prelude-val">Err</span>(SrpRejection::Unusable)
+<a href=#1147 id=1147 data-nosnippet>1147</a>        ));
+<a href=#1148 id=1148 data-nosnippet>1148</a>    }
+<a href=#1149 id=1149 data-nosnippet>1149</a>
+<a href=#1150 id=1150 data-nosnippet>1150</a>    <span class="attr">#[test]
+<a href=#1151 id=1151 data-nosnippet>1151</a>    </span><span class="kw">fn </span>a_proof_of_the_wrong_length_is_refused_without_panicking() {
+<a href=#1152 id=1152 data-nosnippet>1152</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1153 id=1153 data-nosnippet>1153</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x());
+<a href=#1154 id=1154 data-nosnippet>1154</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1155 id=1155 data-nosnippet>1155</a>        <span class="kw">let </span>challenge = server
+<a href=#1156 id=1156 data-nosnippet>1156</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1157 id=1157 data-nosnippet>1157</a>            .unwrap();
+<a href=#1158 id=1158 data-nosnippet>1158</a>
+<a href=#1159 id=1159 data-nosnippet>1159</a>        <span class="kw">for </span>proof <span class="kw">in </span>[<span class="string">""</span>, <span class="string">"ab"</span>, <span class="kw-2">&amp;</span><span class="string">"f"</span>.repeat(<span class="number">128</span>), <span class="string">"zzzz"</span>] {
+<a href=#1160 id=1160 data-nosnippet>1160</a>            <span class="macro">assert!</span>(
+<a href=#1161 id=1161 data-nosnippet>1161</a>                server.verify(<span class="kw-2">&amp;</span>challenge.srp_session, proof).is_err(),
+<a href=#1162 id=1162 data-nosnippet>1162</a>                <span class="string">"proof {proof:?} should be refused"
+<a href=#1163 id=1163 data-nosnippet>1163</a>            </span>);
+<a href=#1164 id=1164 data-nosnippet>1164</a>        }
+<a href=#1165 id=1165 data-nosnippet>1165</a>    }
+<a href=#1166 id=1166 data-nosnippet>1166</a>
+<a href=#1167 id=1167 data-nosnippet>1167</a>    <span class="comment">// --- enumeration resistance -----------------------------------------
+<a href=#1168 id=1168 data-nosnippet>1168</a>
+<a href=#1169 id=1169 data-nosnippet>1169</a>    </span><span class="attr">#[test]
+<a href=#1170 id=1170 data-nosnippet>1170</a>    </span><span class="kw">fn </span>a_simulated_challenge_is_shaped_exactly_like_a_real_one() {
+<a href=#1171 id=1171 data-nosnippet>1171</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1172 id=1172 data-nosnippet>1172</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#1173 id=1173 data-nosnippet>1173</a>        <span class="kw">let </span>group = SrpGroup::Rfc5054_2048;
+<a href=#1174 id=1174 data-nosnippet>1174</a>        <span class="kw">let </span>client = reference_client::begin(group);
+<a href=#1175 id=1175 data-nosnippet>1175</a>
+<a href=#1176 id=1176 data-nosnippet>1176</a>        <span class="kw">let </span>real = server
+<a href=#1177 id=1177 data-nosnippet>1177</a>            .challenge(
+<a href=#1178 id=1178 data-nosnippet>1178</a>                <span class="kw-2">&amp;</span>credential(group, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>correct_x()),
+<a href=#1179 id=1179 data-nosnippet>1179</a>                Uuid::new_v4(),
+<a href=#1180 id=1180 data-nosnippet>1180</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1181 id=1181 data-nosnippet>1181</a>            )
+<a href=#1182 id=1182 data-nosnippet>1182</a>            .unwrap();
+<a href=#1183 id=1183 data-nosnippet>1183</a>        <span class="kw">let </span>fake = server
+<a href=#1184 id=1184 data-nosnippet>1184</a>            .simulated_challenge(
+<a href=#1185 id=1185 data-nosnippet>1185</a>                group,
+<a href=#1186 id=1186 data-nosnippet>1186</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1187 id=1187 data-nosnippet>1187</a>                <span class="string">"ghost"</span>,
+<a href=#1188 id=1188 data-nosnippet>1188</a>                tenant_id,
+<a href=#1189 id=1189 data-nosnippet>1189</a>                Uuid::new_v4(),
+<a href=#1190 id=1190 data-nosnippet>1190</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1191 id=1191 data-nosnippet>1191</a>            )
+<a href=#1192 id=1192 data-nosnippet>1192</a>            .unwrap();
+<a href=#1193 id=1193 data-nosnippet>1193</a>
+<a href=#1194 id=1194 data-nosnippet>1194</a>        <span class="macro">assert_eq!</span>(real.salt.len(), fake.salt.len());
+<a href=#1195 id=1195 data-nosnippet>1195</a>        <span class="macro">assert_eq!</span>(real.b_pub.len(), fake.b_pub.len());
+<a href=#1196 id=1196 data-nosnippet>1196</a>        <span class="macro">assert_eq!</span>(real.group, fake.group);
+<a href=#1197 id=1197 data-nosnippet>1197</a>        <span class="macro">assert_eq!</span>(real.kdf, fake.kdf);
+<a href=#1198 id=1198 data-nosnippet>1198</a>        <span class="macro">assert_eq!</span>(real.iterations, fake.iterations);
+<a href=#1199 id=1199 data-nosnippet>1199</a>    }
+<a href=#1200 id=1200 data-nosnippet>1200</a>
+<a href=#1201 id=1201 data-nosnippet>1201</a>    <span class="attr">#[test]
+<a href=#1202 id=1202 data-nosnippet>1202</a>    </span><span class="kw">fn </span>a_simulated_salt_is_stable_across_attempts() {
+<a href=#1203 id=1203 data-nosnippet>1203</a>        <span class="comment">// Two probes of the same unknown name must return the same salt; a
+<a href=#1204 id=1204 data-nosnippet>1204</a>        // fresh random salt each time would announce "this account does not
+<a href=#1205 id=1205 data-nosnippet>1205</a>        // exist" as loudly as a 404.
+<a href=#1206 id=1206 data-nosnippet>1206</a>        </span><span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1207 id=1207 data-nosnippet>1207</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1209 id=1209 data-nosnippet>1209</a>
+<a href=#1210 id=1210 data-nosnippet>1210</a>        <span class="kw">let </span>first = server
+<a href=#1211 id=1211 data-nosnippet>1211</a>            .simulated_challenge(
+<a href=#1212 id=1212 data-nosnippet>1212</a>                SrpGroup::Rfc5054_2048,
+<a href=#1213 id=1213 data-nosnippet>1213</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1214 id=1214 data-nosnippet>1214</a>                <span class="string">"ghost"</span>,
+<a href=#1215 id=1215 data-nosnippet>1215</a>                tenant_id,
+<a href=#1216 id=1216 data-nosnippet>1216</a>                Uuid::new_v4(),
+<a href=#1217 id=1217 data-nosnippet>1217</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1218 id=1218 data-nosnippet>1218</a>            )
+<a href=#1219 id=1219 data-nosnippet>1219</a>            .unwrap();
+<a href=#1220 id=1220 data-nosnippet>1220</a>        <span class="kw">let </span>second = server
+<a href=#1221 id=1221 data-nosnippet>1221</a>            .simulated_challenge(
+<a href=#1222 id=1222 data-nosnippet>1222</a>                SrpGroup::Rfc5054_2048,
+<a href=#1223 id=1223 data-nosnippet>1223</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1224 id=1224 data-nosnippet>1224</a>                <span class="string">"ghost"</span>,
+<a href=#1225 id=1225 data-nosnippet>1225</a>                tenant_id,
+<a href=#1226 id=1226 data-nosnippet>1226</a>                Uuid::new_v4(),
+<a href=#1227 id=1227 data-nosnippet>1227</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1228 id=1228 data-nosnippet>1228</a>            )
+<a href=#1229 id=1229 data-nosnippet>1229</a>            .unwrap();
+<a href=#1230 id=1230 data-nosnippet>1230</a>        <span class="macro">assert_eq!</span>(first.salt, second.salt);
+<a href=#1231 id=1231 data-nosnippet>1231</a>
+<a href=#1232 id=1232 data-nosnippet>1232</a>        <span class="comment">// ...but different per tenant and per identity, so one tenant cannot
+<a href=#1233 id=1233 data-nosnippet>1233</a>        // fingerprint another's user list.
+<a href=#1234 id=1234 data-nosnippet>1234</a>        </span><span class="kw">let </span>other_identity = server
+<a href=#1235 id=1235 data-nosnippet>1235</a>            .simulated_challenge(
+<a href=#1236 id=1236 data-nosnippet>1236</a>                SrpGroup::Rfc5054_2048,
+<a href=#1237 id=1237 data-nosnippet>1237</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1238 id=1238 data-nosnippet>1238</a>                <span class="string">"phantom"</span>,
+<a href=#1239 id=1239 data-nosnippet>1239</a>                tenant_id,
+<a href=#1240 id=1240 data-nosnippet>1240</a>                Uuid::new_v4(),
+<a href=#1241 id=1241 data-nosnippet>1241</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1242 id=1242 data-nosnippet>1242</a>            )
+<a href=#1243 id=1243 data-nosnippet>1243</a>            .unwrap();
+<a href=#1244 id=1244 data-nosnippet>1244</a>        <span class="macro">assert_ne!</span>(first.salt, other_identity.salt);
+<a href=#1245 id=1245 data-nosnippet>1245</a>
+<a href=#1246 id=1246 data-nosnippet>1246</a>        <span class="kw">let </span>other_tenant = server
+<a href=#1247 id=1247 data-nosnippet>1247</a>            .simulated_challenge(
+<a href=#1248 id=1248 data-nosnippet>1248</a>                SrpGroup::Rfc5054_2048,
+<a href=#1249 id=1249 data-nosnippet>1249</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1250 id=1250 data-nosnippet>1250</a>                <span class="string">"ghost"</span>,
+<a href=#1251 id=1251 data-nosnippet>1251</a>                Uuid::new_v4(),
+<a href=#1252 id=1252 data-nosnippet>1252</a>                Uuid::new_v4(),
+<a href=#1253 id=1253 data-nosnippet>1253</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1254 id=1254 data-nosnippet>1254</a>            )
+<a href=#1255 id=1255 data-nosnippet>1255</a>            .unwrap();
+<a href=#1256 id=1256 data-nosnippet>1256</a>        <span class="macro">assert_ne!</span>(first.salt, other_tenant.salt);
+<a href=#1257 id=1257 data-nosnippet>1257</a>    }
+<a href=#1258 id=1258 data-nosnippet>1258</a>
+<a href=#1259 id=1259 data-nosnippet>1259</a>    <span class="attr">#[test]
+<a href=#1260 id=1260 data-nosnippet>1260</a>    </span><span class="kw">fn </span>a_simulated_exchange_can_never_authenticate_anyone() {
+<a href=#1261 id=1261 data-nosnippet>1261</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1262 id=1262 data-nosnippet>1262</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1263 id=1263 data-nosnippet>1263</a>        <span class="kw">let </span>challenge = server
+<a href=#1264 id=1264 data-nosnippet>1264</a>            .simulated_challenge(
+<a href=#1265 id=1265 data-nosnippet>1265</a>                SrpGroup::Rfc5054_2048,
+<a href=#1266 id=1266 data-nosnippet>1266</a>                SrpKdfParams::defaults_for(SrpKdf::Argon2id),
+<a href=#1267 id=1267 data-nosnippet>1267</a>                <span class="string">"ghost"</span>,
+<a href=#1268 id=1268 data-nosnippet>1268</a>                Uuid::new_v4(),
+<a href=#1269 id=1269 data-nosnippet>1269</a>                Uuid::new_v4(),
+<a href=#1270 id=1270 data-nosnippet>1270</a>                <span class="kw-2">&amp;</span>client.a_pub_hex,
+<a href=#1271 id=1271 data-nosnippet>1271</a>            )
+<a href=#1272 id=1272 data-nosnippet>1272</a>            .unwrap();
+<a href=#1273 id=1273 data-nosnippet>1273</a>
+<a href=#1274 id=1274 data-nosnippet>1274</a>        <span class="comment">// Even handed the correct M1 — which requires the fabricated verifier,
+<a href=#1275 id=1275 data-nosnippet>1275</a>        // i.e. the server key — there is no user to return.
+<a href=#1276 id=1276 data-nosnippet>1276</a>        </span><span class="kw">let </span>sealed = URL_SAFE_NO_PAD.decode(<span class="kw-2">&amp;</span>challenge.srp_session).unwrap();
+<a href=#1277 id=1277 data-nosnippet>1277</a>        <span class="kw">let </span>plaintext = aes256gcm_decrypt(
+<a href=#1278 id=1278 data-nosnippet>1278</a>            <span class="kw-2">&amp;</span>key(),
+<a href=#1279 id=1279 data-nosnippet>1279</a>            <span class="kw-2">&amp;</span>base64::engine::general_purpose::STANDARD.encode(<span class="kw-2">&amp;</span>sealed),
+<a href=#1280 id=1280 data-nosnippet>1280</a>        )
+<a href=#1281 id=1281 data-nosnippet>1281</a>        .unwrap();
+<a href=#1282 id=1282 data-nosnippet>1282</a>        <span class="kw">let </span>session: SealedSession = serde_json::from_slice(<span class="kw-2">&amp;</span>plaintext).unwrap();
+<a href=#1283 id=1283 data-nosnippet>1283</a>        <span class="macro">assert!</span>(session.user_id.is_none());
+<a href=#1284 id=1284 data-nosnippet>1284</a>
+<a href=#1285 id=1285 data-nosnippet>1285</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1286 id=1286 data-nosnippet>1286</a>            server.verify(<span class="kw-2">&amp;</span>challenge.srp_session, <span class="kw-2">&amp;</span>session.expected_client_proof),
+<a href=#1287 id=1287 data-nosnippet>1287</a>            <span class="prelude-val">Err</span>(SrpRejection::Unusable)
+<a href=#1288 id=1288 data-nosnippet>1288</a>        ));
+<a href=#1289 id=1289 data-nosnippet>1289</a>    }
+<a href=#1290 id=1290 data-nosnippet>1290</a>
+<a href=#1291 id=1291 data-nosnippet>1291</a>    <span class="comment">// --- identity binding ------------------------------------------------
+<a href=#1292 id=1292 data-nosnippet>1292</a>
+<a href=#1293 id=1293 data-nosnippet>1293</a>    </span><span class="attr">#[test]
+<a href=#1294 id=1294 data-nosnippet>1294</a>    </span><span class="kw">fn </span>a_verifier_is_bound_to_the_identity_it_was_enrolled_for() {
+<a href=#1295 id=1295 data-nosnippet>1295</a>        <span class="comment">// x is derived over `I ":" p` client-side, so a client that uses the
+<a href=#1296 id=1296 data-nosnippet>1296</a>        // wrong identity string derives a different M1 and is rejected. This
+<a href=#1297 id=1297 data-nosnippet>1297</a>        // is why the challenge response carries the canonical identity.
+<a href=#1298 id=1298 data-nosnippet>1298</a>        </span><span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1299 id=1299 data-nosnippet>1299</a>        <span class="kw">let </span>x = correct_x();
+<a href=#1300 id=1300 data-nosnippet>1300</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>x);
+<a href=#1301 id=1301 data-nosnippet>1301</a>        <span class="kw">let </span>client = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1302 id=1302 data-nosnippet>1302</a>        <span class="kw">let </span>challenge = server
+<a href=#1303 id=1303 data-nosnippet>1303</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>client.a_pub_hex)
+<a href=#1304 id=1304 data-nosnippet>1304</a>            .unwrap();
+<a href=#1305 id=1305 data-nosnippet>1305</a>
+<a href=#1306 id=1306 data-nosnippet>1306</a>        <span class="kw">let </span>(m1, <span class="kw">_</span>) = client
+<a href=#1307 id=1307 data-nosnippet>1307</a>            .finish(<span class="string">"bob"</span>, <span class="kw-2">&amp;</span>challenge.salt, <span class="kw-2">&amp;</span>challenge.b_pub, <span class="kw-2">&amp;</span>x)
+<a href=#1308 id=1308 data-nosnippet>1308</a>            .unwrap();
+<a href=#1309 id=1309 data-nosnippet>1309</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1310 id=1310 data-nosnippet>1310</a>            server.verify(<span class="kw-2">&amp;</span>challenge.srp_session, <span class="kw-2">&amp;</span>m1),
+<a href=#1311 id=1311 data-nosnippet>1311</a>            <span class="prelude-val">Err</span>(SrpRejection::BadProof { .. })
+<a href=#1312 id=1312 data-nosnippet>1312</a>        ));
+<a href=#1313 id=1313 data-nosnippet>1313</a>    }
+<a href=#1314 id=1314 data-nosnippet>1314</a>
+<a href=#1315 id=1315 data-nosnippet>1315</a>    <span class="attr">#[test]
+<a href=#1316 id=1316 data-nosnippet>1316</a>    </span><span class="kw">fn </span>two_exchanges_for_the_same_user_produce_different_sessions() {
+<a href=#1317 id=1317 data-nosnippet>1317</a>        <span class="kw">let </span>server = SrpServer::new(key());
+<a href=#1318 id=1318 data-nosnippet>1318</a>        <span class="kw">let </span>x = correct_x();
+<a href=#1319 id=1319 data-nosnippet>1319</a>        <span class="kw">let </span>cred = credential(SrpGroup::Rfc5054_2048, <span class="string">"alice"</span>, <span class="kw-2">&amp;</span>x);
+<a href=#1320 id=1320 data-nosnippet>1320</a>
+<a href=#1321 id=1321 data-nosnippet>1321</a>        <span class="kw">let </span>c1 = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1322 id=1322 data-nosnippet>1322</a>        <span class="kw">let </span>c2 = reference_client::begin(SrpGroup::Rfc5054_2048);
+<a href=#1323 id=1323 data-nosnippet>1323</a>        <span class="kw">let </span>ch1 = server
+<a href=#1324 id=1324 data-nosnippet>1324</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>c1.a_pub_hex)
+<a href=#1325 id=1325 data-nosnippet>1325</a>            .unwrap();
+<a href=#1326 id=1326 data-nosnippet>1326</a>        <span class="kw">let </span>ch2 = server
+<a href=#1327 id=1327 data-nosnippet>1327</a>            .challenge(<span class="kw-2">&amp;</span>cred, Uuid::new_v4(), <span class="kw-2">&amp;</span>c2.a_pub_hex)
+<a href=#1328 id=1328 data-nosnippet>1328</a>            .unwrap();
+<a href=#1329 id=1329 data-nosnippet>1329</a>
+<a href=#1330 id=1330 data-nosnippet>1330</a>        <span class="macro">assert_ne!</span>(ch1.b_pub, ch2.b_pub, <span class="string">"B must be fresh per exchange"</span>);
+<a href=#1331 id=1331 data-nosnippet>1331</a>        <span class="macro">assert_ne!</span>(ch1.srp_session, ch2.srp_session);
+<a href=#1332 id=1332 data-nosnippet>1332</a>
+<a href=#1333 id=1333 data-nosnippet>1333</a>        <span class="comment">// A proof from one exchange must not open the other.
+<a href=#1334 id=1334 data-nosnippet>1334</a>        </span><span class="kw">let </span>(m1_for_1, <span class="kw">_</span>) = c1.finish(<span class="string">"alice"</span>, <span class="kw-2">&amp;</span>ch1.salt, <span class="kw-2">&amp;</span>ch1.b_pub, <span class="kw-2">&amp;</span>x).unwrap();
+<a href=#1335 id=1335 data-nosnippet>1335</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1336 id=1336 data-nosnippet>1336</a>            server.verify(<span class="kw-2">&amp;</span>ch2.srp_session, <span class="kw-2">&amp;</span>m1_for_1),
+<a href=#1337 id=1337 data-nosnippet>1337</a>            <span class="prelude-val">Err</span>(SrpRejection::BadProof { .. })
+<a href=#1338 id=1338 data-nosnippet>1338</a>        ));
+<a href=#1339 id=1339 data-nosnippet>1339</a>    }
+<a href=#1340 id=1340 data-nosnippet>1340</a>
+<a href=#1341 id=1341 data-nosnippet>1341</a>    <span class="attr">#[test]
+<a href=#1342 id=1342 data-nosnippet>1342</a>    </span><span class="kw">fn </span>the_server_never_renders_its_session_key() {
+<a href=#1343 id=1343 data-nosnippet>1343</a>        <span class="comment">// The key is generated, and the strings that must NOT appear are derived
+<a href=#1344 id=1344 data-nosnippet>1344</a>        // from it — a stronger check than the previous fixed 0xAB byte, which
+<a href=#1345 id=1345 data-nosnippet>1345</a>        // only ever proved that one rendering of one value was absent.
+<a href=#1346 id=1346 data-nosnippet>1346</a>        </span><span class="kw">let </span>secret = random_bytes32();
+<a href=#1347 id=1347 data-nosnippet>1347</a>        <span class="kw">let </span>server = SrpServer::new(secret);
+<a href=#1348 id=1348 data-nosnippet>1348</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{server:?}"</span>);
+<a href=#1349 id=1349 data-nosnippet>1349</a>        <span class="macro">assert!</span>(
+<a href=#1350 id=1350 data-nosnippet>1350</a>            !rendered.contains(<span class="kw-2">&amp;</span>hex::encode(secret)),
+<a href=#1351 id=1351 data-nosnippet>1351</a>            <span class="string">"Debug leaked the key as hex: {rendered}"
+<a href=#1352 id=1352 data-nosnippet>1352</a>        </span>);
+<a href=#1353 id=1353 data-nosnippet>1353</a>        <span class="macro">assert!</span>(
+<a href=#1354 id=1354 data-nosnippet>1354</a>            !rendered.contains(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{:?}"</span>, secret.to_vec())),
+<a href=#1355 id=1355 data-nosnippet>1355</a>            <span class="string">"Debug leaked the key as a byte slice: {rendered}"
+<a href=#1356 id=1356 data-nosnippet>1356</a>        </span>);
+<a href=#1357 id=1357 data-nosnippet>1357</a>    }
+<a href=#1358 id=1358 data-nosnippet>1358</a>}
+</code></pre></div></section></main></body></html>

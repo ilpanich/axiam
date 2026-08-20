@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Secure Remote Password (SRP-6a) — server side."><title>axiam_auth::srp - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_auth" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module srp</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_auth/index.html">axiam_<wbr>auth</a><span class="version">1.0.0-alpha29</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module srp</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-exchange" title="The exchange">The exchange</a></li><li><a href="#why-the-server-state-is-sealed-into-a-token-rather-than-stored" title="Why the server state is sealed into a token rather than stored">Why the server state is sealed into a token rather than stored</a></li><li><a href="#constant-time-properties-stated-precisely" title="Constant-time properties, stated precisely">Constant-time properties, stated precisely</a></li><li><a href="#account-enumeration" title="Account enumeration">Account enumeration</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>auth</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_auth</a></div><h1>Module <span>srp</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_auth/srp.rs.html#1-1358">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Secure Remote Password (SRP-6a) — server side.</p>
+<p>The domain types, the enforcement modes, and the rationale for adopting SRP
+at all live in [<code>axiam_core::models::srp</code>]. This module is the arithmetic
+and the two-message exchange that sits behind <code>POST /api/v1/auth/srp/challenge</code>
+and <code>POST /api/v1/auth/srp/verify</code>.</p>
+<h2 id="the-exchange"><a class="doc-anchor" href="#the-exchange">§</a>The exchange</h2><div class="example-wrap"><pre class="language-text"><code>  client                                            server
+    |  I, A = g^a mod N                               |
+    | ----------------------------------------------&gt; |   challenge
+    |                                                  |   b &lt;- random
+    |                                                  |   B = (k*v + g^b) mod N
+    |  s, B, group, kdf, params, srp_session           |
+    | &lt;---------------------------------------------- |
+    |   x = KDF(I &quot;:&quot; p, s)                           |
+    |   S = (B - k*g^x)^(a + u*x) mod N               |
+    |   K = H(S);  M1 = H(H(N)^H(g) | H(I) | s | A | B | K)
+    |  srp_session, M1                                |
+    | ----------------------------------------------&gt; |   verify
+    |                                                  |   compare M1 in constant time
+    |  M2 = H(A | M1 | K), + the ordinary login result |
+    | &lt;---------------------------------------------- |</code></pre></div>
+<p>Both sides arrive at the same <code>S</code> — the client from <code>a</code> and <code>x</code>, the server
+from <code>b</code> and <code>v</code> — without either learning the other’s secret.</p>
+<h2 id="why-the-server-state-is-sealed-into-a-token-rather-than-stored"><a class="doc-anchor" href="#why-the-server-state-is-sealed-into-a-token-rather-than-stored">§</a>Why the server state is sealed into a token rather than stored</h2>
+<p>Between the two messages the server has to remember what it derived. The
+obvious approach is a <code>srp_session</code> table with a TTL; this module instead
+seals the derived state into an AES-256-GCM token the client carries back,
+exactly as <a href="../service/struct.AuthService.html" title="struct axiam_auth::service::AuthService"><code>crate::service::AuthService</code></a> already does for the MFA
+challenge. Three reasons:</p>
+<ol>
+<li><strong>It works across replicas with no coordination.</strong> A DB-backed session
+would add a write and a read to every login on the hot path, in a system
+whose whole point is horizontal scaling.</li>
+<li><strong>There is nothing to garbage-collect.</strong> Expiry is a field inside the
+sealed blob, checked on open; an abandoned exchange costs nothing.</li>
+<li><strong>A replayed token grants no new power.</strong> Opening it requires the server
+key, and <em>using</em> it still requires <code>M1</code>, which still requires the
+password. An attacker who can replay a captured <code>(srp_session, M1)</code> pair
+has, by construction, already broken TLS — at which point they have the
+session cookie the exchange would have produced anyway. The 120-second
+lifetime bounds even that.</li>
+</ol>
+<h2 id="constant-time-properties-stated-precisely"><a class="doc-anchor" href="#constant-time-properties-stated-precisely">§</a>Constant-time properties, stated precisely</h2>
+<p><code>num_bigint::BigUint::modpow</code> is <strong>not</strong> constant-time, so it is worth being
+exact about what that does and does not expose here.</p>
+<ul>
+<li>The verifier <code>v</code> — the only long-term secret — is used as a <em>base</em>
+(<code>v.modpow(&amp;u, n)</code>), never as an exponent. Exponent-dependent timing is
+the leak <code>modpow</code> has; base-dependent timing is not, so <code>v</code> is not
+exposed.</li>
+<li>The exponent <code>b</code> is freshly generated per request and discarded when the
+exchange completes. Recovering it would let an attacker finish one
+already-in-flight exchange for which they would still need <code>M1</code>.</li>
+<li>The password never reaches this module in any form.</li>
+</ul>
+<p>The <code>M1</code> comparison — the one place a timing signal would be directly
+exploitable — uses <a href="https://docs.rs/subtle/2.6.0/subtle/trait.ConstantTimeEq.html" title="trait subtle::ConstantTimeEq"><code>subtle::ConstantTimeEq</code></a>.</p>
+<h2 id="account-enumeration"><a class="doc-anchor" href="#account-enumeration">§</a>Account enumeration</h2>
+<p>An unknown identity must produce a response indistinguishable from a known
+one, or <code>/auth/srp/challenge</code> becomes a faster user-enumeration oracle than
+anything else in the API. <a href="struct.SrpServer.html#method.challenge" title="method axiam_auth::srp::SrpServer::challenge"><code>SrpServer::challenge</code></a> handles this by
+fabricating a <em>stable</em> salt — <code>HMAC(server_key, tenant_id || identity)</code>, so
+the same unknown user yields the same salt on every attempt, which a random
+salt would not — and a well-formed <code>B</code> derived from a dummy verifier. The
+full modular exponentiation is performed in that branch too, so the timing
+matches. The caller cannot tell the difference, and the subsequent
+<code>/auth/srp/verify</code> fails as an ordinary bad-password would.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="reference_client/index.html" title="mod axiam_auth::srp::reference_client">reference_<wbr>client</a></dt><dd>A minimal SRP-6a <strong>client</strong>, used by this crate’s tests and by the
+integration tests in <code>axiam-api-rest</code>.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ExchangeVector.html" title="struct axiam_auth::srp::ExchangeVector">Exchange<wbr>Vector</a></dt><dd>A fully-determined SRP-6a exchange, for cross-language conformance testing.</dd><dt><a class="struct" href="struct.SrpServer.html" title="struct axiam_auth::srp::SrpServer">SrpServer</a></dt><dd>SRP-6a server operations, parameterised by the key that seals session
+state.</dd><dt><a class="struct" href="struct.SrpVerified.html" title="struct axiam_auth::srp::SrpVerified">SrpVerified</a></dt><dd>Outcome of opening and checking a <code>srp_session</code> + <code>M1</code> pair.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SrpRejection.html" title="enum axiam_auth::srp::SrpRejection">SrpRejection</a></dt><dd>Why an SRP verification was refused.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.deterministic_exchange.html" title="fn axiam_auth::srp::deterministic_exchange">deterministic_<wbr>exchange</a></dt><dd>Compute a complete exchange from fixed inputs.</dd></dl></section></div></main></body></html>

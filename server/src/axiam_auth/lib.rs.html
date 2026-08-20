@@ -14,23 +14,25 @@
 <a href=#14 id=14 data-nosnippet>14</a><span class="kw">pub mod </span>password_reset;
 <a href=#15 id=15 data-nosnippet>15</a><span class="kw">pub mod </span>policy;
 <a href=#16 id=16 data-nosnippet>16</a><span class="kw">pub mod </span>service;
-<a href=#17 id=17 data-nosnippet>17</a><span class="kw">pub mod </span>token;
-<a href=#18 id=18 data-nosnippet>18</a><span class="kw">pub mod </span>totp;
-<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>verification;
-<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>webauthn;
-<a href=#21 id=21 data-nosnippet>21</a>
-<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub use </span>attestation::{AttestationCaCache, ComplianceStatus, evaluate_credential_compliance};
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub use </span>client_secret::{ClientSecretHasher, ClientSecretVerdict};
-<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub use </span>config::AuthConfig;
-<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub use </span>error::AuthError;
-<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>hibp_breaker::HibpBreaker;
-<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>mfa_methods::MfaMethodService;
-<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>password_reset::PasswordResetService;
-<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>service::{
-<a href=#30 id=30 data-nosnippet>30</a>    AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
-<a href=#31 id=31 data-nosnippet>31</a>    MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
-<a href=#32 id=32 data-nosnippet>32</a>};
-<a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub use </span>token::{AccessTokenClaims, ValidatedClaims};
-<a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub use </span>verification::EmailVerificationService;
-<a href=#35 id=35 data-nosnippet>35</a><span class="kw">pub use </span>webauthn::WebauthnService;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">pub mod </span>srp;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">pub mod </span>token;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>totp;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>verification;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>webauthn;
+<a href=#22 id=22 data-nosnippet>22</a>
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub use </span>attestation::{AttestationCaCache, ComplianceStatus, evaluate_credential_compliance};
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub use </span>client_secret::{ClientSecretHasher, ClientSecretVerdict};
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub use </span>config::AuthConfig;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>error::AuthError;
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>hibp_breaker::HibpBreaker;
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>mfa_methods::MfaMethodService;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>password_reset::PasswordResetService;
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>service::{
+<a href=#31 id=31 data-nosnippet>31</a>    AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
+<a href=#32 id=32 data-nosnippet>32</a>    MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
+<a href=#33 id=33 data-nosnippet>33</a>};
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub use </span>srp::{SrpRejection, SrpServer, SrpVerified};
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">pub use </span>token::{AccessTokenClaims, ValidatedClaims};
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">pub use </span>verification::EmailVerificationService;
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">pub use </span>webauthn::WebauthnService;
 </code></pre></div></section></main></body></html>

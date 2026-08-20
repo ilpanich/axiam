@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha29] - 2026-08-20
+
+### Added
+
+- SRP login, enrolment on password change and reset
+- CONTRACT.md §23, cross-language SRP vectors, OpenAPI, docs
+- SRP challenge/verify endpoints, enrolment and bootstrap support
+- SRP-6a core, domain model and org/tenant policy
+
+### Changed
+
+- Generate the frontend tests' password and refusal fixtures
+- Give the 4096-bit group check a timeout that fits its cost
+- Generate the enrolment salts in the REST tests
+- Generate the auth crate's test key, salt and x
+- Mint the login test's credentials per run
+- §23.3 rule 4 errata and the §23.8 table, at contract 1.25
+- Record the two SRP handler modules in the frontend coverage matrix
+- Add srp_challenge scenario and register it in the harness
+
 ## [1.0.0-alpha28] - 2026-08-19
 
 ### Changed

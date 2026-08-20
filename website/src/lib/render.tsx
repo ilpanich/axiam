@@ -12,9 +12,10 @@ const inlineCodeStyle = {
 
 /**
  * Render prose text, turning `backtick` spans into inline <code>,
- * `**double-asterisk**` spans into bold and `*single-asterisk*` spans into
- * italics. Code wins: asterisks inside a backtick span are left alone, so a
- * code sample never gets reinterpreted as markup.
+ * `**double-asterisk**` spans into bold, `*single-asterisk*` spans into
+ * italics and `[label](#/docs/slug)` into a link. Code wins: asterisks and
+ * brackets inside a backtick span are left alone, so a code sample never gets
+ * reinterpreted as markup.
  */
 export function renderInline(text: string): ReactNode {
   const parts = text.split("`");
@@ -24,9 +25,58 @@ export function renderInline(text: string): ReactNode {
         {part}
       </code>
     ) : (
-      <Fragment key={i}>{renderBold(part)}</Fragment>
+      <Fragment key={i}>{renderLinks(part)}</Fragment>
     ),
   );
+}
+
+const linkStyle = {
+  color: "#67e8f9",
+  textDecoration: "none",
+  borderBottom: "1px solid rgba(0,212,255,.35)",
+} as const;
+
+/**
+ * Turn `[label](href)` into an anchor.
+ *
+ * Cross-references between doc pages are written as ordinary hash links
+ * (`#/docs/opaque`) rather than as click handlers, because the docs section is
+ * hash-routed: a plain `<a href>` therefore navigates correctly, is
+ * middle-clickable, and can be copied out of the page — none of which is true
+ * of a `<span onClick>`. External links are opened in a new tab.
+ */
+function renderLinks(text: string): ReactNode {
+  if (!text.includes("](")) return renderBold(text);
+
+  const tokens: ReactNode[] = [];
+  const re = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      tokens.push(
+        <Fragment key={key++}>{renderBold(text.slice(last, match.index))}</Fragment>,
+      );
+    }
+    const [, label, href] = match;
+    const external = /^https?:/.test(href);
+    tokens.push(
+      <a
+        key={key++}
+        href={href}
+        style={linkStyle}
+        {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
+      >
+        {renderBold(label)}
+      </a>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) {
+    tokens.push(<Fragment key={key++}>{renderBold(text.slice(last))}</Fragment>);
+  }
+  return tokens;
 }
 
 function renderBold(text: string): ReactNode {

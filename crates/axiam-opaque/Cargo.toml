@@ -19,6 +19,7 @@ rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 description = "AXIAM's OPAQUE (RFC 9807) ciphersuite, key-stretching functions and client operations"
+readme = "README.md"
 
 [dependencies]
 # RFC 9807, independently audited. Pinned to a patch range rather than a caret

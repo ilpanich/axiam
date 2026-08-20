@@ -27,14 +27,20 @@ While the aim is to build a fully functional IAM system, the deeper goal is to e
 ## Key Features
 
 - **Multi-tenant architecture** — Organizations contain tenants; tenants provide full data isolation
-- **RBAC with resource hierarchy** — Roles, permissions, groups, and scoped access that cascades through resource trees
-- **Multiple auth protocols** — REST, gRPC, and AMQP for sync and async authorization
-- **OAuth2 & OpenID Connect** — Full authorization server with PKCE, client credentials, and refresh token rotation
-- **Federation** — SAML and OIDC for cross-domain SSO
-- **PKI & Certificate Management** — Hierarchical X.509 certificates, mTLS for IoT devices
-- **GnuPG Integration** — Audit log signing, encrypted data exports, identity attestation
-- **Webhooks** — Real-time event delivery with HMAC-SHA256 signatures
-- **Comprehensive audit trail** — Append-only, tamper-evident logging
+- **RBAC with deny-override** — Roles, permissions, groups and scoped access cascading through resource trees, with explicit `deny` grants that beat every allow at any depth
+- **Multiple auth protocols** — REST, gRPC and AMQP for sync and async authorization
+- **OAuth2 & OpenID Connect** — Authorization code + PKCE, client credentials, refresh rotation, device grant (RFC 8628), token exchange (RFC 8693), PAR (RFC 9126), introspection and revocation
+- **OPAQUE (RFC 9807)** — Optional augmented PAKE: the password never reaches the server, and a stolen credential database is not offline-crackable on its own
+- **Passkeys & WebAuthn** — Phishing-resistant sign-in, with an MDS3-backed per-tenant attestation policy
+- **Federation & provisioning** — SAML and OIDC for cross-domain SSO; SCIM 2.0 for IdP-driven user and group lifecycle
+- **Logout that means something** — OIDC RP-initiated *and* back-channel logout, scoped to a session rather than a user
+- **FAPI 2.0 profile** — An opt-in constraint bundle a client cannot half-apply, with mTLS client auth and certificate-bound access tokens
+- **UMA 2.0** — Permission tickets and the ticket grant, so a resource server can describe what a request needs without becoming the authority
+- **PKI & certificate management** — Hierarchical X.509, mTLS terminated in-process for IoT devices and services
+- **GnuPG integration** — Audit log signing, encrypted data exports, identity attestation
+- **Webhooks & Reactors** — HMAC-signed event delivery, plus external hook actors that can allow, deny or narrowly mutate an operation *without running third-party code inside the authorization server*
+- **Comprehensive audit trail** — Append-only, tamper-evident logging, with GDPR-compatible actor pseudonymisation
+- **Pluggable secret providers** — Environment, mounted files, or HashiCorp Vault
 
 ## Tech Stack
 
@@ -169,6 +175,24 @@ The project follows a structured roadmap of **64 tasks across 19 phases**:
 | Phase 17 | SDKs (Rust, TS, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++) | Done |
 | Phase 18 | Security audit, compliance, docs | Done |
 
+## Documentation
+
+The full documentation site — getting started, the bootstrap procedure, every
+authentication and authorization mechanism, the OAuth2/OIDC surface, the API
+references, and the operations and hardening guides — is published at
+**<https://ilpanich.github.io/axiam/>**.
+
+In-repository references, which the site links out to for the normative detail:
+
+| Topic | Where |
+|---|---|
+| REST / gRPC / AMQP contracts | [`docs/api/`](docs/api/README.md) |
+| Deployment, rate-limit sizing, Vault | [`docs/deployment/`](docs/deployment/README.md) |
+| Admin bootstrap and day-to-day operations | [`docs/admin/`](docs/admin/README.md) |
+| Certificate lifecycle | [`docs/pki/`](docs/pki/README.md) |
+| Compliance matrices (ASVS, OIDC, OAuth2, GDPR) | [`docs/compliance/`](docs/compliance/) |
+| Cross-language SDK contract | [`sdks/CONTRACT.md`](sdks/CONTRACT.md) |
+
 ## Quick Start
 
 ```bash
@@ -203,7 +227,11 @@ axiam/
 │   ├── axiam-federation/   # SAML + OIDC federation
 │   ├── axiam-audit/        # Audit logging service
 │   ├── axiam-pki/          # Certificate management & GnuPG
-│   ├── axiam-email/          # Certificate management & GnuPG
+│   ├── axiam-email/        # Transactional mail (verification, reset, alerts)
+│   ├── axiam-scim/         # SCIM 2.0 provisioning endpoint
+│   ├── axiam-opaque/       # OPAQUE (RFC 9807) — the single client implementation
+│   ├── axiam-opaque-ffi/   # C ABI over axiam-opaque, for eight SDKs
+│   ├── axiam-opaque-wasm/  # WebAssembly build, for the TS SDK and admin UI
 │   └── axiam-server/       # Binary — composes all crates
 ├── proto/                  # Protocol Buffer definitions
 ├── frontend/               # React admin UI

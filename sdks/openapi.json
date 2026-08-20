@@ -812,6 +812,134 @@
         }
       }
     },
+    "/api/v1/auth/opaque/login/finish": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/opaque/login/finish`",
+        "description": "Returns the same three outcomes as `POST /api/v1/auth/login` — `200` with\nsession cookies, `202` for an MFA challenge, `403` for MFA setup — so a\nclient can share one result handler across both login paths.\n\nNote what this response does *not* carry, where the SRP one did: a server\nproof. Under SRP the client had to verify `M2` itself or it would have\nauthenticated to a server that never knew the verifier. RFC 9807's AKE\nauthenticates the server as part of the handshake — a client that\nsuccessfully opens `KE2` has already proved the server holds the record —\nso there is nothing left for the client to check afterwards, and an SDK\ncannot forget to.",
+        "operationId": "opaque_login_finish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpaqueLoginFinishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful; tokens arrive as cookies"
+          },
+          "202": {
+            "description": "MFA challenge required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaRequiredResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials, expired session, or unknown identity"
+          },
+          "403": {
+            "description": "MFA setup required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaSetupRequiredResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/opaque/login/start": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/opaque/login/start`",
+        "operationId": "opaque_login_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpaqueLoginStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "KE2 (identical shape for unknown identities)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueLoginStartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed KE1 or missing workspace identity"
+          },
+          "404": {
+            "description": "OPAQUE is not enabled for this tenant"
+          },
+          "503": {
+            "description": "OPAQUE is enabled but the server has no keys configured"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/opaque/register/start": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/opaque/register/start`",
+        "operationId": "opaque_register_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpaqueRegisterStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OPRF evaluation and the KSF parameters to stretch with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueRegisterStartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed registration request or missing workspace identity"
+          },
+          "404": {
+            "description": "OPAQUE is not enabled for this tenant"
+          },
+          "503": {
+            "description": "OPAQUE is enabled but the server has no keys configured"
+          }
+        }
+      }
+    },
     "/api/v1/auth/refresh": {
       "post": {
         "tags": [
@@ -930,7 +1058,7 @@
           "auth"
         ],
         "summary": "`GET /api/v1/auth/reset/context`",
-        "description": "Password reset would otherwise be a permanent hole in SRP coverage. The\nreset page is unauthenticated: it holds a token and a tenant id and knows\nneither the account's username — which the verifier is bound to — nor the\ntenant's group and KDF. Without those it cannot compute a verifier, so every\n\"forgot password\" would leave the account with a verifier for a password it\nno longer has, and under `srp_mode: required` would leave it unable to log\nin at all.\n\n# Why disclosing the username here is not a leak\n\nThe caller has presented an unconsumed, unexpired reset token, which was\ndelivered to the account's own registered email address. They are the\naccount holder, and the username is not a secret from the account holder.\nAn attacker without a valid token gets `404` and learns nothing — the same\nanswer for a wrong token, an expired token, and a token for a tenant that\ndoes not exist.\n\nThe token is **read, not consumed**: this is a lookup, and burning the\nsingle-use token here would break the reset it is meant to enable.",
+        "description": "Password reset would otherwise be a permanent hole in OPAQUE coverage. The\nreset page is unauthenticated and holds only a token and a tenant id, so it\ncannot tell whether the tenant expects an enrolment. Without that, every\n\"forgot password\" would leave the account with a record for a password it\nno longer has, and under `opaque_mode: required` would leave it unable to\nlog in at all.\n\n# What this no longer discloses\n\nThe SRP version returned the account's username, because that string was\ninside the client-side key derivation and the reset page had no other way\nto learn it. That was defensible — the caller holds a token delivered to\nthe account's own email — but it is better not to need the argument.\nOPAQUE does not bind to the username, so it is not returned.\n\nAn attacker without a valid token still gets `404` and learns nothing — the\nsame answer for a wrong token, an expired token, and a token for a tenant that\ndoes not exist.\n\nThe token is **read, not consumed**: this is a lookup, and burning the\nsingle-use token here would break the reset it is meant to enable.",
         "operationId": "reset_context",
         "parameters": [
           {
@@ -955,7 +1083,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Identity and SRP policy for this reset",
+            "description": "OPAQUE policy for this reset",
             "content": {
               "application/json": {
                 "schema": {
@@ -966,101 +1094,6 @@
           },
           "404": {
             "description": "Unknown, expired or already-consumed token"
-          }
-        }
-      }
-    },
-    "/api/v1/auth/srp/challenge": {
-      "post": {
-        "tags": [
-          "auth"
-        ],
-        "summary": "`POST /api/v1/auth/srp/challenge`",
-        "operationId": "srp_challenge",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SrpChallengeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "SRP challenge (identical shape for unknown identities)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SrpChallenge"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed client public value or missing workspace identity"
-          },
-          "404": {
-            "description": "SRP is not enabled for this tenant"
-          },
-          "503": {
-            "description": "SRP is enabled but the server has no session key configured"
-          }
-        }
-      }
-    },
-    "/api/v1/auth/srp/verify": {
-      "post": {
-        "tags": [
-          "auth"
-        ],
-        "summary": "`POST /api/v1/auth/srp/verify`",
-        "description": "Returns the same three outcomes as `POST /api/v1/auth/login` — `200` with\nsession cookies, `202` for an MFA challenge, `403` for MFA setup — so a\nclient can share one result handler across both login paths.",
-        "operationId": "srp_verify",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SrpVerifyRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Login successful; body carries the server proof M2",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SrpVerifyResponse"
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "MFA challenge required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MfaRequiredResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Invalid proof, expired session, or unknown identity"
-          },
-          "403": {
-            "description": "MFA setup required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MfaSetupRequiredResponse"
-                }
-              }
-            }
           }
         }
       }
@@ -9470,14 +9503,14 @@
           "new_password": {
             "type": "string"
           },
-          "srp": {
+          "opaque": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/SrpEnrollment",
-                "description": "SRP verifier for `new_password`, computed client-side.\n\nWithout this, reset would be the hole in SRP coverage: a tenant could\nrun `srp_mode = required`, and every \"forgot password\" would still put a\nplaintext password on the wire and leave the account with a verifier for\na password it no longer has."
+                "$ref": "#/components/schemas/OpaqueEnrollment",
+                "description": "OPAQUE registration record for `new_password`, built client-side.\n\nWithout this, reset would be the hole in OPAQUE coverage: a tenant could\nrun `opaque_mode = required`, and every \"forgot password\" would still put a\nplaintext password on the wire and leave the account with a verifier for\na password it no longer has."
               }
             ]
           },
@@ -10331,19 +10364,19 @@
             "type": "string"
           },
           "metadata": {},
-          "password": {
-            "type": "string"
-          },
-          "srp": {
+          "opaque": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/SrpEnrollment",
-                "description": "SRP verifier for `password`, computed client-side over `username`.\n\nThe server cannot derive this — it never sees the password in a form it\ncould run the KDF over — so it has to arrive with the request or not at\nall. Required under `srp_mode = required`, where a user created without\none could never authenticate."
+                "$ref": "#/components/schemas/OpaqueEnrollment",
+                "description": "OPAQUE registration record for `password`, built client-side.\n\nThe server cannot derive this — the envelope is sealed under a key only\nthe client can compute — so it has to arrive with the request or not at\nall. Required under `opaque_mode = required`, where a user created\nwithout one could never authenticate.\n\nObtained by calling `POST /api/v1/auth/opaque/register/start` first and\ncarrying its `opaque_session` through, which is the one structural\ndifference from the SRP verifier this replaces: a verifier could be\ncomputed offline from a self-chosen salt, whereas a record needs the\nserver's OPRF evaluation."
               }
             ]
+          },
+          "password": {
+            "type": "string"
           },
           "username": {
             "type": "string"
@@ -11222,13 +11255,6 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
-          },
-          "server_proof": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Server proof `M2`, present only on the SRP path\n(`POST /api/v1/auth/srp/verify`).\n\nIt lives on this shared type — rather than in a separate SRP-only\nresponse — so both login paths return one body shape and a client needs\none result handler. A client that completed an SRP exchange MUST verify\nthis; without it, it has proved itself to the server but has not proved\nthe server to itself, which is half the protocol."
           },
           "session_id": {
             "type": "string",
@@ -12240,6 +12266,327 @@
           }
         }
       },
+      "OpaqueEnrollment": {
+        "type": "object",
+        "description": "The client-supplied half of an OPAQUE enrolment, as it appears inside\nregistration / change-password / reset-completion / bootstrap request\nbodies.\n\nThere is no standalone `register/finish` endpoint, deliberately. A record\ncan only be created at a moment when the plaintext password legitimately\nexists on the client, and every one of those moments is already an endpoint\nthat takes a password. A free-standing finish would be an endpoint whose\nonly job is to attach a credential to an account, which is a thing worth\nnot having.\n\nKept separate from [`CreateOpaqueCredential`] because the tenant, the user\nand the credential identifier are all decided by the server — a client that\ncould name them could enrol a record against somebody else's account.",
+        "required": [
+          "opaque_session",
+          "registration_record"
+        ],
+        "properties": {
+          "opaque_session": {
+            "type": "string",
+            "description": "The `opaque_session` from the register/start response, echoed verbatim."
+          },
+          "registration_record": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `RegistrationRecord`."
+          }
+        }
+      },
+      "OpaqueLoginFinishRequest": {
+        "type": "object",
+        "description": "Client request to `POST /api/v1/auth/opaque/login/finish`.",
+        "required": [
+          "opaque_session",
+          "ke3"
+        ],
+        "properties": {
+          "ke3": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `KE3`."
+          },
+          "opaque_session": {
+            "type": "string",
+            "description": "The `opaque_session` from the login/start response, echoed verbatim."
+          }
+        }
+      },
+      "OpaqueLoginStartRequest": {
+        "type": "object",
+        "description": "Client request to `POST /api/v1/auth/opaque/login/start`.",
+        "required": [
+          "username_or_email",
+          "ke1"
+        ],
+        "properties": {
+          "ke1": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `KE1`."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Organization UUID. Either this or `org_slug` is required."
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization slug. Either this or `org_id` is required."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Tenant UUID. Either this or `tenant_slug` is required."
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant slug. Either this or `tenant_id` is required."
+          },
+          "username_or_email": {
+            "type": "string",
+            "description": "Username or email, as typed by the human."
+          }
+        }
+      },
+      "OpaqueLoginStartResponse": {
+        "type": "object",
+        "description": "Server response to `POST /api/v1/auth/opaque/login/start`.\n\nEvery field is safe to return for an identity that does not exist — the\nserver derives a stable decoy credential identifier and produces a\nwell-formed `KE2` from it, so this response cannot be used to enumerate\naccounts.\n\nNote what is *not* here: the credential identifier itself. It keys the\nserver's OPRF and never enters the client's computation, so returning it\nwould be a gratuitous disclosure. This is a real difference from SRP, whose\nchallenge had to carry the canonical `identity` because that string was\ninside the client's key derivation.",
+        "required": [
+          "opaque_session",
+          "ke2",
+          "suite",
+          "ksf"
+        ],
+        "properties": {
+          "iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id time cost; absent for scrypt.",
+            "minimum": 0
+          },
+          "ke2": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `KE2`."
+          },
+          "ksf": {
+            "type": "string",
+            "description": "KSF to stretch with.",
+            "example": "argon2id"
+          },
+          "log_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt log2(N); absent for Argon2id.",
+            "minimum": 0
+          },
+          "memory_kib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id memory cost in KiB; absent for scrypt.",
+            "minimum": 0
+          },
+          "opaque_session": {
+            "type": "string",
+            "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/opaque/login/finish`; the client cannot read or forge it."
+          },
+          "p": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt parallelism; absent for Argon2id.",
+            "minimum": 0
+          },
+          "parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id parallelism; absent for scrypt.",
+            "minimum": 0
+          },
+          "r": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt block size; absent for Argon2id.",
+            "minimum": 0
+          },
+          "suite": {
+            "type": "string",
+            "description": "Ciphersuite in use.",
+            "example": "ristretto255_sha512"
+          }
+        }
+      },
+      "OpaquePolicy": {
+        "type": "object",
+        "description": "Secure Remote Password policy.\n\n`suite` and `ksf` are the parameters a *new* registration record is enrolled\nwith. They deliberately do not apply retroactively: an existing record is\nonly valid under the suite and KSF it was created with, so tightening these\ntakes effect as users next set a password rather than invalidating\neverybody at once.",
+        "required": [
+          "opaque_mode",
+          "opaque_suite",
+          "opaque_ksf"
+        ],
+        "properties": {
+          "opaque_ksf": {
+            "type": "string",
+            "description": "Key-stretching function new records are enrolled under. Both variants\nare memory-hard; see [`opaque_ksf_is_at_least`] for the tighten-only\nordering.",
+            "example": "argon2id"
+          },
+          "opaque_mode": {
+            "type": "string",
+            "description": "Whether OPAQUE is offered, and whether password login is still accepted.",
+            "example": "disabled"
+          },
+          "opaque_suite": {
+            "type": "string",
+            "description": "RFC 9807 ciphersuite new records are enrolled under.",
+            "example": "ristretto255_sha512"
+          }
+        }
+      },
+      "OpaqueRegisterStartRequest": {
+        "type": "object",
+        "description": "Client request to `POST /api/v1/auth/opaque/register/start`.\n\nUnauthenticated, because it is needed while creating a user who does not\nexist yet. That is safe: the server mints the credential identifier itself,\nrandomly, so an attacker calling this repeatedly obtains OPRF evaluations\nunder identifiers they did not choose and cannot predict. Had the\nidentifier been caller-supplied, this would instead be an oracle for\ngrinding a chosen user's OPRF offline.",
+        "required": [
+          "registration_request"
+        ],
+        "properties": {
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Organization UUID. Either this or `org_slug` is required."
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization slug. Either this or `org_id` is required."
+          },
+          "registration_request": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `RegistrationRequest` (a blinded\ngroup element)."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Tenant UUID. Either this or `tenant_slug` is required."
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant slug. Either this or `tenant_id` is required."
+          }
+        }
+      },
+      "OpaqueRegisterStartResponse": {
+        "type": "object",
+        "description": "Server response to `POST /api/v1/auth/opaque/register/start`.",
+        "required": [
+          "opaque_session",
+          "registration_response",
+          "suite",
+          "ksf"
+        ],
+        "properties": {
+          "iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id time cost; absent for scrypt.",
+            "minimum": 0
+          },
+          "ksf": {
+            "type": "string",
+            "description": "KSF the client must stretch with.",
+            "example": "argon2id"
+          },
+          "log_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt log2(N); absent for Argon2id.",
+            "minimum": 0
+          },
+          "memory_kib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id memory cost in KiB; absent for scrypt.",
+            "minimum": 0
+          },
+          "opaque_session": {
+            "type": "string",
+            "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/opaque/register/finish`; the client cannot read or forge it."
+          },
+          "p": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt parallelism; absent for Argon2id.",
+            "minimum": 0
+          },
+          "parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Argon2id parallelism; absent for scrypt.",
+            "minimum": 0
+          },
+          "r": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "scrypt block size; absent for Argon2id.",
+            "minimum": 0
+          },
+          "registration_response": {
+            "type": "string",
+            "description": "Lowercase-hex serialized RFC 9807 `RegistrationResponse` (the evaluated\nelement and the server's public key)."
+          },
+          "suite": {
+            "type": "string",
+            "description": "Ciphersuite the client must use.",
+            "example": "ristretto255_sha512"
+          }
+        }
+      },
       "Organization": {
         "type": "object",
         "description": "An organization groups multiple tenants under a single administrative entity.\n\nOrganizations represent companies, departments, or business units.\nCA certificates are registered at the organization level, enabling\na hierarchical trust model across all tenants.",
@@ -12963,23 +13310,16 @@
       },
       "ResetContextResponse": {
         "type": "object",
-        "description": "What a valid reset-token holder needs in order to compute an SRP verifier.",
-        "required": [
-          "identity"
-        ],
+        "description": "What a valid reset-token holder needs in order to build an OPAQUE record.\n\nThe SRP version of this also returned the account's `identity`, because\nSRP derived its private key over `username \":\" password` and the reset page\nhad no other way to learn the username. OPAQUE binds to a server-chosen\ncredential identifier that the client never handles, so the username is not\nneeded and is no longer disclosed. The endpoint went from \"tell an\nunauthenticated caller who this account is\" to \"tell them whether this\ntenant uses OPAQUE\", which is strictly less.",
         "properties": {
-          "identity": {
-            "type": "string",
-            "description": "The canonical identity the verifier must be bound to — the account's\nusername, which the reset page has no other way to learn."
-          },
-          "srp": {
+          "opaque": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/SrpPolicy",
-                "description": "The tenant's effective SRP policy, so the client knows which group and\nKDF to use. Absent when the tenant does not use SRP."
+                "$ref": "#/components/schemas/OpaquePolicy",
+                "description": "The tenant's effective OPAQUE policy, so the client knows whether to\nrun an enrolment at all. Absent when the tenant does not use OPAQUE."
               }
             ]
           }
@@ -13357,7 +13697,7 @@
           "email",
           "certificate",
           "notification",
-          "srp",
+          "opaque",
           "created_at",
           "updated_at"
         ],
@@ -13385,6 +13725,9 @@
           "notification": {
             "$ref": "#/components/schemas/NotificationPolicy"
           },
+          "opaque": {
+            "$ref": "#/components/schemas/OpaquePolicy"
+          },
           "password": {
             "$ref": "#/components/schemas/PasswordPolicy"
           },
@@ -13394,9 +13737,6 @@
           "scope_id": {
             "type": "string",
             "format": "uuid"
-          },
-          "srp": {
-            "$ref": "#/components/schemas/SrpPolicy"
           },
           "token": {
             "$ref": "#/components/schemas/TokenPolicy"
@@ -13671,6 +14011,18 @@
             "format": "int32",
             "minimum": 0
           },
+          "opaque_ksf": {
+            "type": "string",
+            "example": "argon2id"
+          },
+          "opaque_mode": {
+            "type": "string",
+            "example": "disabled"
+          },
+          "opaque_suite": {
+            "type": "string",
+            "example": "ristretto255_sha512"
+          },
           "password_history_count": {
             "type": "integer",
             "format": "int32",
@@ -13692,18 +14044,6 @@
           },
           "require_uppercase": {
             "type": "boolean"
-          },
-          "srp_group": {
-            "type": "string",
-            "example": "rfc5054_4096"
-          },
-          "srp_kdf": {
-            "type": "string",
-            "example": "argon2id"
-          },
-          "srp_mode": {
-            "type": "string",
-            "example": "disabled"
           }
         }
       },
@@ -13796,231 +14136,6 @@
           },
           "username": {
             "type": "string"
-          }
-        }
-      },
-      "SrpChallenge": {
-        "type": "object",
-        "description": "Server response to `POST /api/v1/auth/srp/challenge`.\n\nEvery field is safe to return for an identity that does not exist — the\nserver fabricates a stable, deterministic salt and a well-formed `B` in\nthat case, so this response cannot be used to enumerate accounts.",
-        "required": [
-          "srp_session",
-          "identity",
-          "salt",
-          "group",
-          "kdf",
-          "iterations",
-          "b_pub"
-        ],
-        "properties": {
-          "b_pub": {
-            "type": "string",
-            "description": "Server public ephemeral `B`, lowercase hex padded to the group width."
-          },
-          "group": {
-            "type": "string",
-            "description": "Group to compute in.",
-            "example": "rfc5054_4096"
-          },
-          "identity": {
-            "type": "string",
-            "description": "The canonical identity string to feed into the KDF. The client MUST use\nthis rather than whatever the human typed, because a user may\nauthenticate by username *or* email while only one of them is bound\ninto `x`."
-          },
-          "iterations": {
-            "type": "integer",
-            "format": "int32",
-            "description": "KDF iteration/time cost.",
-            "minimum": 0
-          },
-          "kdf": {
-            "type": "string",
-            "description": "KDF to derive `x` with.",
-            "example": "argon2id"
-          },
-          "memory_kib": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Argon2id memory cost in KiB; absent for PBKDF2.",
-            "minimum": 0
-          },
-          "parallelism": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Argon2id parallelism; absent for PBKDF2.",
-            "minimum": 0
-          },
-          "salt": {
-            "type": "string",
-            "description": "Lowercase-hex salt `s`."
-          },
-          "srp_session": {
-            "type": "string",
-            "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/srp/verify`; the client cannot read or forge it."
-          }
-        }
-      },
-      "SrpChallengeRequest": {
-        "type": "object",
-        "description": "Request body for `POST /api/v1/auth/srp/challenge`.",
-        "required": [
-          "username_or_email",
-          "client_public"
-        ],
-        "properties": {
-          "client_public": {
-            "type": "string",
-            "description": "Client public ephemeral `A = g^a mod N`, lowercase hex."
-          },
-          "org_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Organization UUID. Either this or `org_slug` is required."
-          },
-          "org_slug": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Organization slug alternative to `org_id`."
-          },
-          "tenant_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Tenant UUID. Either this or `tenant_slug` is required."
-          },
-          "tenant_slug": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Tenant slug alternative to `tenant_id`."
-          },
-          "username_or_email": {
-            "type": "string",
-            "description": "Username or email the human typed. The response's `identity` field, not\nthis, is what goes into the KDF."
-          }
-        }
-      },
-      "SrpEnrollment": {
-        "type": "object",
-        "description": "The client-supplied half of an SRP enrolment, as it appears inside\nregistration / change-password / reset-completion request bodies.\n\nKept separate from [`CreateSrpCredential`] because the tenant, user and\ncanonical identity are all decided by the server from the authenticated\ncontext — a client that could name them could enrol a verifier against\nsomebody else's account.",
-        "required": [
-          "group",
-          "kdf",
-          "iterations",
-          "salt",
-          "verifier"
-        ],
-        "properties": {
-          "group": {
-            "type": "string",
-            "description": "Group the client used. Must be permitted by effective settings.",
-            "example": "rfc5054_4096"
-          },
-          "iterations": {
-            "type": "integer",
-            "format": "int32",
-            "description": "KDF iteration/time cost.",
-            "minimum": 0
-          },
-          "kdf": {
-            "type": "string",
-            "description": "KDF the client used.",
-            "example": "argon2id"
-          },
-          "memory_kib": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Argon2id memory cost in KiB. Required for `argon2id`, ignored otherwise.",
-            "minimum": 0
-          },
-          "parallelism": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Argon2id parallelism. Required for `argon2id`, ignored otherwise.",
-            "minimum": 0
-          },
-          "salt": {
-            "type": "string",
-            "description": "Lowercase-hex 32-byte salt the client generated."
-          },
-          "verifier": {
-            "type": "string",
-            "description": "Lowercase-hex verifier `v = g^x mod N`."
-          }
-        }
-      },
-      "SrpPolicy": {
-        "type": "object",
-        "description": "Secure Remote Password policy.\n\n`group` and `kdf` are the parameters a *new* verifier is enrolled with.\nThey deliberately do not apply retroactively: an existing verifier is only\nvalid under the group and KDF it was generated with, so tightening these\ntakes effect as users next set a password rather than invalidating\neverybody at once.",
-        "required": [
-          "srp_mode",
-          "srp_group",
-          "srp_kdf"
-        ],
-        "properties": {
-          "srp_group": {
-            "type": "string",
-            "description": "RFC 5054 group new verifiers are enrolled under.",
-            "example": "rfc5054_4096"
-          },
-          "srp_kdf": {
-            "type": "string",
-            "description": "KDF new verifiers derive `x` with. A client that cannot perform this\nKDF may enrol with `pbkdf2_sha256` instead — see\n[`srp_kdf_is_at_least`].",
-            "example": "argon2id"
-          },
-          "srp_mode": {
-            "type": "string",
-            "description": "Whether SRP is offered, and whether password login is still accepted.",
-            "example": "disabled"
-          }
-        }
-      },
-      "SrpVerifyRequest": {
-        "type": "object",
-        "description": "Client request to `POST /api/v1/auth/srp/verify`.",
-        "required": [
-          "srp_session",
-          "client_proof"
-        ],
-        "properties": {
-          "client_proof": {
-            "type": "string",
-            "description": "Client proof `M1`, lowercase hex."
-          },
-          "srp_session": {
-            "type": "string",
-            "description": "The `srp_session` from the challenge response, echoed verbatim."
-          }
-        }
-      },
-      "SrpVerifyResponse": {
-        "type": "object",
-        "description": "`POST /api/v1/auth/srp/verify` success body.\n\nShape-compatible with `LoginSuccessResponse` plus `server_proof`; tokens\nstill arrive as `Set-Cookie`, exactly as on the password path.",
-        "required": [
-          "server_proof"
-        ],
-        "properties": {
-          "server_proof": {
-            "type": "string",
-            "description": "Server proof `M2`, lowercase hex.\n\nA client MUST check this before treating the session as good. Skipping\nit throws away half of what SRP provides — without it the client has\nauthenticated itself to the server but has not authenticated the\nserver, so a rogue endpoint that never knew the verifier is\nindistinguishable from the real one."
           }
         }
       },
@@ -14249,6 +14364,24 @@
             "format": "int32",
             "minimum": 0
           },
+          "opaque_ksf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "opaque_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "opaque_suite": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "password_history_count": {
             "type": [
               "integer",
@@ -14286,24 +14419,6 @@
           "require_uppercase": {
             "type": [
               "boolean",
-              "null"
-            ]
-          },
-          "srp_group": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "srp_kdf": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "srp_mode": {
-            "type": [
-              "string",
               "null"
             ]
           }

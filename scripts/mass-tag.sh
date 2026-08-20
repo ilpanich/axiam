@@ -47,7 +47,11 @@
 #                      is a symlink to it); the frontend Sidebar version string
 #                      and its test; the two k8s deployment image tags.
 #   axiam-rust-sdk     Cargo.toml package version and the `=`-pinned
-#                      axiam-sdk-macros dependency; axiam-sdk-macros/Cargo.toml.
+#                      axiam-sdk-macros dependency; axiam-sdk-macros/Cargo.toml;
+#                      axiam-sdk-wasm/Cargo.toml (excluded from the workspace,
+#                      so no workspace-wide tool reaches it, but its version is
+#                      the version of the npm package and the release workflow
+#                      refuses to publish when it disagrees with the tag).
 #   axiam-python-sdk   pyproject.toml [project].version and the package
 #                      __version__, both in PEP 440 spelling (1.4.0-rc1 -> 1.4.0rc1).
 #   axiam-typescript-sdk  package.json and package-lock.json versions.
@@ -402,6 +406,11 @@ bump_versions() {
       # (the `=` prefix is preserved because only the literal changes).
       sub_literal Cargo.toml                    "$old" "$version"
       sub_literal axiam-sdk-macros/Cargo.toml   "$old" "$version"
+      # Not a workspace member (it only builds for wasm32), so nothing that
+      # walks the workspace will bump it. Its version IS the npm package
+      # version, and release-wasm-npm.yml aborts before publishing if it does
+      # not match the tag.
+      sub_literal axiam-sdk-wasm/Cargo.toml     "$old" "$version"
       ;;
     axiam-typescript-sdk)
       sub_literal package.json       "$old" "$version"

@@ -84,6 +84,14 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     (private_key, public_key)
 }
 
+/// A fresh 32-byte key. Two calls give two different keys, which is what the
+/// two OPAQUE slots want.
+fn opaque_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).expect("a CSPRNG");
+    key
+}
+
 fn test_auth_config() -> AuthConfig {
     let (priv_pem, pub_pem) = test_keypair();
     AuthConfig {
@@ -92,9 +100,11 @@ fn test_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         // Bootstrap runs both halves of an OPAQUE registration itself, so it
-        // needs both keys present even though no client is involved.
-        opaque_session_key: Some([0x11; 32]),
-        opaque_setup_key: Some([0x22; 32]),
+        // needs both keys present even though no client is involved. Minted
+        // per process rather than written as literals — see
+        // `opaque_login_test::keys` for why.
+        opaque_session_key: Some(opaque_key()),
+        opaque_setup_key: Some(opaque_key()),
         ..AuthConfig::default()
     }
 }

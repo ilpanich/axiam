@@ -13,6 +13,23 @@ fn c(s: &str) -> CString {
     CString::new(s).unwrap()
 }
 
+/// A password minted per process rather than written as a literal.
+///
+/// CodeQL's `rust/hardcoded-cryptographic-value` flags a literal that reaches a
+/// KDF, and that rule is right about shipping code: keeping it sharp is worth
+/// more than a fixed string here. Nothing in this file depends on the value —
+/// every assertion is about what the ABI does with it.
+fn password(tag: &str) -> CString {
+    use std::sync::OnceLock;
+    static SUFFIX: OnceLock<String> = OnceLock::new();
+    let suffix = SUFFIX.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("a CSPRNG");
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    });
+    c(&format!("{tag}-{suffix}"))
+}
+
 /// Take ownership of a string the library returned, freeing it correctly.
 ///
 /// # Safety
@@ -35,7 +52,7 @@ fn last_error() -> Option<String> {
 
 #[test]
 fn a_full_exchange_round_trips_through_the_abi() {
-    let password = c("correct horse battery staple");
+    let password = password("correct");
     let ksf = axiam_opaque_ksf_argon2id(8192, 1, 1);
     assert!(!ksf.is_null());
 
@@ -95,8 +112,8 @@ fn a_full_exchange_round_trips_through_the_abi() {
 
 #[test]
 fn a_wrong_password_returns_null_and_sets_an_error() {
-    let right = c("right");
-    let wrong = c("wrong");
+    let right = password("right");
+    let wrong = password("wrong");
     let ksf = axiam_opaque_ksf_argon2id(8192, 1, 1);
 
     let mut request: *mut c_char = std::ptr::null_mut();
@@ -144,7 +161,7 @@ fn a_wrong_password_returns_null_and_sets_an_error() {
 fn out_parameters_may_be_null_when_the_caller_does_not_want_them() {
     // Not a convenience: a binding that had to allocate for every optional
     // output would leak the ones its language has no use for.
-    let password = c("pw");
+    let password = password("pw");
     let ksf = axiam_opaque_ksf_argon2id(8192, 1, 1);
 
     let mut request: *mut c_char = std::ptr::null_mut();
@@ -195,7 +212,7 @@ fn null_inputs_are_refused_rather_than_dereferenced() {
     assert!(unsafe { axiam_opaque_registration_start(std::ptr::null(), &mut out) }.is_null());
     assert!(unsafe { axiam_opaque_login_start(std::ptr::null(), &mut out) }.is_null());
 
-    let password = c("pw");
+    let password = password("pw");
     assert!(
         unsafe { axiam_opaque_registration_start(password.as_ptr(), std::ptr::null_mut()) }
             .is_null(),
@@ -229,7 +246,7 @@ fn freeing_null_is_a_no_op_so_a_caller_can_free_unconditionally() {
 
 #[test]
 fn an_unfinished_exchange_can_be_freed() {
-    let password = c("pw");
+    let password = password("pw");
     let mut out: *mut c_char = std::ptr::null_mut();
 
     let state = unsafe { axiam_opaque_registration_start(password.as_ptr(), &mut out) };
@@ -244,7 +261,7 @@ fn an_unfinished_exchange_can_be_freed() {
 
 #[test]
 fn malformed_hex_from_the_server_is_refused() {
-    let password = c("pw");
+    let password = password("pw");
     let junk = c("not hex at all");
     let ksf = axiam_opaque_ksf_argon2id(8192, 1, 1);
 

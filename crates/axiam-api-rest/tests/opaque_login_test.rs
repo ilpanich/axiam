@@ -43,10 +43,24 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_PEER: &str = "127.0.0.1:12345";
 const USERNAME: &str = "alice";
 
-/// Keys for the two things OPAQUE seals. Fixed in tests, and distinct from each
-/// other so a test would fail if the engine ever confused them.
-const SESSION_KEY: [u8; 32] = [0x11; 32];
-const SETUP_KEY: [u8; 32] = [0x22; 32];
+/// Keys for the two things OPAQUE seals, minted per process rather than written
+/// as literals.
+///
+/// CodeQL's `rust/hardcoded-cryptographic-value` flags a literal that reaches a
+/// cipher, and that rule is right about shipping code. Nothing here depends on
+/// the values, only on the two being *distinct* — which is what would catch the
+/// engine ever confusing them.
+fn keys() -> (&'static [u8; 32], &'static [u8; 32]) {
+    static KEYS: OnceLock<([u8; 32], [u8; 32])> = OnceLock::new();
+    let (session, setup) = KEYS.get_or_init(|| {
+        let mut session = [0u8; 32];
+        let mut setup = [0u8; 32];
+        getrandom::fill(&mut session).expect("a CSPRNG");
+        getrandom::fill(&mut setup).expect("a CSPRNG");
+        (session, setup)
+    });
+    (session, setup)
+}
 
 /// The account's password, minted per test run rather than written as a literal.
 ///
@@ -86,8 +100,8 @@ fn test_auth_config() -> AuthConfig {
         .into(),
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
-        opaque_session_key: Some(SESSION_KEY),
-        opaque_setup_key: Some(SETUP_KEY),
+        opaque_session_key: Some(*keys().0),
+        opaque_setup_key: Some(*keys().1),
         ..AuthConfig::default()
     }
 }
@@ -804,7 +818,7 @@ async fn half_configured_keys_are_treated_as_no_keys_at_all() {
     let (db, org_id, tenant_id, _user_id) = setup_db("halfkeys").await;
     set_opaque_mode(&db, org_id, OpaqueMode::Optional).await;
     let auth = AuthConfig {
-        opaque_session_key: Some(SESSION_KEY),
+        opaque_session_key: Some(*keys().0),
         opaque_setup_key: None,
         ..test_auth_config()
     };

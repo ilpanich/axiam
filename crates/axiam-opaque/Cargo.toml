@@ -26,4 +26,5 @@ rand08 = { version = "0.8", package = "rand", features = ["getrandom"] }
 workspace = true
 
 [dev-dependencies]
+getrandom = "0.4.3"
 serde_json.workspace = true

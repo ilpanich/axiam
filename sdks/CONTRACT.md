@@ -4685,7 +4685,12 @@ What an SDK MUST test is the layer it actually owns:
 3. **An unknown `ksf` is refused** with `NetworkError` naming it, and no
    stretching is attempted.
 4. **Out-of-range costs are refused** at each bound in `ksf_bounds`.
-5. **A non-ASCII password round-trips**, pinning UTF-8 (`passwords.unicode`).
+5. **A non-ASCII password round-trips**, pinning UTF-8. The SDK chooses its
+   own: the fixture carries no shared password, because the SRP file only
+   needed one to pin `x` across implementations and there is one
+   implementation now. The obligation is unchanged — a binding that hands the
+   core its platform's default encoding must fail in a test rather than for
+   one unlucky user.
 6. **`opaque_required` maps to a distinguishable error**, not to
    `AuthenticationError`.
 7. **`404` from `login/start` is not reported as "no such user".**

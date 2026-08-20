@@ -900,6 +900,7 @@ dependencies = [
  "chrono",
  "futures",
  "futures-lite",
+ "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 11.0.0",
@@ -1126,6 +1127,7 @@ name = "axiam-opaque"
 version = "1.0.0-alpha31"
 dependencies = [
  "argon2",
+ "getrandom 0.4.3",
  "hex",
  "opaque-ke",
  "rand 0.8.7",
@@ -1140,6 +1142,7 @@ name = "axiam-opaque-ffi"
 version = "1.0.0-alpha31"
 dependencies = [
  "axiam-opaque",
+ "getrandom 0.4.3",
 ]
 
 [[package]]

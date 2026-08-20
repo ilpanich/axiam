@@ -102,12 +102,10 @@
     "registration_response": 64,
     "session_key": 64
   },
-  "passwords": {
-    "_comment": "The unicode entry pins UTF-8 encoding of the password. An SDK that hands its platform's default encoding to the core fails here rather than for one unlucky user.",
-    "ascii": "correct horse battery staple",
-    "unicode": "hünter²-Ωmega-🔑",
-    "unicode_utf8_hex": "68c3bc6e746572c2b22dcea96d6567612df09f9491"
-  },
   "rfc": 9807,
-  "suite": "ristretto255_sha512"
+  "suite": "ristretto255_sha512",
+  "utf8": {
+    "_comment": "There is no shared password fixture, deliberately. The SRP file carried one because its vectors pinned `x`, which two implementations had to agree on; with one implementation there is nothing to agree about. What remains is the obligation: every SDK MUST drive a non-ASCII password through its binding, choosing its own, so that a binding handing the core its platform's default encoding fails in a test rather than for one unlucky user.",
+    "required": true
+  }
 }

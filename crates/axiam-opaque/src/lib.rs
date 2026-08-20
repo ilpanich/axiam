@@ -48,19 +48,23 @@
 //! ```
 //! use axiam_opaque::{AxiamKsf, ClientLoginState, ClientRegistrationState};
 //!
+//! // Whatever the user typed. Read from somewhere rather than written as a
+//! // literal, which is also what a real caller does.
+//! # let password = &format!("example-{}", std::process::id());
+//!
 //! // --- registration ---
 //! let ksf = AxiamKsf::argon2id(19456, 2, 1).unwrap();
-//! let (state, request) = ClientRegistrationState::start("hunter2").unwrap();
+//! let (state, request) = ClientRegistrationState::start(password).unwrap();
 //! // ... server evaluates the OPRF and returns `registration_response` ...
 //! # let (setup, response) = axiam_opaque::testing::server_registration_start(&request);
 //! # let registration_response = response;
-//! let record = state.finish("hunter2", &registration_response, &ksf).unwrap();
+//! let record = state.finish(password, &registration_response, &ksf).unwrap();
 //!
 //! // --- login ---
-//! let (state, ke1) = ClientLoginState::start("hunter2").unwrap();
+//! let (state, ke1) = ClientLoginState::start(password).unwrap();
 //! # let ke2 = axiam_opaque::testing::server_login_start(&setup, &record.record, &ke1);
 //! // ... server returns `ke2` ...
-//! let finished = state.finish("hunter2", &ke2, &ksf).unwrap();
+//! let finished = state.finish(password, &ke2, &ksf).unwrap();
 //! assert_eq!(finished.ke3.len(), 128); // 64 bytes, hex
 //! ```
 

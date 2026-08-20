@@ -90,3 +90,4 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # literals). Already a workspace dependency (axiam-pki, axiam-server).
 rcgen = { workspace = true }
 axiam-opaque = { path = "../axiam-opaque" }
+getrandom = "0.4.3"

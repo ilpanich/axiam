@@ -23,6 +23,47 @@ dev-up: dev-broker-certs
 dev-broker-certs:
     bash scripts/gen-broker-tls.sh
 
+# Start a development-mode Vault and seed AXIAM's secrets into it.
+#
+# OPTIONAL locally: `just dev-up` does not start Vault, and the default secret
+# provider is `env`, so a developer who never runs this sees no change. Run it
+# to exercise the path production uses.
+#
+# Dev-mode Vault is in-memory, unsealed, plain HTTP and has a fixed root token.
+# All four are wrong for production and right for a laptop — see
+# docs/deployment/vault.md for what a real deployment does instead.
+vault-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f docker/docker-compose.dev.yml --profile vault up -d vault
+    echo "→ Waiting for Vault to become ready"
+    for _ in $(seq 1 30); do
+        if curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    VAULT_ADDR=http://127.0.0.1:8200 \
+    VAULT_TOKEN="${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}" \
+        bash scripts/vault-seed.sh
+    echo ""
+    echo "Vault UI/API: http://localhost:8200 (token: ${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root})"
+    echo ""
+    echo "To make the server use it, export before \`just run\`:"
+    echo "  export AXIAM__AUTH__SECRET_PROVIDER=vault"
+    echo "  export AXIAM__AUTH__VAULT_ADDR=http://127.0.0.1:8200"
+    echo "  export AXIAM__AUTH__VAULT_TOKEN=${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}"
+
+# Stop the development Vault (its data is in-memory and goes with it).
+vault-down:
+    docker compose -f docker/docker-compose.dev.yml --profile vault down vault
+
+# Print which secrets the dev Vault holds, without printing their values.
+vault-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    curl -fsS --header "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}" \
+        http://127.0.0.1:8200/v1/secret/data/axiam \
+        | python3 scripts/vault-status.py
+
 # Stop development dependencies
 dev-down:
     docker compose -f docker/docker-compose.dev.yml down
@@ -164,6 +205,53 @@ prod-up:
     fi
     export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(cat "$PRIV")"
     export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(cat "$PUB")"
+
+    # Vault is mandatory in this stack, so it comes up first and gets
+    # initialised, unsealed and seeded before the server is allowed to start.
+    bash scripts/gen-vault-tls.sh
+    docker compose -f docker/docker-compose.prod.yml up -d vault
+    VAULT_STATE="$SECRETS_DIR/vault-init.json"
+    export VAULT_ADDR="https://127.0.0.1:8200"
+    export VAULT_CACERT="$PWD/$SECRETS_DIR/vault-tls/ca.pem"
+
+    echo "→ Waiting for Vault to respond"
+    for _ in $(seq 1 60); do
+        # 501 (uninitialised) and 503 (sealed) both mean "listening", which is
+        # what we are waiting for here.
+        if curl -sS --cacert "$VAULT_CACERT" -o /dev/null "$VAULT_ADDR/v1/sys/health" 2>/dev/null; then break; fi
+        sleep 1
+    done
+
+    if [[ ! -f "$VAULT_STATE" ]]; then
+        echo "→ Initialising Vault (first run)"
+        # One unseal key for a local stack. A real deployment uses Shamir with
+        # a threshold across several holders, or auto-unseal — see
+        # docs/deployment/vault.md.
+        curl -sS --cacert "$VAULT_CACERT" --request POST \
+            --data '{"secret_shares":1,"secret_threshold":1}' \
+            "$VAULT_ADDR/v1/sys/init" > "$VAULT_STATE"
+        chmod 600 "$VAULT_STATE"
+        echo "  ⚠ Unseal key and root token written to $VAULT_STATE."
+        echo "    That file is the whole of your Vault. Back it up, and do NOT"
+        echo "    do this in production — see docs/deployment/vault.md."
+    fi
+
+    UNSEAL_KEY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["keys"][0])' "$VAULT_STATE")"
+    export VAULT_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root_token"])' "$VAULT_STATE")"
+
+    if curl -sS --cacert "$VAULT_CACERT" "$VAULT_ADDR/v1/sys/seal-status" \
+        | grep -q '"sealed":true'; then
+        echo "→ Unsealing Vault"
+        curl -sS --cacert "$VAULT_CACERT" --request POST \
+            --data "{\"key\":\"$UNSEAL_KEY\"}" \
+            "$VAULT_ADDR/v1/sys/unseal" > /dev/null
+    fi
+
+    JWT_PRIVATE_KEY_PEM="$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" \
+    JWT_PUBLIC_KEY_PEM="$AXIAM__AUTH__JWT_PUBLIC_KEY_PEM" \
+        bash scripts/vault-seed.sh
+
+    export AXIAM__AUTH__VAULT_TOKEN="$VAULT_TOKEN"
     docker compose -f docker/docker-compose.prod.yml up --build -d
     echo "AXIAM Frontend: http://localhost:8081 (front it with Caddy for HTTPS)"
     echo "AXIAM REST API: http://localhost:8090"

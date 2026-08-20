@@ -25,3 +25,23 @@ data:
   AXIAM__GRPC__HOST: "0.0.0.0"
   # SEC-052: Narrow RUST_LOG — no internal module exposure in production
   RUST_LOG: "info"
+  # ---------------------------------------------------------------------
+  # Secret provider (see docs/deployment/vault.md)
+  # ---------------------------------------------------------------------
+  #
+  # `vault` is the default here, and mandatory for production. The point is
+  # that everything below is safe to read: an operator can `kubectl get
+  # configmap axiam-config -o yaml` and learn where secrets live without
+  # learning any of them.
+  #
+  # The three other providers, for reference:
+  #   env  — AXIAM__AUTH__<NAME> variables. Fine for development, and what a
+  #          plain `docker compose up` uses. Puts the OPAQUE setup key in the
+  #          pod spec, where `kubectl describe pod` shows it.
+  #   file — one file per key under AXIAM__AUTH__SECRET_DIR. Use this with a
+  #          CSI secrets driver (Vault Agent Injector, External Secrets,
+  #          AWS/GCP CSI) that materialises secrets as files.
+  AXIAM__AUTH__SECRET_PROVIDER: "vault"
+  AXIAM__AUTH__VAULT_ADDR: "https://vault.axiam.svc.cluster.local:8200"
+  AXIAM__AUTH__VAULT_MOUNT: "secret"
+  AXIAM__AUTH__VAULT_PATH: "axiam"

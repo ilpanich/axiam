@@ -63,6 +63,46 @@ services:
   # datastores (SurrealDB + RabbitMQ) and the server runs from source via
   # `just run`. This image is published to a private registry; pulling it is
   # opt-in for those with access: `docker compose --profile full-stack up -d`.
+  # ---------------------------------------------------------------------------
+  # HashiCorp Vault (development mode) — OPTIONAL locally
+  # ---------------------------------------------------------------------------
+  #
+  # Gated behind the "vault" profile, so `just dev-up` does not start it and a
+  # developer keeps the environment-variable workflow by default. Bring it up
+  # with `just vault-up`, which also seeds AXIAM's keys.
+  #
+  # `-dev` mode is NOT production: it stores everything in memory, starts
+  # unsealed, listens on plain HTTP and uses a fixed root token. Every one of
+  # those is wrong for a real deployment, which is why the production compose
+  # file and the k8s manifests do none of them, and why
+  # docs/deployment/vault.md exists.
+  #
+  # It is right for local development for the same reasons: no unseal ceremony
+  # between `docker compose down` and `up`, and no TLS certificate to mint
+  # before anything works.
+  vault:
+    profiles: ["vault", "full-stack"]
+    image: hashicorp/vault:1.20
+    container_name: axiam-vault
+    cap_add:
+      # Vault locks its memory so secrets cannot be swapped to disk. Without
+      # this it still runs, but logs a warning on every start.
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      # 200 = unsealed and active. A dev-mode Vault should reach this within a
+      # second or two; anything else means it did not start cleanly.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   axiam-server:
     profiles: ["full-stack"]
     image: ghcr.io/axiamhq/axiam/server:latest
@@ -92,6 +132,14 @@ services:
       # D-18: cookies work over HTTP in local dev (http://localhost).
       # Default in code is true (prod-safe). NEVER set false in production.
       AXIAM__AUTH__COOKIE_SECURE: "false"
+      # Secrets come from Vault when it is running, and from this file's
+      # environment otherwise. `env` is the default in code, so a developer who
+      # never starts Vault sees no change.
+      AXIAM__AUTH__SECRET_PROVIDER: "${AXIAM__AUTH__SECRET_PROVIDER:-env}"
+      AXIAM__AUTH__VAULT_ADDR: "http://vault:8200"
+      AXIAM__AUTH__VAULT_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}"
+      AXIAM__AUTH__VAULT_MOUNT: "secret"
+      AXIAM__AUTH__VAULT_PATH: "axiam"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro

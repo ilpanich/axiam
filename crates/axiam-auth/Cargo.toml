@@ -52,6 +52,8 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 getrandom = "0.4.3"
+wiremock = "0.6.5"
+serde_json.workspace = true
 
 [[bench]]
 name = "auth_bench"

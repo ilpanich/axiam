@@ -986,6 +986,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "webauthn-rs",
+ "wiremock",
  "zeroize",
 ]
 

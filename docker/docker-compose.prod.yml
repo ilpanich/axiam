@@ -7,6 +7,52 @@
 
 services:
   # ---------------------------------------------------------------------------
+  # HashiCorp Vault — MANDATORY in this stack
+  # ---------------------------------------------------------------------------
+  #
+  # Not gated behind a profile, unlike the dev stack: in a production-shaped
+  # deployment the secret provider is Vault, and `axiam-server` below depends on
+  # it being healthy.
+  #
+  # This runs Vault with the `file` storage backend and a real (self-signed)
+  # TLS listener, which is close enough to production to exercise the parts that
+  # differ from dev mode — sealing, unsealing, persistent storage, TLS. It is
+  # still NOT a production Vault, and the difference that matters is auto-unseal:
+  # a real deployment uses a cloud KMS or transit seal so a restart does not
+  # need a human with unseal keys. See docs/deployment/vault.md.
+  #
+  # `just prod-up` runs the init/unseal ceremony and seeds AXIAM's keys.
+  vault:
+    image: hashicorp/vault:1.20
+    container_name: axiam-vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_ADDR: "https://127.0.0.1:8200"
+      VAULT_API_ADDR: "https://vault:8200"
+      VAULT_CACERT: "/vault/tls/ca.pem"
+    volumes:
+      - vault-data:/vault/file
+      # Config is bind-mounted from the repository rather than living in a
+      # named volume: it is not a secret, it should be reviewable in git, and
+      # editing it should not require exec'ing into a container.
+      - ./vault:/vault/config:ro
+      - ./.secrets/vault-tls:/vault/tls:ro
+    command: ["vault", "server", "-config=/vault/config/vault.hcl"]
+    healthcheck:
+      # 501 = not initialised, 503 = sealed, 200 = ready. Only 200 is healthy;
+      # a sealed Vault cannot answer a secret read, so starting the server
+      # against one would fail at boot with a less obvious message.
+      test: ["CMD", "sh", "-c", "wget --no-check-certificate --spider -q https://127.0.0.1:8200/v1/sys/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - axiam-network
+
+  # ---------------------------------------------------------------------------
   # AXIAM Backend (REST + gRPC)
   # ---------------------------------------------------------------------------
   axiam-server:
@@ -53,6 +99,19 @@ services:
       # JWT signing keys — provided by `just prod-up` from docker/.secrets/jwt_ed25519*.pem.
       # Compose refuses to start if these vars are not set in the shell environment,
       # so `docker compose up` run outside `just prod-up` fails fast with a clear message.
+      # Secrets come from Vault, not from this file. That is the point: a
+      # production deployment should be inspectable — `docker inspect`, a
+      # Compose file in git, a CI variable — without any of those revealing the
+      # token signing key or the OPAQUE setup key.
+      #
+      # The JWT keys below stay as a fallback for a stack brought up before the
+      # Vault seeding step has run; once `just prod-up` has seeded, the values
+      # in Vault win (see crates/axiam-server/src/main.rs).
+      AXIAM__AUTH__SECRET_PROVIDER: "vault"
+      AXIAM__AUTH__VAULT_ADDR: "https://vault:8200"
+      AXIAM__AUTH__VAULT_TOKEN: "${AXIAM__AUTH__VAULT_TOKEN:?Vault token missing - run 'just prod-up' instead of raw docker compose}"
+      AXIAM__AUTH__VAULT_MOUNT: "secret"
+      AXIAM__AUTH__VAULT_PATH: "axiam"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just prod-up' instead of raw docker compose}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just prod-up' instead of raw docker compose}"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
@@ -63,6 +122,11 @@ services:
       surrealdb:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      # An unhealthy Vault here means sealed or not yet initialised. Starting
+      # the server against one would fail at boot — by design, since secrets
+      # fail closed — but with a less obvious message than "vault is unhealthy".
+      vault:
         condition: service_healthy
     healthcheck:
       # D-09: distroless has no shell; use the axiam-server healthcheck subcommand
@@ -159,6 +223,11 @@ services:
 volumes:
   surrealdb-data:
   rabbitmq-data:
+  # Vault's `file` backend. Losing this volume loses every secret AXIAM stores
+  # there — including the OPAQUE setup key, which means a password reset for
+  # every user in every tenant. Back it up, or use a storage backend that is
+  # backed up for you.
+  vault-data:
 
 networks:
   axiam-network:

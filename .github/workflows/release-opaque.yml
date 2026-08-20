@@ -158,19 +158,7 @@ jobs:
           - { os: macos-latest,   target: aarch64-apple-darwin,      lib: libaxiam_opaque_ffi.dylib }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    lib: axiam_opaque_ffi.dll }
     steps:
-      # Sparse: the repository contains `.github/instructions/*.instructions.md`
-      # — a literal asterisk in the filename — which Windows refuses to check
-      # out, failing the job before any Rust runs. This job needs the crates and
-      # the workspace manifests and nothing else, so narrowing the checkout both
-      # fixes Windows and makes every platform faster. Renaming that file is the
-      # repository owner's call, not this workflow's.
       - uses: actions/checkout@v5
-        with:
-          sparse-checkout: |
-            crates
-            Cargo.toml
-            Cargo.lock
-          sparse-checkout-cone-mode: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

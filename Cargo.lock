@@ -1136,6 +1136,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiam-opaque-ffi"
+version = "1.0.0-alpha31"
+dependencies = [
+ "axiam-opaque",
+]
+
+[[package]]
 name = "axiam-pki"
 version = "1.0.0-alpha31"
 dependencies = [

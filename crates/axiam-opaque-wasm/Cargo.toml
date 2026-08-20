@@ -1,0 +1,35 @@
+# WebAssembly build of AXIAM's OPAQUE (RFC 9807) client.
+#
+# Deliberately NOT a member of the workspace's `members` list: it only ever
+# builds for wasm32, and including it would make a plain `cargo test` at the
+# repository root try to compile `wasm-bindgen` for the host. `wasm-pack` is
+# pointed at this directory instead. This follows the precedent set by
+# `axiam-sdk-wasm` in the Rust SDK repository.
+# Standalone: `wasm-pack` drives this directory directly.
+[workspace]
+
+[package]
+name = "axiam-opaque-wasm"
+version = "1.0.0-alpha31"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+description = "WebAssembly build of AXIAM's OPAQUE (RFC 9807) client"
+publish = false          # published to npm by wasm-pack, never to crates.io
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+axiam-opaque = { path = "../axiam-opaque" }
+wasm-bindgen = "0.2"
+# Panics in wasm are otherwise a bare "unreachable executed" with no location.
+console_error_panic_hook = "0.1"
+# `getrandom` needs the browser's crypto.getRandomValues on wasm32. Without
+# this feature the OPRF blind falls back to nothing and every call fails at
+# runtime rather than at build time, which is the worst place to find out.
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "z"
+lto = true

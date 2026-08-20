@@ -2,6 +2,7 @@
 members = [
     "crates/axiam-core",
     "crates/axiam-opaque",
+    "crates/axiam-opaque-ffi",
     "crates/axiam-db",
     "crates/axiam-auth",
     "crates/axiam-authz",
@@ -187,6 +188,7 @@ proptest = "1"
 
 # Internal crates
 axiam-core = { path = "crates/axiam-core" }
+axiam-opaque = { path = "crates/axiam-opaque" }
 axiam-db = { path = "crates/axiam-db" }
 axiam-auth = { path = "crates/axiam-auth" }
 axiam-authz = { path = "crates/axiam-authz" }

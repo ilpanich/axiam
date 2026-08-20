@@ -98,6 +98,11 @@ LAYERS: dict[str, int] = {
     "axiam-opaque": 0,
     # 1 -- domain services: policy and cryptography expressed over layer 0's
     #      types, with no knowledge of storage or transport.
+    # The C ABI wrapper around axiam-opaque. Layer 1 because it depends on a
+    # layer-0 crate, though it is not a domain service: it is a leaf packaging
+    # artifact that nothing in the workspace depends on, existing only so the
+    # eight SDKs without a native binding have one library to link.
+    "axiam-opaque-ffi": 1,
     "axiam-auth": 1,
     "axiam-authz": 1,
     "axiam-pki": 1,

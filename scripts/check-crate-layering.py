@@ -98,11 +98,18 @@ LAYERS: dict[str, int] = {
     "axiam-opaque": 0,
     # 1 -- domain services: policy and cryptography expressed over layer 0's
     #      types, with no knowledge of storage or transport.
-    # The C ABI wrapper around axiam-opaque. Layer 1 because it depends on a
-    # layer-0 crate, though it is not a domain service: it is a leaf packaging
-    # artifact that nothing in the workspace depends on, existing only so the
-    # eight SDKs without a native binding have one library to link.
+    # The two packaging wrappers around axiam-opaque. Layer 1 because they
+    # depend on a layer-0 crate, though neither is a domain service: they are
+    # leaf artifacts that nothing in the workspace depends on, existing only so
+    # the SDKs without a native binding have something to link or import.
+    #
+    # `axiam-opaque-wasm` is not a Cargo workspace *member* — it only builds for
+    # wasm32 and wasm-pack drives it directly — but it is a crate in this
+    # directory and its dependency direction is checked here like any other.
+    # Exempting it because of how it is built would be exempting it for a reason
+    # that has nothing to do with what this gate measures.
     "axiam-opaque-ffi": 1,
+    "axiam-opaque-wasm": 1,
     "axiam-auth": 1,
     "axiam-authz": 1,
     "axiam-pki": 1,

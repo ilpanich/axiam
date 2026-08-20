@@ -677,7 +677,12 @@ fn bootstrap_srp_fields(username: &str, password: &str) -> (String, Value) {
     use axiam_core::models::srp::SrpGroup;
     use sha2::{Digest, Sha256};
 
-    let salt = hex::encode([0x3Cu8; 32]);
+    // Fresh per call: §23.3 rule 11 wants a new salt per enrolment, and nothing
+    // here depends on the value — the verifier is recomputed from it below.
+    let mut salt_bytes = [0u8; 32];
+    salt_bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    salt_bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    let salt = hex::encode(salt_bytes);
     let mut hasher = Sha256::new();
     hasher.update(hex::decode(&salt).unwrap());
     hasher.update(username.as_bytes());

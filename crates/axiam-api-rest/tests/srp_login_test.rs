@@ -67,6 +67,14 @@ fn new_password() -> &'static str {
     VALUE.get_or_init(|| format!("Bx{}2", Uuid::new_v4().simple()))
 }
 
+/// Thirty-two fresh bytes, as §23.3 rule 11 requires of every enrolment salt.
+fn fresh_salt() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    out[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    out
+}
+
 /// A password that is emphatically not the account's, for the paths that must
 /// refuse. Distinct from both of the above by construction.
 fn wrong_password() -> &'static str {
@@ -250,8 +258,11 @@ async fn enroll_via_password_change(
     current: &str,
     new_password: &str,
 ) -> u16 {
-    // The salt is the client's to choose; the server only checks its width.
-    let salt = hex::encode([0x2Bu8; 32]);
+    // The salt is the client's to choose; the server only checks its width. A
+    // fresh one per enrolment is what §23.3 rule 11 asks for anyway, so
+    // generating it is both more faithful than a fixed fixture and keeps
+    // CodeQL's hard-coded-cryptographic-value rule pointed at shipping code.
+    let salt = hex::encode(fresh_salt());
     let x = derive_x(USERNAME, new_password, &salt);
     let verifier = reference_client::verifier_hex(SrpGroup::Rfc5054_2048, &x);
 

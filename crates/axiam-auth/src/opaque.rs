@@ -119,8 +119,8 @@ use uuid::Uuid;
 
 use opaque_ke::rand::rngs::OsRng;
 use opaque_ke::{
-    CipherSuite, CredentialFinalization, CredentialRequest, RegistrationRequest,
-    RegistrationUpload, ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
+    CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
+    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 
 use axiam_core::models::opaque::{
@@ -150,35 +150,22 @@ const KIND_LOGIN: &str = "login";
 // Ciphersuite
 // ---------------------------------------------------------------------------
 
-/// AXIAM's OPAQUE ciphersuite: `OPAQUE-3DH` over ristretto255 with SHA-512,
-/// HKDF-SHA-512 and HMAC-SHA-512 — the RFC 9807 recommended configuration.
+/// AXIAM's OPAQUE ciphersuite, re-exported under the name this module uses
+/// throughout.
 ///
-/// One suite ships today. [`OpaqueSuite`] keeps the policy field and its
-/// ranking live so that adding the RFC's P-256/SHA-256 profile later is
-/// additive; when that happens this module gains a second `CipherSuite` impl
-/// and the public functions become generic over it, which is why they already
-/// take an [`OpaqueSuite`] argument they currently only assert on.
-pub struct Ristretto255Sha512;
-
-impl CipherSuite for Ristretto255Sha512 {
-    type OprfCs = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, opaque_sha2::Sha512>;
-    // The KSF is a *client-side* function: RFC 9807 stretches the OPRF output
-    // before it seals the envelope, and the server never sees either. None of
-    // the server entry points (`ServerRegistration::start`,
-    // `ServerLogin::start`, `ServerLogin::finish`) take one. `Identity` here is
-    // therefore not a weakening — it is the accurate statement that this half
-    // of the protocol does no stretching. The real Argon2id and scrypt live in
-    // the shared client core, which is the only place they can run.
-    type Ksf = opaque_ke::ksf::Identity;
-}
-
-/// `opaque-ke` 4.0.1 is built on the `digest 0.10` generation of RustCrypto
-/// while the AXIAM workspace has moved to `digest 0.11`. Both are in the
-/// dependency tree; this alias makes it unambiguous at every use site which
-/// `Sha512` is meant, so a workspace bump cannot silently retype the
-/// ciphersuite out from under the wire format.
-use sha2_v10 as opaque_sha2;
+/// Defined in [`axiam_opaque`] rather than here, deliberately. That crate is
+/// compiled into the eleven client SDKs and the admin UI as well as into this
+/// server, and a suite defined twice is a suite that can drift — silently, and
+/// across a language boundary where nothing would catch it until a login
+/// stopped working in one SDK and not the others.
+///
+/// The KSF associated type is the real Argon2id/scrypt implementation for the
+/// same reason, even though **this half of the protocol never evaluates it**:
+/// RFC 9807 stretches client-side, and none of the server entry points
+/// (`ServerRegistration::start`, `ServerLogin::start`, `ServerLogin::finish`)
+/// take a KSF. Naming the real one here costs nothing and keeps the two halves
+/// provably the same type.
+type Ristretto255Sha512 = axiam_opaque::AxiamOpaqueSuite;
 
 // ---------------------------------------------------------------------------
 // Sealed session state
@@ -406,7 +393,7 @@ impl OpaqueServer {
 
         let request_bytes = decode_hex(registration_request_hex, "registration_request")?;
         let request = RegistrationRequest::<Ristretto255Sha512>::deserialize(&request_bytes)
-            .map_err(|_| AuthError::Crypto("malformed OPAQUE registration request".into()))?;
+            .map_err(|_| AuthError::OpaqueMalformed("registration_request".into()))?;
 
         let mut rng = OsRng;
         let mut credential_identifier = [0u8; 32];
@@ -460,18 +447,18 @@ impl OpaqueServer {
     ) -> Result<OpaqueEnrolled, AuthError> {
         let sealed: SealedRegistration = self
             .open_session(opaque_session, KIND_REGISTER)
-            .ok_or_else(|| AuthError::Crypto("OPAQUE registration session is unusable".into()))?;
+            .ok_or_else(|| AuthError::OpaqueMalformed("opaque_session".into()))?;
 
         let record = normalize_hex(
             registration_record_hex,
             "registration_record",
             Some(sealed.suite.record_len()),
         )
-        .map_err(|e| AuthError::Crypto(e.to_string()))?;
+        .map_err(|e| AuthError::OpaqueMalformed(e.to_string()))?;
 
         let record_bytes = decode_hex(&record, "registration_record")?;
         RegistrationUpload::<Ristretto255Sha512>::deserialize(&record_bytes)
-            .map_err(|_| AuthError::Crypto("malformed OPAQUE registration record".into()))?;
+            .map_err(|_| AuthError::OpaqueMalformed("registration_record".into()))?;
 
         Ok(OpaqueEnrolled {
             tenant_id: sealed.tenant_id,
@@ -492,11 +479,11 @@ impl OpaqueServer {
         org_id: Uuid,
         ke1_hex: &str,
     ) -> Result<OpaqueLoginStartResponse, AuthError> {
-        let record_bytes = decode_hex(&credential.record, "stored OPAQUE record")?;
+        let record_bytes = decode_stored_hex(&credential.record, "OPAQUE record")?;
         let record = ServerRegistration::<Ristretto255Sha512>::deserialize(&record_bytes)
             .map_err(|_| AuthError::Crypto("stored OPAQUE record is malformed".into()))?;
         let credential_identifier =
-            decode_hex(&credential.credential_identifier, "credential_identifier")?;
+            decode_stored_hex(&credential.credential_identifier, "credential_identifier")?;
 
         self.build_login(
             server_setup,
@@ -617,7 +604,7 @@ impl OpaqueServer {
 
         let ke1_bytes = decode_hex(ke1_hex, "ke1")?;
         let ke1 = CredentialRequest::<Ristretto255Sha512>::deserialize(&ke1_bytes)
-            .map_err(|_| AuthError::Crypto("malformed OPAQUE KE1".into()))?;
+            .map_err(|_| AuthError::OpaqueMalformed("ke1".into()))?;
 
         let mut rng = OsRng;
         let started = ServerLogin::<Ristretto255Sha512>::start(
@@ -628,7 +615,7 @@ impl OpaqueServer {
             credential_identifier,
             ServerLoginParameters::default(),
         )
-        .map_err(|_| AuthError::Crypto("OPAQUE login start failed".into()))?;
+        .map_err(|_| AuthError::OpaqueMalformed("ke1".into()))?;
 
         let sealed = SealedLogin {
             v: SEALED_VERSION,
@@ -782,8 +769,15 @@ fn require_supported_suite(suite: OpaqueSuite) -> Result<(), AuthError> {
     }
 }
 
+/// Decode hex that came from a **client**. A failure is the caller's mistake.
 fn decode_hex(value: &str, label: &str) -> Result<Vec<u8>, AuthError> {
-    hex::decode(value).map_err(|_| AuthError::Crypto(format!("{label} is not valid hex")))
+    hex::decode(value).map_err(|_| AuthError::OpaqueMalformed(format!("{label} is not valid hex")))
+}
+
+/// Decode hex that came from **AXIAM's own storage**. A failure is corruption,
+/// not a bad request, and must not be reported to the caller as one.
+fn decode_stored_hex(value: &str, label: &str) -> Result<Vec<u8>, AuthError> {
+    hex::decode(value).map_err(|_| AuthError::Crypto(format!("stored {label} is not valid hex")))
 }
 
 #[cfg(test)]
@@ -791,11 +785,11 @@ mod tests {
     use super::*;
     use axiam_core::models::opaque::OpaqueKsf;
     use opaque_ke::generic_array::{ArrayLength, GenericArray};
+    use opaque_ke::{CipherSuite, CredentialResponse, ksf::Ksf};
     use opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, RegistrationResponse,
     };
-    use opaque_ke::{CredentialResponse, ksf::Ksf};
 
     // ---------------------------------------------------------------
     // A client, so the tests exercise the real protocol rather than the
@@ -809,7 +803,7 @@ mod tests {
     struct FastClient;
     impl CipherSuite for FastClient {
         type OprfCs = opaque_ke::Ristretto255;
-        type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, opaque_sha2::Sha512>;
+        type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2_v10::Sha512>;
         type Ksf = opaque_ke::ksf::Identity;
     }
 
@@ -832,7 +826,7 @@ mod tests {
     struct StretchingClient;
     impl CipherSuite for StretchingClient {
         type OprfCs = opaque_ke::Ristretto255;
-        type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, opaque_sha2::Sha512>;
+        type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2_v10::Sha512>;
         type Ksf = CountingKsf;
     }
 

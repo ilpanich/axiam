@@ -130,29 +130,41 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
                     .route(web::post().to(handlers::auth::login::<C>)),
             )
-            // SRP shares `/login`'s per-IP budget policy for the same reason:
-            // both are unauthenticated, both take a user identifier, and
-            // neither carries a client identity to key on. The challenge
-            // endpoint is rate-limited too, not just verify — it performs a
-            // full modular exponentiation per call, so leaving it open would
-            // hand an attacker a cheap way to burn server CPU.
+            // OPAQUE shares `/login`'s per-IP budget policy for the same
+            // reason: both are unauthenticated, both take a user identifier,
+            // and neither carries a client identity to key on. Every one of
+            // the three is rate-limited, not just the finish — each performs
+            // elliptic-curve work per call, so leaving any of them open would
+            // hand an attacker a cheap way to burn server CPU. `register/start`
+            // in particular is unauthenticated by necessity (it is used while
+            // creating a user who does not exist yet), which makes it the one
+            // most worth a budget.
             .service(
-                web::resource("/srp/challenge")
+                web::resource("/opaque/register/start")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
                     .wrap(RateLimitShared::<C>::new(
-                        "srp_challenge",
+                        "opaque_register_start",
                         rate_limit_cfg.login_per_min,
                     ))
-                    .route(web::post().to(handlers::srp::srp_challenge::<C>)),
+                    .route(web::post().to(handlers::opaque::opaque_register_start::<C>)),
             )
             .service(
-                web::resource("/srp/verify")
+                web::resource("/opaque/login/start")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
                     .wrap(RateLimitShared::<C>::new(
-                        "srp_verify",
+                        "opaque_login_start",
                         rate_limit_cfg.login_per_min,
                     ))
-                    .route(web::post().to(handlers::srp::srp_verify::<C>)),
+                    .route(web::post().to(handlers::opaque::opaque_login_start::<C>)),
+            )
+            .service(
+                web::resource("/opaque/login/finish")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "opaque_login_finish",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(web::post().to(handlers::opaque::opaque_login_finish::<C>)),
             )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
@@ -233,7 +245,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
             )
             // Token-gated lookup that lets an unauthenticated reset page compute
-            // an SRP verifier. Shares `/reset`'s budget: it is unauthenticated
+            // an OPAQUE record. Shares `/reset`'s budget: it is unauthenticated
             // and takes a token, so it must not be a cheaper probe than the
             // endpoint it supports.
             .service(

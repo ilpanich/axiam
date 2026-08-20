@@ -69,6 +69,21 @@ pub enum AuthError {
     /// Generic cryptography failure (use typed sub-variants for new call sites).
     #[error("cryptography error: {0}")]
     Crypto(String),
+    /// A client-supplied OPAQUE protocol message was not well formed.
+    ///
+    /// Distinct from [`Self::Crypto`] because the two have different owners
+    /// and therefore different HTTP statuses. A malformed `KE1` is the
+    /// caller's mistake and must be a `400`; a stored record that will not
+    /// parse is AXIAM's own corruption and must be a `500`. Collapsing them —
+    /// which this originally did — meant a client sending junk got a `500`,
+    /// which reads as "the server is broken" in every dashboard and pager rule
+    /// an operator has.
+    ///
+    /// It carries no detail about *why* beyond the field name, because a
+    /// caller that could distinguish "bad point encoding" from "wrong length"
+    /// learns something about the server's parser and nothing it needs.
+    #[error("malformed OPAQUE message: {0}")]
+    OpaqueMalformed(String),
 
     /// Key material could not be parsed or decoded (e.g. PEM/DER parse failure).
     #[error("key parse error: {0}")]
@@ -157,6 +172,7 @@ impl From<AuthError> for AxiamError {
             | AuthError::CryptoKeyParse(msg)
             | AuthError::CryptoAesDecrypt(msg)
             | AuthError::CryptoHmacInvalid(msg) => AxiamError::Crypto(msg),
+            AuthError::OpaqueMalformed(msg) => AxiamError::Validation { message: msg },
             AuthError::PasswordReusedCurrent => AxiamError::Validation {
                 message: err.to_string(),
             },

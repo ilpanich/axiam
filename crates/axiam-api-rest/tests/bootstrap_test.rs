@@ -91,6 +91,10 @@ fn test_auth_config() -> AuthConfig {
         jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
+        // Bootstrap runs both halves of an OPAQUE registration itself, so it
+        // needs both keys present even though no client is involved.
+        opaque_session_key: Some([0x11; 32]),
+        opaque_setup_key: Some([0x22; 32]),
         ..AuthConfig::default()
     }
 }
@@ -660,57 +664,27 @@ async fn bootstrap_admin_can_login() {
 }
 
 // ---------------------------------------------------------------------------
-// SRP at bootstrap
+// OPAQUE at bootstrap
 // ---------------------------------------------------------------------------
 //
 // The first admin is the one account for which "enrol later" is not an option:
 // there is no second administrator to repair a deployment whose only login is
-// broken. These tests pin the three outcomes that matter.
+// broken. These tests pin the outcomes that matter.
+//
+// Note what bootstrap does NOT take: an `opaque` object. Every other enrolment
+// path requires a client-built record, because the server must never hold the
+// plaintext. Bootstrap already receives it — it has to, to compute the
+// Argon2id hash — so it runs both halves of the registration itself. See
+// `BootstrapRequest::opaque_mode` for the full argument.
 
-/// Build the SRP fields for a bootstrap request.
-///
-/// Uses the same reference client the SDKs are specified against, and the same
-/// stand-in KDF as `srp_login_test` — the server never runs the KDF, so a plain
-/// hash exercises everything the server actually checks.
-fn bootstrap_srp_fields(username: &str, password: &str) -> (String, Value) {
-    use axiam_auth::srp::reference_client;
-    use axiam_core::models::srp::SrpGroup;
-    use sha2::{Digest, Sha256};
-
-    // Fresh per call: §23.3 rule 11 wants a new salt per enrolment, and nothing
-    // here depends on the value — the verifier is recomputed from it below.
-    let mut salt_bytes = [0u8; 32];
-    salt_bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-    salt_bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-    let salt = hex::encode(salt_bytes);
-    let mut hasher = Sha256::new();
-    hasher.update(hex::decode(&salt).unwrap());
-    hasher.update(username.as_bytes());
-    hasher.update(b":");
-    hasher.update(password.as_bytes());
-    let x = hasher.finalize().to_vec();
-
-    let verifier = reference_client::verifier_hex(SrpGroup::Rfc5054_2048, &x);
-    (
-        salt.clone(),
-        serde_json::json!({
-            "group": "rfc5054_2048",
-            "kdf": "pbkdf2_sha256",
-            "iterations": 600_000,
-            "salt": salt,
-            "verifier": verifier,
-        }),
-    )
-}
-
-/// Bootstrap can seed an SRP-required organization and enrol the admin's
-/// verifier in the same call.
+/// Bootstrap seeds an OPAQUE-required organization and enrols the admin in the
+/// same call, with no extra round trip.
 #[actix_rt::test]
-async fn bootstrap_seeds_srp_policy_and_enrolls_the_admin_verifier() {
+async fn bootstrap_seeds_opaque_policy_and_enrolls_the_admin() {
     let _guard = env_guard().await;
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "srp-admin@example.com");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "opaque-admin@example.com");
     }
 
     let db = setup_empty_db().await;
@@ -718,21 +692,17 @@ async fn bootstrap_seeds_srp_policy_and_enrolls_the_admin_verifier() {
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
 
-    let (_salt, srp) = bootstrap_srp_fields("srpadmin", TEST_PASSWORD);
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .set_json(serde_json::json!({
-            "organization_name": "SRP Org",
-            "organization_slug": "srp-org",
+            "organization_name": "OPAQUE Org",
+            "organization_slug": "opaque-org",
             "tenant_slug": "default",
-            "email": "srp-admin@example.com",
-            "username": "srpadmin",
+            "email": "opaque-admin@example.com",
+            "username": "opaqueadmin",
             "password": TEST_PASSWORD,
-            "srp_mode": "required",
-            "srp_group": "rfc5054_2048",
-            "srp_kdf": "pbkdf2_sha256",
-            "srp": srp,
+            "opaque_mode": "required",
         }))
         .to_request();
 
@@ -746,7 +716,7 @@ async fn bootstrap_seeds_srp_policy_and_enrolls_the_admin_verifier() {
     assert_eq!(
         status,
         201,
-        "bootstrap with SRP failed: {}",
+        "bootstrap with OPAQUE failed: {}",
         String::from_utf8_lossy(&body)
     );
 
@@ -760,37 +730,48 @@ async fn bootstrap_seeds_srp_policy_and_enrolls_the_admin_verifier() {
         .unwrap();
 
     // The policy landed as the org baseline...
-    use axiam_core::repository::{SettingsRepository, SrpCredentialRepository};
+    use axiam_core::repository::{OpaqueCredentialRepository, SettingsRepository};
     let settings = axiam_db::repository::SurrealSettingsRepository::new(db.clone())
         .get_effective_settings(org_id, tenant_id)
         .await
         .unwrap();
     assert_eq!(
-        settings.srp.srp_mode,
-        axiam_core::models::srp::SrpMode::Required
+        settings.opaque.opaque_mode,
+        axiam_core::models::opaque::OpaqueMode::Required
     );
 
-    // ...and the admin's verifier was written in the same transaction, bound
-    // to the username rather than the email.
-    let credential = axiam_db::SurrealSrpCredentialRepository::new(db.clone())
+    // ...and the admin's record was written in the same transaction.
+    let credential = axiam_db::SurrealOpaqueCredentialRepository::new(db.clone())
         .get_by_user(tenant_id, user_id)
         .await
-        .expect("the bootstrap admin must have a verifier under srp_mode=required");
-    assert_eq!(credential.identity, "srpadmin");
+        .expect("the bootstrap admin must have a record under opaque_mode=required");
     assert_eq!(
-        credential.group,
-        axiam_core::models::srp::SrpGroup::Rfc5054_2048
+        credential.suite,
+        axiam_core::models::opaque::OpaqueSuite::Ristretto255Sha512
+    );
+    assert_eq!(
+        credential.credential_identifier.len(),
+        64,
+        "a 32-byte identifier, hex"
+    );
+    assert_eq!(
+        credential.record.len(),
+        credential.suite.record_len() * 2,
+        "the stored record must be the suite's full width"
     );
 }
 
-/// `srp_mode=required` without a verifier is refused, because it would create a
-/// deployment whose only administrator can never authenticate.
+/// The admin enrolled at bootstrap can actually log in through OPAQUE.
+///
+/// This is the assertion that matters: a record that exists but does not
+/// authenticate is exactly the unrecoverable deployment `required` is supposed
+/// to prevent, and only an end-to-end exchange proves it does not happen.
 #[actix_rt::test]
-async fn bootstrap_refuses_srp_required_without_a_verifier() {
+async fn the_bootstrap_admin_can_log_in_through_opaque() {
     let _guard = env_guard().await;
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "locked-out@example.com");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "e2e-admin@example.com");
     }
 
     let db = setup_empty_db().await;
@@ -802,11 +783,98 @@ async fn bootstrap_refuses_srp_required_without_a_verifier() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .set_json(serde_json::json!({
+            "organization_name": "E2E Org",
+            "organization_slug": "e2e-org",
+            "tenant_slug": "default",
+            "email": "e2e-admin@example.com",
+            "username": "e2eadmin",
+            "password": TEST_PASSWORD,
+            "opaque_mode": "required",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body = test::read_body(resp).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    let body_json: Value = serde_json::from_slice(&body).unwrap();
+    let tenant_id: Uuid = body_json["tenant_id"].as_str().unwrap().parse().unwrap();
+    let org_id: Uuid = body_json["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let (state, ke1) = axiam_opaque::ClientLoginState::start(TEST_PASSWORD).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "username_or_email": "e2eadmin",
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let started: Value = test::read_body_json(resp).await;
+
+    let ksf = axiam_opaque::AxiamKsf::argon2id(
+        started["memory_kib"].as_u64().unwrap() as u32,
+        started["iterations"].as_u64().unwrap() as u32,
+        started["parallelism"].as_u64().unwrap() as u32,
+    )
+    .unwrap();
+    let finished = state
+        .finish(TEST_PASSWORD, started["ke2"].as_str().unwrap(), &ksf)
+        .expect("the server-built record must open under the admin's password");
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/finish")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "opaque_session": started["opaque_session"].as_str().unwrap(),
+            "ke3": finished.ke3,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "the bootstrap admin must be able to authenticate through OPAQUE"
+    );
+}
+
+/// Enabling OPAQUE without the server keys is refused, because it would create
+/// a deployment whose only administrator can never authenticate.
+#[actix_rt::test]
+async fn bootstrap_refuses_opaque_without_the_server_keys() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "locked-out@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = AuthConfig {
+        opaque_session_key: None,
+        opaque_setup_key: None,
+        ..test_auth_config()
+    };
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
             "organization_name": "Locked Out Org",
             "email": "locked-out@example.com",
             "username": "lockedout",
             "password": TEST_PASSWORD,
-            "srp_mode": "required",
+            "opaque_mode": "required",
         }))
         .to_request();
 
@@ -828,10 +896,10 @@ async fn bootstrap_refuses_srp_required_without_a_verifier() {
     );
 }
 
-/// Omitting SRP entirely leaves it disabled, so an operator who has never heard
-/// of it gets exactly today's behaviour.
+/// Omitting OPAQUE entirely leaves it disabled, so an operator who has never
+/// heard of it gets exactly today's behaviour.
 #[actix_rt::test]
-async fn bootstrap_without_srp_leaves_it_disabled() {
+async fn bootstrap_without_opaque_leaves_it_disabled() {
     let _guard = env_guard().await;
     // SAFETY: serialized via env_lock.
     unsafe {
@@ -877,7 +945,7 @@ async fn bootstrap_without_srp_leaves_it_disabled() {
         .await
         .unwrap();
     assert_eq!(
-        settings.srp.srp_mode,
-        axiam_core::models::srp::SrpMode::Disabled
+        settings.opaque.opaque_mode,
+        axiam_core::models::opaque::OpaqueMode::Disabled
     );
 }

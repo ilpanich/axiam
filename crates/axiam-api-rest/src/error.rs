@@ -50,7 +50,7 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
                 StatusCode::UNAUTHORIZED
             }
-            AxiamError::AuthorizationDenied { .. } | AxiamError::SrpRequired => {
+            AxiamError::AuthorizationDenied { .. } | AxiamError::OpaqueRequired => {
                 StatusCode::FORBIDDEN
             }
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
@@ -78,9 +78,9 @@ impl actix_web::ResponseError for AxiamApiError {
             }
             AxiamError::AuthorizationDenied { .. } => "authorization_denied",
             // Distinct from `authentication_failed` on purpose: an SDK reads
-            // this to switch to `/auth/srp/*` rather than to tell the user
+            // this to switch to `/auth/opaque/*` rather than to tell the user
             // their password was wrong.
-            AxiamError::SrpRequired => "srp_required",
+            AxiamError::OpaqueRequired => "opaque_required",
             AxiamError::Validation { .. } => "validation_error",
             AxiamError::PasswordPolicy { .. } => "password_policy_violation",
             AxiamError::TenantContext => "tenant_context",
@@ -100,7 +100,7 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::AuthenticationFailed { .. }
             | AxiamError::ReplayDetected
             | AxiamError::AuthorizationDenied { .. }
-            | AxiamError::SrpRequired
+            | AxiamError::OpaqueRequired
             | AxiamError::Validation { .. }
             | AxiamError::PasswordPolicy { .. }
             | AxiamError::TenantContext

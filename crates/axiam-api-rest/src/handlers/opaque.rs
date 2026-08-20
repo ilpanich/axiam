@@ -1,39 +1,53 @@
-//! Secure Remote Password endpoints — `POST /api/v1/auth/srp/challenge` and
-//! `POST /api/v1/auth/srp/verify`.
+//! OPAQUE endpoints — `POST /api/v1/auth/opaque/register/start`,
+//! `POST /api/v1/auth/opaque/login/start` and
+//! `POST /api/v1/auth/opaque/login/finish`.
 //!
-//! These are a *sibling* of `POST /api/v1/auth/login`, not a replacement. They
-//! establish the same fact — this principal knows the password — by a route
-//! that never puts the password on the wire, and then hand off to the exact
-//! same post-credential path
+//! The login pair is a *sibling* of `POST /api/v1/auth/login`, not a
+//! replacement. They establish the same fact — this principal knows the
+//! password — by a route that never puts the password on the wire, and then
+//! hand off to the exact same post-credential path
 //! ([`axiam_auth::AuthService::complete_authenticated_login`]), so MFA policy,
 //! account status, the `login.post_auth` reactor hook, lockout accounting and
 //! session issuance are identical on both. That shared tail is the point: two
-//! parallel implementations of "what happens after a successful login" is how a
-//! deployment ends up with MFA enforced on one path and not the other.
+//! parallel implementations of "what happens after a successful login" is how
+//! a deployment ends up with MFA enforced on one path and not the other.
+//!
+//! # Why there is no `register/finish` endpoint
+//!
+//! A registration record can only be built at a moment when the plaintext
+//! password legitimately exists on the client, and every one of those moments
+//! — user creation, an authenticated password change, reset completion,
+//! first-run bootstrap — is already an endpoint that takes a password. Each of
+//! those grew an `opaque` field carrying the finished record, exactly where
+//! the SRP implementation carried an `srp` verifier. A free-standing finish
+//! would be an endpoint whose only job is to attach a credential to an
+//! account, which is a thing worth not having.
 //!
 //! # Enumeration
 //!
-//! `/auth/srp/challenge` answers `200` for every syntactically valid request,
-//! including one naming a user who does not exist, a user in another tenant, or
-//! a user with no verifier. The fabricated challenge is described in
-//! [`axiam_auth::srp`]. Anything else here would make this endpoint a faster
-//! account-enumeration oracle than the rest of the API, which is exactly the
-//! kind of regression that "we added a security feature" is supposed to
-//! preclude.
+//! `/auth/opaque/login/start` answers `200` for every syntactically valid
+//! request, including one naming a user who does not exist, a user in another
+//! tenant, or a user with no record. The decoy exchange is described in
+//! [`axiam_auth::opaque`]. Anything else here would make this endpoint a
+//! faster account-enumeration oracle than the rest of the API, which is
+//! exactly the kind of regression that "we added a security feature" is
+//! supposed to preclude.
 //!
-//! The one case that is *not* disguised is `srp_mode = disabled`, which returns
-//! `404`: that is a property of the tenant, not of any user, so revealing it
-//! leaks nothing about who exists.
+//! The one case that is *not* disguised is `opaque_mode = disabled`, which
+//! returns `404`: that is a property of the tenant, not of any user, so
+//! revealing it leaks nothing about who exists.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::LoginResult;
 use axiam_core::error::AxiamError;
-use axiam_core::models::srp::{SrpKdfParams, SrpMode, SrpVerifyRequest};
-use axiam_core::repository::{
-    OrganizationRepository, SettingsRepository, SrpCredentialRepository, TenantRepository,
-    UserRepository,
+use axiam_core::models::opaque::{
+    OpaqueKsfParams, OpaqueLoginFinishRequest, OpaqueLoginStartRequest, OpaqueMode,
+    OpaqueRegisterStartRequest,
 };
-use serde::{Deserialize, Serialize};
+use axiam_core::repository::{
+    OpaqueCredentialRepository, OpaqueServerSetupRepository, OrganizationRepository,
+    SettingsRepository, TenantRepository, UserRepository,
+};
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -45,68 +59,25 @@ use crate::handlers::auth::{
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
-// Wire types
-// -----------------------------------------------------------------------
-
-/// Request body for `POST /api/v1/auth/srp/challenge`.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct SrpChallengeRequest {
-    /// Tenant UUID. Either this or `tenant_slug` is required.
-    #[serde(default)]
-    pub tenant_id: Option<Uuid>,
-    /// Organization UUID. Either this or `org_slug` is required.
-    #[serde(default)]
-    pub org_id: Option<Uuid>,
-    /// Tenant slug alternative to `tenant_id`.
-    #[serde(default)]
-    pub tenant_slug: Option<String>,
-    /// Organization slug alternative to `org_id`.
-    #[serde(default)]
-    pub org_slug: Option<String>,
-    /// Username or email the human typed. The response's `identity` field, not
-    /// this, is what goes into the KDF.
-    #[serde(alias = "username")]
-    pub username_or_email: String,
-    /// Client public ephemeral `A = g^a mod N`, lowercase hex.
-    pub client_public: String,
-}
-
-/// `POST /api/v1/auth/srp/verify` success body.
-///
-/// Shape-compatible with `LoginSuccessResponse` plus `server_proof`; tokens
-/// still arrive as `Set-Cookie`, exactly as on the password path.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct SrpVerifyResponse {
-    /// Server proof `M2`, lowercase hex.
-    ///
-    /// A client MUST check this before treating the session as good. Skipping
-    /// it throws away half of what SRP provides — without it the client has
-    /// authenticated itself to the server but has not authenticated the
-    /// server, so a rogue endpoint that never knew the verifier is
-    /// indistinguishable from the real one.
-    pub server_proof: String,
-}
-
-// -----------------------------------------------------------------------
 // Handlers
 // -----------------------------------------------------------------------
 
-/// `POST /api/v1/auth/srp/challenge`
+/// `POST /api/v1/auth/opaque/register/start`
 #[utoipa::path(
     post,
-    path = "/api/v1/auth/srp/challenge",
+    path = "/api/v1/auth/opaque/register/start",
     tag = "auth",
-    request_body = SrpChallengeRequest,
+    request_body = OpaqueRegisterStartRequest,
     responses(
-        (status = 200, description = "SRP challenge (identical shape for unknown identities)", body = axiam_core::models::srp::SrpChallenge),
-        (status = 400, description = "Malformed client public value or missing workspace identity"),
-        (status = 404, description = "SRP is not enabled for this tenant"),
-        (status = 503, description = "SRP is enabled but the server has no session key configured"),
+        (status = 200, description = "OPRF evaluation and the KSF parameters to stretch with", body = axiam_core::models::opaque::OpaqueRegisterStartResponse),
+        (status = 400, description = "Malformed registration request or missing workspace identity"),
+        (status = 404, description = "OPAQUE is not enabled for this tenant"),
+        (status = 503, description = "OPAQUE is enabled but the server has no keys configured"),
     )
 )]
-pub async fn srp_challenge<C: Connection + Clone>(
+pub async fn opaque_register_start<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
-    body: web::Json<SrpChallengeRequest>,
+    body: web::Json<OpaqueRegisterStartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
     let (org_id, tenant_id) = resolve_workspace(
@@ -122,94 +93,145 @@ pub async fn srp_challenge<C: Connection + Clone>(
         .settings_repo
         .get_effective_settings(org_id, tenant_id)
         .await?;
-    let policy = &settings.srp;
+    let policy = &settings.opaque;
 
-    if policy.srp_mode == SrpMode::Disabled {
+    if policy.opaque_mode == OpaqueMode::Disabled {
         return Err(AxiamApiError(AxiamError::NotFound {
-            entity: "srp".into(),
+            entity: "opaque".into(),
             id: "disabled".into(),
         }));
     }
 
-    // A configured policy with no key is a misconfiguration, and it must look
-    // like one. Falling through to "no SRP available" would let an operator
-    // believe a control is on while every client silently uses password login.
-    let Some(srp) = state.srp_server.as_ref() else {
-        return Err(AxiamApiError(AxiamError::Internal(
-            "SRP is enabled but AXIAM__AUTH__SRP_SESSION_KEY is not configured".into(),
-        )));
-    };
+    let opaque = opaque_server(&state)?;
+    let setup = server_setup(&state, tenant_id, policy.opaque_suite).await?;
 
-    // Look up the user; a miss at any step falls through to the simulated
-    // branch rather than returning an error, so all four outcomes — unknown
-    // name, wrong tenant, known user without a verifier, known user with one —
-    // are indistinguishable from outside.
+    let response = opaque
+        .register_start(
+            &setup,
+            OpaqueKsfParams::defaults_for(policy.opaque_ksf),
+            &b.registration_request,
+        )
+        .map_err(AxiamError::from)?;
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// `POST /api/v1/auth/opaque/login/start`
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/opaque/login/start",
+    tag = "auth",
+    request_body = OpaqueLoginStartRequest,
+    responses(
+        (status = 200, description = "KE2 (identical shape for unknown identities)", body = axiam_core::models::opaque::OpaqueLoginStartResponse),
+        (status = 400, description = "Malformed KE1 or missing workspace identity"),
+        (status = 404, description = "OPAQUE is not enabled for this tenant"),
+        (status = 503, description = "OPAQUE is enabled but the server has no keys configured"),
+    )
+)]
+pub async fn opaque_login_start<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
+    body: web::Json<OpaqueLoginStartRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+    let (org_id, tenant_id) = resolve_workspace(
+        &state,
+        b.org_id,
+        b.org_slug.as_deref(),
+        b.tenant_id,
+        b.tenant_slug.as_deref(),
+    )
+    .await?;
+
+    let settings = state
+        .settings_repo
+        .get_effective_settings(org_id, tenant_id)
+        .await?;
+    let policy = &settings.opaque;
+
+    if policy.opaque_mode == OpaqueMode::Disabled {
+        return Err(AxiamApiError(AxiamError::NotFound {
+            entity: "opaque".into(),
+            id: "disabled".into(),
+        }));
+    }
+
+    let opaque = opaque_server(&state)?;
+    let setup = server_setup(&state, tenant_id, policy.opaque_suite).await?;
+
+    // Look up the user; a miss at any step falls through to the decoy branch
+    // rather than returning an error, so all four outcomes — unknown name,
+    // wrong tenant, known user without a record, known user with one — are
+    // indistinguishable from outside.
     let credential = match lookup_user_id(&state, tenant_id, &b.username_or_email).await {
         Some(user_id) => state
-            .srp_credential_repo
+            .opaque_credential_repo
             .get_by_user(tenant_id, user_id)
             .await
             .ok(),
         None => None,
     };
 
-    let challenge = match credential {
-        Some(cred) => srp
-            .challenge(&cred, org_id, &b.client_public)
+    let started = match credential {
+        Some(cred) => opaque
+            .login_start(&setup, &cred, org_id, &b.ke1)
             .map_err(AxiamError::from)?,
-        None => srp
-            .simulated_challenge(
-                policy.srp_group,
-                SrpKdfParams::defaults_for(policy.srp_kdf),
+        None => opaque
+            .login_start_decoy(
+                &setup,
+                OpaqueKsfParams::defaults_for(policy.opaque_ksf),
                 &b.username_or_email,
                 tenant_id,
                 org_id,
-                &b.client_public,
+                &b.ke1,
             )
             .map_err(AxiamError::from)?,
     };
 
-    Ok(HttpResponse::Ok().json(challenge))
+    Ok(HttpResponse::Ok().json(started))
 }
 
-/// `POST /api/v1/auth/srp/verify`
+/// `POST /api/v1/auth/opaque/login/finish`
 ///
 /// Returns the same three outcomes as `POST /api/v1/auth/login` — `200` with
 /// session cookies, `202` for an MFA challenge, `403` for MFA setup — so a
 /// client can share one result handler across both login paths.
+///
+/// Note what this response does *not* carry, where the SRP one did: a server
+/// proof. Under SRP the client had to verify `M2` itself or it would have
+/// authenticated to a server that never knew the verifier. RFC 9807's AKE
+/// authenticates the server as part of the handshake — a client that
+/// successfully opens `KE2` has already proved the server holds the record —
+/// so there is nothing left for the client to check afterwards, and an SDK
+/// cannot forget to.
 #[utoipa::path(
     post,
-    path = "/api/v1/auth/srp/verify",
+    path = "/api/v1/auth/opaque/login/finish",
     tag = "auth",
-    request_body = SrpVerifyRequest,
+    request_body = OpaqueLoginFinishRequest,
     responses(
-        (status = 200, description = "Login successful; body carries the server proof M2", body = SrpVerifyResponse),
+        (status = 200, description = "Login successful; tokens arrive as cookies"),
         (status = 202, description = "MFA challenge required", body = MfaRequiredResponse),
         (status = 403, description = "MFA setup required", body = MfaSetupRequiredResponse),
-        (status = 401, description = "Invalid proof, expired session, or unknown identity"),
+        (status = 401, description = "Invalid credentials, expired session, or unknown identity"),
     )
 )]
-pub async fn srp_verify<C: Connection + Clone>(
+pub async fn opaque_login_finish<C: Connection + Clone>(
     req: HttpRequest,
     state: web::Data<AppState<C>>,
-    body: web::Json<SrpVerifyRequest>,
+    body: web::Json<OpaqueLoginFinishRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+    let opaque = opaque_server(&state)?;
 
-    let Some(srp) = state.srp_server.as_ref() else {
-        return Err(AxiamApiError(AxiamError::Internal(
-            "SRP is enabled but AXIAM__AUTH__SRP_SESSION_KEY is not configured".into(),
-        )));
-    };
-
-    let verified = match srp.verify(&b.srp_session, &b.client_proof) {
+    let verified = match opaque.login_finish(&b.opaque_session, &b.ke3) {
         Ok(verified) => verified,
         Err(rejection) => {
-            // A wrong proof is a wrong password: it must move the lockout
+            // A failed KE3 is a wrong password: it must move the lockout
             // counter exactly as a failed Argon2id verify on `/auth/login`
-            // does. Without this, enabling SRP would quietly remove
+            // does. Without this, enabling OPAQUE would quietly remove
             // brute-force protection from the accounts that adopted it.
-            if let axiam_auth::SrpRejection::BadProof {
+            if let axiam_auth::OpaqueRejection::BadCredentials {
                 tenant_id,
                 user_id: Some(user_id),
             } = rejection
@@ -218,7 +240,7 @@ pub async fn srp_verify<C: Connection + Clone>(
                 // a 500 and hand the caller a way to tell the two apart.
                 if let Err(e) = state
                     .auth_service
-                    .record_failed_srp_attempt(tenant_id, user_id)
+                    .record_failed_opaque_attempt(tenant_id, user_id)
                     .await
                 {
                     tracing::warn!(
@@ -226,7 +248,7 @@ pub async fn srp_verify<C: Connection + Clone>(
                         tenant_id = %tenant_id,
                         user_id = %user_id,
                         error = %e,
-                        "failed to record an SRP lockout attempt"
+                        "failed to record an OPAQUE lockout attempt"
                     );
                 }
             }
@@ -246,8 +268,8 @@ pub async fn srp_verify<C: Connection + Clone>(
             reason: "invalid credentials".into(),
         })?;
 
-    // Lockout is checked here rather than at challenge time on purpose: the
-    // challenge must stay indistinguishable for every identity, and refusing it
+    // Lockout is checked here rather than at login/start on purpose: the start
+    // response must stay indistinguishable for every identity, and refusing it
     // for a locked account would announce that the account exists and is under
     // attack.
     if axiam_auth::lockout::is_locked_out(&user) {
@@ -286,7 +308,6 @@ pub async fn srp_verify<C: Connection + Clone>(
                 &state.user_repo,
                 &state.tenant_repo,
                 &state.org_repo,
-                Some(verified.server_proof),
             )
             .await
         }
@@ -305,14 +326,12 @@ pub async fn srp_verify<C: Connection + Clone>(
                 "mfa_required": true,
                 "challenge_token": challenge.challenge_token,
                 "available_methods": challenge.available_methods,
-                "server_proof": verified.server_proof,
             })))
         }
         LoginResult::MfaSetupRequired(setup) => {
             Ok(HttpResponse::Forbidden().json(serde_json::json!({
                 "mfa_setup_required": true,
                 "setup_token": setup.setup_token,
-                "server_proof": verified.server_proof,
             })))
         }
     }
@@ -321,6 +340,42 @@ pub async fn srp_verify<C: Connection + Clone>(
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
+
+/// Fetch the configured OPAQUE server, or fail loudly.
+///
+/// A configured policy with no keys is a misconfiguration, and it must look
+/// like one. Falling through to "no OPAQUE available" would let an operator
+/// believe a control is on while every client silently uses password login.
+pub(crate) fn opaque_server<C: Connection + Clone>(
+    state: &AppState<C>,
+) -> Result<&axiam_auth::OpaqueServer, AxiamApiError> {
+    state.opaque_server.as_ref().ok_or_else(|| {
+        AxiamApiError(AxiamError::Internal(
+            "OPAQUE is enabled but AXIAM__AUTH__OPAQUE_SESSION_KEY / \
+             AXIAM__AUTH__OPAQUE_SETUP_KEY are not configured"
+                .into(),
+        ))
+    })
+}
+
+/// Fetch a tenant's OPAQUE key material, minting it on first use.
+///
+/// The mint-on-first-use is why this is a helper rather than an inline read:
+/// `get_or_create` must be the only way key material comes into existence, so
+/// that two concurrent first logins cannot end up writing two different OPRF
+/// seeds for one tenant. A tenant with two seeds has records that only
+/// sometimes open, which presents as an intermittent wrong password.
+pub(crate) async fn server_setup<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    suite: axiam_core::models::opaque::OpaqueSuite,
+) -> Result<axiam_core::models::opaque::OpaqueServerSetup, AxiamApiError> {
+    let opaque = opaque_server(state)?;
+    let fresh = opaque
+        .create_server_setup(tenant_id, suite)
+        .map_err(AxiamError::from)?;
+    Ok(state.opaque_setup_repo.get_or_create(fresh).await?)
+}
 
 /// Resolve `(org_id, tenant_id)` from UUIDs or slugs and prove the tenant
 /// belongs to the organization.
@@ -392,8 +447,8 @@ async fn resolve_workspace<C: Connection + Clone>(
 /// Resolve a username-or-email to a user id, or `None`.
 ///
 /// Deliberately swallows every error into `None`: the caller's next step is the
-/// enumeration-safe simulated challenge, and surfacing "no such user" as an
-/// error here would defeat it.
+/// enumeration-safe decoy exchange, and surfacing "no such user" as an error
+/// here would defeat it.
 async fn lookup_user_id<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,

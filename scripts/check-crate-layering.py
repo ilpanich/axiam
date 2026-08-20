@@ -87,6 +87,15 @@ LAYERS: dict[str, int] = {
     #      dependency of its own.
     "axiam-core": 0,          # entities, value objects, and the repository ports
     "axiam-test-support": 0,  # test-only helpers; deliberately dependency-free
+    # axiam-opaque is layer 0 for a reason worth stating: it is the single
+    # definition of AXIAM's OPAQUE ciphersuite and key-stretching functions,
+    # and it is compiled into the eleven client SDKs as well as into the
+    # server. Anything it depended on would become a dependency of every SDK,
+    # and any drift between a server-side and a client-side definition of the
+    # suite would be a silent cross-language break. Keeping it dependency-free
+    # is what makes "one implementation, not twelve" enforceable rather than
+    # aspirational.
+    "axiam-opaque": 0,
     # 1 -- domain services: policy and cryptography expressed over layer 0's
     #      types, with no knowledge of storage or transport.
     "axiam-auth": 1,

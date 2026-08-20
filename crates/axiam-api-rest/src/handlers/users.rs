@@ -60,14 +60,20 @@ pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
     pub metadata: Option<serde_json::Value>,
-    /// SRP verifier for `password`, computed client-side over `username`.
+    /// OPAQUE registration record for `password`, built client-side.
     ///
-    /// The server cannot derive this — it never sees the password in a form it
-    /// could run the KDF over — so it has to arrive with the request or not at
-    /// all. Required under `srp_mode = required`, where a user created without
-    /// one could never authenticate.
+    /// The server cannot derive this — the envelope is sealed under a key only
+    /// the client can compute — so it has to arrive with the request or not at
+    /// all. Required under `opaque_mode = required`, where a user created
+    /// without one could never authenticate.
+    ///
+    /// Obtained by calling `POST /api/v1/auth/opaque/register/start` first and
+    /// carrying its `opaque_session` through, which is the one structural
+    /// difference from the SRP verifier this replaces: a verifier could be
+    /// computed offline from a self-chosen salt, whereas a record needs the
+    /// server's OPRF evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub srp: Option<axiam_core::models::srp::SrpEnrollment>,
+    pub opaque: Option<axiam_core::models::opaque::OpaqueEnrollment>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -168,20 +174,23 @@ pub async fn create<C: Connection + Clone>(
 
     use axiam_core::repository::{SettingsRepository as _, TenantRepository as _};
 
-    // Resolve the tenant's SRP policy and reject a malformed verifier before
+    // Resolve the tenant's OPAQUE policy and reject a malformed record before
     // the user row is written. Validating afterwards would leave a created
-    // user with no verifier under `required` — an account that exists and
-    // cannot log in — which is exactly the state this check prevents.
-    let srp_enrollment = req.srp.take();
+    // user with no record under `required` — an account that exists and cannot
+    // log in — which is exactly the state this check prevents.
+    let opaque_enrollment = req.opaque.take();
     let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
-    let srp_policy = state
+    let opaque_policy = state
         .settings_repo
         .get_effective_settings(tenant.organization_id, user.tenant_id)
         .await?
-        .srp;
-    if let Some(enrollment) = srp_enrollment.as_ref() {
-        enrollment.parse()?;
-    }
+        .opaque;
+    let enrolled = crate::handlers::opaque_enrollment::validate_enrollment(
+        &state,
+        &opaque_policy,
+        user.tenant_id,
+        opaque_enrollment.as_ref(),
+    )?;
 
     let mut input = CreateUser {
         tenant_id: user.tenant_id,
@@ -211,17 +220,16 @@ pub async fn create<C: Connection + Clone>(
         .create_with_consent(input, "terms_of_service", "current", ip_address, user_agent)
         .await?;
 
-    // `created.username`, not `req.username`: a `user.pre_create` reactor is
-    // allowed to normalize it, and the verifier is bound to whatever actually
-    // got stored. Binding to the pre-normalization string would produce a
-    // verifier that no login could ever satisfy.
-    crate::handlers::srp_enrollment::record_verifier(
+    // Note that nothing here depends on `created.username`. The SRP version
+    // had to bind the verifier to the post-reactor-normalization username, and
+    // getting that wrong produced a verifier no login could ever satisfy. An
+    // OPAQUE record binds to a server-chosen credential identifier instead, so
+    // a `user.pre_create` reactor renaming the user cannot break it.
+    crate::handlers::opaque_enrollment::store_credential(
         &state,
-        &srp_policy,
         created.tenant_id,
         created.id,
-        &created.username,
-        srp_enrollment.as_ref(),
+        enrolled,
     )
     .await?;
 
@@ -374,32 +382,18 @@ pub async fn update<C: Connection + Clone>(
     )
     .await?;
 
-    // Capture the pre-update username so a rename can be detected below.
-    // Read here rather than from `req`, because a `user.pre_update` reactor is
-    // allowed to rewrite the incoming username.
-    let previous_username = state
-        .user_repo
-        .get_by_id(user.tenant_id, target_id)
-        .await
-        .ok()
-        .map(|u| u.username);
-
     let updated = state
         .user_repo
         .update(user.tenant_id, target_id, input)
         .await?;
 
-    // A rename invalidates any SRP verifier, because `x` is derived over
-    // `username ":" password`. Left in place, the verifier would keep
-    // answering challenges that no client could ever satisfy, and the user
-    // would see "invalid credentials" for a password that is entirely
-    // correct. Dropping it makes the state honest: no verifier, so the SRP
-    // path reports the account as unenrolled and password login (or a
-    // password change that re-enrols) applies.
-    if previous_username.as_deref() != Some(updated.username.as_str()) {
-        crate::handlers::srp_enrollment::invalidate_on_rename(&state, user.tenant_id, target_id)
-            .await;
-    }
+    // A rename used to need work here: SRP derived `x` over
+    // `username ":" password`, so this handler had to read the pre-update
+    // username, detect a change, and drop the verifier — otherwise the user
+    // saw "invalid credentials" for an entirely correct password. OPAQUE binds
+    // to a random server-chosen credential identifier with no relationship to
+    // any name, so a rename is free and both the extra read and the deletion
+    // are gone rather than ported.
 
     // D7 (REVOCATION — security critical): an update can NARROW access, most
     // directly by setting `status` to a non-Active value. Nothing on the

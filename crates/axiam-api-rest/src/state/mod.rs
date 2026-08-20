@@ -50,8 +50,8 @@ use std::sync::Arc;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
-    AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
-    PasswordResetService, SrpServer, WebauthnService,
+    AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService, OpaqueServer,
+    OpaqueServerKeys, PasswordResetService, WebauthnService,
 };
 use axiam_authz::AuthzConfig;
 use axiam_db::DbHandle;
@@ -64,13 +64,14 @@ use axiam_db::{
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
+    SurrealOpaqueCredentialRepository, SurrealOpaqueServerSetupRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealSrpCredentialRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
@@ -303,14 +304,22 @@ pub struct AppState<C: Connection + Clone> {
     pub password_history_repo: SurrealPasswordHistoryRepository<C>,
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
-    /// Stored SRP verifiers. Read by `/auth/srp/challenge` and written by
-    /// every path that legitimately holds a plaintext password.
-    pub srp_credential_repo: SurrealSrpCredentialRepository<C>,
-    /// The SRP-6a engine, present only when `AXIAM__AUTH__SRP_SESSION_KEY` is
-    /// configured. `None` makes the SRP endpoints answer `503` regardless of
-    /// policy — see [`axiam_auth::AuthConfig::srp_session_key`] for why that is
-    /// preferable to falling back to password login.
-    pub srp_server: Option<SrpServer>,
+    /// Stored OPAQUE registration records. Read by
+    /// `/auth/opaque/login/start` and written by every path that legitimately
+    /// holds a plaintext password.
+    pub opaque_credential_repo: SurrealOpaqueCredentialRepository<C>,
+    /// Per-tenant OPAQUE server key material, minted on first use.
+    pub opaque_setup_repo: SurrealOpaqueServerSetupRepository<C>,
+    /// The OPAQUE engine, present only when both
+    /// `AXIAM__AUTH__OPAQUE_SESSION_KEY` and `AXIAM__AUTH__OPAQUE_SETUP_KEY`
+    /// are configured. `None` makes the OPAQUE endpoints answer `503`
+    /// regardless of policy — see [`axiam_auth::AuthConfig::opaque_session_key`]
+    /// for why that is preferable to falling back to password login.
+    ///
+    /// Both keys are required together: one without the other can either seal
+    /// an exchange it cannot key, or key a tenant it cannot seal a session
+    /// for, and neither half is useful alone.
+    pub opaque_server: Option<OpaqueServer>,
     pub http_client: reqwest::Client,
     /// Federation JWKS cache: caches REMOTE identity providers' JWKS
     /// documents fetched during OIDC federation login. NOT related to
@@ -370,6 +379,22 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::FederationState`].
     pub federation: bundles::FederationState<C>,
+}
+
+/// Assemble the OPAQUE server keys, requiring **both** or neither.
+///
+/// A deployment with one key and not the other is a misconfiguration that
+/// would otherwise fail deep inside a login, so it resolves to `None` here and
+/// the endpoints answer `503` — the same posture as having neither key, which
+/// is the one an operator can actually diagnose.
+pub(crate) fn opaque_keys_from(auth_config: &AuthConfig) -> Option<OpaqueServerKeys> {
+    match (auth_config.opaque_session_key, auth_config.opaque_setup_key) {
+        (Some(session_key), Some(setup_key)) => Some(OpaqueServerKeys {
+            session_key,
+            setup_key,
+        }),
+        _ => None,
+    }
 }
 
 impl<C: Connection + Clone> AppState<C> {
@@ -485,7 +510,7 @@ impl<C: Connection + Clone> AppState<C> {
         let db: DbHandle<C> = db.into();
         // `Option<[u8; 32]>` is `Copy`, so read it out before `auth_config` is
         // moved into the struct literal below.
-        let srp_session_key = auth_config.srp_session_key;
+        let opaque_keys = opaque_keys_from(&auth_config);
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
@@ -639,8 +664,9 @@ impl<C: Connection + Clone> AppState<C> {
             password_history_repo,
             oauth2_client_repo,
             settings_repo: SurrealSettingsRepository::new(db.clone()),
-            srp_credential_repo: SurrealSrpCredentialRepository::new(db.clone()),
-            srp_server: srp_session_key.map(SrpServer::new),
+            opaque_credential_repo: SurrealOpaqueCredentialRepository::new(db.clone()),
+            opaque_setup_repo: SurrealOpaqueServerSetupRepository::new(db.clone()),
+            opaque_server: opaque_keys.map(OpaqueServer::new),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),
             crypto_semaphore,

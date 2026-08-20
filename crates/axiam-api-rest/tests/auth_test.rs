@@ -891,7 +891,8 @@ fn mfa_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         mfa_encryption_key: Some(TEST_MFA_KEY),
-        srp_session_key: None,
+        opaque_session_key: None,
+        opaque_setup_key: None,
         totp_issuer: "AXIAM-Test".into(),
         ..AuthConfig::default()
     }

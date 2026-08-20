@@ -244,12 +244,30 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Federation encryption key loaded");
     }
 
-    // Load the SRP session-sealing key from env (skipped by serde on AuthConfig).
-    // Absent, the SRP endpoints answer 503 rather than quietly leaving clients
-    // on password login — see `AuthConfig::srp_session_key`.
-    config.auth.srp_session_key = load_key_from_env("AXIAM__AUTH__SRP_SESSION_KEY");
-    if config.auth.srp_session_key.is_some() {
-        tracing::info!("SRP session key loaded");
+    // Load the OPAQUE keys from env (skipped by serde on AuthConfig). Absent,
+    // the OPAQUE endpoints answer 503 rather than quietly leaving clients on
+    // password login — see `AuthConfig::opaque_session_key`.
+    //
+    // Two keys, not one, because rotating them costs wildly different things:
+    // the session key seals 120 seconds of in-flight state, while losing the
+    // setup key makes every registration record in every tenant unopenable.
+    config.auth.opaque_session_key = load_key_from_env("AXIAM__AUTH__OPAQUE_SESSION_KEY");
+    config.auth.opaque_setup_key = load_key_from_env("AXIAM__AUTH__OPAQUE_SETUP_KEY");
+    match (
+        config.auth.opaque_session_key.is_some(),
+        config.auth.opaque_setup_key.is_some(),
+    ) {
+        (true, true) => tracing::info!("OPAQUE keys loaded"),
+        (false, false) => {}
+        // Half-configured is worth a warning rather than silence: the operator
+        // set one of the two and almost certainly believes OPAQUE is on.
+        (session, setup) => tracing::warn!(
+            session_key = session,
+            setup_key = setup,
+            "OPAQUE is only half-configured; both AXIAM__AUTH__OPAQUE_SESSION_KEY \
+             and AXIAM__AUTH__OPAQUE_SETUP_KEY are required, so the OPAQUE \
+             endpoints will answer 503"
+        ),
     }
 
     // Load email encryption key from env (D-17).
@@ -801,7 +819,10 @@ async fn main() -> std::io::Result<()> {
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(pool.handle_for_repo());
-    let srp_credential_repo = axiam_db::SurrealSrpCredentialRepository::new(pool.handle_for_repo());
+    let opaque_credential_repo =
+        axiam_db::SurrealOpaqueCredentialRepository::new(pool.handle_for_repo());
+    let opaque_setup_repo =
+        axiam_db::SurrealOpaqueServerSetupRepository::new(pool.handle_for_repo());
     // Notification-rule repository — required by the notification_rules handlers'
     // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
     // registration every /api/v1/notification-rules request 500s with
@@ -1839,11 +1860,20 @@ async fn main() -> std::io::Result<()> {
         // was built from — not a second default that could disagree.
         rate_limit_cfg: config.rate_limit.clone(),
         settings_repo: settings_repo.clone(),
-        srp_credential_repo: srp_credential_repo.clone(),
-        // `None` when AXIAM__AUTH__SRP_SESSION_KEY is unset, which makes the
-        // SRP endpoints answer 503 rather than silently leaving clients on
-        // password login — see `AuthConfig::srp_session_key`.
-        srp_server: config.auth.srp_session_key.map(axiam_auth::SrpServer::new),
+        opaque_credential_repo: opaque_credential_repo.clone(),
+        opaque_setup_repo: opaque_setup_repo.clone(),
+        // `None` unless *both* OPAQUE keys are set, which makes the OPAQUE
+        // endpoints answer 503 rather than silently leaving clients on
+        // password login — see `AuthConfig::opaque_session_key`.
+        opaque_server: match (config.auth.opaque_session_key, config.auth.opaque_setup_key) {
+            (Some(session_key), Some(setup_key)) => Some(axiam_auth::OpaqueServer::new(
+                axiam_auth::OpaqueServerKeys {
+                    session_key,
+                    setup_key,
+                },
+            )),
+            _ => None,
+        },
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),

@@ -893,6 +893,7 @@ dependencies = [
  "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
+ "axiam-opaque",
  "axiam-pki",
  "axiam-test-support",
  "base64 0.23.1",
@@ -954,6 +955,7 @@ dependencies = [
  "argon2",
  "axiam-core",
  "axiam-db",
+ "axiam-opaque",
  "axiam-test-support",
  "base64 0.23.1",
  "chrono",
@@ -1119,6 +1121,19 @@ dependencies = [
  "utoipa",
  "uuid",
  "x509-parser 0.18.1",
+]
+
+[[package]]
+name = "axiam-opaque"
+version = "1.0.0-alpha31"
+dependencies = [
+ "argon2",
+ "hex",
+ "opaque-ke",
+ "rand 0.8.7",
+ "scrypt",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4889,6 +4904,7 @@ dependencies = [
  "displaydoc",
  "elliptic-curve",
  "generic-array 0.14.7",
+ "getrandom 0.2.17",
  "hkdf 0.12.4",
  "hmac 0.12.1",
  "rand 0.8.7",

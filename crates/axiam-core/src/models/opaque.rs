@@ -509,8 +509,27 @@ pub struct OpaqueServerSetup {
 // -----------------------------------------------------------------------
 
 /// Client request to `POST /api/v1/auth/opaque/register/start`.
+///
+/// Unauthenticated, because it is needed while creating a user who does not
+/// exist yet. That is safe: the server mints the credential identifier itself,
+/// randomly, so an attacker calling this repeatedly obtains OPRF evaluations
+/// under identifiers they did not choose and cannot predict. Had the
+/// identifier been caller-supplied, this would instead be an oracle for
+/// grinding a chosen user's OPRF offline.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OpaqueRegisterStartRequest {
+    /// Organization slug. Either this or `org_id` is required.
+    #[serde(default)]
+    pub org_slug: Option<String>,
+    /// Organization UUID. Either this or `org_slug` is required.
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+    /// Tenant slug. Either this or `tenant_id` is required.
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+    /// Tenant UUID. Either this or `tenant_slug` is required.
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
     /// Lowercase-hex serialized RFC 9807 `RegistrationRequest` (a blinded
     /// group element).
     pub registration_request: String,
@@ -552,7 +571,15 @@ pub struct OpaqueRegisterStartResponse {
 }
 
 /// The client-supplied half of an OPAQUE enrolment, as it appears inside
-/// registration / change-password / reset-completion request bodies.
+/// registration / change-password / reset-completion / bootstrap request
+/// bodies.
+///
+/// There is no standalone `register/finish` endpoint, deliberately. A record
+/// can only be created at a moment when the plaintext password legitimately
+/// exists on the client, and every one of those moments is already an endpoint
+/// that takes a password. A free-standing finish would be an endpoint whose
+/// only job is to attach a credential to an account, which is a thing worth
+/// not having.
 ///
 /// Kept separate from [`CreateOpaqueCredential`] because the tenant, the user
 /// and the credential identifier are all decided by the server — a client that
@@ -572,11 +599,20 @@ pub struct OpaqueEnrollment {
 /// Client request to `POST /api/v1/auth/opaque/login/start`.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OpaqueLoginStartRequest {
-    /// Organization slug.
-    pub org_slug: String,
-    /// Tenant slug.
-    pub tenant_slug: String,
+    /// Organization slug. Either this or `org_id` is required.
+    #[serde(default)]
+    pub org_slug: Option<String>,
+    /// Organization UUID. Either this or `org_slug` is required.
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+    /// Tenant slug. Either this or `tenant_id` is required.
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+    /// Tenant UUID. Either this or `tenant_slug` is required.
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
     /// Username or email, as typed by the human.
+    #[serde(alias = "username")]
     pub username_or_email: String,
     /// Lowercase-hex serialized RFC 9807 `KE1`.
     pub ke1: String,

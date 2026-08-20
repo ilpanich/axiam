@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-amqp"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-audit",
  "axiam-authz",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-grpc"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-amqp",
  "axiam-auth",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-rest"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "actix-cors",
  "actix-governor",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-audit"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "actix-web",
  "axiam-auth",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-auth"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "aes-gcm 0.11.0",
  "argon2",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-authz"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-core",
  "axiam-db",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-core"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "chrono",
  "serde",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-db"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "aes-gcm 0.11.0",
  "arc-swap",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-email"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-core",
  "chrono",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-federation"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-oauth2"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "argon2",
  "getrandom 0.4.3",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque-ffi"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "axiam-opaque",
  "getrandom 0.4.3",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-pki"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "aes-gcm 0.11.0",
  "axiam-core",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-scim"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-server"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-test-support"
-version = "1.0.0-alpha31"
+version = "1.0.0-alpha32"
 dependencies = [
  "uuid",
 ]

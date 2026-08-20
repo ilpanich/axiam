@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha32] - 2026-08-20
+
+### Added
+
+- HashiCorp Vault in the stack, mandatory in production
+- Pluggable secret provider for the OPAQUE keys, and a release pipeline
+- Migrate the admin UI from SRP to OPAQUE
+- C ABI and WebAssembly builds of the shared client core
+- OPAQUE endpoints, enrolment rework and the shared client core
+- Implement the OPAQUE protocol engine and persistence
+- Replace the SRP domain model with OPAQUE (RFC 9807)
+
+### Changed
+
+- Clear the last three CodeQL alerts, and prove the Go exception
+- Mint test keys and passwords per run instead of hard-coding them
+- Correct comments that still described the new columns as SRP
+- Rewrite CONTRACT §23 from SRP-6a to OPAQUE (contract 1.26)
+- Design document, conformance fixtures, benchmarks and runbook
+
+### Fixed
+
+- Route every long-lived secret through the provider
+- Place axiam-opaque-wasm in the crate-layering table
+
 ## [Unreleased]
 
 ### Changed

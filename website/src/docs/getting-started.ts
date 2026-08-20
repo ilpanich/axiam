@@ -1,0 +1,642 @@
+import type { DocPage } from "./types";
+
+/**
+ * "Getting started" — the path from nothing to a running instance with a real
+ * tenant and a first authorization decision.
+ *
+ * The ordering is deliberate and is the one thing to preserve when editing:
+ * overview (what this is) → quickstart (see it work) → installation (build it
+ * properly) → bootstrap (make it yours) → concepts (understand what you just
+ * did). A reader who stops after any one page has something that works.
+ */
+export const GETTING_STARTED_PAGES: DocPage[] = [
+  {
+    slug: "overview",
+    section: "Getting started",
+    navLabel: "What is AXIAM?",
+    title: "What is AXIAM?",
+    intro:
+      "A multi-tenant identity and access management server written in Rust — OAuth2 and OpenID Connect provider, RBAC authorization engine, PKI, and an audit trail, reachable over REST, gRPC and AMQP.",
+    blocks: [
+      { type: "h", id: "what", text: "In one paragraph" },
+      {
+        type: "p",
+        text: "AXIAM issues and validates identities, and answers the question *may this principal perform this action on this resource?* It is a complete OAuth2 authorization server and OpenID Connect provider, a role-based authorization engine that evaluates over a hierarchy of resources, a certificate authority for machine identities, and an append-only audit log — all of it partitioned by tenant, so one deployment can serve many isolated customers without any of them being able to observe another.",
+      },
+      {
+        type: "p",
+        text: "It is built for the two workloads that stress an IAM system in different directions: **microservices**, where an authorization check happens on nearly every request and tail latency is the constraint, and **IoT fleets**, where identities are certificates rather than passwords and devices commission themselves without a browser.",
+      },
+      { type: "h", id: "capabilities", text: "What it does" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Area", "Capability"],
+        rows: [
+          [
+            "Authentication",
+            "Password (Argon2id), OPAQUE (RFC 9807, password never leaves the client), TOTP, WebAuthn passkeys and security keys, X.509 client certificates, and federated sign-in via SAML or OIDC.",
+          ],
+          [
+            "Authorization",
+            "Role-based, default-deny, with deny-override precedence, a cascading resource hierarchy, sub-resource scopes, groups, service accounts, and UMA 2.0 for resource servers that guard what they do not own.",
+          ],
+          [
+            "Standards",
+            "OAuth2 (authorization code + PKCE, client credentials, refresh, device grant, token exchange, PAR), OpenID Connect with discovery and RP-initiated plus back-channel logout, FAPI 2.0 Security Profile, SCIM 2.0 provisioning.",
+          ],
+          [
+            "Machine identity",
+            "Per-tenant X.509 issuance under an organization CA, mTLS authentication terminated in-process, certificate-bound access tokens, and OpenPGP keys for audit signing and encrypted exports.",
+          ],
+          [
+            "Operations",
+            "Append-only signed audit log, webhooks, Reactors (external hook actors on the AMQP bus), pluggable secret providers including HashiCorp Vault, and GDPR export/erasure endpoints.",
+          ],
+        ],
+      },
+      { type: "h", id: "protocols", text: "Three protocols, one engine" },
+      {
+        type: "p",
+        text: "The same domain logic is reachable three ways. Choosing between them is a transport decision, not a capability one — an authorization check returns the same answer whichever door it arrives through.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Protocol", "Use it for", "Spec"],
+        rows: [
+          [
+            "REST",
+            "Administration, the admin console, and any HTTP integrator. The broadest surface — every entity is manageable here.",
+            "OpenAPI 3.1 (`sdks/openapi.json`)",
+          ],
+          [
+            "gRPC",
+            "The hot path inside a service mesh: authorization checks, token validation and user lookups where connection reuse and binary framing matter.",
+            "Protocol Buffers (`proto/axiam/v1/`)",
+          ],
+          [
+            "AMQP",
+            "Deferred authorization decisions, audit ingestion, mail, webhook and notification delivery, and Reactor hooks.",
+            "AsyncAPI 2.6 (`docs/api/asyncapi.yml`)",
+          ],
+        ],
+      },
+      { type: "h", id: "shape", text: "How a deployment is shaped" },
+      {
+        type: "code",
+        caption: "the runtime picture",
+        code: "  Browsers · Mobile · IoT devices · Services · Admin console\n        |             |              |\n     REST/HTTPS    gRPC/mTLS       AMQP\n        |             |              |\n        v             v              v\n  +-------------------------------------------+\n  |               axiam-server                |\n  |   Actix-Web  |  Tonic  |  Lapin consumer  |\n  +-------------------------------------------+\n  |  AuthN · AuthZ · OAuth2/OIDC · Federation |\n  |  PKI · SCIM · Audit · Email · Reactors    |\n  +-------------------------------------------+\n        |                        |\n        v                        v\n   SurrealDB                RabbitMQ\n  (all domain state)   (async work + events)\n        |\n        v\n   HashiCorp Vault  (long-lived secrets, production)",
+      },
+      {
+        type: "p",
+        text: "`axiam-server` is a single binary composing a workspace of focused crates. It is stateless: every piece of durable state lives in SurrealDB, so replicas scale horizontally behind an ordinary load balancer.",
+      },
+      { type: "h", id: "status", text: "Project status" },
+      {
+        type: "warn",
+        text: "AXIAM is pre-1.0 and under active development. It should not carry production identity traffic until it reaches a stable release. The security posture described throughout these docs is a self-assessment backed by tests and a threat model — not a certified third-party audit.",
+      },
+      { type: "h", id: "start", text: "Where to go next" },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Quickstart →",
+            body: "Run the stack and make your first authorization check.",
+            to: "docs",
+            doc: "quickstart",
+          },
+          {
+            title: "Browse the SDKs →",
+            body: "Install snippets and quickstarts for eleven languages.",
+            to: "sdks",
+          },
+          {
+            title: "See the benchmarks →",
+            body: "Measured throughput, latency and the cost of each security tier.",
+            to: "bench",
+          },
+          {
+            title: "Read the security model →",
+            body: "Threat model, cryptography choices and shared responsibility.",
+            to: "security",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "quickstart",
+    section: "Getting started",
+    navLabel: "Quickstart",
+    title: "Quickstart",
+    intro:
+      "Get a local AXIAM instance running, create your first admin, then make an authenticated authorization check — in about ten minutes.",
+    blocks: [
+      { type: "h", id: "prereq", text: "Prerequisites" },
+      {
+        type: "p",
+        text: "AXIAM builds with Rust 1.93+ and runs its dev infrastructure (SurrealDB + RabbitMQ) in Docker. The `just` task runner wraps the common commands. If you only want to *use* a running instance, you need none of this — skip to [your first check](#authz) and point an SDK at your server.",
+      },
+      { type: "h", id: "run", text: "1. Start the stack" },
+      {
+        type: "code",
+        caption: "terminal",
+        code: "# clone and enter the repository\ngit clone https://github.com/ilpanich/axiam.git\ncd axiam\n\n# start dev infrastructure (SurrealDB + RabbitMQ)\njust dev-up\n\n# build and run the server\njust build\njust run",
+      },
+      {
+        type: "p",
+        text: "The REST API comes up on `http://localhost:8090` and gRPC on `localhost:50051`. Confirm it is alive and that it can reach the database:",
+      },
+      {
+        type: "code",
+        code: "curl -s localhost:8090/health   # liveness  — always 200 if the process is up\ncurl -s localhost:8090/ready    # readiness — 200 only when SurrealDB answers",
+      },
+      { type: "h", id: "admin", text: "2. Create the first admin" },
+      {
+        type: "p",
+        text: "A fresh deployment has no users at all, and the bootstrap endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. The full procedure, both gates and the seeded role set are on [First organization, tenant and admin](#/docs/bootstrap).",
+      },
+      {
+        type: "code",
+        caption: "the short version",
+        code: "# Lock bootstrap to a known address before starting the server\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"tenant_name\": \"Production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+      },
+      { type: "h", id: "authz", text: "3. Your first authorization check" },
+      {
+        type: "p",
+        text: "Install a client SDK, construct a client for your tenant, sign in, then call `can()`. Tenant is always explicit — AXIAM is multi-tenant and has no default tenant, so there is no ambient context to get wrong.",
+      },
+      {
+        type: "codegroup",
+        caption: "authenticate, then check",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: "import { AxiamClient } from 'axiam-sdk';\n\nconst axiam = new AxiamClient({\n  baseUrl: 'https://iam.acme.dev',\n  orgSlug: 'acme',\n  tenantSlug: 'acme',\n});\n\nawait axiam.login(email, password);\nconst ok = await axiam.can('read', 'doc:1');",
+          },
+          {
+            label: "Python",
+            code: "from axiam_sdk import AxiamClient\n\naxiam = AxiamClient(\n    base_url=\"https://iam.acme.dev\",\n    org_slug=\"acme\",\n    tenant_slug=\"acme\",\n)\n\nawait axiam.login(email, password)\nok = await axiam.can(\"read\", \"doc:1\")",
+          },
+          {
+            label: "Rust",
+            code: "use axiam_sdk::AxiamClient;\n\nlet axiam = AxiamClient::builder()\n    .base_url(\"https://iam.acme.dev\")\n    .org_slug(\"acme\")\n    .tenant_slug(\"acme\")\n    .build()?;\n\naxiam.login(&email, &password).await?;\nlet ok = axiam.can(\"read\", \"doc:1\").await?;",
+          },
+          {
+            label: "Go",
+            code: "import axiam \"github.com/ilpanich/axiam-go-sdk\"\n\nclient, err := axiam.New(axiam.Config{\n    BaseURL:    \"https://iam.acme.dev\",\n    OrgSlug:    \"acme\",\n    TenantSlug: \"acme\",\n})\n\nerr = client.Login(ctx, email, password)\nok, err := client.Can(ctx, \"read\", \"doc:1\")",
+          },
+          {
+            label: "Java",
+            code: "AxiamClient axiam = AxiamClient.builder()\n    .baseUrl(\"https://iam.acme.dev\")\n    .orgSlug(\"acme\")\n    .tenantSlug(\"acme\")\n    .build();\n\naxiam.login(email, password);\nboolean ok = axiam.can(\"read\", \"doc:1\");",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "In a browser, tokens arrive only via `httpOnly` cookies — CSRF forwarding and single-flight refresh are handled for you, and browser code imports only from `axiam-sdk/rest`. There is no code path in any SDK that puts a token in `localStorage`.",
+      },
+      { type: "h", id: "curl", text: "The same thing over plain HTTP" },
+      {
+        type: "p",
+        text: "No SDK required — every capability is reachable with an HTTP client. Note that `tenant_id` is a query parameter on the OAuth2 endpoints and a path or body field elsewhere; it is never implicit.",
+      },
+      {
+        type: "code",
+        caption: "login, then check",
+        code: "# 1. authenticate\ncurl -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"acme\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}'\n\n# 2. check — the token from step 1 goes in the Authorization header\ncurl -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $ACCESS_TOKEN\" \\\n  -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+      },
+      { type: "h", id: "next", text: "Next steps" },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Browse the SDKs →",
+            body: "Quickstarts for all eleven languages.",
+            to: "sdks",
+          },
+          {
+            title: "See the benchmarks →",
+            body: "Performance, efficiency and security posture.",
+            to: "bench",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "installation",
+    section: "Getting started",
+    navLabel: "Installation",
+    title: "Installation",
+    intro:
+      "Build AXIAM from source, or run the whole stack in containers. Both paths, and what each one is good for.",
+    blocks: [
+      { type: "h", id: "which", text: "Which path?" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["You want to…", "Use", "Notes"],
+        rows: [
+          [
+            "Develop against AXIAM, or on it",
+            "`just dev-up` + a natively-run server",
+            "Only SurrealDB and RabbitMQ run in Docker; the server runs on your machine so you get fast rebuilds and a debugger.",
+          ],
+          [
+            "Validate the whole stack end to end",
+            "`just prod-up`",
+            "Server, admin console, database and broker in Compose. Documented as *not* for real production — it exists to prove the pieces fit.",
+          ],
+          [
+            "Run it for real",
+            "The Kubernetes manifests in `k8s/`",
+            "See [Docker & Kubernetes](#/docs/deploy) and [Production hardening](#/docs/hardening).",
+          ],
+        ],
+      },
+      { type: "h", id: "toolchain", text: "Toolchain" },
+      {
+        type: "p",
+        text: "AXIAM is a Cargo workspace of focused crates — `axiam-core` holds the domain types, `axiam-db` the SurrealDB repositories, `axiam-auth`, `axiam-authz`, `axiam-oauth2`, `axiam-pki`, `axiam-scim` and the rest hold one concern each, and `axiam-server` composes them into the runnable binary. You need a Rust 1.93+ toolchain, Docker, and the `just` task runner.",
+      },
+      {
+        type: "code",
+        caption: "install the task runner",
+        code: "# macOS\nbrew install just\n\n# or via cargo, anywhere\ncargo install just",
+      },
+      { type: "h", id: "services", text: "Backing services" },
+      {
+        type: "p",
+        text: "`just dev-up` starts the development infrastructure in Docker: a SurrealDB node (the document/graph store behind every domain entity) and a RabbitMQ broker (async authorization, audit ingestion, mail and event delivery). `just dev-down` stops them again.",
+      },
+      {
+        type: "code",
+        code: "just dev-up      # start SurrealDB + RabbitMQ\njust dev-down    # stop them",
+      },
+      { type: "h", id: "build", text: "Build & verify" },
+      {
+        type: "code",
+        code: "just build       # compile the workspace\njust test        # run all tests\njust check       # fmt + lint + test — the same gate CI enforces",
+      },
+      { type: "h", id: "features", text: "Optional build features" },
+      {
+        type: "p",
+        text: "SAML federation is behind a default-on `saml` feature because it links `libxml`, which needs system libxml2 headers. Where those are unavailable, build without default features — this is exactly what CI's *Build (SAML off)* job does, and everything except the SAML service-provider path is unaffected.",
+      },
+      {
+        type: "code",
+        code: "cargo build -p axiam-server --no-default-features",
+      },
+      { type: "h", id: "compose", text: "The full stack in Compose" },
+      {
+        type: "p",
+        text: "`just prod-up` builds and starts `axiam-server`, the admin console, SurrealDB and RabbitMQ together. It generates a local-only Ed25519 signing keypair under `docker/.secrets/` on first run and refuses to start if the database and broker credentials are not set in your shell — the Compose file uses fail-fast variable syntax rather than silently defaulting.",
+      },
+      {
+        type: "code",
+        code: "just prod-up      # build + start everything\n#   admin console  http://localhost:8081\n#   REST API       http://localhost:8090\n#   gRPC           localhost:50051\n\njust prod-down    # stop, keep volumes\njust prod-clean   # stop and remove volumes",
+      },
+      {
+        type: "warn",
+        text: "`docker-compose.prod.yml` is a workstation validation tool, not a production deployment. It is named for the production *image* it builds, not for where it should run. Use the Kubernetes manifests for anything real.",
+      },
+    ],
+  },
+
+  {
+    slug: "bootstrap",
+    section: "Getting started",
+    navLabel: "First org, tenant & admin",
+    title: "The bootstrap procedure",
+    intro:
+      "A fresh AXIAM has no organizations, no tenants and no users — and every administrative endpoint requires an authenticated caller who holds an explicit grant. Bootstrap is the one call that resolves that circularity, and it is built so that it can only ever be made by the operator, exactly once.",
+    blocks: [
+      { type: "h", id: "why", text: "The problem bootstrap solves" },
+      {
+        type: "p",
+        text: "AXIAM is default-deny all the way down: a caller needs a token, and the principal behind that token needs a permission grant, for every administrative action. On a brand-new deployment nobody satisfies either condition, so something has to create the first administrator out of nothing. That something is `POST /api/v1/admin/bootstrap` — the only privileged endpoint reachable without an access token.",
+      },
+      {
+        type: "p",
+        text: "An endpoint like that is worth exactly as much as the gate in front of it, and as much as its guarantee that it cannot run twice. Both are enforced in the database rather than by a check in the handler, which is the part worth understanding before you run it.",
+      },
+      { type: "h", id: "does", text: "What one call does" },
+      {
+        type: "p",
+        text: "Bootstrap is a single call that provisions the entire first-run state, inside one transaction. There is no partially-bootstrapped outcome: either all of the following exists afterwards, or none of it does.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Creates the organization",
+            body: "From `organization_name`, with `organization_slug` derived from it when you do not supply one. Get-or-create by slug, so retrying after a transient failure reuses the organization rather than duplicating it.",
+          },
+          {
+            title: "Creates the default tenant",
+            body: "From `tenant_name` (default `\"Default\"`) and `tenant_slug` (default `\"default\"`). Also get-or-create by slug.",
+          },
+          {
+            title: "Seeds the permission registry into the tenant",
+            body: "All 113 built-in permissions across 25 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
+          },
+          {
+            title: "Seeds three default roles",
+            body: "`super-admin` (full system access — every permission), `admin` (all entity CRUD) and `viewer` (read-only: list and get). Seeding is idempotent — already-granted pairs are skipped rather than re-granted.",
+          },
+          {
+            title: "Creates the admin user and binds the super-admin role",
+            body: "The password is hashed with Argon2id server-side. If you asked for an OPAQUE baseline, the registration record is created here too.",
+          },
+          {
+            title: "Takes the bootstrap lock",
+            body: "A uniqueness-invariant `bootstrap_lock:global` row is created in the same transaction. This is what makes the operation one-shot — see below.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Bootstrap issues **no token**. The new admin authenticates through `POST /api/v1/auth/login` like anybody else. That is deliberate: a provisioning endpoint that also hands out a session is a provisioning endpoint that is worth attacking twice.",
+      },
+      { type: "h", id: "gates", text: "The gate — fail-closed, two ways to satisfy it" },
+      {
+        type: "p",
+        text: "A request is refused with `403` unless **one** of two gates is satisfied. Neither gate being configured does not mean *allow*; it means the endpoint is unusable until an operator configures one. There is no deployment in which an arbitrary caller can create the first admin.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Gate", "How it works", "When to prefer it"],
+        rows: [
+          [
+            "`AXIAM_BOOTSTRAP_ADMIN_EMAIL`",
+            "Set this environment variable on the `axiam-server` process before it starts. The request's `email` field must match it **exactly**, or the call is refused. When this variable is set, `setup_token` is ignored entirely.",
+            "Automated and declarative deployments. The operator names the first admin before the server exists, and nothing has to be recovered from a log.",
+          ],
+          [
+            "One-time setup token",
+            "Used only when the variable is unset. On first boot — and only while no admin has ever been bootstrapped — the server mints a random token, stores its SHA-256 hash, and logs the token once at `info`. Pass it as `setup_token`.",
+            "Interactive installs and local exploration, where you are watching the server start.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "The token is single-use, and that is enforced twice. A pre-check rejects a hash that is unknown or already consumed; the authoritative guarantee is a `bootstrap_setup_token_consumed` row created inside the same transaction as the admin user, so two requests racing past the pre-check still leave exactly one winner — the loser hits a uniqueness violation and its whole transaction rolls back.",
+      },
+      {
+        type: "warn",
+        text: "The setup token is written to the server log exactly once, at `info` level. If your log pipeline drops `info`, buffers it, or you simply scroll past it, there is no way to re-read or re-mint it. Set `AXIAM_BOOTSTRAP_ADMIN_EMAIL` and restart instead — for anything unattended, prefer that gate in the first place.",
+      },
+      {
+        type: "note",
+        text: "`AXIAM_BOOTSTRAP_ADMIN_EMAIL` uses a **single** underscore after the prefix, unlike the `AXIAM__*` configuration variables. It is read straight from the environment rather than through the layered config loader, which is why it does not follow that convention — and why doubling the underscore here silently disables the gate.",
+      },
+      { type: "h", id: "once", text: "Why it can only ever run once" },
+      {
+        type: "p",
+        text: "The one-shot property is not a `SELECT` followed by an `INSERT` — that pattern has a window between the two in which a second caller can also pass. Instead, creating the first super-admin includes creating `bootstrap_lock:global`, a row whose record id is a uniqueness invariant, in the *same* transaction.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Two concurrent first-run requests** — both attempt the lock, one wins, the loser gets `409 Conflict` and rolls back completely. At most one super-admin can exist, with no orphaned role assignment left behind.",
+          "**Any later call** — hits the same uniqueness violation and is refused with `409`. Additional organizations, tenants and admins are created through the authenticated admin API from then on.",
+        ],
+      },
+      { type: "h", id: "request", text: "Request fields" },
+      {
+        type: "table",
+        headers: ["Field", "Required", "Meaning"],
+        rows: [
+          ["organization_name", "yes", "Display name of the organization to create."],
+          [
+            "organization_slug",
+            "no",
+            "URL-safe slug. Derived from `organization_name` when omitted or blank — ASCII alphanumerics are lower-cased and every other run of characters collapses to a single dash.",
+          ],
+          ["tenant_name", "no", "Display name of the default tenant. Defaults to `Default`."],
+          ["tenant_slug", "no", "URL-safe slug for that tenant. Defaults to `default`."],
+          ["email", "yes", "Admin email address. Must match `AXIAM_BOOTSTRAP_ADMIN_EMAIL` when that gate is in use."],
+          ["username", "yes", "Admin username."],
+          ["password", "yes", "Admin password. Hashed with Argon2id before storage."],
+          [
+            "setup_token",
+            "conditional",
+            "Required when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored when it is.",
+          ],
+          [
+            "opaque_mode",
+            "no",
+            "Seeds the new organization's OPAQUE baseline: `disabled` (the default), `optional` or `required`.",
+          ],
+          [
+            "opaque_suite",
+            "no",
+            "RFC 9807 ciphersuite for that baseline. Defaults to `ristretto255_sha512`.",
+          ],
+          [
+            "opaque_ksf",
+            "no",
+            "Client key-stretching function for that baseline. Defaults to `argon2id`.",
+          ],
+        ],
+      },
+      { type: "h", id: "call", text: "Making the call" },
+      {
+        type: "code",
+        caption: "gate 1 — AXIAM_BOOTSTRAP_ADMIN_EMAIL",
+        code: "# Set on the axiam-server process, BEFORE it starts.\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"organization_slug\": \"acme\",\n        \"tenant_name\": \"Production\",\n        \"tenant_slug\": \"production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+      },
+      {
+        type: "code",
+        caption: "gate 2 — the one-time setup token",
+        code: "# Capture the token the server logged once at first boot:\n#   AXIAM first-run bootstrap setup token minted. Use this token ONCE ...\nexport SETUP_TOKEN=...\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\",\n        \"setup_token\": \"'\"$SETUP_TOKEN\"'\"\n      }'",
+      },
+      {
+        type: "code",
+        caption: "201 Created",
+        code: "{\n  \"message\": \"Bootstrap completed\",\n  \"organization_id\": \"0f8c...\",\n  \"organization_slug\": \"acme\",\n  \"tenant_id\": \"3a91...\",\n  \"tenant_slug\": \"production\",\n  \"user_id\": \"c47b...\"\n}",
+      },
+      {
+        type: "p",
+        text: "Keep `organization_slug` and `tenant_slug` — every SDK constructor takes them, and they are how a client names the tenant it is talking to.",
+      },
+      { type: "h", id: "responses", text: "Response codes" },
+      {
+        type: "table",
+        headers: ["Status", "Meaning", "What to do"],
+        rows: [
+          ["201", "Organization, tenant and admin created.", "Log in and continue with the checklist below."],
+          [
+            "400",
+            "A required field is missing or blank (`organization_name`, `email`, `username`, `password`).",
+            "Fix the body. Nothing was created.",
+          ],
+          [
+            "403",
+            "The gate was not satisfied — email mismatch, or a missing/unknown/already-consumed setup token. The error names which.",
+            "Check that `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set on the *server* process and matches byte-for-byte, or that you are using a fresh token.",
+          ],
+          [
+            "409",
+            "Bootstrap has already completed on this deployment, or a concurrent request won the race.",
+            "Not an error to retry. Log in as the existing admin; create further tenants and admins through the authenticated API.",
+          ],
+        ],
+      },
+      { type: "h", id: "opaque", text: "Seeding an OPAQUE baseline at bootstrap" },
+      {
+        type: "p",
+        text: "`opaque_mode` is settable here, and not only through the settings API afterwards, for one specific reason: OPAQUE's `required` mode cannot be turned on retroactively. A registration record has to be built from the plaintext password, and a stored Argon2id hash is not invertible — so nobody can be enrolled after the fact. If you switched a deployment to `required` while its only account had no record, you would lock the sole administrator out of their own system with no second admin to undo it.",
+      },
+      {
+        type: "p",
+        text: "Bootstrap is also the one enrolment path that does not take a client-built record, and that is not a weakening. Every other path requires the client to build the record because the server must never see the plaintext; bootstrap takes `password` in the request body by construction, so it runs the client half of the registration itself. The resulting record is indistinguishable from a client-built one.",
+      },
+      {
+        type: "note",
+        text: "If you want an OPAQUE record the server provably never held material for, change the admin password once after bootstrap through the ordinary password-change flow — that path is client-built like every other one.",
+      },
+      { type: "h", id: "after", text: "What to do immediately after" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Enrol a second factor on the admin account",
+            body: "A single-factor super-admin is the most valuable credential in the deployment. Register a passkey or a TOTP authenticator before anything else.",
+          },
+          {
+            title: "Create a second administrator",
+            body: "One admin account is one lost device away from an unrecoverable deployment, and bootstrap cannot be run again to rescue you.",
+            code: "POST /api/v1/users            # create the user\nPOST /api/v1/roles/{role_id}/users   # bind them to super-admin",
+          },
+          {
+            title: "Create the tenants you actually need",
+            body: "The bootstrap tenant is a starting point, not a container for everything. Tenants are the isolation boundary — one per customer, environment or business unit.",
+            code: "POST /api/v1/organizations/{org_id}/tenants\n{ \"name\": \"Acme Staging\", \"slug\": \"acme-staging\" }",
+          },
+          {
+            title: "Review the settings baseline",
+            body: "Password policy, lockout, token lifetimes, MFA enforcement and the OPAQUE mode all default at the organization and are tightened per tenant.",
+            code: "GET /api/v1/organizations/{org_id}/settings",
+          },
+          {
+            title: "Unset the bootstrap gate",
+            body: "Once bootstrap has completed, `AXIAM_BOOTSTRAP_ADMIN_EMAIL` does nothing — the lock refuses every further call regardless. Removing it keeps your deployment manifest honest about what is still load-bearing.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Settings & policies →",
+            body: "The org baseline, tenant tighten-only overrides, and every policy field.",
+            to: "docs",
+            doc: "settings",
+          },
+          {
+            title: "Production hardening →",
+            body: "The checklist to work through before this deployment carries real traffic.",
+            to: "docs",
+            doc: "hardening",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "concepts",
+    section: "Getting started",
+    navLabel: "Core concepts",
+    title: "Core concepts",
+    intro:
+      "The domain model AXIAM is built around — organizations and tenants at the top, and the entities scoped inside them.",
+    blocks: [
+      { type: "h", id: "tenancy", text: "Organizations & tenants" },
+      {
+        type: "p",
+        text: "**Organizations** are the top-level entity. They own the CA certificates, hold the settings baseline, and contain one or more tenants. **Tenants** are the isolation boundary: each has its own users, groups, roles, permissions, resources, certificates, OAuth2 clients, federation configuration and OPAQUE key material. Nothing crosses a tenant boundary implicitly.",
+      },
+      {
+        type: "p",
+        text: "There is no default tenant and no ambient tenant context. Every SDK constructor takes one, every gRPC request message carries `tenant_id`, and every OAuth2 endpoint takes it as a query parameter. This is deliberate: the most common multi-tenancy bug is a query that forgot to filter, and an API that cannot express *unscoped* cannot express that bug.",
+      },
+      {
+        type: "code",
+        caption: "the containment hierarchy",
+        code: "Organization  (CA certificates, settings baseline)\n └── Tenant   (the isolation boundary)\n      ├── Users, Groups, Service accounts\n      ├── Roles → Permissions (action + resource, allow or deny)\n      ├── Resources (a tree) → Scopes\n      ├── OAuth2 clients, Federation configs\n      ├── Certificates, PGP keys\n      └── Webhooks, Reactors, Notification rules",
+      },
+      { type: "h", id: "identity", text: "Identities" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Entity", "What it is"],
+        rows: [
+          [
+            "User",
+            "A human identity. Authenticates with a password, an OPAQUE record, a federated IdP, a passkey, or a client certificate — with optional MFA on top.",
+          ],
+          [
+            "Group",
+            "A named collection of users. Roles assigned to a group are inherited by every member, which is how you avoid per-user grants.",
+          ],
+          [
+            "Service account",
+            "A non-human identity for machine-to-machine access. Authenticates with client credentials or a bound X.509 certificate, and can have its secret rotated in place.",
+          ],
+          [
+            "OAuth2 client",
+            "A registered application. Confidential or public, with its own redirect URIs, grant types, scopes and — optionally — a FAPI 2.0 constraint bundle.",
+          ],
+        ],
+      },
+      { type: "h", id: "access", text: "Roles, permissions & resources" },
+      {
+        type: "p",
+        text: "A **permission** is an action on a resource, carrying an effect of either allow or deny. A **role** is a collection of permissions, assignable to users or to groups, and either global or bound to a specific resource. **Resources** form a tree, and a role assigned on a parent cascades to its descendants. **Scopes** add sub-resource granularity where a permission needs to apply to only part of a resource.",
+      },
+      {
+        type: "p",
+        text: "Evaluation is **default-deny with deny-override**: nothing is permitted unless a grant allows it, and an explicit `effect: \"deny\"` refuses regardless of what else allows it — at any depth of the hierarchy and at equal specificity. See [the authorization engine](#/docs/authz) for the precedence table and why deny-override rather than most-specific-wins.",
+      },
+      {
+        type: "note",
+        text: "Earlier revisions of this page described the engine as additive-only with no explicit deny. That was accurate before deny grants shipped; it is not accurate now. Deny is a first-class effect on a permission grant.",
+      },
+      { type: "h", id: "sessions", text: "Sessions, tokens & credentials" },
+      {
+        type: "p",
+        text: "Authenticating produces a **session**, identified by a `sid` that survives token refresh. Access tokens are short-lived EdDSA-signed JWTs; refresh tokens are opaque, server-stored and single-use. In a browser both live only in `httpOnly` cookies. Logging out ends the session — and, if relying parties are registered for back-channel logout, tells them so.",
+      },
+      { type: "h", id: "audit", text: "Everything is audited" },
+      {
+        type: "p",
+        text: "Every authentication, authorization decision and administrative mutation is written to an append-only, cryptographically signed audit log. There are no UPDATE or DELETE paths on it. This is a property of the platform rather than a feature you enable.",
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Authorization engine →",
+            body: "Precedence, cascade, scopes and how a decision is actually computed.",
+            to: "docs",
+            doc: "authz",
+          },
+          {
+            title: "The security model →",
+            body: "Threat model, cryptography and shared responsibility.",
+            to: "security",
+          },
+        ],
+      },
+    ],
+  },
+];

@@ -16,7 +16,7 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 - **Frontend**: React + TypeScript (Vite)
 - **API Protocols**: REST (OpenAPI documented), gRPC (Protocol Buffers), AMQP
 - **Deployment**: Docker, Kubernetes
-- **SDKs**: Rust, Python, TypeScript, Java, C#, PHP, Go — each in its own `axiam-<lang>-sdk` repository
+- **SDKs**: Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++ — eleven, each in its own `axiam-<lang>-sdk` repository
 
 ## Core Domain Model
 
@@ -36,7 +36,8 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 
 - OAuth2 for authorization (Authorization Code + PKCE, Client Credentials, Refresh Token)
 - OpenID Connect for authentication/identity
-- MFA support (TOTP, extensible to WebAuthn)
+- MFA support: TOTP, plus WebAuthn passkeys and security keys with a per-tenant attestation policy
+- OPAQUE (RFC 9807) as an optional augmented PAKE — off by default, enabled per organization or tenant
 - Certificate-based authentication (mTLS for IoT devices)
 - gRPC for low-latency authz checks in service mesh
 - AMQP for async/deferred authz decisions
@@ -58,6 +59,11 @@ axiam/
 │   ├── axiam-federation/   # SAML SP + OIDC federation
 │   ├── axiam-audit/        # Audit logging service
 │   ├── axiam-pki/          # Certificate management, CA, GnuPG integration
+│   ├── axiam-email/        # Transactional mail (verification, reset, alerts)
+│   ├── axiam-scim/         # SCIM 2.0 provisioning endpoint
+│   ├── axiam-opaque/       # OPAQUE (RFC 9807) — the single client implementation
+│   ├── axiam-opaque-ffi/   # C ABI over axiam-opaque, bound by eight SDKs
+│   ├── axiam-opaque-wasm/  # WebAssembly build, for the TS SDK and admin UI
 │   └── axiam-server/       # Binary — composes all crates
 ├── proto/                  # Protocol Buffer definitions
 ├── frontend/               # React admin UI
@@ -93,10 +99,27 @@ Test-only outward edges are allowed but must be declared in
 [`claude_dev/crate-layering.md`](claude_dev/crate-layering.md) for the rationale
 behind each placement.
 
-The seven client SDKs are **not** in this repository — each lives in its own
-`ilpanich/axiam-<lang>-sdk` repo (rust, typescript, python, java, csharp, php, go) and
-vendors a copy of `sdks/CONTRACT.md`, `sdks/openapi.json` and `proto/`, which are
-maintained here and must be re-synced downstream when they change.
+The eleven client SDKs are **not** in this repository — each lives in its own
+`ilpanich/axiam-<lang>-sdk` repo (rust, typescript, python, java, kotlin, csharp,
+php, go, swift, c, cplusplus) and vendors a copy of `sdks/CONTRACT.md`,
+`sdks/openapi.json` and `proto/`, which are maintained here and must be re-synced
+downstream when they change.
+
+Seven of them — Rust, TypeScript, Python, Java, C#, PHP, Go — implement the full
+CONTRACT §1–§11 surface including the gRPC and AMQP transports. Kotlin, Swift, C
+and C++ cover the REST surface (§1–§7, §9–§11, including §6.1 mTLS).
+
+## Public website & documentation site
+
+The public site lives in `website/` (React + Vite) and is published to
+<https://ilpanich.github.io/axiam/> by `.github/workflows/website-publish.yml`.
+Its documentation section is authored as a block content model under
+`website/src/docs/` — one module per sidebar section, assembled by
+`website/src/docs/index.ts`, which is also the source of truth for page order.
+`docSectionsAreComplete()` asserts navigation and content agree.
+
+Do not duplicate normative detail there: the site is the readable front door and
+links out to `docs/`, `sdks/CONTRACT.md` and the specs for anything binding.
 
 ## Development Artifacts
 

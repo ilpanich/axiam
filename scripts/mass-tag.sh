@@ -45,7 +45,13 @@
 #                      identical apart from this field, so a targeted rewrite
 #                      keeps the gate green with no rebuild; docs/api/openapi.json
 #                      is a symlink to it); the frontend Sidebar version string
-#                      and its test; the two k8s deployment image tags.
+#                      and its test; the two k8s deployment image tags; and
+#                      crates/axiam-opaque-wasm/Cargo.toml, which is outside
+#                      the workspace and so inherits nothing.
+#   axiam-opaque       NOT a repo — the shared OPAQUE client core inside the
+#                      platform clone, released on its own `axiam-opaque-v*`
+#                      tag (see TAG NAMES). Bumps exactly the same files as
+#                      `axiam`, because it is the same working tree.
 #   axiam-rust-sdk     Cargo.toml package version and the `=`-pinned
 #                      axiam-sdk-macros dependency; axiam-sdk-macros/Cargo.toml;
 #                      axiam-sdk-wasm/Cargo.toml (excluded from the workspace,
@@ -80,11 +86,23 @@
 # configured, tag/commit creation fails and the script stops; it never pushes
 # an unsigned tag.
 #
-# TAG NAMES: every repo — the platform included — now releases on a plain
-# `v*` tag (the platform's release workflow was reconciled from the old
-# namespaced `axiam-server/v*` to `v*`). Tags are per-repo, so the same
-# `v1.0.0-alpha` in each repo is unambiguous. A single run can therefore cut
-# the whole fleet:
+# TAG NAMES: every repo — the platform included — releases on a plain `v*` tag
+# (the platform's release workflow was reconciled from the old namespaced
+# `axiam-server/v*` to `v*`). Tags are per-repo, so the same `v1.0.0-alpha` in
+# each repo is unambiguous.
+#
+# The one exception is the `axiam-opaque` target, which is not a repo at all:
+# the shared OPAQUE client core ships from the platform clone but on its own
+# `axiam-opaque-v<version>` tag, because that is the only ref
+# .github/workflows/release-opaque.yml triggers on — a plain `v*` tag publishes
+# the server and leaves the crates.io / npm / C-ABI artifacts un-cut. Selecting
+# it puts a SECOND tag on the same commit the platform release was tagged on,
+# which is exactly what the split namespace is for: the wire format is a
+# cross-language contract and is versioned deliberately, not as a side effect of
+# a server release. Include it in the run whenever a release should also publish
+# a new client core, and leave it out when it should not.
+#
+# A single run can therefore cut the whole fleet:
 #     scripts/mass-tag.sh -r all -b main -t v1.0.0-alpha -m "first alpha release" -p
 # (Use --repos to release a subset — e.g. -r axiam or -r all-sdks — when the
 # platform and SDKs are versioned on different cadences.)
@@ -96,12 +114,14 @@
 #                       --message <message> \
 #                       [--pull] [--no-bump] [--root <dir>] [--dry-run]
 #
-#   -r, --repos    (required) 'all' (platform + 7 SDKs), 'all-sdks' (the 7
-#                  SDKs only), or a comma-separated subset of the known repo
-#                  names below.
+#   -r, --repos    (required) 'all' (platform + axiam-opaque + the SDKs),
+#                  'all-sdks' (the SDKs only), or a comma-separated subset of
+#                  the known target names below.
 #   -b, --branch   (required) branch to tag; must exist in every selected repo.
-#   -t, --tag      (required) tag name to create (identical across the run). The
-#                  release version is derived from it (strip 'prefix/' and 'v').
+#   -t, --tag      (required) tag name to create; identical across the run
+#                  except for `axiam-opaque`, which is namespaced (see TAG
+#                  NAMES). The release version is derived from it (strip
+#                  'prefix/' and 'v').
 #   -m, --message  (required) tag message; the final annotation for each repo
 #                  is "<repo-name> - <message>".
 #   -p, --pull     (optional) fast-forward pull each branch from origin before
@@ -122,9 +142,16 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Known repos. `all` = the platform repo first, then the seven SDKs.
+# Known targets. `all` = the platform repo, then the OPAQUE client core that
+# ships from it, then the SDKs.
 # ---------------------------------------------------------------------------
 PLATFORM_REPO="axiam"
+# Not a repo of its own: the shared OPAQUE client core lives in the platform
+# clone (crates/axiam-opaque{,-ffi,-wasm}) but releases on its OWN tag
+# namespace, `axiam-opaque-v*`, because .github/workflows/release-opaque.yml
+# triggers on nothing else. Treating it as a selectable target is what makes
+# that workflow fire; a plain `v*` tag never reaches it.
+OPAQUE_TARGET="axiam-opaque"
 SDK_REPOS=(
   axiam-rust-sdk
   axiam-typescript-sdk
@@ -138,7 +165,7 @@ SDK_REPOS=(
   axiam-c-sdk
   axiam-cplusplus-sdk
 )
-ALL_REPOS=("$PLATFORM_REPO" "${SDK_REPOS[@]}")
+ALL_REPOS=("$PLATFORM_REPO" "$OPAQUE_TARGET" "${SDK_REPOS[@]}")
 
 # ---------------------------------------------------------------------------
 # Defaults / arg storage
@@ -174,7 +201,9 @@ Usage:
   -r, --repos    (required) 'all', 'all-sdks', or a comma-separated subset.
   -b, --branch   (required) branch to tag; must exist in every selected repo.
   -t, --tag      (required) tag name to create (plain v* for every repo); the
-                 release version is derived from it (v1.4.0 means 1.4.0).
+                 release version is derived from it (v1.4.0 means 1.4.0). The
+                 'axiam-opaque' target rewrites it to axiam-opaque-v<version>,
+                 the only ref release-opaque.yml triggers on.
   -m, --message  (required) tag message; each tag's annotation is
                  "<repo-name> - <message>".
   -p, --pull     (optional) fast-forward pull each branch before releasing.
@@ -189,9 +218,12 @@ Usage:
                  Pre-flight validation still runs.
   -h, --help     show this help and exit.
 
-Known repos: axiam (platform) + the seven axiam-<lang>-sdk repos.
-Every repo releases on a plain v* tag, so one run (e.g. -r all -t v1.0.0) can
-cut the whole fleet; use --repos to release a subset on its own cadence.
+Known targets: axiam (platform), axiam-opaque (the shared OPAQUE client core,
+inside the platform clone, tagged axiam-opaque-v*), and the axiam-<lang>-sdk
+repos. Everything else releases on a plain v* tag, so one run (e.g. -r all
+-t v1.0.0) can cut the whole fleet; use --repos to release a subset on its own
+cadence — in particular, drop axiam-opaque from a run that must not publish a
+new client core.
 EOF
 }
 
@@ -250,6 +282,29 @@ if $BUMP; then
 fi
 
 # ---------------------------------------------------------------------------
+# Where a target's clone is, and which tag it releases on.
+#
+# Every target but one is a repo of its own, tagged with --tag verbatim. The
+# `axiam-opaque` target is the exception on BOTH counts: it lives in the
+# platform clone, and release-opaque.yml only triggers on `axiam-opaque-v*`.
+# The prefix is joined to the derived VERSION rather than to --tag so the tag
+# is well-formed whether or not the caller wrote the leading `v`.
+# ---------------------------------------------------------------------------
+repo_dir() {
+  case "$1" in
+    "$OPAQUE_TARGET") printf '%s/%s' "$ROOT" "$PLATFORM_REPO" ;;
+    *)                printf '%s/%s' "$ROOT" "$1" ;;
+  esac
+}
+
+repo_tag() {
+  case "$1" in
+    "$OPAQUE_TARGET") printf 'axiam-opaque-v%s' "$RELEASE_VERSION" ;;
+    *)                printf '%s' "$TAG" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Resolve the selected repo list
 # ---------------------------------------------------------------------------
 declare -a REPOS
@@ -294,8 +349,10 @@ vcpkg_manifest_path() {
 # returns 0 — a missing match must not abort the caller under `set -e`.
 current_version() {
   { case "$1" in
-    axiam)
-      # The [workspace.package] version — the source all crates inherit.
+    axiam|axiam-opaque)
+      # The [workspace.package] version — the source all crates inherit,
+      # axiam-opaque and axiam-opaque-ffi included (both are `version.workspace
+      # = true`), so it is what `cargo publish -p axiam-opaque` uploads.
       sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1
       ;;
     axiam-rust-sdk)
@@ -368,6 +425,57 @@ set_quoted_field() {
   BUMP_FILES+=("$file")
 }
 
+# Set the `[package] version` of a STANDALONE crate manifest $1 (one that is
+# not a workspace member and so inherits nothing) to $2, whatever it currently
+# says. Unlike sub_literal this does not need the old value, which matters
+# because such a manifest is exactly the file that drifts out of lockstep.
+# Anchored at the start of a line so `rust-version` is not mistaken for it, and
+# un-global so only the first — the [package] one — is rewritten.
+set_crate_version() {
+  local file="$1" version="$2"
+  [[ -f "$file" ]] || { printf '      [skip] %s (absent)\n' "$file"; return 0; }
+  grep -q '^version[[:space:]]*=' "$file" || { printf '      [skip] %s (no package version)\n' "$file"; return 0; }
+  if $DRY_RUN; then
+    printf '      [dry-run] %s: package version -> "%s"\n' "$file" "$version"
+  else
+    VAL="$version" perl -0pi -e 's/^(version[[:space:]]*=[[:space:]]*)"[^"]*"/$1 . "\"" . $ENV{VAL} . "\""/me' "$file"
+    printf '      %s: package version -> "%s"\n' "$file" "$version"
+  fi
+  BUMP_FILES+=("$file")
+}
+
+# Bump to $1 the version REQUIREMENT of every `axiam-opaque = { version = "…",
+# path = … }` dependency in ./crates/*/Cargo.toml.
+#
+# These live in individual crate manifests, so the [workspace.package] rewrite
+# never reaches them, and cargo resolves them by path in this workspace — which
+# is why a stale requirement builds cleanly forever and only bites once
+# axiam-opaque is published under a version the requirement excludes, or once a
+# dependent crate is itself published and cargo goes looking on crates.io for a
+# version that was never cut. Now that the release pipeline actually publishes
+# this crate, the requirement has to name the version being published.
+bump_opaque_dep_reqs() {
+  local version="$1" f before
+  # Anchored at the start of a line so the `-ffi`/`-wasm` crates, whose names
+  # merely start with the same string, are not matched.
+  local re='(^axiam-opaque[[:space:]]*=[[:space:]]*\{[[:space:]]*version[[:space:]]*=[[:space:]]*)"[^"]*"'
+  for f in crates/*/Cargo.toml; do
+    [[ -f "$f" ]] || continue
+    grep -Eq "$re" "$f" || continue
+    if $DRY_RUN; then
+      printf '      [dry-run] %s: axiam-opaque version req -> "%s"\n' "$f" "$version"
+      BUMP_FILES+=("$f")
+      continue
+    fi
+    before="$(cksum < "$f")"
+    RE="$re" VAL="$version" perl -0pi -e 's/$ENV{RE}/$1 . "\"" . $ENV{VAL} . "\""/gme' "$f"
+    if [[ "$(cksum < "$f")" != "$before" ]]; then
+      printf '      %s: axiam-opaque version req -> "%s"\n' "$f" "$version"
+      BUMP_FILES+=("$f")
+    fi
+  done
+}
+
 # Bump every axiam-* crate entry in ./Cargo.lock from $1 to $2. The workspace
 # crates all share one version, so a `cargo build` would rewrite these anyway;
 # doing it here keeps the committed lockfile consistent without a build.
@@ -392,7 +500,10 @@ bump_versions() {
   BUMP_FILES=()
   old="$(current_version "$repo")"
   case "$repo" in
-    axiam)
+    axiam|axiam-opaque)
+      # Both targets bump the same clone — they differ only in the tag they
+      # then put on it — so they must rewrite the same files, or releasing one
+      # would leave the tree half-bumped for the other.
       sub_literal Cargo.toml                                       "$old" "$version"
       sub_literal sdks/openapi.json                                "$old" "$version"
       sub_literal frontend/src/components/layout/Sidebar.tsx       "$old" "$version"
@@ -400,6 +511,14 @@ bump_versions() {
       sub_literal k8s/server/deployment.yml                        "$old" "$version"
       sub_literal k8s/frontend/deployment.yml                      "$old" "$version"
       bump_cargo_lock_axiam                                        "$old" "$version"
+      bump_opaque_dep_reqs                                                  "$version"
+      # Excluded from the workspace (it only builds for wasm32), so it carries
+      # its own literal version that nothing workspace-wide reaches — and that
+      # version is the one wasm-pack writes into the npm package.json, i.e. the
+      # published version of @axiam/opaque-wasm. Set outright rather than
+      # substituted, because when it has drifted the workspace literal is not
+      # in it to substitute.
+      set_crate_version crates/axiam-opaque-wasm/Cargo.toml        "$version"
       ;;
     axiam-rust-sdk)
       # Replaces the package version AND the `=`-pinned axiam-sdk-macros dep
@@ -622,7 +741,8 @@ echo ""
 echo "==> Pre-flight validation"
 preflight_ok=true
 for repo in "${REPOS[@]}"; do
-  dir="$ROOT/$repo"
+  dir="$(repo_dir "$repo")"
+  TAG_FOR_REPO="$(repo_tag "$repo")"
   if [[ ! -d "$dir/.git" ]]; then
     echo "    [FAIL] $repo — not a git repository at $dir"; preflight_ok=false; continue
   fi
@@ -632,12 +752,12 @@ for repo in "${REPOS[@]}"; do
     echo "    [FAIL] $repo — branch '$BRANCH' not found (local or origin)"; preflight_ok=false; continue
   fi
   # Tag must not already exist locally...
-  if git -C "$dir" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "    [FAIL] $repo — tag '$TAG' already exists locally"; preflight_ok=false; continue
+  if git -C "$dir" rev-parse -q --verify "refs/tags/$TAG_FOR_REPO" >/dev/null 2>&1; then
+    echo "    [FAIL] $repo — tag '$TAG_FOR_REPO' already exists locally"; preflight_ok=false; continue
   fi
   # ...nor on origin (never silently clobber a published release tag).
-  if [[ -n "$(git -C "$dir" ls-remote --tags origin "refs/tags/$TAG" 2>/dev/null)" ]]; then
-    echo "    [FAIL] $repo — tag '$TAG' already exists on origin"; preflight_ok=false; continue
+  if [[ -n "$(git -C "$dir" ls-remote --tags origin "refs/tags/$TAG_FOR_REPO" 2>/dev/null)" ]]; then
+    echo "    [FAIL] $repo — tag '$TAG_FOR_REPO' already exists on origin"; preflight_ok=false; continue
   fi
   # When bumping, the repo's current version must be discoverable (except for
   # the tag-derived repos), so the rewrite has a known starting point.
@@ -646,9 +766,9 @@ for repo in "${REPOS[@]}"; do
     if [[ "$repo" != axiam-php-sdk && "$repo" != axiam-go-sdk && -z "$cv" ]]; then
       echo "    [FAIL] $repo — could not determine current version to bump"; preflight_ok=false; continue
     fi
-    echo "    [ ok ] $repo (${cv:-tag-derived} -> $RELEASE_VERSION)"
+    echo "    [ ok ] $repo (${cv:-tag-derived} -> $RELEASE_VERSION) tag $TAG_FOR_REPO"
   else
-    echo "    [ ok ] $repo"
+    echo "    [ ok ] $repo (tag $TAG_FOR_REPO)"
   fi
 done
 $preflight_ok || die "pre-flight validation failed; nothing was tagged."
@@ -661,9 +781,10 @@ echo "==> Releasing"
 FAIL_COUNT=0
 FAILED_REPOS=""
 for repo in "${REPOS[@]}"; do
-  dir="$ROOT/$repo"
+  dir="$(repo_dir "$repo")"
+  TAG_FOR_REPO="$(repo_tag "$repo")"
   full_msg="$repo - $MESSAGE"
-  echo "  --- $repo ---"
+  echo "  --- $repo (tag $TAG_FOR_REPO) ---"
   (
     set -euo pipefail
     cd "$dir"
@@ -725,14 +846,14 @@ for repo in "${REPOS[@]}"; do
       fi
     fi
 
-    echo "    sign tag $TAG on HEAD ($(git rev-parse --short HEAD)) — \"$full_msg\""
-    run git tag -s "$TAG" -m "$full_msg"
+    echo "    sign tag $TAG_FOR_REPO on HEAD ($(git rev-parse --short HEAD)) — \"$full_msg\""
+    run git tag -s "$TAG_FOR_REPO" -m "$full_msg"
 
     echo "    push branch $BRANCH"
     run git push origin "$BRANCH"
 
-    echo "    push tag $TAG"
-    run git push origin "refs/tags/$TAG"
+    echo "    push tag $TAG_FOR_REPO"
+    run git push origin "refs/tags/$TAG_FOR_REPO"
   ) || { echo "    [FAILED] $repo"; FAIL_COUNT=$((FAIL_COUNT + 1)); FAILED_REPOS="$FAILED_REPOS $repo"; continue; }
   echo "    [done] $repo"
 done
@@ -745,4 +866,4 @@ if [[ $FAIL_COUNT -gt 0 ]]; then
   echo "==> Completed with failures:$FAILED_REPOS"
   exit 1
 fi
-echo "==> All ${#REPOS[@]} repo(s) released as '$TAG' (version $RELEASE_VERSION) and pushed."
+echo "==> All ${#REPOS[@]} target(s) released at version $RELEASE_VERSION and pushed."

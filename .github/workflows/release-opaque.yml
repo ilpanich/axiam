@@ -18,6 +18,43 @@
 # contract, and it should be publishable on its own cadence without implying a
 # server release — and, more importantly, without a server release implying a
 # new client artifact that nothing has been re-tested against.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTHENTICATION — Trusted Publishing (OIDC), no tokens
+#
+# Neither registry is given a long-lived credential. crates.io and npm each
+# authenticate this workflow by its OIDC identity: the repository, the workflow
+# file path and the environment named on the publishing jobs are matched against
+# the trusted publisher configured for `axiam-opaque` and `@axiam/opaque-wasm`.
+#
+# Four things have to stay true or a publish fails, usually with an OIDC
+# mismatch that does not say which one:
+#
+#   1. `id-token: write` on the publishing job. Without it there is no OIDC
+#      token to present, and the tool falls back to looking for a credential
+#      that is not there.
+#   2. `environment: production` matches the environment named in each
+#      registry's trusted-publisher configuration. If a registry names one and
+#      the job omits it — or names a different one — the claim does not match.
+#   3. npm >= 11.5.1. `setup-node` with Node 22 ships npm 10.x, which does not
+#      know about Trusted Publishing at all, so the upgrade step is load-bearing
+#      rather than hygiene.
+#   4. No NPM_TOKEN secret. A token present takes precedence over OIDC, so
+#      leaving one configured would mean Trusted Publishing is set up, believed
+#      to be in use, and silently never used. The publish job asserts its
+#      absence rather than trusting that nobody re-added it.
+#
+# Renaming or moving this file breaks both trust relationships: the workflow
+# path is part of what each registry matches. Update the publishers first.
+#
+# Provenance is automatic under npm Trusted Publishing, so `--provenance` is not
+# passed explicitly.
+#
+# The publishing steps live in their own tag-only jobs rather than as a final
+# `if:` step on the build jobs. That is what keeps `environment: production` off
+# the pull-request path — an environment with a protection rule would otherwise
+# hold every PR run waiting for a human to approve a job that publishes nothing.
+# ─────────────────────────────────────────────────────────────────────────────
 name: Release axiam-opaque
 
 on:
@@ -40,6 +77,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A git tag is not branch-scoped, so a tag cut on a feature branch would
+  # otherwise ship unreviewed code to two registries under a version number that
+  # can never be reclaimed. Every other publishing workflow in the fleet runs
+  # this gate; this one was the exception until Trusted Publishing made it the
+  # only workflow here that publishes without a human handing it a credential.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
   # Everything below runs on a pull request too, in dry-run mode. A manifest
   # that cannot be packaged, a wasm build that cannot be produced or a C ABI
   # that will not link should fail on the PR that broke it, not on the tag
@@ -60,10 +120,40 @@ jobs:
       - name: Package
         run: cargo package -p axiam-opaque
 
+  publish-crate:
+    name: Publish to crates.io (Trusted Publishing)
+    needs: [verify-tag-on-main, crate]
+    if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+    runs-on: ubuntu-latest
+    # Must match the environment named in crates.io's trusted-publisher
+    # configuration for `axiam-opaque`.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write   # crates.io Trusted Publishing OIDC
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Exchange this workflow's OIDC identity for a short-lived crates.io
+      # token. It is scoped to the crates this repository is a trusted publisher
+      # for and expires in minutes, so there is nothing here worth stealing from
+      # a log.
+      #
+      # A leftover CRATES_IO_TOKEN secret would NOT silently win here the way a
+      # stray NPM_TOKEN does — cargo reads only what this step sets — but it
+      # should be deleted anyway: a long-lived publish credential that nothing
+      # uses is a credential nobody is watching.
+      - name: Mint a crates.io token (Trusted Publishing)
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # `--allow-dirty` is deliberately NOT passed: a package that differs from
+      # the committed tree is not the thing the `crate` job tested.
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish -p axiam-opaque
 
   wasm:
@@ -127,11 +217,75 @@ jobs:
             console.log('wasm smoke test passed');
           "
 
-      - name: Publish
-        if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
-        working-directory: crates/axiam-opaque-wasm/pkg
+      # Hand the built package to the tag-only publisher rather than publishing
+      # from here. The wasm toolchain, the two release builds and the smoke test
+      # are all things a PR should run; `environment: production` is not.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opaque-wasm-pkg
+          path: crates/axiam-opaque-wasm/pkg/
+
+  publish-wasm:
+    name: Publish to npm (Trusted Publishing)
+    needs: [verify-tag-on-main, wasm]
+    if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+    runs-on: ubuntu-latest
+    # Must match the environment named in npm's trusted-publisher configuration
+    # for `@axiam/opaque-wasm`.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write   # npm Trusted Publishing OIDC (and provenance, which it implies)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opaque-wasm-pkg
+          path: pkg
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Load-bearing, not hygiene: Trusted Publishing needs npm >= 11.5.1, and
+      # `setup-node` with Node 22 ships npm 10.x, which does not know about it
+      # at all and would quietly look for a token that is not there.
+      - name: Upgrade npm
+        run: npm install -g npm@latest && npm --version
+
+      # Which credential will npm ACTUALLY use? Answer it here rather than
+      # letting a publish succeed by the wrong mechanism.
+      #
+      # The failure this catches is specific and quiet: a leftover NPM_TOKEN
+      # secret takes precedence over OIDC, so Trusted Publishing would be
+      # configured, believed to be in use, and never actually used. Refusing
+      # here is better than a green publish that did not do what this file says
+      # it does.
+      - name: Assert Trusted Publishing will be used
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN_PRESENT: ${{ secrets.NPM_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          echo "npm version: $(npm --version)"
+          echo "package:     @axiam/opaque-wasm"
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token available. This job needs \`id-token: write\`;"
+            echo "::error::without it npm cannot use Trusted Publishing."
+            exit 1
+          fi
+          echo "OIDC token:  available"
+
+          if [ "${NPM_TOKEN_PRESENT}" = "true" ]; then
+            echo "::error::The NPM_TOKEN secret is still set. npm prefers a token over"
+            echo "::error::OIDC, so this publish would silently bypass Trusted"
+            echo "::error::Publishing. Delete the NPM_TOKEN repository secret."
+            exit 1
+          fi
+          echo "NPM_TOKEN:   absent (correct — OIDC will be used)"
+
+      - name: Publish
+        working-directory: pkg
         # npm >= 11 refuses to publish a prerelease under `latest`, so derive
         # the dist-tag from the version rather than hard-coding one.
         run: |
@@ -196,7 +350,7 @@ jobs:
 
   release:
     name: Attach C ABI binaries to the release
-    needs: [crate, wasm, cabi]
+    needs: [verify-tag-on-main, publish-crate, publish-wasm, cabi]
     if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
     runs-on: ubuntu-latest
     permissions:

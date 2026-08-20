@@ -24,3 +24,6 @@ rand08 = { version = "0.8", package = "rand", features = ["getrandom"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

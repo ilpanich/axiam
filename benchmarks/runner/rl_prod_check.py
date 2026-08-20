@@ -104,14 +104,14 @@ RUN_DIR_RE = re.compile(r"run-\d+")
 ENDPOINTS = {
     "login_per_min": (
         "oauth2_password_login.js",
-        # /api/v1/auth/srp/challenge and /srp/verify share this bucket: both are
+        # The three /api/v1/auth/opaque/* endpoints share this bucket: all are
         # unauthenticated, both take a user identifier, and neither carries a
-        # client identity to key on. `srp_challenge.js` drives the challenge
+        # client identity to key on. `opaque_login_start.js` drives the start
         # half — it performs the group exponentiations, so an unlimited version
         # would be a cheap way to burn server CPU. One scenario per family is
         # this map's invariant, so it is named here rather than given its own
         # (non-existent) config key.
-        "POST /api/v1/auth/login (also covers /api/v1/auth/srp/*)",
+        "POST /api/v1/auth/login (also covers /api/v1/auth/opaque/*)",
     ),
     "token_per_min": ("oauth2_client_credentials.js", "POST /oauth2/token (client_credentials)"),
     "introspect_per_min": ("token_introspection.js", "POST /oauth2/introspect"),

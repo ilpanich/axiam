@@ -86,13 +86,20 @@ AXIAM targets compliance with:
 - **ISO 27001** — Access control, cryptography, audit logging
 - **CyberSecurity Act** — Secure by design, vulnerability management
 
-### Secure Remote Password (optional)
+### OPAQUE (optional)
 
-AXIAM can authenticate with **SRP-6a**, an augmented PAKE in which the password
-never reaches the server — only a verifier `v = g^x mod N` computed on the
-client. This closes the exposure TLS does not: a TLS-terminating proxy, an
-accidentally verbose request log, or a heap dump can no longer capture a
-plaintext password, because the server never has one.
+AXIAM can authenticate with **OPAQUE** ([RFC 9807](https://datatracker.ietf.org/doc/rfc9807/)),
+the CFRG's augmented PAKE, in which the password never reaches the server —
+only a registration record whose envelope is sealed under a key the client
+derives through the server's oblivious PRF. This closes the exposure TLS does
+not: a TLS-terminating proxy, an accidentally verbose request log, or a heap
+dump can no longer capture a plaintext password, because the server never has
+one.
+
+It also means a **stolen record database is not offline-crackable on its own**.
+Recovering a password additionally requires the tenant's OPRF seed, which is
+encrypted at rest separately — so unlike a stolen password-hash database, there
+is no dictionary attack to mount at any cost.
 
 It does **not** defend against a compromised AXIAM server, and for browser
 clients it does not defend against AXIAM serving malicious JavaScript. The
@@ -100,16 +107,25 @@ strong case is native SDK clients, IoT devices, and deployments sitting behind
 infrastructure the tenant does not control.
 
 It is **off by default** and enabled per organization or tenant
-(`srp_mode: disabled | optional | required`). `required` cannot be turned on
-safely until every user has enrolled, because a verifier needs the plaintext
+(`opaque_mode: disabled | optional | required`). `required` cannot be turned on
+safely until every user has enrolled, because a record needs the plaintext
 password and a stored Argon2id hash is not invertible — so nobody can be
 enrolled retroactively. See
-[`claude_dev/srp-design.md`](claude_dev/srp-design.md) for the migration
+[`claude_dev/opaque-design.md`](claude_dev/opaque-design.md) for the migration
 runbook, and `sdks/CONTRACT.md` §23 for the cross-language protocol.
 
+Every AXIAM client — the eleven SDKs and the admin UI — binds one audited
+implementation (`crates/axiam-opaque`), compiled directly, through WebAssembly,
+or through its C ABI. OPAQUE is not a protocol it is reasonable to hand-write
+once per language.
+
 ```bash
-# Required whenever any org or tenant has srp_mode != disabled.
-export AXIAM__AUTH__SRP_SESSION_KEY="$(openssl rand -hex 32)"
+# Both required whenever any org or tenant has opaque_mode != disabled.
+# Seals in-flight exchange state; cheap to rotate.
+export AXIAM__AUTH__OPAQUE_SESSION_KEY="$(openssl rand -hex 32)"
+# Encrypts per-tenant OPRF seeds at rest. Back this up: losing it means every
+# user in every tenant needs a password reset.
+export AXIAM__AUTH__OPAQUE_SETUP_KEY="$(openssl rand -hex 32)"
 ```
 
 ## Development Progress

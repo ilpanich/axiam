@@ -133,20 +133,6 @@ base64 = "0.23"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
 aes-gcm = "0.11"
-# SRP-6a group arithmetic (crates/axiam-auth/src/srp.rs). `num-bigint` is
-# already an unconditional transitive dependency of the workspace (via
-# `rsa`/`num-bigint-dig`'s shared tree and `surrealdb`), so naming it here
-# promotes an already-vendored crate to a direct dependency for the one code
-# path that needs modular exponentiation rather than widening the supply chain.
-#
-# It is NOT constant-time. That is acceptable for SRP's server side and no
-# other: the only secret exponent the server raises is the per-request
-# ephemeral `b`, which is discarded when the exchange ends. The long-term
-# secret — the verifier `v` — is a *base*, never an exponent, so a timing
-# signal on `v` is not available to leak. See the module docs for the full
-# argument.
-num-bigint = "0.4"
-num-traits = "0.2"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 
 # Shared test fixtures (dev-dependency only; see crates/axiam-test-support)
@@ -159,7 +145,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 thiserror = "2"
-anyhow = "1"
 
 # Logging & Tracing
 tracing = "0.1"
@@ -202,7 +187,6 @@ proptest = "1"
 
 # Internal crates
 axiam-core = { path = "crates/axiam-core" }
-axiam-opaque = { path = "crates/axiam-opaque" }
 axiam-db = { path = "crates/axiam-db" }
 axiam-auth = { path = "crates/axiam-auth" }
 axiam-authz = { path = "crates/axiam-authz" }

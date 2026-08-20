@@ -21,10 +21,24 @@ const JSONH = { headers: { 'Content-Type': 'application/json' } };
 // --- AXIAM ----------------------------------------------------------------
 // REST under /api/v1; OAuth2/OIDC under /oauth2 and /.well-known. Tenant context
 // is carried in the request body / query (?tenant_id=) per the REST handlers.
-// A fixed 2048-bit client public value for the SRP challenge probe. Any value
-// not congruent to zero modulo the group prime makes the server do the same
-// work, and this one is a long way from it.
-const SRP_FIXED_CLIENT_PUBLIC = '5a3f'.repeat(128);
+// Fixed, valid OPAQUE protocol messages for the probes below.
+//
+// These are ristretto255 group elements and must deserialize, so — unlike
+// SRP's `A`, which could be any integer not congruent to zero — they cannot be
+// invented here. They were emitted by
+// `cargo run -p axiam-opaque --example bench_fixtures`, which is also what to
+// re-run if the suite ever changes.
+//
+// Fixed rather than fresh per iteration on purpose: the server performs
+// identical work for any well-formed message, and generating a real one inside
+// a k6 VU would put elliptic-curve arithmetic in the measurement loop and
+// report k6's CPU as AXIAM's.
+const OPAQUE_FIXED_REGISTRATION_REQUEST =
+  'f2579f2c2c88ba7a3fba564070be504c361d3dc03216cd7ae421ce15c0e68104';
+const OPAQUE_FIXED_KE1 =
+  'f6913efa370bf2c856a0686689a54b63b48be6ca73b19b75b141c0a6bd402f11' +
+  '5c0ff9fce351cfd669681f15c7eafdab1e68cb4070ae2e55a35e9045545984c4' +
+  'd66bdb8f5622b28757baebbf9c8fa76ef492d17f7b31ccfdacb8907f20305924';
 
 const axiam = {
   // Resource-owner login (AXIAM's first-party session/login endpoint).
@@ -45,18 +59,14 @@ const axiam = {
       expect: 200,
     };
   },
-  // SRP-6a challenge (CONTRACT §23). Isolates the server's two modular
-  // exponentiations; see scenarios/srp_challenge.js for why the client half of
-  // the exchange is deliberately excluded.
-  //
-  // `A` is a fixed constant rather than a fresh ephemeral: the server does
-  // identical work for any A that is not congruent to zero mod N, and
-  // generating a real one would put a 2048-bit modexp inside the VU loop,
-  // measuring k6's CPU instead of AXIAM's.
-  srpChallenge() {
+  // OPAQUE login/start (CONTRACT §23). Isolates the server's elliptic-curve
+  // work — the OPRF evaluation, the envelope masking and the KE2 share — plus
+  // an AES-256-GCM seal. See scenarios/opaque_login_start.js for why the client
+  // half of the exchange is deliberately excluded.
+  opaqueLoginStart() {
     const body = {
       username_or_email: cfg.username,
-      client_public: SRP_FIXED_CLIENT_PUBLIC,
+      ke1: OPAQUE_FIXED_KE1,
     };
     if (cfg.orgId) body.org_id = cfg.orgId;
     else if (cfg.orgSlug) body.org_slug = cfg.orgSlug;
@@ -64,12 +74,30 @@ const axiam = {
     else if (cfg.tenantSlug) body.tenant_slug = cfg.tenantSlug;
     return {
       method: 'POST',
-      url: `${baseUrl()}/api/v1/auth/srp/challenge`,
+      url: `${baseUrl()}/api/v1/auth/opaque/login/start`,
       body: JSON.stringify(body),
       params: JSONH,
-      // 404 means the tenant has srp_mode=disabled — a configuration problem
+      // 404 means the tenant has opaque_mode=disabled — a configuration problem
       // with this run, not a server failure, and it must not be measured as
       // one.
+      expect: 200,
+    };
+  },
+  // OPAQUE register/start — one OPRF evaluation. Benchmarked separately from
+  // login because it is **unauthenticated by necessity** (it is called while
+  // creating a user who does not exist yet), which makes its cost the one an
+  // operator most needs to know when sizing a rate-limit budget.
+  opaqueRegisterStart() {
+    const body = { registration_request: OPAQUE_FIXED_REGISTRATION_REQUEST };
+    if (cfg.orgId) body.org_id = cfg.orgId;
+    else if (cfg.orgSlug) body.org_slug = cfg.orgSlug;
+    if (cfg.tenantId) body.tenant_id = cfg.tenantId;
+    else if (cfg.tenantSlug) body.tenant_slug = cfg.tenantSlug;
+    return {
+      method: 'POST',
+      url: `${baseUrl()}/api/v1/auth/opaque/register/start`,
+      body: JSON.stringify(body),
+      params: JSONH,
       expect: 200,
     };
   },

@@ -690,9 +690,9 @@ describe("LoginPage — passkeys (C2)", () => {
 // ---------------------------------------------------------------------------
 //
 // The SRP version of this block drove the page through `services/srp` into
-// real modular arithmetic in `lib/srp`, because that arithmetic lived here and
-// nowhere else. It does not any more: CONTRACT §23.1 forbids a client from
-// implementing OPAQUE, so `lib/opaque.ts` is a loader around the same
+// real modular arithmetic in the old `lib/srp`, because that arithmetic lived
+// here and nowhere else. It does not any more: CONTRACT §23.1 forbids a client
+// from implementing OPAQUE, so `lib/opaque.ts` is a loader around the same
 // WebAssembly build of `crates/axiam-opaque` that the server and every SDK use,
 // and the protocol is proven in that crate's own tests and against a live
 // server in `crates/axiam-api-rest/tests/opaque_login_test.rs`.

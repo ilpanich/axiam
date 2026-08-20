@@ -52,10 +52,10 @@ struct SettingsRow {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
-    // SRP (V41). `Option` rather than `String` so a row written before the
+    // OPAQUE (V42). `Option` rather than `String` so a row written before the
     // migration — which has no such column at all — still deserializes; it
     // resolves to the `disabled` default, which is what a deployment that has
-    // never configured SRP means.
+    // never configured OPAQUE means.
     opaque_mode: Option<String>,
     opaque_suite: Option<String>,
     opaque_ksf: Option<String>,
@@ -100,10 +100,10 @@ struct SettingsRowWithId {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
-    // SRP (V41). `Option` rather than `String` so a row written before the
+    // OPAQUE (V42). `Option` rather than `String` so a row written before the
     // migration — which has no such column at all — still deserializes; it
     // resolves to the `disabled` default, which is what a deployment that has
-    // never configured SRP means.
+    // never configured OPAQUE means.
     opaque_mode: Option<String>,
     opaque_suite: Option<String>,
     opaque_ksf: Option<String>,
@@ -114,7 +114,7 @@ struct SettingsRowWithId {
     updated_at: DateTime<Utc>,
 }
 
-/// Decode the three SRP columns, tolerating rows written before the V41
+/// Decode the three OPAQUE columns, tolerating rows written before the V42
 /// migration.
 ///
 /// An unparseable value is treated as absent rather than as an error: the

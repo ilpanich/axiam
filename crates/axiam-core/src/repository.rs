@@ -2295,3 +2295,158 @@ pub trait MailPublisher: Send + Sync {
         msg: OutboundMailMessage,
     ) -> impl Future<Output = crate::error::AxiamResult<()>> + Send;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+
+    // -----------------------------------------------------------------------
+    // Pagination (SEC-010 / CQ-B30)
+    //
+    // `clamp_pagination_limit` is a resource-exhaustion control, not a
+    // convenience: it is the only thing standing between `?limit=100000000`
+    // and a query that tries to materialise the whole table. It runs on the
+    // SERDE path only — direct struct construction is deliberately unaffected,
+    // because internal callers that ask for a large page have already been
+    // reasoned about, while a query string has not.
+    //
+    // Both halves of that split are asserted below. A refactor that moved the
+    // clamp into the struct would break internal callers silently; one that
+    // dropped it from serde would reopen the DoS with no visible change.
+    // -----------------------------------------------------------------------
+
+    fn from_query(json: &str) -> Pagination {
+        serde_json::from_str(json).expect("deserialises")
+    }
+
+    #[test]
+    fn a_deserialised_limit_is_clamped_to_the_documented_bounds() {
+        assert_eq!(from_query(r#"{"offset":0,"limit":100000000}"#).limit, 200);
+        assert_eq!(from_query(r#"{"offset":0,"limit":201}"#).limit, 200);
+        assert_eq!(from_query(r#"{"offset":0,"limit":200}"#).limit, 200);
+        // A zero-size page is not a page; it would loop forever in any caller
+        // that pages until it sees fewer rows than it asked for.
+        assert_eq!(from_query(r#"{"offset":0,"limit":0}"#).limit, 1);
+        assert_eq!(from_query(r#"{"offset":0,"limit":1}"#).limit, 1);
+        // Anything already inside the range passes through untouched.
+        assert_eq!(from_query(r#"{"offset":0,"limit":50}"#).limit, 50);
+        assert_eq!(from_query(r#"{"offset":0,"limit":199}"#).limit, 199);
+        // u64::MAX is the value an attacker actually sends.
+        let max = format!(r#"{{"offset":0,"limit":{}}}"#, u64::MAX);
+        assert_eq!(from_query(&max).limit, 200);
+    }
+
+    #[test]
+    fn the_offset_is_not_clamped_because_it_bounds_no_work() {
+        // Only `limit` decides how many rows come back, so only `limit` is a
+        // DoS lever. A huge offset returns an empty page cheaply, and clamping
+        // it would silently hand back page 1 to a caller that asked for page
+        // 10 000 — a correctness bug in service of no security gain.
+        assert_eq!(
+            from_query(r#"{"offset":100000000,"limit":10}"#).offset,
+            100_000_000
+        );
+    }
+
+    #[test]
+    fn direct_construction_bypasses_the_clamp_on_purpose() {
+        // The doc comment says "direct struct construction is unaffected".
+        // Internal callers rely on it — an export or a reconciliation job asks
+        // for a big page knowingly, and it has not come from a query string.
+        let p = Pagination {
+            offset: 0,
+            limit: 100_000,
+        };
+        assert_eq!(p.limit, 100_000);
+    }
+
+    #[test]
+    fn the_default_page_is_the_documented_one() {
+        let p = Pagination::default();
+        assert_eq!(p.offset, 0);
+        assert_eq!(p.limit, 50);
+        // `#[serde(default)]` on the struct means an absent field falls back
+        // here rather than to u64's zero — and a zero limit would be the
+        // infinite-loop page described above.
+        let empty = from_query("{}");
+        assert_eq!(empty.offset, 0);
+        assert_eq!(empty.limit, 50);
+        // One field present, the other defaulted.
+        assert_eq!(from_query(r#"{"offset":20}"#).limit, 50);
+        assert_eq!(from_query(r#"{"limit":10}"#).offset, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ProofKind
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn proof_kind_wire_names_are_stable() {
+        // These strings are a storage format: the replay table is keyed on
+        // them, so renaming one would silently split the namespace and let a
+        // proof that was already spent be replayed once more under its new
+        // name.
+        assert_eq!(ProofKind::ClientAssertion.as_str(), "client_assertion");
+        assert_eq!(ProofKind::DpopProof.as_str(), "dpop_proof");
+        assert_ne!(
+            ProofKind::ClientAssertion.as_str(),
+            ProofKind::DpopProof.as_str()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The provided `list_by_tenant` default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_by_tenant_defaults_to_empty_so_test_doubles_keep_compiling() {
+        // The default exists so pre-existing test doubles did not all have to
+        // grow a method when D9 added tenant-wide listing. Its contract is
+        // "empty", and that must stay true: a double that silently returned
+        // something would make a compliance report look complete when the
+        // repository behind it had never been asked.
+        struct Double;
+        impl WebauthnCredentialRepository for Double {
+            async fn create(
+                &self,
+                _input: CreateWebauthnCredential,
+            ) -> AxiamResult<WebauthnCredential> {
+                unreachable!("not exercised by this test")
+            }
+            async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> {
+                unreachable!("not exercised by this test")
+            }
+            async fn list_by_user(
+                &self,
+                _t: Uuid,
+                _u: Uuid,
+            ) -> AxiamResult<Vec<WebauthnCredential>> {
+                unreachable!("not exercised by this test")
+            }
+            async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+                unreachable!("not exercised by this test")
+            }
+            async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+                unreachable!("not exercised by this test")
+            }
+            async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
+                unreachable!("not exercised by this test")
+            }
+            // list_by_tenant deliberately NOT overridden — the default is
+            // what is under test.
+        }
+
+        // Polled by hand rather than through an executor: axiam-core is
+        // layer 0 and depends on no runtime, and a dev-dependency on one just
+        // to drive a future that never yields would be a dependency the
+        // layering check has to reason about forever.
+        let mut fut = std::pin::pin!(Double.list_by_tenant(Uuid::new_v4()));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let got = match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(r) => r.expect("the default never fails"),
+            std::task::Poll::Pending => panic!("the default must not yield"),
+        };
+        assert!(got.is_empty());
+    }
+}

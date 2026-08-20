@@ -787,3 +787,379 @@ pub struct CreateSessionClient {
     pub client_id: String,
     pub user_id: Uuid,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Wire-value parsing.
+    //
+    // Every `from_wire` here refuses an unrecognised value instead of
+    // defaulting, and each doc comment says why: a typo that degraded to the
+    // permissive variant would be a silent security downgrade. Both halves of
+    // that contract are asserted — the values that MUST parse, and the ones
+    // that must NOT — because a `_ => None` arm is only as good as the list
+    // above it, and a missing arm looks identical to a rejected value until
+    // someone registers a `fapi2` client that comes back `Standard`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_profile_round_trips_through_its_wire_form() {
+        for profile in [ClientProfile::Standard, ClientProfile::Fapi2] {
+            assert_eq!(ClientProfile::from_wire(profile.as_str()), Some(profile));
+        }
+        // Stored values arrive with whatever casing and padding a migration or
+        // a hand-edited row left behind; none of that changes the profile.
+        assert_eq!(
+            ClientProfile::from_wire("  FAPI2 "),
+            Some(ClientProfile::Fapi2)
+        );
+        assert_eq!(
+            ClientProfile::from_wire("Standard"),
+            Some(ClientProfile::Standard)
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_profile_is_refused_rather_than_downgraded() {
+        // The failure this prevents: `fapi_2` silently becoming `Standard`
+        // turns a typo into a client that no longer has to satisfy any FAPI
+        // constraint, and nothing downstream can tell that happened.
+        for raw in ["fapi_2", "fapi", "fapi3", "", "   ", "standard!", "null"] {
+            assert_eq!(ClientProfile::from_wire(raw), None, "raw = {raw:?}");
+        }
+    }
+
+    #[test]
+    fn only_fapi2_reports_itself_as_fapi2() {
+        assert!(ClientProfile::Fapi2.is_fapi2());
+        assert!(!ClientProfile::Standard.is_fapi2());
+        // The default must be the RESTRICTIVE-to-adopt one: a row written
+        // before the column existed is a pre-FAPI client.
+        assert_eq!(ClientProfile::default(), ClientProfile::Standard);
+    }
+
+    #[test]
+    fn client_auth_method_round_trips_through_its_wire_form() {
+        for method in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::TlsClientAuth,
+            ClientAuthMethod::SelfSignedTlsClientAuth,
+            ClientAuthMethod::PrivateKeyJwt,
+        ] {
+            assert_eq!(ClientAuthMethod::from_wire(method.as_str()), Some(method));
+        }
+        assert_eq!(
+            ClientAuthMethod::from_wire("  PRIVATE_KEY_JWT  "),
+            Some(ClientAuthMethod::PrivateKeyJwt)
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_auth_method_is_refused() {
+        // `client_secret_basic` is the interesting one: it is a real RFC 6749
+        // method that this server does NOT implement, so accepting it as
+        // anything would claim support that does not exist.
+        for raw in [
+            "client_secret_basic",
+            "none",
+            "private-key-jwt",
+            "tls_client_auth ",
+            "",
+        ] {
+            if raw.trim() == "tls_client_auth" {
+                continue; // trimmed, this one is legitimate
+            }
+            assert_eq!(ClientAuthMethod::from_wire(raw), None, "raw = {raw:?}");
+        }
+        // Pre-v38 rows have no column at all, and were doing client_secret_post.
+        assert_eq!(
+            ClientAuthMethod::default(),
+            ClientAuthMethod::ClientSecretPost
+        );
+    }
+
+    #[test]
+    fn device_grant_status_round_trips_and_refuses_the_unknown() {
+        for status in [
+            DeviceGrantStatus::Pending,
+            DeviceGrantStatus::Approved,
+            DeviceGrantStatus::Denied,
+            DeviceGrantStatus::Redeemed,
+        ] {
+            assert_eq!(DeviceGrantStatus::from_wire(status.as_str()), Some(status));
+        }
+        assert_eq!(
+            DeviceGrantStatus::from_wire(" APPROVED "),
+            Some(DeviceGrantStatus::Approved)
+        );
+        // Failing closed matters most here: a status that defaulted to
+        // `Approved` would hand out tokens for a grant nobody approved.
+        for raw in ["approve", "granted", "", "pending "] {
+            if raw.trim() == "pending" {
+                continue;
+            }
+            assert_eq!(DeviceGrantStatus::from_wire(raw), None, "raw = {raw:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The mutually-exclusive registration counters.
+    //
+    // Both counters exist so that the pending registration, the merged update
+    // and the stored row cannot disagree about what "registered" means. The
+    // blank-string case is the whole point: `Some("")` is how the API says
+    // "clear this", and if the counter treated it as present, a client could
+    // pass validation with one binding and be stored with none.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mtls_binding_count_ignores_absent_and_blank_parameters() {
+        assert_eq!(count_mtls_bindings(None, None, None), 0);
+        assert_eq!(count_mtls_bindings(Some("CN=a"), None, None), 1);
+        assert_eq!(count_mtls_bindings(None, Some("a.test"), None), 1);
+        assert_eq!(count_mtls_bindings(None, None, Some("https://a.test")), 1);
+        // Blank and whitespace-only are NOT registered parameters.
+        assert_eq!(count_mtls_bindings(Some(""), Some("   "), Some("\t")), 0);
+        // RFC 8705 permits exactly one; the counter is what makes two visible.
+        assert_eq!(count_mtls_bindings(Some("CN=a"), Some("a.test"), None), 2);
+        assert_eq!(
+            count_mtls_bindings(Some("CN=a"), Some("a.test"), Some("https://a.test")),
+            3
+        );
+        // A blank alongside a real one still counts one, not two.
+        assert_eq!(count_mtls_bindings(Some("CN=a"), Some(" "), None), 1);
+    }
+
+    #[test]
+    fn jwks_source_count_ignores_absent_and_blank_sources() {
+        assert_eq!(count_jwks_sources(None, None), 0);
+        assert_eq!(count_jwks_sources(Some("{\"keys\":[]}"), None), 1);
+        assert_eq!(count_jwks_sources(None, Some("https://a.test/jwks")), 1);
+        assert_eq!(count_jwks_sources(Some(""), Some("  ")), 0);
+        // Two sources means the client's credentials are the union of a
+        // document it controls and one it publishes — RFC 7591 permits one.
+        assert_eq!(
+            count_jwks_sources(Some("{\"keys\":[]}"), Some("https://a.test/jwks")),
+            2
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixtures for the struct-level helpers.
+    // -----------------------------------------------------------------------
+
+    fn client() -> OAuth2Client {
+        OAuth2Client {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            client_id: "client-1".into(),
+            client_secret_hash: "hash".into(),
+            name: "Client One".into(),
+            redirect_uris: vec!["https://rp.test/cb".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: Vec::new(),
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn create() -> CreateOAuth2Client {
+        CreateOAuth2Client {
+            tenant_id: Uuid::new_v4(),
+            name: "Client One".into(),
+            redirect_uris: vec!["https://rp.test/cb".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: Vec::new(),
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+        }
+    }
+
+    #[test]
+    fn the_counters_read_the_same_way_from_a_row_and_from_a_pending_registration() {
+        // The invariant the free functions exist to protect: a registration
+        // that validates as "exactly one binding" must still count one after
+        // it has been stored. Asserting them separately would let the two
+        // drift; asserting them against each other is the actual contract.
+        let mut c = create();
+        c.tls_client_auth_san_dns = Some("a.test".into());
+        c.jwks_uri = Some("https://a.test/jwks".into());
+
+        let mut row = client();
+        row.tls_client_auth_san_dns = c.tls_client_auth_san_dns.clone();
+        row.jwks_uri = c.jwks_uri.clone();
+
+        assert_eq!(c.mtls_binding_count(), row.mtls_binding_count());
+        assert_eq!(c.jwks_source_count(), row.jwks_source_count());
+        assert_eq!(row.mtls_binding_count(), 1);
+        assert_eq!(row.jwks_source_count(), 1);
+
+        // ...and a blank clears it on both sides identically.
+        c.tls_client_auth_san_dns = Some("  ".into());
+        row.tls_client_auth_san_dns = Some("  ".into());
+        assert_eq!(c.mtls_binding_count(), 0);
+        assert_eq!(row.mtls_binding_count(), 0);
+    }
+
+    #[test]
+    fn sender_constrained_asks_the_question_rather_than_enumerating_mechanisms() {
+        let mut c = client();
+        assert!(!c.is_sender_constrained());
+        c.tls_client_certificate_bound_access_tokens = true;
+        assert!(c.is_sender_constrained());
+        c.tls_client_certificate_bound_access_tokens = false;
+        c.dpop_bound_access_tokens = true;
+        assert!(c.is_sender_constrained());
+        // Both at once is not a contradiction — it is still constrained.
+        c.tls_client_certificate_bound_access_tokens = true;
+        assert!(c.is_sender_constrained());
+    }
+
+    // -----------------------------------------------------------------------
+    // Update patches.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn touches_security_profile_is_false_only_for_a_patch_that_cannot_change_it() {
+        // A rename must not force the caller to read the stored row back.
+        let patch = UpdateOAuth2Client::default();
+        assert!(!patch.touches_security_profile());
+
+        // Every field the profile rules read must flip it. Listing them here
+        // is the point: a field added to the struct but forgotten in
+        // `touches_security_profile` would let a patch change the client's
+        // security posture while being validated against the OLD row.
+        type Patch = Box<dyn Fn(&mut UpdateOAuth2Client)>;
+        let cases: Vec<Patch> = vec![
+            Box::new(|u| u.profile = Some(ClientProfile::Fapi2)),
+            Box::new(|u| u.token_endpoint_auth_method = Some(ClientAuthMethod::PrivateKeyJwt)),
+            Box::new(|u| u.require_par = Some(true)),
+            Box::new(|u| u.tls_client_certificate_bound_access_tokens = Some(true)),
+            Box::new(|u| u.tls_client_auth_subject_dn = Some("CN=a".into())),
+            Box::new(|u| u.tls_client_auth_san_dns = Some("a.test".into())),
+            Box::new(|u| u.tls_client_auth_san_uri = Some("https://a.test".into())),
+            Box::new(|u| u.self_signed_tls_client_auth_thumbprints = Some(vec!["ab".into()])),
+            Box::new(|u| u.jwks = Some("{}".into())),
+            Box::new(|u| u.jwks_uri = Some("https://a.test/jwks".into())),
+            Box::new(|u| u.dpop_bound_access_tokens = Some(true)),
+            Box::new(|u| u.dpop_require_nonce = Some(true)),
+        ];
+        for (i, set) in cases.iter().enumerate() {
+            let mut u = UpdateOAuth2Client::default();
+            set(&mut u);
+            assert!(u.touches_security_profile(), "case {i} did not flip it");
+        }
+    }
+
+    #[test]
+    fn with_update_applied_merges_only_the_profile_relevant_fields() {
+        let mut row = client();
+        row.name = "original".into();
+        row.tls_client_auth_subject_dn = Some("CN=old".into());
+
+        let patch = UpdateOAuth2Client {
+            profile: Some(ClientProfile::Fapi2),
+            token_endpoint_auth_method: Some(ClientAuthMethod::PrivateKeyJwt),
+            require_par: Some(true),
+            tls_client_certificate_bound_access_tokens: Some(true),
+            tls_client_auth_subject_dn: Some("CN=new".into()),
+            self_signed_tls_client_auth_thumbprints: Some(vec!["aabb".into()]),
+            jwks: Some("{\"keys\":[]}".into()),
+            dpop_bound_access_tokens: Some(true),
+            dpop_require_nonce: Some(true),
+            ..Default::default()
+        };
+        let merged = row.clone().with_update_applied(&patch);
+
+        assert_eq!(merged.profile, ClientProfile::Fapi2);
+        assert_eq!(
+            merged.token_endpoint_auth_method,
+            ClientAuthMethod::PrivateKeyJwt
+        );
+        assert!(merged.require_par);
+        assert!(merged.tls_client_certificate_bound_access_tokens);
+        assert_eq!(merged.tls_client_auth_subject_dn.as_deref(), Some("CN=new"));
+        assert_eq!(merged.self_signed_tls_client_auth_thumbprints, vec!["aabb"]);
+        assert_eq!(merged.jwks.as_deref(), Some("{\"keys\":[]}"));
+        assert!(merged.dpop_bound_access_tokens);
+        assert!(merged.dpop_require_nonce);
+
+        // Deliberately NOT merged: the result exists only to be validated, and
+        // carrying the rest would invite it to be mistaken for the row about
+        // to be written.
+        assert_eq!(merged.name, "original");
+    }
+
+    #[test]
+    fn with_update_applied_leaves_untouched_fields_alone() {
+        let mut row = client();
+        row.profile = ClientProfile::Fapi2;
+        row.require_par = true;
+        row.tls_client_auth_san_dns = Some("keep.test".into());
+        row.jwks_uri = Some("https://keep.test/jwks".into());
+
+        let merged = row
+            .clone()
+            .with_update_applied(&UpdateOAuth2Client::default());
+
+        assert_eq!(merged.profile, ClientProfile::Fapi2);
+        assert!(merged.require_par);
+        assert_eq!(merged.tls_client_auth_san_dns.as_deref(), Some("keep.test"));
+        assert_eq!(merged.jwks_uri.as_deref(), Some("https://keep.test/jwks"));
+    }
+
+    #[test]
+    fn an_empty_string_in_a_patch_clears_the_field_exactly_as_the_write_will() {
+        // This is the case the doc comment singles out. If validation saw the
+        // OLD DN while the repository stored `None`, an update that clears the
+        // last `tls_client_auth_*` parameter would pass validation and then
+        // store a client that can authenticate nothing.
+        let mut row = client();
+        row.token_endpoint_auth_method = ClientAuthMethod::TlsClientAuth;
+        row.tls_client_auth_subject_dn = Some("CN=old".into());
+        row.jwks = Some("{\"keys\":[]}".into());
+        assert_eq!(row.mtls_binding_count(), 1);
+
+        let patch = UpdateOAuth2Client {
+            tls_client_auth_subject_dn: Some(String::new()),
+            jwks: Some("   ".into()),
+            ..Default::default()
+        };
+        let merged = row.with_update_applied(&patch);
+
+        assert_eq!(merged.tls_client_auth_subject_dn, None);
+        assert_eq!(merged.jwks, None);
+        // ...and the counter agrees, which is the invariant that matters:
+        // validation now sees zero bindings and can refuse the update.
+        assert_eq!(merged.mtls_binding_count(), 0);
+        assert_eq!(merged.jwks_source_count(), 0);
+    }
+}

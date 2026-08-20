@@ -33,6 +33,7 @@ use crate::models::{
         CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient, DeviceGrant,
         OAuth2Client, PushedAuthRequest, RefreshToken, SessionClient, UpdateOAuth2Client,
     },
+    opaque::{CreateOpaqueCredential, OpaqueCredential, OpaqueServerSetup, OpaqueSuite},
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
     password_reset::{CreatePasswordResetToken, PasswordResetToken},
@@ -48,7 +49,6 @@ use crate::models::{
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
-    srp::{CreateSrpCredential, SrpCredential},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
     user::{CreateUser, UpdateUser, User},
@@ -1686,34 +1686,39 @@ pub trait PasswordHistoryRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// SRP credentials (tenant scope)
+// OPAQUE credentials (tenant scope)
 // ---------------------------------------------------------------------------
 
-/// Repository for Secure Remote Password verifiers.
+/// Repository for OPAQUE (RFC 9807) registration records.
 ///
-/// One row per user at most. A verifier is written only where the plaintext
-/// password is legitimately in hand (registration, authenticated password
-/// change, reset completion), so `upsert` replaces rather than versions:
-/// keeping historical verifiers would keep historical passwords crackable for
-/// no operational benefit.
-pub trait SrpCredentialRepository: Send + Sync {
-    /// Create or replace the verifier for a user.
+/// One row per user at most. A record is written only where the plaintext
+/// password is legitimately in hand on the *client* (registration, an
+/// authenticated password change, reset completion), so `upsert` replaces
+/// rather than versions: keeping historical records would keep historical
+/// passwords attackable for no operational benefit.
+pub trait OpaqueCredentialRepository: Send + Sync {
+    /// Create or replace the registration record for a user.
     fn upsert(
         &self,
-        input: CreateSrpCredential,
-    ) -> impl Future<Output = AxiamResult<SrpCredential>> + Send;
+        input: CreateOpaqueCredential,
+    ) -> impl Future<Output = AxiamResult<OpaqueCredential>> + Send;
 
-    /// Fetch a user's verifier. `NotFound` means the user has never set a
-    /// password under an SRP-enabled policy — which is a normal state, not an
-    /// error, and callers must treat it as "fall back to password login"
+    /// Fetch a user's record. `NotFound` means the user has never set a
+    /// password under an OPAQUE-enabled policy — which is a normal state, not
+    /// an error, and callers must treat it as "fall back to password login"
     /// rather than as a failure.
+    ///
+    /// Note for callers on the login path: `NotFound` must **not** short-circuit
+    /// into a distinguishable response. The protocol engine has a decoy path
+    /// for exactly this case, and skipping it reintroduces the enumeration
+    /// oracle the whole design avoids.
     fn get_by_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
-    ) -> impl Future<Output = AxiamResult<SrpCredential>> + Send;
+    ) -> impl Future<Output = AxiamResult<OpaqueCredential>> + Send;
 
-    /// Remove a user's verifier — used by account deletion and by an admin
+    /// Remove a user's record — used by account deletion and by an admin
     /// forcing a user back onto password login.
     fn delete_for_user(
         &self,
@@ -1721,12 +1726,44 @@ pub trait SrpCredentialRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
-    /// Count users in a tenant that have a verifier. Backs the admin-facing
-    /// SRP coverage figure, which is what tells an operator whether
-    /// [`SrpMode::Required`] would strand anyone.
+    /// Count users in a tenant that have a record. Backs the admin-facing
+    /// OPAQUE coverage figure, which is what tells an operator whether
+    /// [`OpaqueMode::Required`] would strand anyone.
     ///
-    /// [`SrpMode::Required`]: crate::models::srp::SrpMode::Required
+    /// [`OpaqueMode::Required`]: crate::models::opaque::OpaqueMode::Required
     fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// OPAQUE server key material (tenant scope)
+// ---------------------------------------------------------------------------
+
+/// Repository for per-tenant OPAQUE server key material.
+///
+/// There is no `update` and no `delete` on purpose. The stored `ServerSetup`
+/// carries the OPRF seed that every one of the tenant's registration records
+/// was sealed against, so replacing it invalidates all of them at once and
+/// removing it locks the tenant out. Both are recoverable only by a
+/// tenant-wide password reset, which is not an operation a repository method
+/// should make one call away.
+pub trait OpaqueServerSetupRepository: Send + Sync {
+    /// Fetch a tenant's key material for a suite. `NotFound` means the tenant
+    /// has never had OPAQUE enabled.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        suite: OpaqueSuite,
+    ) -> impl Future<Output = AxiamResult<OpaqueServerSetup>> + Send;
+
+    /// Fetch a tenant's key material, creating it on first use.
+    ///
+    /// Idempotent under concurrency: two simultaneous first logins must end up
+    /// agreeing on one setup, because a tenant whose seed depended on which
+    /// request won a race would have records that only sometimes open.
+    fn get_or_create(
+        &self,
+        input: OpaqueServerSetup,
+    ) -> impl Future<Output = AxiamResult<OpaqueServerSetup>> + Send;
 }
 
 // ---------------------------------------------------------------------------

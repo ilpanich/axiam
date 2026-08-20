@@ -237,9 +237,9 @@ fn many_less_restrictive_overrides_are_rejected() {
         // weakest value there is, so no override of it can violate the
         // tighten-only rule. The SRP rules have their own cases in
         // `models::settings::tests`.
-        srp_mode: None,
-        srp_group: None,
-        srp_kdf: None,
+        opaque_mode: None,
+        opaque_suite: None,
+        opaque_ksf: None,
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

@@ -29,9 +29,9 @@ export async function fetchCurrentUser(): Promise<AuthUser | null> {
       // Restore slugs from /auth/me for setTenantContext after hard reload.
       tenantSlug: res.data.tenant_slug ?? res.data.user?.tenant_slug ?? undefined,
       orgSlug: res.data.org_slug ?? res.data.user?.org_slug ?? undefined,
-      // Effective SRP policy for this user's tenant — needed to compute a
+      // Effective OPAQUE policy for this user's tenant — needed to build a
       // verifier when they change their password.
-      srp: res.data.srp ?? undefined,
+      opaque: res.data.opaque ?? undefined,
     };
   } catch {
     return null;

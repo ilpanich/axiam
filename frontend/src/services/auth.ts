@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import type { SrpEnrollment } from "@/services/srp";
+import type { OpaqueEnrollment } from "@/services/opaque";
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
 
@@ -80,21 +80,21 @@ export const authService = {
     token: string,
     new_password: string,
     /**
-     * Verifier for the new password, when the tenant uses SRP.
+     * OPAQUE registration record for the new password, when the tenant uses it.
      *
-     * Reset has to carry one or it becomes the hole in SRP coverage: a tenant
-     * could run `srp_mode: required` while every "forgot password" still put a
+     * Reset has to carry one or it becomes the hole in OPAQUE coverage: a
+     * tenant could run `opaque_mode: required` while every "forgot password" put a
      * plaintext on the wire and left the account holding a verifier for a
      * password it no longer has.
      */
-    srp?: SrpEnrollment | null
+    opaque?: OpaqueEnrollment | null
   ): Promise<void> =>
     api
       .post<void>("/api/v1/auth/reset/confirm", {
         tenant_id: tenantId,
         token,
         new_password,
-        ...(srp ? { srp } : {}),
+        ...(opaque ? { opaque } : {}),
       })
       .then(() => undefined),
 
@@ -136,14 +136,14 @@ export const authService = {
   changePassword: (
     current_password: string,
     new_password: string,
-    /** Verifier for the new password, when the tenant uses SRP. */
-    srp?: SrpEnrollment | null
+    /** OPAQUE registration record for the new password, when the tenant uses it. */
+    opaque?: OpaqueEnrollment | null
   ): Promise<void> =>
     api
       .post<void>("/api/v1/auth/password/change", {
         current_password,
         new_password,
-        ...(srp ? { srp } : {}),
+        ...(opaque ? { opaque } : {}),
       })
       .then(() => undefined),
 

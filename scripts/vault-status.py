@@ -19,6 +19,7 @@ EXPECTED = [
     "email_encryption_key",
     "gdpr_pseudonym_pepper",
     "pki_encryption_key",
+    "amqp_signing_key",
     "auth_pepper",
     "jwt_private_key_pem",
     "jwt_public_key_pem",
@@ -45,7 +46,10 @@ def main() -> int:
         print(f"\n  also present (not read by AXIAM): {', '.join(extra)}")
 
     if missing:
-        print(f"\n{len(missing)} secret(s) missing — run `just vault-up` to mint them.")
+        print(
+            f"\n{len(missing)} secret(s) missing — run `just vault-seed` to mint them "
+            "(or `just vault-up` for the dev-mode Vault)."
+        )
         return 1
     return 0
 

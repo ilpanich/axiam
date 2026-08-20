@@ -73,6 +73,15 @@ pub const EMAIL_ENCRYPTION_KEY: &str = "email_encryption_key";
 /// attacker can mint certificates every mTLS client in the tenant will trust.
 pub const PKI_ENCRYPTION_KEY: &str = "pki_encryption_key";
 
+/// HMAC-SHA256 master key authenticating AMQP message payloads.
+///
+/// Signing is mandatory and there is no unsigned code path, so an absent key is
+/// a startup failure in a release build. It is a 256-bit key here and a hex
+/// string in `AmqpConfig::signing_key`; the composition root encodes it, which
+/// is the right place for that adaptation — the port describes what the secret
+/// *is*, not how one consumer spells it.
+pub const AMQP_SIGNING_KEY: &str = "amqp_signing_key";
+
 /// HMAC-SHA256 pepper for GDPR audit pseudonymisation.
 ///
 /// Losing it makes existing audit pseudonyms unlinkable to any future one,
@@ -88,6 +97,7 @@ pub const ALL_KEYS: &[&str] = &[
     EMAIL_ENCRYPTION_KEY,
     GDPR_PSEUDONYM_PEPPER,
     PKI_ENCRYPTION_KEY,
+    AMQP_SIGNING_KEY,
 ];
 
 /// The password pepper, prepended before Argon2id hashing.

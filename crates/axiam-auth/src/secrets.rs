@@ -86,6 +86,10 @@ impl SecretProvider for EnvSecretProvider {
         }
     }
 
+    fn get_secret(&self, name: &str) -> AxiamResult<Option<Zeroizing<String>>> {
+        Ok(std::env::var(Self::var_name(name)).ok().map(Zeroizing::new))
+    }
+
     fn describe(&self) -> &'static str {
         "env"
     }
@@ -136,6 +140,25 @@ impl SecretProvider for FileSecretProvider {
         }
     }
 
+    fn get_secret(&self, name: &str) -> AxiamResult<Option<Zeroizing<String>>> {
+        let path: &Path = &self.path_for(name);
+        match std::fs::read_to_string(path) {
+            // Only a trailing newline is stripped, not all whitespace: a PEM
+            // document is multi-line and meaningful, and a pepper could
+            // legitimately end in a space. `echo` adding one newline is the
+            // case worth forgiving; guessing beyond that would corrupt a
+            // secret an operator set deliberately.
+            Ok(raw) => Ok(Some(Zeroizing::new(
+                raw.strip_suffix('\n').unwrap_or(&raw).to_string(),
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(AxiamError::Internal(format!(
+                "{} exists but could not be read: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     fn describe(&self) -> &'static str {
         "file"
     }
@@ -156,14 +179,20 @@ impl SecretProvider for FileSecretProvider {
 #[derive(Clone)]
 pub struct VaultSecretProvider {
     keys: HashMap<String, [u8; 32]>,
+    secrets: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for VaultSecretProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut names: Vec<&str> = self.keys.keys().map(String::as_str).collect();
+        let mut names: Vec<&str> = self
+            .keys
+            .keys()
+            .chain(self.secrets.keys())
+            .map(String::as_str)
+            .collect();
         names.sort_unstable();
         f.debug_struct("VaultSecretProvider")
-            .field("keys", &names)
+            .field("names", &names)
             .finish()
     }
 }
@@ -207,7 +236,8 @@ impl VaultSecretProvider {
     pub async fn fetch(
         client: &reqwest::Client,
         config: &VaultConfig,
-        names: &[&str],
+        key_names: &[&str],
+        secret_names: &[&str],
     ) -> AxiamResult<Self> {
         let url = format!(
             "{}/v1/{}/data/{}",
@@ -249,25 +279,36 @@ impl VaultSecretProvider {
             })?;
 
         let mut keys = HashMap::new();
-        for name in names {
+        for name in key_names {
             if let Some(raw) = fields.get(*name).and_then(|v| v.as_str()) {
                 keys.insert((*name).to_string(), parse_key(name, raw)?);
             }
         }
 
-        Ok(Self { keys })
+        let mut secrets = HashMap::new();
+        for name in secret_names {
+            if let Some(raw) = fields.get(*name).and_then(|v| v.as_str()) {
+                secrets.insert((*name).to_string(), raw.to_string());
+            }
+        }
+
+        Ok(Self { keys, secrets })
     }
 
-    /// Build directly from already-resolved keys. For tests and for a caller
+    /// Build directly from already-resolved values. For tests and for a caller
     /// that fetched by some other means.
-    pub fn from_keys(keys: HashMap<String, [u8; 32]>) -> Self {
-        Self { keys }
+    pub fn from_values(keys: HashMap<String, [u8; 32]>, secrets: HashMap<String, String>) -> Self {
+        Self { keys, secrets }
     }
 }
 
 impl SecretProvider for VaultSecretProvider {
     fn get_key(&self, name: &str) -> AxiamResult<Option<[u8; 32]>> {
         Ok(self.keys.get(name).copied())
+    }
+
+    fn get_secret(&self, name: &str) -> AxiamResult<Option<Zeroizing<String>>> {
+        Ok(self.secrets.get(name).cloned().map(Zeroizing::new))
     }
 
     fn describe(&self) -> &'static str {
@@ -345,13 +386,14 @@ impl SecretProviderKind {
     pub async fn build(
         &self,
         client: &reqwest::Client,
-        names: &[&str],
+        key_names: &[&str],
+        secret_names: &[&str],
     ) -> AxiamResult<Box<dyn SecretProvider>> {
         Ok(match self {
             Self::Env => Box::new(EnvSecretProvider),
             Self::File { dir } => Box::new(FileSecretProvider::new(dir.clone())),
             Self::Vault(config) => {
-                Box::new(VaultSecretProvider::fetch(client, config, names).await?)
+                Box::new(VaultSecretProvider::fetch(client, config, key_names, secret_names).await?)
             }
         })
     }
@@ -468,8 +510,10 @@ mod tests {
     #[test]
     fn the_vault_provider_serves_from_memory() {
         let key = a_key();
-        let provider =
-            VaultSecretProvider::from_keys(HashMap::from([(OPAQUE_SETUP_KEY.to_string(), key)]));
+        let provider = VaultSecretProvider::from_values(
+            HashMap::from([(OPAQUE_SETUP_KEY.to_string(), key)]),
+            HashMap::new(),
+        );
         assert_eq!(provider.get_key(OPAQUE_SETUP_KEY).unwrap(), Some(key));
         assert_eq!(provider.get_key(OPAQUE_SESSION_KEY).unwrap(), None);
     }
@@ -495,8 +539,10 @@ mod tests {
     #[test]
     fn vault_provider_debug_renders_names_not_key_material() {
         let key = a_key();
-        let provider =
-            VaultSecretProvider::from_keys(HashMap::from([(OPAQUE_SETUP_KEY.to_string(), key)]));
+        let provider = VaultSecretProvider::from_values(
+            HashMap::from([(OPAQUE_SETUP_KEY.to_string(), key)]),
+            HashMap::new(),
+        );
         let rendered = format!("{provider:?}");
         assert!(!rendered.contains(&hex::encode(key)), "{rendered}");
         assert!(rendered.contains(OPAQUE_SETUP_KEY), "{rendered}");

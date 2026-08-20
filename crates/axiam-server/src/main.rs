@@ -91,30 +91,6 @@ fn default_cleanup_interval_secs() -> u64 {
     300
 }
 
-/// Load a 32-byte AES-256-GCM key (or pepper) from an environment variable.
-///
-/// The variable must contain a 64-character lowercase-hex string (256 bits).
-/// - Returns `Some(key)` on success.
-/// - Panics with a clear message if the variable is set but malformed or wrong length.
-/// - Returns `None` (with a `warn` log) when the variable is absent.
-fn load_key_from_env(name: &str) -> Option<[u8; 32]> {
-    match std::env::var(name) {
-        Ok(hex) => {
-            let bytes = hex::decode(&hex).unwrap_or_else(|_| {
-                panic!("{name} must be a 64-char hex string (32 bytes / 256 bits)")
-            });
-            let key: [u8; 32] = bytes
-                .try_into()
-                .unwrap_or_else(|_| panic!("{name} must be exactly 32 bytes (256 bits)"));
-            Some(key)
-        }
-        Err(_) => {
-            tracing::warn!("{name} not set");
-            None
-        }
-    }
-}
-
 /// Top-level configuration aggregating all sub-configs.
 #[derive(Debug, Deserialize)]
 struct AppConfig {
@@ -231,85 +207,110 @@ async fn main() -> std::io::Result<()> {
 
     let mut config = load_config();
 
-    // Load MFA encryption key from env (skipped by serde on AuthConfig).
-    config.auth.mfa_encryption_key = load_key_from_env("AXIAM__AUTH__MFA_ENCRYPTION_KEY");
+    // ---------------------------------------------------------------------
+    // Secrets
+    // ---------------------------------------------------------------------
+    //
+    // Every long-lived secret is resolved here, through one provider, rather
+    // than by each subsystem reading its own environment variable. That is the
+    // point of `axiam_core::secrets`: where secrets come from is a deployment
+    // concern, and it should be changeable in one place instead of nine.
+    //
+    // A provider failure stops startup. Deliberate: a secret failing *open*
+    // silently disables a control the operator believes is on, and "the server
+    // did not start" is a far better signal than "logins began failing an hour
+    // later".
+    use axiam_auth::secrets::SecretProviderKind;
+    use axiam_core::secrets as keys;
+
+    let secret_provider = {
+        let kind = SecretProviderKind::from_env()
+            .unwrap_or_else(|e| panic!("secret provider configuration is invalid: {e}"));
+        // A short-lived client: this runs once, before the shared one exists.
+        let bootstrap_http = reqwest::Client::new();
+        let provider = kind
+            .build(&bootstrap_http, keys::ALL_KEYS, keys::ALL_SECRETS)
+            .await
+            .unwrap_or_else(|e| panic!("secret provider `{kind:?}` could not be initialised: {e}"));
+        tracing::info!(provider = provider.describe(), "secret provider ready");
+        provider
+    };
+
+    let read_key = |name: &str| {
+        secret_provider
+            .get_key(name)
+            .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
+    };
+    let read_secret = |name: &str| {
+        secret_provider
+            .get_secret(name)
+            .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
+    };
+
+    // Load MFA encryption key.
+    config.auth.mfa_encryption_key = read_key(keys::MFA_ENCRYPTION_KEY);
     if config.auth.mfa_encryption_key.is_some() {
         tracing::info!("MFA encryption key loaded");
     }
 
-    // Load federation encryption key from env (skipped by serde on AuthConfig).
-    config.auth.federation_encryption_key =
-        load_key_from_env("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY");
+    // Load federation encryption key.
+    config.auth.federation_encryption_key = read_key(keys::FEDERATION_ENCRYPTION_KEY);
     if config.auth.federation_encryption_key.is_some() {
         tracing::info!("Federation encryption key loaded");
     }
 
-    // Load the OPAQUE keys through the configured secret provider (skipped by
-    // serde on AuthConfig). Absent, the OPAQUE endpoints answer 503 rather than
+    // The OPAQUE keys. Absent, the OPAQUE endpoints answer 503 rather than
     // quietly leaving clients on password login — see
     // `AuthConfig::opaque_session_key`.
     //
     // Two keys, not one, because rotating them costs wildly different things:
     // the session key seals 120 seconds of in-flight state, while losing the
     // setup key makes every registration record in every tenant unopenable.
-    // That asymmetry is also why the setup key is the one worth putting in a
+    // That asymmetry is why the setup key is the one most worth putting in a
     // KMS — see `axiam_auth::secrets`.
-    //
-    // A provider failure stops startup. That is deliberate: a key this
-    // important failing *open* would silently disable a control the operator
-    // believes is on, and "the server did not start" is a far better signal
-    // than "logins began failing an hour later".
-    {
-        use axiam_auth::secrets::SecretProviderKind;
-        use axiam_core::secrets::{ALL_KEYS, OPAQUE_SESSION_KEY, OPAQUE_SETUP_KEY, SecretProvider};
-
-        let kind = SecretProviderKind::from_env()
-            .unwrap_or_else(|e| panic!("secret provider configuration is invalid: {e}"));
-        // A short-lived client: this runs once, before the shared one exists.
-        let bootstrap_http = reqwest::Client::new();
-        let provider = kind
-            .build(&bootstrap_http, ALL_KEYS)
-            .await
-            .unwrap_or_else(|e| panic!("secret provider `{kind:?}` could not be initialised: {e}"));
-
-        let mut read = |name: &str| {
-            provider
-                .get_key(name)
-                .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
-        };
-        config.auth.opaque_session_key = read(OPAQUE_SESSION_KEY);
-        config.auth.opaque_setup_key = read(OPAQUE_SETUP_KEY);
-
-        match (
-            config.auth.opaque_session_key.is_some(),
-            config.auth.opaque_setup_key.is_some(),
-        ) {
-            (true, true) => tracing::info!(provider = provider.describe(), "OPAQUE keys loaded"),
-            (false, false) => {}
-            // Half-configured is worth a warning rather than silence: the
-            // operator set one of the two and almost certainly believes OPAQUE
-            // is on. Naming the provider matters here — the commonest cause is
-            // believing a key came from somewhere it did not.
-            (session, setup) => tracing::warn!(
-                provider = provider.describe(),
-                session_key = session,
-                setup_key = setup,
-                "OPAQUE is only half-configured; both keys are required, so the \
-                 OPAQUE endpoints will answer 503"
-            ),
-        }
+    config.auth.opaque_session_key = read_key(keys::OPAQUE_SESSION_KEY);
+    config.auth.opaque_setup_key = read_key(keys::OPAQUE_SETUP_KEY);
+    match (
+        config.auth.opaque_session_key.is_some(),
+        config.auth.opaque_setup_key.is_some(),
+    ) {
+        (true, true) => tracing::info!(provider = secret_provider.describe(), "OPAQUE keys loaded"),
+        (false, false) => {}
+        // Half-configured is worth a warning rather than silence: the operator
+        // set one of the two and almost certainly believes OPAQUE is on. Naming
+        // the provider matters — the commonest cause is believing a key came
+        // from somewhere it did not.
+        (session, setup) => tracing::warn!(
+            provider = secret_provider.describe(),
+            session_key = session,
+            setup_key = setup,
+            "OPAQUE is only half-configured; both keys are required, so the \
+             OPAQUE endpoints will answer 503"
+        ),
     }
 
-    // Load email encryption key from env (D-17).
-    config.email_encryption_key = load_key_from_env("AXIAM__EMAIL_ENCRYPTION_KEY");
+    // Load email encryption key (D-17).
+    config.email_encryption_key = read_key(keys::EMAIL_ENCRYPTION_KEY);
     if config.email_encryption_key.is_some() {
         tracing::info!("Email encryption key loaded");
     }
 
-    // Load GDPR pseudonym pepper from env (D-02).
-    config.gdpr_pseudonym_pepper = load_key_from_env("AXIAM__GDPR_PSEUDONYM_PEPPER");
+    // Load GDPR pseudonym pepper (D-02).
+    config.gdpr_pseudonym_pepper = read_key(keys::GDPR_PSEUDONYM_PEPPER);
     if config.gdpr_pseudonym_pepper.is_some() {
         tracing::info!("GDPR pseudonym pepper loaded");
+    }
+
+    // The token signing key is the single most valuable secret AXIAM holds:
+    // possessing it means being able to mint a token for any principal in any
+    // tenant. If the provider carries it, it wins over whatever `load_config`
+    // read — that is what lets a production deployment keep it out of the
+    // container spec entirely.
+    if let Some(pem) = read_secret(keys::JWT_PRIVATE_KEY_PEM) {
+        config.auth.jwt_private_key_pem = (*pem).clone();
+    }
+    if let Some(pem) = read_secret(keys::JWT_PUBLIC_KEY_PEM) {
+        config.auth.jwt_public_key_pem = (*pem).clone();
     }
 
     // CQ-B14: Parse Ed25519 JWT keys once at startup and cache them in the
@@ -323,13 +324,13 @@ async fn main() -> std::io::Result<()> {
     // Clamp cleanup interval to 60..=3600 seconds (T-04-35).
     config.cleanup_interval_secs = config.cleanup_interval_secs.clamp(60, 3600);
 
-    // Load auth pepper from env (REQ-14 AC-1). Plain string — no hex decode.
-    // The pepper is prepended to passwords before Argon2id hashing/verification.
+    // Load auth pepper (REQ-14 AC-1). Text, not a key: it is concatenated with
+    // the password before Argon2id rather than used as one.
     // SECURITY: do NOT log the pepper value. Wrapped in `SecretString`
     // (SECHRD-12) so the value can never be accidentally `Debug`-printed.
-    if let Ok(value) = std::env::var("AXIAM__AUTH__PEPPER") {
-        config.auth.pepper = Some(secrecy::SecretString::from(value));
-        tracing::info!("Auth pepper loaded");
+    if let Some(value) = read_secret(keys::AUTH_PEPPER) {
+        config.auth.pepper = Some(secrecy::SecretString::from((*value).clone()));
+        tracing::info!(provider = secret_provider.describe(), "Auth pepper loaded");
     } else {
         tracing::info!(
             "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper; \
@@ -754,11 +755,11 @@ async fn main() -> std::io::Result<()> {
     // `Deserialize` (it holds `[u8; 32]`/`PathBuf`, same reason
     // `encryption_key` above is loaded manually rather than through
     // `AppConfig`), so these five `AXIAM__PKI__MDS_*` vars are parsed here by
-    // hand, mirroring `load_key_from_env`'s style. `mds_enabled` defaults to
+    // hand. `mds_enabled` defaults to
     // `false` — "off means zero outbound calls" — so an unset env var
     // reproduces `PkiConfig::default()`'s documented behavior exactly.
     let pki_config = PkiConfig {
-        encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
+        encryption_key: read_key(keys::PKI_ENCRYPTION_KEY),
         mds_enabled: std::env::var("AXIAM__PKI__MDS_ENABLED")
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
             .unwrap_or(false),
@@ -845,7 +846,7 @@ async fn main() -> std::io::Result<()> {
     // boots, but webhook registration and delivery are refused with an
     // explicit error + `warn!` until a real key is configured. NEVER an
     // all-zero/constant fallback key.
-    let webhook_enc_key: Option<[u8; 32]> = load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY");
+    let webhook_enc_key: Option<[u8; 32]> = read_key(keys::PKI_ENCRYPTION_KEY);
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(pool.handle_for_repo());

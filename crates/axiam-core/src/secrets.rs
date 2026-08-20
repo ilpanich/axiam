@@ -45,6 +45,8 @@
 //! them would let a Vault outage look like a deliberate decision to run without
 //! OPAQUE.
 
+use zeroize::Zeroizing;
+
 use crate::error::AxiamResult;
 
 /// The OPAQUE session-sealing key. Rotating it invalidates in-flight exchanges
@@ -56,8 +58,57 @@ pub const OPAQUE_SESSION_KEY: &str = "opaque_session_key";
 /// **Losing it requires a password reset for every user in every tenant.**
 pub const OPAQUE_SETUP_KEY: &str = "opaque_setup_key";
 
-/// Every key name this port defines, for providers that want to preload.
-pub const ALL_KEYS: &[&str] = &[OPAQUE_SESSION_KEY, OPAQUE_SETUP_KEY];
+/// Encrypts TOTP/MFA secrets at rest.
+pub const MFA_ENCRYPTION_KEY: &str = "mfa_encryption_key";
+
+/// Encrypts federated identity-provider client secrets at rest.
+pub const FEDERATION_ENCRYPTION_KEY: &str = "federation_encryption_key";
+
+/// Encrypts stored email addresses at rest.
+pub const EMAIL_ENCRYPTION_KEY: &str = "email_encryption_key";
+
+/// Encrypts CA private keys at rest.
+///
+/// Ranks with the token signing key for blast radius: a leaked CA key means an
+/// attacker can mint certificates every mTLS client in the tenant will trust.
+pub const PKI_ENCRYPTION_KEY: &str = "pki_encryption_key";
+
+/// HMAC-SHA256 pepper for GDPR audit pseudonymisation.
+///
+/// Losing it makes existing audit pseudonyms unlinkable to any future one,
+/// which breaks the audit trail rather than any login.
+pub const GDPR_PSEUDONYM_PEPPER: &str = "gdpr_pseudonym_pepper";
+
+/// Every 256-bit key this port defines, for providers that preload.
+pub const ALL_KEYS: &[&str] = &[
+    OPAQUE_SESSION_KEY,
+    OPAQUE_SETUP_KEY,
+    MFA_ENCRYPTION_KEY,
+    FEDERATION_ENCRYPTION_KEY,
+    EMAIL_ENCRYPTION_KEY,
+    GDPR_PSEUDONYM_PEPPER,
+    PKI_ENCRYPTION_KEY,
+];
+
+/// The password pepper, prepended before Argon2id hashing.
+///
+/// Text rather than 32 bytes, and deliberately so: it is concatenated with the
+/// password, not used as a key. **Changing it invalidates every stored password
+/// hash.**
+pub const AUTH_PEPPER: &str = "auth_pepper";
+
+/// The Ed25519 private key AXIAM signs tokens with, PEM-encoded.
+///
+/// The single most valuable secret in the system: holding it means being able
+/// to mint a token for any principal in any tenant.
+pub const JWT_PRIVATE_KEY_PEM: &str = "jwt_private_key_pem";
+
+/// The matching public key, PEM-encoded. Not secret, but it travels with the
+/// private key and a mismatched pair is a confusing outage.
+pub const JWT_PUBLIC_KEY_PEM: &str = "jwt_public_key_pem";
+
+/// Every text secret this port defines, for providers that preload.
+pub const ALL_SECRETS: &[&str] = &[AUTH_PEPPER, JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM];
 
 /// A source of 256-bit symmetric keys, addressed by a stable logical name.
 ///
@@ -72,6 +123,20 @@ pub trait SecretProvider: Send + Sync {
     /// when it is configured but could not be retrieved or is malformed. See
     /// the module docs for why those must not be collapsed.
     fn get_key(&self, name: &str) -> AxiamResult<Option<[u8; 32]>>;
+
+    /// Fetch the text secret registered under `name`.
+    ///
+    /// Separate from [`Self::get_key`] because not every secret is 32 bytes:
+    /// the password pepper is concatenated with a password rather than used as
+    /// a key, and the token signing key is a PEM document. Forcing them through
+    /// a `[u8; 32]` would mean hex-encoding a PEM, which is the kind of
+    /// indirection that gets an operator's key rejected for a reason no error
+    /// message explains.
+    ///
+    /// The value is returned in a [`Zeroizing`] wrapper so a caller that drops
+    /// it does not leave it in a freed heap page. That is a small control, not
+    /// a strong one — the secret is about to live in the process anyway.
+    fn get_secret(&self, name: &str) -> AxiamResult<Option<Zeroizing<String>>>;
 
     /// A short label for logs and startup diagnostics, e.g. `"env"`.
     ///

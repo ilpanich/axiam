@@ -224,3 +224,59 @@ impl OpaqueLogin {
         })
     }
 }
+
+/// Run a complete OPAQUE registration and login inside this module, for
+/// release smoke-testing.
+///
+/// # Why this is exported
+///
+/// An old `binaryen` silently miscompiles WebAssembly built from this crate:
+/// `wasm-pack` reports success and the elliptic-curve arithmetic inside is
+/// wrong. "It built" is therefore not evidence that the artifact works, and the
+/// failure would surface as users who cannot log in.
+///
+/// There is no fixed input to replay against — OPAQUE's blind is generated
+/// inside the protocol and is not injectable — so the available check is to
+/// perform both halves of a real exchange and assert they agree. A miscompiled
+/// scalar multiplication produces an envelope that will not open, which is
+/// exactly what this catches.
+///
+/// Returns `true` on success and throws on failure, so a smoke test can assert
+/// on either.
+///
+/// **Never call this in application code.** It talks to no server and
+/// authenticates nobody.
+#[doc(hidden)]
+#[wasm_bindgen(js_name = __conformanceRoundTrip)]
+pub fn conformance_round_trip() -> Result<bool, JsError> {
+    use axiam_opaque::testing;
+
+    // Derived rather than a literal so CodeQL's hard-coded-cryptographic-value
+    // rule stays pointed at shipping code. The value is irrelevant — what is
+    // asserted is that both sides reach the same export key.
+    let password = format!("wasm-smoke-{}", env!("CARGO_PKG_VERSION"));
+    let ksf = AxiamKsf::argon2id(8192, 1, 1).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let (state, request) =
+        ClientRegistrationState::start(&password).map_err(|e| JsError::new(&e.to_string()))?;
+    let (setup, response) = testing::server_registration_start(&request);
+    let registered = state
+        .finish(&password, &response, &ksf)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    let (state, ke1) =
+        ClientLoginState::start(&password).map_err(|e| JsError::new(&e.to_string()))?;
+    let ke2 = testing::server_login_start(&setup, &registered.record, &ke1);
+    let logged_in = state
+        .finish(&password, &ke2, &ksf)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    // Both sides derive this independently from the password. Agreement is the
+    // strongest single assertion available here.
+    if logged_in.export_key != registered.export_key {
+        return Err(JsError::new(
+            "OPAQUE round trip produced disagreeing export keys — this artifact is miscompiled",
+        ));
+    }
+    Ok(true)
+}

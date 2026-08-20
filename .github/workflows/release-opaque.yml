@@ -1,0 +1,227 @@
+# Release pipeline for the shared OPAQUE client core.
+#
+# `crates/axiam-opaque` is the single implementation every AXIAM client binds
+# (CONTRACT.md §23.1). Until it is published, the SDKs cannot depend on it —
+# the Rust SDK vendors a copy, and the C-ABI and WebAssembly SDKs can only build
+# where a Rust toolchain happens to be present. This workflow removes all three
+# constraints at once.
+#
+# Three artifacts, because three groups of SDKs consume it three ways:
+#
+#   crates.io   -> the Rust SDK
+#   npm         -> the TypeScript SDK and the React admin UI
+#   GH Release  -> the eight SDKs that load the C ABI (Python, Java, Kotlin,
+#                  C#, PHP, Swift, C, C++)
+#
+# Triggered by an `axiam-opaque-v*` tag. Deliberately its own tag namespace
+# rather than the server's release tag: the wire format is a cross-language
+# contract, and it should be publishable on its own cadence without implying a
+# server release — and, more importantly, without a server release implying a
+# new client artifact that nothing has been re-tested against.
+name: Release axiam-opaque
+
+on:
+  push:
+    tags:
+      - 'axiam-opaque-v*'
+  pull_request:
+    paths:
+      - 'crates/axiam-opaque/**'
+      - 'crates/axiam-opaque-ffi/**'
+      - 'crates/axiam-opaque-wasm/**'
+      - '.github/workflows/release-opaque.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-opaque-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Everything below runs on a pull request too, in dry-run mode. A manifest
+  # that cannot be packaged, a wasm build that cannot be produced or a C ABI
+  # that will not link should fail on the PR that broke it, not on the tag
+  # someone pushes three weeks later expecting a release.
+  crate:
+    name: crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p axiam-opaque --all-targets
+
+      # `--allow-dirty` is deliberately NOT passed: a package that differs from
+      # the committed tree is not the thing that was tested.
+      - name: Package
+        run: cargo package -p axiam-opaque
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish -p axiam-opaque
+
+  wasm:
+    name: npm (@axiam/opaque-wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Pinned rather than floating: an old binaryen silently miscompiles this
+      # module — it builds cleanly and the arithmetic inside is wrong. The smoke
+      # test below exists for exactly that failure, and pinning keeps it rare.
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build
+        working-directory: crates/axiam-opaque-wasm
+        run: wasm-pack build --target web --release --out-name axiam_opaque
+
+      # wasm-pack derives the npm package name from the crate name, which would
+      # publish this as `axiam-opaque-wasm`. The name the TypeScript SDK and the
+      # admin UI import is `@axiam/opaque-wasm`, and `--scope axiam` would give
+      # `@axiam/axiam-opaque-wasm`, so the name is set here rather than by
+      # renaming the crate and breaking the workspace's directory convention.
+      - name: Name the package
+        working-directory: crates/axiam-opaque-wasm/pkg
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = '@axiam/opaque-wasm';
+            pkg.repository = { type: 'git', url: 'https://github.com/ilpanich/axiam' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cat package.json
+
+      # A complete OPAQUE exchange run *through the built artifact*. "wasm-pack
+      # succeeded" is not evidence the elliptic-curve arithmetic survived
+      # wasm-opt; an envelope that opens is.
+      - name: Smoke-test the built artifact
+        working-directory: crates/axiam-opaque-wasm
+        run: |
+          wasm-pack build --target nodejs --release --out-dir pkg-node --out-name axiam_opaque
+          node -e "
+            const wasm = require('./pkg-node/axiam_opaque.js');
+            if (wasm.__conformanceRoundTrip() !== true) {
+              throw new Error('OPAQUE round trip failed inside the built artifact');
+            }
+            if (wasm.opaqueAvailable() !== true) {
+              throw new Error('opaqueAvailable() is false in the built artifact');
+            }
+            console.log('wasm smoke test passed');
+          "
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+        working-directory: crates/axiam-opaque-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm >= 11 refuses to publish a prerelease under `latest`, so derive
+        # the dist-tag from the version rather than hard-coding one.
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "$VERSION" in
+            *-alpha*) TAG=alpha ;;
+            *-beta*)  TAG=beta ;;
+            *-rc*)    TAG=rc ;;
+            *)        TAG=latest ;;
+          esac
+          echo "publishing $VERSION under dist-tag $TAG"
+          npm publish --access public --tag "$TAG"
+
+  cabi:
+    name: C ABI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  lib: libaxiam_opaque_ffi.so }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, lib: libaxiam_opaque_ffi.so, cross: true }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       lib: libaxiam_opaque_ffi.dylib }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      lib: libaxiam_opaque_ffi.dylib }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    lib: axiam_opaque_ffi.dll }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build -p axiam-opaque-ffi --release --target ${{ matrix.target }}
+
+      # Only where the artifact can actually run — a cross-compiled aarch64
+      # library cannot be exercised on an x86 runner, and pretending otherwise
+      # would make this step decorative.
+      - name: Test the ABI
+        if: '!matrix.cross'
+        run: cargo test -p axiam-opaque-ffi --release --target ${{ matrix.target }}
+
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" \
+             "dist/${{ matrix.target }}-${{ matrix.lib }}"
+          cp crates/axiam-opaque-ffi/include/axiam/opaque.h dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cabi-${{ matrix.target }}
+          path: dist/
+
+  release:
+    name: Attach C ABI binaries to the release
+    needs: [crate, wasm, cabi]
+    if: startsWith(github.ref, 'refs/tags/axiam-opaque-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cabi-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        # So an SDK vendoring a binary can pin what it vendored.
+        run: sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            Shared OPAQUE (RFC 9807) client core — see `sdks/CONTRACT.md` §23.
+
+            - **Rust**: `axiam-opaque` on crates.io
+            - **JavaScript/TypeScript**: `@axiam/opaque-wasm` on npm
+            - **C ABI**: the shared libraries attached below, plus `opaque.h`
+
+            Verify a downloaded library against `SHA256SUMS` before vendoring it.

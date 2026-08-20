@@ -961,6 +961,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "criterion",
+ "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 11.0.0",

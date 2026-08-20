@@ -14,6 +14,7 @@ pub mod opaque;
 pub mod password;
 pub mod password_reset;
 pub mod policy;
+pub mod secrets;
 pub mod service;
 pub mod token;
 pub mod totp;

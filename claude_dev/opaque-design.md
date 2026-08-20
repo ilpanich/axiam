@@ -150,18 +150,86 @@ kind of defect that takes weeks to find.
 
 ### Two server keys, split by what rotating them costs
 
-- `AXIAM__AUTH__OPAQUE_SESSION_KEY` seals 120 seconds of in-flight exchange
-  state. Rotate it whenever you like; it invalidates exchanges in flight and
-  nothing else.
-- `AXIAM__AUTH__OPAQUE_SETUP_KEY` encrypts the `ServerSetup` rows above.
-  Rotating it means re-encrypting those rows. **Losing it** means every record
-  in every tenant is unopenable.
+- `opaque_session_key` seals 120 seconds of in-flight exchange state. Rotate it
+  whenever you like; it invalidates exchanges in flight and nothing else.
+- `opaque_setup_key` encrypts the `ServerSetup` rows above. Rotating it means
+  re-encrypting those rows. **Losing it** means every record in every tenant is
+  unopenable.
 
 Sharing one key would put the cheap rotation and the catastrophic one on the
 same schedule, which is how an operator ends up doing neither. Both absent, or
 either absent, and the OPAQUE endpoints answer `503` regardless of policy —
 falling back to password login on a misconfiguration would turn it into an
 undetectable downgrade of a control the operator believes is on.
+
+### Where the keys come from, and why the seeds are in the database
+
+This is the question the design gets asked most, so it is worth answering
+precisely.
+
+**The seeds are in the database. The key is not.** `opaque_server_setup` rows
+hold AES-256-GCM ciphertext; the setup key is supplied by a
+[`SecretProvider`](../crates/axiam-core/src/secrets.rs) and never written to
+SurrealDB. Every vector OPAQUE's pre-computation resistance is *for* — SQL
+injection, a stolen backup, a compromised read replica, a DBA or cloud provider
+with storage access, a decommissioned disk — yields ciphertext and no key.
+
+A frequent suggestion is to move the seeds to an encrypted file on the server
+volume instead. That is **not** an improvement, and it is worth being explicit
+about why:
+
+- It removes the separation rather than adding one. An attacker who can read
+  `/var/lib/axiam/seeds.enc` can generally also read `/proc/<pid>/environ`. The
+  ciphertext ends up on the *same* side of the boundary as the key.
+- It breaks horizontal scaling. Seeds are minted on first use per tenant, so a
+  tenant created on replica A would be unopenable on replica B until some
+  out-of-band sync caught up — presenting as an intermittent wrong password.
+- It loses transactionality with the `opaque_credential` rows the seeds belong
+  to, and the replication, backup and restore the database already provides.
+- It creates a failure mode that did not exist: a lost or corrupted volume
+  becomes total tenant lockout, with no database backup to restore from.
+
+What *does* improve things is changing where the **key** comes from, which is
+why that is the pluggable part:
+
+| Provider | `AXIAM__AUTH__SECRET_PROVIDER` | What it is actually good for |
+|---|---|---|
+| Environment | `env` (default) | Simplicity. What every existing deployment does. |
+| Mounted file | `file` | Docker secrets and Kubernetes `Secret` volumes, which mount files rather than inject variables. **Not** a security improvement over `env` — same trust boundary. |
+| HashiCorp Vault | `vault` | The key is never in a container spec, a Compose file, a CI variable or a shell history; access is authenticated per workload, audited and revocable; rotation is a write to Vault rather than a redeploy. |
+
+The `vault` provider fetches at startup and serves from memory, so a KMS is
+never on a login path and a KMS outage fails the process at boot rather than
+degrading logins an hour later.
+
+None of the three defends against a compromised *application server*: the key
+must reach the process to decrypt anything. The construction that would is
+envelope encryption against a Transit-style API where the plaintext key never
+leaves the KMS — every seal and open becomes a network round trip. That is the
+natural next implementation of the same trait, and deliberately not this change.
+
+```bash
+# Default: unchanged from before this feature existed.
+export AXIAM__AUTH__OPAQUE_SESSION_KEY="$(openssl rand -hex 32)"
+export AXIAM__AUTH__OPAQUE_SETUP_KEY="$(openssl rand -hex 32)"
+
+# Docker/Kubernetes secret volumes.
+export AXIAM__AUTH__SECRET_PROVIDER=file
+export AXIAM__AUTH__SECRET_DIR=/run/secrets      # expects files named
+                                                  # opaque_session_key, opaque_setup_key
+
+# HashiCorp Vault KV v2.
+export AXIAM__AUTH__SECRET_PROVIDER=vault
+export AXIAM__AUTH__VAULT_ADDR=https://vault.internal:8200
+export AXIAM__AUTH__VAULT_TOKEN=...              # a token with read on the path below
+export AXIAM__AUTH__VAULT_MOUNT=secret           # optional, defaults to `secret`
+export AXIAM__AUTH__VAULT_PATH=axiam             # optional, defaults to `axiam`
+```
+
+An unknown provider name is refused at startup rather than falling back to
+`env`: a typo would otherwise silently revert a deployment to reading variables
+that are probably unset, which presents as "OPAQUE stopped working" with nothing
+in the logs pointing at the cause.
 
 ### Sealed session, not a session table
 

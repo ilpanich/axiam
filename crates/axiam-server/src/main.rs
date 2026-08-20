@@ -244,30 +244,60 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Federation encryption key loaded");
     }
 
-    // Load the OPAQUE keys from env (skipped by serde on AuthConfig). Absent,
-    // the OPAQUE endpoints answer 503 rather than quietly leaving clients on
-    // password login — see `AuthConfig::opaque_session_key`.
+    // Load the OPAQUE keys through the configured secret provider (skipped by
+    // serde on AuthConfig). Absent, the OPAQUE endpoints answer 503 rather than
+    // quietly leaving clients on password login — see
+    // `AuthConfig::opaque_session_key`.
     //
     // Two keys, not one, because rotating them costs wildly different things:
     // the session key seals 120 seconds of in-flight state, while losing the
     // setup key makes every registration record in every tenant unopenable.
-    config.auth.opaque_session_key = load_key_from_env("AXIAM__AUTH__OPAQUE_SESSION_KEY");
-    config.auth.opaque_setup_key = load_key_from_env("AXIAM__AUTH__OPAQUE_SETUP_KEY");
-    match (
-        config.auth.opaque_session_key.is_some(),
-        config.auth.opaque_setup_key.is_some(),
-    ) {
-        (true, true) => tracing::info!("OPAQUE keys loaded"),
-        (false, false) => {}
-        // Half-configured is worth a warning rather than silence: the operator
-        // set one of the two and almost certainly believes OPAQUE is on.
-        (session, setup) => tracing::warn!(
-            session_key = session,
-            setup_key = setup,
-            "OPAQUE is only half-configured; both AXIAM__AUTH__OPAQUE_SESSION_KEY \
-             and AXIAM__AUTH__OPAQUE_SETUP_KEY are required, so the OPAQUE \
-             endpoints will answer 503"
-        ),
+    // That asymmetry is also why the setup key is the one worth putting in a
+    // KMS — see `axiam_auth::secrets`.
+    //
+    // A provider failure stops startup. That is deliberate: a key this
+    // important failing *open* would silently disable a control the operator
+    // believes is on, and "the server did not start" is a far better signal
+    // than "logins began failing an hour later".
+    {
+        use axiam_auth::secrets::SecretProviderKind;
+        use axiam_core::secrets::{ALL_KEYS, OPAQUE_SESSION_KEY, OPAQUE_SETUP_KEY, SecretProvider};
+
+        let kind = SecretProviderKind::from_env()
+            .unwrap_or_else(|e| panic!("secret provider configuration is invalid: {e}"));
+        // A short-lived client: this runs once, before the shared one exists.
+        let bootstrap_http = reqwest::Client::new();
+        let provider = kind
+            .build(&bootstrap_http, ALL_KEYS)
+            .await
+            .unwrap_or_else(|e| panic!("secret provider `{kind:?}` could not be initialised: {e}"));
+
+        let mut read = |name: &str| {
+            provider
+                .get_key(name)
+                .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
+        };
+        config.auth.opaque_session_key = read(OPAQUE_SESSION_KEY);
+        config.auth.opaque_setup_key = read(OPAQUE_SETUP_KEY);
+
+        match (
+            config.auth.opaque_session_key.is_some(),
+            config.auth.opaque_setup_key.is_some(),
+        ) {
+            (true, true) => tracing::info!(provider = provider.describe(), "OPAQUE keys loaded"),
+            (false, false) => {}
+            // Half-configured is worth a warning rather than silence: the
+            // operator set one of the two and almost certainly believes OPAQUE
+            // is on. Naming the provider matters here — the commonest cause is
+            // believing a key came from somewhere it did not.
+            (session, setup) => tracing::warn!(
+                provider = provider.describe(),
+                session_key = session,
+                setup_key = setup,
+                "OPAQUE is only half-configured; both keys are required, so the \
+                 OPAQUE endpoints will answer 503"
+            ),
+        }
     }
 
     // Load email encryption key from env (D-17).

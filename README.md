@@ -128,6 +128,21 @@ export AXIAM__AUTH__OPAQUE_SESSION_KEY="$(openssl rand -hex 32)"
 export AXIAM__AUTH__OPAQUE_SETUP_KEY="$(openssl rand -hex 32)"
 ```
 
+The per-tenant OPRF seeds are stored in the database as AES-256-GCM ciphertext;
+the key is not, which is what keeps a stolen credential database
+non-crackable. Where that key comes from is pluggable — environment (default),
+a mounted `file` for Docker/Kubernetes secret volumes, or HashiCorp `vault`:
+
+```bash
+export AXIAM__AUTH__SECRET_PROVIDER=vault
+export AXIAM__AUTH__VAULT_ADDR=https://vault.internal:8200
+export AXIAM__AUTH__VAULT_TOKEN=...
+```
+
+See [`claude_dev/opaque-design.md`](claude_dev/opaque-design.md) for the threat
+model behind each, including why moving the *seeds* to a file on the server
+volume would weaken rather than strengthen the separation.
+
 ## Development Progress
 
 The project follows a structured roadmap of **64 tasks across 19 phases**:

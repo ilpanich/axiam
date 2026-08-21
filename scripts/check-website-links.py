@@ -54,6 +54,13 @@ ATTEMPTS = 3
 # for a crate that demonstrably exists (its own JSON API lists every version),
 # and coveralls.io answers 403 to everything without a session.
 #
+# npmjs.com was added after this check first ran: the package page answers 403
+# to a browser user-agent for `axiam-sdk`, for `react`, and for a package name
+# that does not exist at all. A status that is identical for a hugely popular
+# package and for a nonexistent one is carrying no information about the link.
+# The registry API is the authority and it lists axiam-sdk with 19 published
+# versions, so the page is fine and only the scraping is blocked.
+#
 # For these, a non-success status is reported as UNVERIFIED rather than failed.
 # The check that still applies to them — and the one this script exists for —
 # is the off-domain redirect check, which does not depend on the status code.
@@ -64,6 +71,7 @@ ATTEMPTS = 3
 BOT_HOSTILE_DOMAINS = frozenset({
     "crates.io",
     "coveralls.io",
+    "npmjs.com",
 })
 
 # Some hosts refuse an unadorned urllib request outright. Presenting a normal

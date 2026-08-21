@@ -28,3 +28,11 @@ resources:
   - network-policy/server-egress.yml
   - network-policy/allow-ingress-to-server.yml
   - network-policy/allow-ingress-to-frontend.yml
+  # SEC-053: the receiver-side halves of the datastore and broker paths.
+  # NetworkPolicy is evaluated at BOTH ends — `server-egress` permitting
+  # server -> surrealdb:8000 counts for nothing while `default-deny-all` is
+  # still denying ingress on the SurrealDB pod. Leaving these two out of the
+  # resource list did not merely weaken the model, it broke the deployment:
+  # the server could reach neither its datastore nor its broker.
+  - network-policy/allow-ingress-to-surrealdb.yml
+  - network-policy/allow-ingress-to-rabbitmq.yml

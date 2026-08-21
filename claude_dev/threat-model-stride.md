@@ -125,7 +125,7 @@ Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces
 | T-13 | AMQP consumer (Lapin) <br/>*Process* | S | Forged authorization request on the broker | High | Mitigated |
 | T-14 | Security middleware (authn, CSRF, rate limit, CORS, audit) <br/>*Process* | D | Rate limits multiplied by replica count | Medium | Mitigated |
 | T-15 | Security middleware (authn, CSRF, rate limit, CORS, audit) <br/>*Process* | S | X-Forwarded-For spoofing bypasses per-IP limits | Medium | Mitigated |
-| T-16 | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*Process* | E | No deny-override in the RBAC cascade | Medium | Open |
+| T-16 | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*Process* | E | No deny-override in the RBAC cascade | Medium | Mitigated |
 | T-17 | SurrealDB cluster (all tenant data) <br/>*Store* | I | Direct datastore access bypasses every application control | Critical | Mitigated |
 | T-18 | SurrealDB cluster (all tenant data) <br/>*Store* | I | Backup or snapshot exfiltration | High | Open |
 | T-19 | Audit log (append-only, PGP signed) <br/>*Store* | T | Audit record tampering or selective deletion | High | Mitigated |
@@ -246,7 +246,7 @@ A caller that can set XFF freely attributes every request to a different source 
 > SEC-070: only a configured number of rightmost XFF hops (trusted_hops) is trusted, shared by the REST and gRPC extractors; untrusted hops fall back to the socket peer address.
 
 **T-16 — No deny-override in the RBAC cascade**  
-`Core service layer (AuthN, AuthZ, User, PKI, Federation)` (Process) · Elevation of privilege · Medium · Open
+`Core service layer (AuthN, AuthZ, User, PKI, Federation)` (Process) · Elevation of privilege · Medium · Mitigated
 
 The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource — the only way to remove access to a subtree is to restructure the grant.
 
@@ -943,7 +943,7 @@ The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP as
 | T-84 | AMQP async authz consumer <br/>*Process* | I | Decision response delivered to the wrong reply queue | Medium | Mitigated |
 | T-85 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | Cross-tenant graph edge traversed during resolution | Critical | Mitigated |
 | T-86 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | D | Deep or cyclic resource hierarchy stalls resolution | Medium | Mitigated |
-| T-87 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | No deny-override in the additive cascade | Medium | Open |
+| T-87 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | No deny-override in the additive cascade | Medium | Mitigated |
 | T-88 | Decision cache <br/>*Process* | E | Stale allow served after revocation | High | Mitigated |
 | T-89 | Decision cache <br/>*Process* | I | Cache key collision leaks a decision across subjects | High | Mitigated |
 | T-90 | role / permission / resource graph <br/>*Store* | T | Direct edge insertion grants privilege silently | Critical | Mitigated |
@@ -1017,7 +1017,7 @@ Ancestor walking on a deliberately deep — or cyclic — resource tree turns a 
 > Traversal depth is bounded and visited nodes are tracked so a cycle terminates; the decision cache absorbs repeated checks on the same subject/resource pair.
 
 **T-87 — No deny-override in the additive cascade**  
-`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · Medium · Open
+`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · Medium · Mitigated
 
 The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.
 
@@ -1388,7 +1388,7 @@ Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monit
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
 | T-124 | Cluster operator / SRE <br/>*Actor* | S | Operator credentials grant unaudited data access | High | Open |
-| T-125 | Ingress controller (TLS 1.3) <br/>*Process* | E | Traffic reaches pods bypassing the ingress | High | Open |
+| T-125 | Ingress controller (TLS 1.3) <br/>*Process* | E | Traffic reaches pods bypassing the ingress | High | Mitigated |
 | T-126 | AXIAM deployment (N replicas, HPA) <br/>*Process* | E | Container escape from an over-privileged pod | High | Mitigated |
 | T-127 | AXIAM deployment (N replicas, HPA) <br/>*Process* | T | Vulnerable dependency reaches production | High | Mitigated |
 | T-128 | Prometheus / Grafana <br/>*Process* | I | Metrics or traces disclose tenant identifiers | Medium | Mitigated |
@@ -1411,11 +1411,35 @@ Anyone with kubectl exec or Secret-read rights in the namespace can read signing
 > Outside the application boundary. Restrict RBAC on Secrets and exec, enable Kubernetes audit logging, and treat cluster-admin as equivalent to full AXIAM compromise in your threat register.
 
 **T-125 — Traffic reaches pods bypassing the ingress**  
-`Ingress controller (TLS 1.3)` (Process) · Elevation of privilege · High · Open
+`Ingress controller (TLS 1.3)` (Process) · Elevation of privilege · High · Mitigated
 
 Without a NetworkPolicy, any workload in the cluster can call the AXIAM Service directly and skip the ingress, along with any edge protections applied there.
 
-> AXIAM's own authn/authz still applies on every request, so this is defence-in-depth rather than a bypass of access control. The shipped k8s manifests do not include NetworkPolicies; add default-deny ingress and egress policies for the namespace.
+> **CLOSED (SEC-053).** AXIAM's own authn/authz still applies on every request,
+> so this was always defence-in-depth rather than a bypass of access control —
+> but the depth is now actually shipped. `k8s/network-policy/` carries a
+> namespace-wide `default-deny-all` (ingress *and* egress, `podSelector: {}`)
+> plus the minimum set of allows that a working deployment needs: DNS egress,
+> `server-egress` scoped to SurrealDB:8000, RabbitMQ:5671, public HTTPS with
+> RFC1918/CGN and the cluster CIDRs excluded, and a fail-closed SMTP relay
+> range; and receiver-side ingress policies for the server, frontend, SurrealDB
+> and RabbitMQ pods.
+>
+> The receiver-side halves matter as much as the sender-side ones, and for a
+> reason worth stating: NetworkPolicy is evaluated at *both* ends of a
+> connection. `server-egress` permitting server → surrealdb:8000 counts for
+> nothing while `default-deny-all` still denies ingress on the SurrealDB pod.
+> The SurrealDB and RabbitMQ ingress policies existed as files but were absent
+> from `kustomization.yml`, so they were never applied — which did not merely
+> leave the model weaker than it read, it broke the deployment outright. They
+> are now listed, and `kubectl kustomize k8s/` is the check that they stay
+> listed.
+>
+> Two values in `server-egress` are deliberately placeholders the operator must
+> replace: the cluster pod/service CIDRs in the HTTPS `except` list (defaults
+> match kubeadm/flannel and are almost certainly wrong for a given cluster), and
+> the SMTP relay range, which ships as RFC 5737 TEST-NET-1 so mail egress is
+> denied until it is configured rather than open by default.
 
 **T-126 — Container escape from an over-privileged pod**  
 `AXIAM deployment (N replicas, HPA)` (Process) · Elevation of privilege · High · Mitigated
@@ -1643,7 +1667,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-23 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+20 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1651,16 +1675,13 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-18 | High | Backup or snapshot exfiltration | SurrealDB cluster (all tenant data) <br/>*System diagram* | Not addressed by AXIAM itself. Deployment guidance: encrypt backups at rest, restrict snapshot IAM, and treat backup media as in-scope for the same access review as the live… |
 | T-94 | High | Key extracted from device firmware or flash | IoT device <br/>*PKI, certificates & IoT device identity* | Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM… |
 | T-124 | High | Operator credentials grant unaudited data access | Cluster operator / SRE <br/>*Deployment & platform (Kubernetes)* | Outside the application boundary. Restrict RBAC on Secrets and exec, enable Kubernetes audit logging, and treat cluster-admin as equivalent to full AXIAM compromise in your threat… |
-| T-125 | High | Traffic reaches pods bypassing the ingress | Ingress controller (TLS 1.3) <br/>*Deployment & platform (Kubernetes)* | AXIAM's own authn/authz still applies on every request, so this is defence-in-depth rather than a bypass of access control. The shipped k8s manifests do not include… |
 | T-131 | High | Default or shared broker credentials | RabbitMQ StatefulSet (cluster) <br/>*Deployment & platform (Kubernetes)* | AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not… |
 | T-132 | High | Secret material placed in a ConfigMap or plain env var | Secrets / ConfigMap <br/>*Deployment & platform (Kubernetes)* | The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer… |
 | T-133 | High | Backup media accessible outside the cluster | Backups / volume snapshots <br/>*Deployment & platform (Kubernetes)* | Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data… |
 | T-135 | High | Dependency-confusion or typosquatted SDK package | Integrator / developer <br/>*Client SDKs & admin UI integration surface* | Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical… |
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
-| T-16 | Medium | No deny-override in the RBAC cascade | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*System diagram* | SEC-040, accepted for v1.0-beta and documented in the design document and the roadmap. Deny-override cascade is deferred to post-v1.0-beta. Operators must model exclusions by… |
 | T-39 | Medium | Access token still valid after entitlement revocation | Token service EdDSA JWT + refresh rotation <br/>*Authentication & session management* | Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation… |
-| T-87 | Medium | No deny-override in the additive cascade | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Authorization engine — RBAC, hierarchy & scopes* | SEC-040, accepted for v1.0-beta and documented in the design document. Deny-override cascade is deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy… |
 | T-110 | Medium | Personal data over-collected into an immutable log | Audit middleware & service <br/>*Audit, webhooks, email & notifications* | Partially addressed: audit metadata is deliberately minimised and erasure anonymises the subject rather than deleting audit records. Deployments must set an audit retention period… |
 | T-118 | Medium | Audit trail deleted along with the tenant | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
@@ -1675,14 +1696,12 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 **Accepted design trade-offs** — deliberate, documented, and bounded.
 
-- **No deny-override in the RBAC cascade** (SEC-040). The engine is additive, allow-wins, default-deny; a grant on a parent resource cannot be revoked on one child. Deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy rather than granting high and excluding.
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
 - **Audit records cannot be erased.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.
 - **A stale FIDO MDS3 BLOB is never a hard failure (X3).** A transient outage at the FIDO Alliance must not brick WebAuthn registration, so ingestion past `nextUpdate` still succeeds — logged at WARN and surfaced as `stale: true` on `GET /api/v1/mds/status` — rather than blocking. The cost is T-153: a since-revoked authenticator model keeps passing policy until the next successful refresh.
 
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
 
-- Network policy so pods are not reachable around the ingress
 - Per-service RabbitMQ credentials and vhost separation
 - Secrets supplied as mounted files rather than `AXIAM_*` environment variables; etcd encryption at rest
 - Backup encryption, restricted snapshot IAM, and backups included in access review
@@ -1697,6 +1716,11 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - **~~No SDK ships a webhook-signature verifier~~ (T-145) — closed.** The server signs deliveries with the Stripe-style signed-timestamp scheme, and as of the 2026-08-02 remediation every one of the eleven SDKs ships a conformant `verify_webhook(...)` helper against a canonical spec, with `CONTRACT.md` §13 made normative. What remains is integrator discipline, not a missing control: the helper still has to be called. Recorded here as closed rather than deleted so the history stays legible.
 - **SDK package distribution.** Seven public registries are seven opportunities for typosquatting or a hijacked release. Reserve names, require 2FA and trusted publishing, and publish provenance attestations.
 - **Static client secrets in integrator configuration.** Outside AXIAM's control, but the most common way service-account credentials escape. Prefer mTLS or short-lived workload identity.
+
+**Closed at the 2026-08-21 review** — recorded rather than deleted, as with T-145.
+
+- **~~No deny-override in the RBAC cascade~~ (T-16, T-87) — closed (SEC-040 / B1).** These were carried as open long after the control shipped: their own detail blocks already read "SEC-040 — CLOSED (B1)" while the status column still said `Open`. The engine takes `effect: "allow" | "deny"` and a deny overrides every allow at any depth of the hierarchy and at equal specificity, verified by the precedence-table tests in `crates/axiam-authz/src/engine.rs` — including the property that motivates the choice, `adding_a_deny_can_never_widen_access`. A stale `Open` is not a harmless bookkeeping error: it argues for spending effort on a control that already exists, and it understates the product to anyone reading the model as a security statement.
+- **~~Traffic reaches pods bypassing the ingress~~ (T-125) — closed (SEC-053).** The entry claimed "the shipped k8s manifests do not include NetworkPolicies"; they ship seven, including a namespace-wide default-deny on both ingress and egress. The genuine defect this review found was narrower and worse: the SurrealDB and RabbitMQ ingress policies were present as files but missing from `kustomization.yml`, so they were never applied — and because NetworkPolicy is enforced at both ends, that left the server unable to reach its own datastore or broker. Both are now listed; `kubectl kustomize k8s/` is the check.
 
 ## 7. Coverage
 
@@ -1716,22 +1740,22 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 24 | 1 |
-| High | 68 | 9 |
-| Medium | 66 | 11 |
+| High | 68 | 8 |
+| Medium | 66 | 9 |
 | Low | 7 | 2 |
 
 **By diagram**
 
 | Diagram | Threats | Open |
 |---|---|---|
-| System diagram | 26 | 3 |
+| System diagram | 26 | 2 |
 | Authentication & session management | 22 | 1 |
 | OAuth2 / OIDC authorization server | 16 | 0 |
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
-| Authorization engine — RBAC, hierarchy & scopes | 15 | 1 |
+| Authorization engine — RBAC, hierarchy & scopes | 15 | 0 |
 | PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 12 | 7 |
+| Deployment & platform (Kubernetes) | 12 | 6 |
 | Client SDKs & admin UI integration surface | 15 | 4 |
 
 ## 8. Assumptions

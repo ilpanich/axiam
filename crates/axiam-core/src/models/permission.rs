@@ -99,3 +99,87 @@ pub struct PermissionGrant {
     #[serde(default)]
     pub effect: PermissionEffect,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_is_the_default_so_pre_b1_rows_and_effectless_requests_mean_allow() {
+        // The no-migration property: absent `effect` must read as allow. If
+        // this ever flipped, every existing grant would silently become a deny
+        // and the whole authorization model would invert.
+        assert_eq!(PermissionEffect::default(), PermissionEffect::Allow);
+        let grant: PermissionEffect = serde_json::from_str("\"allow\"").unwrap();
+        assert_eq!(grant, PermissionEffect::Allow);
+    }
+
+    #[test]
+    fn wire_names_round_trip_through_serde_and_as_str() {
+        for effect in [PermissionEffect::Allow, PermissionEffect::Deny] {
+            let json = serde_json::to_string(&effect).unwrap();
+            assert_eq!(json, format!("\"{}\"", effect.as_str()));
+            let back: PermissionEffect = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, effect);
+        }
+    }
+
+    #[test]
+    fn from_wire_accepts_case_and_whitespace_variation() {
+        assert_eq!(
+            PermissionEffect::from_wire("deny"),
+            Some(PermissionEffect::Deny)
+        );
+        assert_eq!(
+            PermissionEffect::from_wire("  DENY "),
+            Some(PermissionEffect::Deny)
+        );
+        assert_eq!(
+            PermissionEffect::from_wire("Allow"),
+            Some(PermissionEffect::Allow)
+        );
+    }
+
+    #[test]
+    fn from_wire_refuses_anything_it_does_not_recognise() {
+        // The security-relevant half. A typo must NOT fall back to allow:
+        // `denyy` becoming an allow is how a deny rule silently stops working.
+        for raw in ["denyy", "DENY!", "", "permit", "true", "0"] {
+            assert_eq!(
+                PermissionEffect::from_wire(raw),
+                None,
+                "{raw:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn is_deny_answers_only_for_deny() {
+        assert!(PermissionEffect::Deny.is_deny());
+        assert!(!PermissionEffect::Allow.is_deny());
+    }
+
+    #[test]
+    fn a_grant_without_an_effect_field_deserializes_as_allow() {
+        // `PermissionGrant.effect` carries `#[serde(default)]` for exactly the
+        // rows written before B1. Asserting on the struct, not just the enum,
+        // because the default lives on the field.
+        let json = serde_json::json!({
+            "permission": {
+                "id": Uuid::nil(),
+                "tenant_id": Uuid::nil(),
+                "action": "read",
+                "description": "",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            },
+            "scope_ids": []
+        });
+        let grant: PermissionGrant = serde_json::from_value(json).unwrap();
+        assert_eq!(grant.effect, PermissionEffect::Allow);
+        assert!(
+            grant.scope_ids.is_empty(),
+            "empty scope_ids is the wildcard"
+        );
+    }
+}

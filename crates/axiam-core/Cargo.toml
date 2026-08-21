@@ -15,3 +15,11 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 utoipa = { workspace = true }
 zeroize.workspace = true
+
+[dev-dependencies]
+# Test-only. `axiam-core` defines async traits (ReactorGate) but deliberately
+# carries no runtime of its own — it is layer 0 and every crate above it brings
+# its own. A dev-dependency lets the type-erasure bridge be tested without
+# adding anything to the production dependency graph.
+tokio = { workspace = true, features = ["macros", "rt"] }
+

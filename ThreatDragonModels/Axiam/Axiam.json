@@ -551,7 +551,7 @@
                   "severity": "High",
                   "type": "Denial of service",
                   "description": "Each Argon2id verification allocates a ~19 MiB arena; an unauthenticated login flood turns password hashing into a memory-exhaustion vector (~970 MiB RSS observed at ~50 concurrent hashes against a 1024 MiB cap).",
-                  "mitigation": "crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly.",
+                  "mitigation": "crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly. Both credential-verifying surfaces pass through the same gate: the REST login path and gRPC ValidateCredentials (B1) \u2014 an ungated path in either protocol would reopen the flood through the other.",
                   "modelType": "STRIDE",
                   "number": 10
                 },
@@ -565,6 +565,17 @@
                   "mitigation": "Tenant context is derived from the interceptor-verified session or JWT, never from request-body input; tenant filtering is enforced at the repository layer and cross-tenant graph edges are stripped on traversal.",
                   "modelType": "STRIDE",
                   "number": 11
+                },
+                {
+                  "id": "ec427fb6-3034-401e-8ff6-587a54467e57",
+                  "title": "Leaked SCIM provisioning token replayed as the IdP",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "SCIM provisioning tokens exist because Okta and Entra can present only one static bearer string, so the credential is deliberately long-lived \u2014 pasted once into the IdP and forgotten. Whoever obtains it can drive user provisioning and deprovisioning for the tenant for as long as it lives.",
+                  "mitigation": "Containment is the design (#330): a provisioning token is accepted on /scim/v2/* and nowhere else \u2014 not /api/v1/*, not /oauth2/*, not gRPC \u2014 and carries no permissions of its own: it resolves to an existing tenant user whose RBAC must still pass the same require_scim_provision check as a session would. It is stored SHA-256-hashed with the plaintext returned exactly once, carries an expiry, is revocable independently of every other credential, stamps last_used_at on use, and minting and revocation are audited. SCIM has its own rate-limit bucket (R5.2), and deprovisioning a user through SCIM revokes their live sessions and refresh tokens (SEC-098).",
+                  "modelType": "STRIDE",
+                  "number": 181
                 }
               ]
             }
@@ -769,11 +780,11 @@
                 {
                   "id": "8b002846-203b-5217-b492-1ca261850569",
                   "title": "No deny-override in the RBAC cascade",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Elevation of privilege",
                   "description": "The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource \u2014 the only way to remove access to a subtree is to restructure the grant.",
-                  "mitigation": "SEC-040, accepted for v1.0-beta and documented in the design document and the roadmap. Deny-override cascade is deferred to post-v1.0-beta. Operators must model exclusions by narrowing the grant rather than by adding a deny.",
+                  "mitigation": "SEC-040 \u2014 closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows \u2014 asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules.",
                   "modelType": "STRIDE",
                   "number": 16
                 }
@@ -989,7 +1000,7 @@
             "id": "bcca5e76-1845-552a-9430-1d8d3a20e3ae",
             "data": {
               "type": "tm.Store",
-              "name": "Kubernetes Secrets\n/ ConfigMap",
+              "name": "Secret store (Vault /\nKubernetes Secrets)",
               "description": "JWT signing keys, datastore credentials, CA key encryption key, provider API keys.",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -1008,7 +1019,7 @@
                   "severity": "Critical",
                   "type": "Information disclosure",
                   "description": "The Ed25519 JWT signing key lets an attacker mint access tokens for any subject in any tenant, defeating authentication entirely.",
-                  "mitigation": "Keys live in Kubernetes Secrets, not in the image or ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Enable envelope encryption for etcd and rotate signing keys on a schedule \u2014 JWKS publishes multiple keys so rotation is non-breaking.",
+                  "mitigation": "The signing key is fetched through the pluggable secret provider \u2014 HashiCorp Vault by default in the production stacks (AXIAM__AUTH__SECRET_PROVIDER=vault), Kubernetes Secrets otherwise \u2014 and never lives in the image or a ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Rotate signing keys on a schedule \u2014 JWKS publishes multiple key ids so rotation is non-breaking \u2014 and where Kubernetes Secrets are the source, enable envelope encryption for etcd.",
                   "modelType": "STRIDE",
                   "number": 21
                 }
@@ -1850,7 +1861,7 @@
                   "severity": "High",
                   "type": "Information disclosure",
                   "description": "A tenant admin who can set metadata_url or jwks_uri makes the server fetch internal addresses \u2014 cloud metadata endpoints, in-cluster services \u2014 and observe the response.",
-                  "mitigation": "SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size.",
+                  "mitigation": "SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size. SEC-107 adds a deliberate, bounded bypass for same-network IdPs: AXIAM__PKI__SSRF_ALLOWED_HOSTS is default-empty, set only at the composition root, matches exact hosts (no wildcards, no CIDRs), applies to the first hop only with redirects always strict, and logs every use \u2014 and cloud metadata endpoints stay blocked even for an allowlisted host, with IPv4-mapped canonicalisation running before that check so the allowlist cannot re-open SEC-094.",
                   "modelType": "STRIDE",
                   "number": 25
                 }
@@ -1981,7 +1992,7 @@
       {
         "id": 1,
         "title": "Authentication & session management",
-        "description": "Password login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.",
+        "description": "Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -2216,7 +2227,7 @@
             "id": "6800fc4b-a3b4-581c-b613-969b5a6e9d2d",
             "data": {
               "type": "tm.Process",
-              "name": "Login endpoint\nPOST /auth/login",
+              "name": "Login endpoints\n/auth/login + /auth/opaque/*",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -2248,6 +2259,28 @@
                   "mitigation": "SEC-026b / D-06: the REST login path and the gRPC UserService::validate_credentials path both call the single shared lockout helper, which is the sole source of truth for failed-attempt accrual.",
                   "modelType": "STRIDE",
                   "number": 31
+                },
+                {
+                  "id": "330ad1fb-972e-47f7-ad03-384790fe65c1",
+                  "title": "Account existence probed through the OPAQUE login flow",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "POST /auth/opaque/login/start is unauthenticated and must answer for any identity; a response that differs for unknown accounts \u2014 in shape, stability or KSF parameters \u2014 is a username-enumeration oracle equivalent to a differential /auth/login error.",
+                  "mitigation": "RFC 9807 designs the case in: for an unknown identity the server runs the AKE with no password file and returns a well-formed KE2 derived from the setup's dummy public key. AXIAM adds the stability half \u2014 the decoy credential identifier is HMAC(decoy_key, tenant_id || lowercased identity), so probing the same non-existent name twice gets the same answer; a random identifier would announce non-existence as loudly as a 404. Stated residual: a decoy carries the tenant's current KSF parameters while a real user carries those they enrolled under, so an attacker who knows the tenant's policy history can tell an account still on the old cost exists; the window closes as passwords rotate.",
+                  "modelType": "STRIDE",
+                  "number": 176
+                },
+                {
+                  "id": "d34b7abc-ebaa-4348-abc6-0fc325695185",
+                  "title": "Unauthenticated OPAQUE exchanges consume server state and OPRF budget",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "login/start and register/start are unauthenticated by necessity; each costs the server an OPRF evaluation and in-flight exchange state, so a flood turns the PAKE handshake into a resource-exhaustion vector \u2014 the OPAQUE analogue of the Argon2id memory flood (T-10).",
+                  "mitigation": "Under OPAQUE the expensive KSF runs on the client, so the server-side cost per attempt is a bounded elliptic-curve OPRF evaluation, not a ~19 MiB Argon2id arena. The endpoints sit under the strict internet-facing per-IP rate limits the tuning presets are prevented from widening; register/start has its own benchmark scenario and budget (opaque_register_start \u2014 new in kind, since SRP enrolment cost the server nothing); and in-flight exchange state is sealed for 120 seconds under the cheap-to-rotate opaque_session_key rather than accumulating unbounded server-side sessions. OPAQUE is additionally off by default (opaque_mode: disabled) until an organization or tenant enables it.",
+                  "modelType": "STRIDE",
+                  "number": 177
                 }
               ]
             }
@@ -2381,6 +2414,17 @@
                   "mitigation": "SEC-032: the increment is a single atomic SurrealQL UPDATE, removing the TOCTOU window.",
                   "modelType": "STRIDE",
                   "number": 36
+                },
+                {
+                  "id": "5d8999ee-5ed8-4d88-8a42-82ffda9182ef",
+                  "title": "OPAQUE login path sits outside the lockout counter",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "A failed OPAQUE authentication is a wrong password, but it surfaces as a failed KE3 inside the AKE rather than a failed hash verify. A path that did not accrue toward lockout would mean enabling OPAQUE silently removed brute-force protection from every account that adopted it \u2014 the same unmetered-path defect SEC-026b closed for gRPC (T-31), reopened by a new protocol.",
+                  "mitigation": "A failed KE3 accrues toward the shared exponential-backoff lockout exactly as a failed Argon2id verify does. OpaqueRejection deliberately has two variants rather than one so the caller can attribute an attempt before accruing it: a malformed client message (AuthError::OpaqueMalformed, 400) is distinguished from a wrong password, and only the latter counts against the account \u2014 and from corrupt stored state (500), so junk from a client is never read as a server fault.",
+                  "modelType": "STRIDE",
+                  "number": 178
                 }
               ]
             }
@@ -2598,7 +2642,7 @@
             "id": "723bd2e1-0555-5a1b-9fca-915b84a37849",
             "data": {
               "type": "tm.Store",
-              "name": "user\n(Argon2id hashes)",
+              "name": "user credentials (Argon2id\nhashes, OPAQUE records)",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -2620,6 +2664,17 @@
                   "mitigation": "Argon2id with OWASP-recommended parameters (m=19 MiB, t=2, p=1) and per-user salts makes bulk cracking expensive; policy enforces a 12-character minimum by default.",
                   "modelType": "STRIDE",
                   "number": 43
+                },
+                {
+                  "id": "bd06bfa4-7da2-4de5-b914-e4f1a7b81be3",
+                  "title": "Stolen OPAQUE records opened offline with the tenant OPRF seed",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "opaque_credential rows are the OPAQUE analogue of password hashes. Unlike an Argon2id or SRP-verifier corpus they are not offline-attackable at KDF cost alone \u2014 but only while the per-tenant OPRF seed stays secret. A dump that includes a usable seed reduces OPAQUE to the SRP posture: a dictionary attack priced at the KSF.",
+                  "mitigation": "Each tenant's OPRF seed and AKE keypair (opaque_server_setup, schema v42) are AES-256-GCM encrypted at rest under opaque_setup_key, which is held outside the datastore in the secret provider (Vault in production), so a database-only disclosure yields no dictionary attack to mount at any cost. The trade-off is stated in docs/deployment/vault.md: losing opaque_setup_key means a password reset for every user in every tenant \u2014 which is why the Vault seeder never regenerates an existing key, and why the setup key is split from the cheap-to-rotate opaque_session_key.",
+                  "modelType": "STRIDE",
+                  "number": 179
                 }
               ]
             }
@@ -6970,7 +7025,7 @@
       {
         "id": 4,
         "title": "Authorization engine \u2014 RBAC, hierarchy & scopes",
-        "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the additive allow-wins RBAC engine with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.",
+        "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -7438,11 +7493,11 @@
                 {
                   "id": "c25c6cb6-456a-56a3-a684-539bd9863874",
                   "title": "No deny-override in the additive cascade",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Elevation of privilege",
                   "description": "The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.",
-                  "mitigation": "SEC-040, accepted for v1.0-beta and documented in the design document. Deny-override cascade is deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy instead of granting high and excluding.",
+                  "mitigation": "SEC-040 \u2014 closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows \u2014 asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules.",
                   "modelType": "STRIDE",
                   "number": 87
                 }
@@ -7776,7 +7831,7 @@
                   "severity": "High",
                   "type": "Tampering",
                   "description": "A party with broker access modifies subject, action or resource between publish and consume.",
-                  "mitigation": "Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; AMQPS protects the transport.",
+                  "mitigation": "Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; the broker connection is TLS-only \u2014 AXIAM__AMQP__URL must be amqps:// and every other scheme is refused before a socket is opened, in a debug build exactly as in a release one, with the AXIAM__AMQP__ALLOW_PLAINTEXT escape hatch removed.",
                   "modelType": "STRIDE",
                   "number": 92
                 }
@@ -10576,7 +10631,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "Outbound mail messages carry reset links and verification tokens; anyone able to read the queue can use them.",
-                  "mitigation": "Broker access is credentialed per service on the private network and AMQPS protects the transport; tokens are single-use and short-lived so a stale queued message has limited value.",
+                  "mitigation": "Broker access is credentialed per service on the private network, and the transport is always TLS \u2014 the server refuses any non-amqps:// broker URL in every build profile; tokens are single-use and short-lived so a stale queued message has limited value.",
                   "modelType": "STRIDE",
                   "number": 121
                 }
@@ -11195,7 +11250,7 @@
       {
         "id": 7,
         "title": "Deployment & platform (Kubernetes)",
-        "description": "Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier \u2014 SurrealDB, RabbitMQ, Secrets and backups. Threats here are largely deployment responsibilities rather than application code.",
+        "description": "Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier \u2014 SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -11486,7 +11541,7 @@
                   "severity": "High",
                   "type": "Tampering",
                   "description": "A transitive Rust or npm dependency with a known advisory ships in the image without anyone noticing.",
-                  "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the seven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03).",
+                  "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the eleven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03).",
                   "modelType": "STRIDE",
                   "number": 127
                 }
@@ -11709,7 +11764,7 @@
                   "severity": "High",
                   "type": "Information disclosure",
                   "description": "A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.",
-                  "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests.",
+                  "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests. The transport itself is no longer configurable: the server refuses any non-amqps:// broker URL in every build profile, so a shared credential at least never travels in the clear.",
                   "modelType": "STRIDE",
                   "number": 131
                 }
@@ -11746,7 +11801,7 @@
             "id": "8fbbc2a9-a70f-513d-a1e0-ea9fdce2783b",
             "data": {
               "type": "tm.Store",
-              "name": "Secrets / ConfigMap",
+              "name": "Secrets (Vault / K8s\nSecrets / ConfigMap)",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -11765,9 +11820,20 @@
                   "severity": "High",
                   "type": "Information disclosure",
                   "description": "ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output \u2014 a signing key or datastore password there is effectively public within the namespace.",
-                  "mitigation": "The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer mounted Secret files, and enable etcd encryption at rest.",
+                  "mitigation": "The production stacks now default to AXIAM__AUTH__SECRET_PROVIDER=vault, which keeps all ten long-lived secrets out of the container spec entirely; where the environment fallback is used instead, nothing prevents an operator from supplying them as AXIAM_* variables. Prefer Vault, or mounted Secret files, and enable etcd encryption at rest.",
                   "modelType": "STRIDE",
                   "number": 132
+                },
+                {
+                  "id": "32689c20-936d-45d7-8aa7-aa77adac3aa1",
+                  "title": "Vault concentrates every long-lived secret behind one credential",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "With AXIAM__AUTH__SECRET_PROVIDER=vault the production default, all ten long-lived secrets \u2014 the JWT signing key, opaque_setup_key, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key \u2014 sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.",
+                  "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does \u2014 TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: just vault-status reports presence only, never values, and the seeder never rewrites a secret that already exists.",
+                  "modelType": "STRIDE",
+                  "number": 180
                 }
               ]
             }
@@ -12322,7 +12388,7 @@
       {
         "id": 8,
         "title": "Client SDKs & admin UI integration surface",
-        "description": "The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.",
+        "description": "The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -12499,7 +12565,7 @@
                   "status": "Open",
                   "severity": "High",
                   "type": "Spoofing",
-                  "description": "The SDKs are published to seven public registries (crates.io, npm, PyPI, Maven Central, NuGet, Packagist, Go modules). A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.",
+                  "description": "The SDKs are published across the public registries \u2014 crates.io, npm, PyPI, Maven Central, NuGet, Packagist, the Go module proxy, Swift Package Index / CocoaPods, and GitHub Releases for C and C++. A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.",
                   "mitigation": "Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical package names in the SDK contract so integrators can verify what they installed.",
                   "modelType": "STRIDE",
                   "number": 135
@@ -12651,7 +12717,7 @@
             "id": "478f32d2-ac93-5350-ade6-1f0a28f6401a",
             "data": {
               "type": "tm.Process",
-              "name": "SDK HTTP core\n(7 languages:\nrs/ts/py/java/cs/php/go)",
+              "name": "SDK HTTP core\n(11 languages)",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,
@@ -12974,7 +13040,7 @@
                   "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Tampering",
-                  "description": "The contract is where SDK security behaviour is actually specified \u2014 TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across seven implementations at once.",
+                  "description": "The contract is where SDK security behaviour is actually specified \u2014 TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across eleven implementations at once.",
                   "mitigation": "The contract lives in this repository under normal review, and the drift and buf gates make any change to the generated artifacts visible in CI rather than in a downstream repository.",
                   "modelType": "STRIDE",
                   "number": 147
@@ -13031,7 +13097,7 @@
                   "severity": "Critical",
                   "type": "Tampering",
                   "description": "A stolen registry token or a compromised release workflow publishes an SDK version that exfiltrates credentials from every integrator who upgrades.",
-                  "mitigation": "Enable 2FA and trusted/OIDC publishing on every registry, pin and review release workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin.",
+                  "mitigation": "Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere \u2014 pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin.",
                   "modelType": "STRIDE",
                   "number": 148
                 }
@@ -13729,6 +13795,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 168
+    "threatTop": 181
   }
 }

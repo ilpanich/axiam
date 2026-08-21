@@ -1,0 +1,46 @@
+name: Website Link Check
+
+# Checks every outbound SDK link the public website advertises — API docs,
+# package registry, repository, examples, coverage — and fails on a dead link
+# OR on a redirect that lands off the expected domain.
+#
+# The off-domain check is the point, and it is not paranoia. The C# SDK's
+# documentation link pointed at fuget.org for months after that domain lapsed
+# and was re-registered: the URL returned a perfectly healthy HTTP 200, and
+# served an unrelated third party's website. A status-code-only check calls
+# that green. For a project whose whole subject is authentication, shipping a
+# documentation link that silently hands visitors to whoever bought the domain
+# is a worse failure than a 404, because nothing about it looks broken.
+#
+# Runs weekly rather than only on change, because link rot is a property of
+# time rather than of commits — nothing in this repository changes on the day
+# a third-party host expires.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/src/data.ts'
+      - '.github/workflows/website-link-check.yml'
+  pull_request:
+    paths:
+      - 'website/src/data.ts'
+      - '.github/workflows/website-link-check.yml'
+  schedule:
+    # Mondays at 06:17 UTC. Off the hour on purpose: scheduled jobs on the hour
+    # queue behind everyone else's.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: SDK links resolve and stay on-domain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every SDK link
+        run: python3 scripts/check-website-links.py

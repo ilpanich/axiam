@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `just tls-certs`) was previously unverifiable and the server panicked at
   startup with a bare transport error.
 
+### Changed
+
+- Website Security section brought up to `1.0.0-alpha34` from
+  `claude_dev/threat-modeling-and-security.md`: OPAQUE (RFC 9807) as an
+  optional augmented PAKE, Vault as the production secret provider, TLS-only
+  AMQP, purpose-bound SCIM provisioning tokens, sender-constrained OAuth2
+  clients and tokens (mTLS, `private_key_jwt`, DPoP, RFC 9207), the WebAuthn
+  MDS3 attestation policy, and the SurrealDB persistent-storage-engine
+  requirement. Deny-override shipped (SEC-040, T-16/T-87), so it is no longer
+  listed as an accepted trade-off.
+
 ### Fixed
 
 - `just prod-up` could not start any stack: `${AXIAM_IMAGE_TAG:latest}` is not

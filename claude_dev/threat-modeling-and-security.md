@@ -12,13 +12,33 @@
 >
 > ---
 >
-> ## Handoff — the website section is live
+> ## Handoff — the website section is in step with this document
 >
-> **Status: published.** Every factual claim below was verified against the code
-> at `3ede4d19` (2026-08-04) and is current. The security review series that backs
-> it is **closed with no open findings** — see §24 of the analysis. If you want to
-> check a specific claim, the evidence is cited by file and line in the analysis
+> **Status: published, source and section both current as of 2026-08-21.** The
+> page first went live from a version of this document verified against
+> `3ede4d19` (2026-08-04). Both have since been brought up to `1.0.0-alpha34`:
+> OPAQUE (RFC 9807) replacing SRP, HashiCorp Vault as the production secret
+> provider, TLS-only AMQP, SCIM provisioning tokens, deny-override shipping
+> (SEC-040 closed — it is no longer listed as an accepted trade-off),
+> sender-constrained OAuth2 clients and tokens, the WebAuthn MDS3 attestation
+> policy, the SurrealDB persistent-storage-engine requirement, and the
+> SEC-096…SEC-107 remediation wave. `npm run gen:threat-model` has been re-run
+> (the Threat Dragon model gained threats T-176…T-181 and closed T-16/T-87, and
+> `src/threatModel.ts` / `src/threatModelSummary.ts` are regenerated from it),
+> and the prose blocks in `src/security.ts` now match the sections below. The
+> alpha34 claims were written against the shipped code and its design documents
+> (`opaque-design.md`, `docs/deployment/vault.md`,
+> `scim-provisioning-token-design.md`, `remediation-plan-2026-08-15.md`); the
+> older claims retain their 2026-08-04 file-and-line verification in the analysis
 > document.
+>
+> **Keeping the two in step.** When this document changes, mirror the change into
+> `src/security.ts` in the same commit. Three bullets there deliberately place
+> their emphasis differently from the Markdown here — the `redirect_uri` bullet,
+> the mounted-Secret-files clause, and the SurrealDB storage-engine bullet. The
+> site's inline renderer splits on backticks before it handles `**`, so a bold
+> span that encloses a code span leaves the rest of the sentence bold; in each
+> case the claim is identical and only the bold markers moved.
 >
 > **Where it lives.** A top-level **Security** nav entry, alongside Docs, SDKs,
 > Benchmarks and Roadmap. In `website/`:
@@ -84,7 +104,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 154 threats** and a
+The system is verified against a **STRIDE threat model of 181 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -105,8 +125,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 154 |
-| Mitigated / Open | 132 / 22 |
+| Threats identified | 181 |
+| Mitigated / Open | 159 / 22 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -119,15 +139,15 @@ optimistic closed one.
 
 | Area | Threats | Open |
 |---|---|---|
-| System context | 26 | 3 |
-| Authentication & session management | 22 | 1 |
-| OAuth2 / OIDC authorization server | 14 | 0 |
-| Federation (SAML SP & OIDC RP) | 15 | 0 |
-| Authorization engine (RBAC, hierarchy, scopes) | 15 | 1 |
+| System context | 27 | 2 |
+| Authentication & session management | 26 | 1 |
+| OAuth2 / OIDC authorization server | 24 | 0 |
+| Federation (SAML SP & OIDC RP) | 23 | 1 |
+| Authorization engine (RBAC, hierarchy, scopes) | 15 | 0 |
 | PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 11 | 7 |
-| Client SDKs & admin-UI integration surface | 15 | 4 |
+| Deployment & platform (Kubernetes) | 13 | 8 |
+| Client SDKs & admin-UI integration surface | 17 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -146,7 +166,7 @@ have to be re-established — nothing is assumed across a boundary.
 | Boundary | Separates | What must hold on every crossing |
 |---|---|---|
 | **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie requests, input validation |
-| **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Secrets | Private network, credentialed connections, parameterised queries, tenant scoping at the repository layer |
+| **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
@@ -155,9 +175,10 @@ have to be re-established — nothing is assumed across a boundary.
 
 | Asset | Protection | Compromise would mean |
 |---|---|---|
-| JWT signing key (Ed25519) | Kubernetes Secret, never in the image | Any identity in any tenant forged |
+| JWT signing key (Ed25519) | Secret provider — Vault in production — never in the image | Any identity in any tenant forged |
 | Organization CA private key | AES-256-GCM encrypted at rest | Any user/service/device certificate minted |
 | Password hashes | Argon2id, per-user salt, pepper | Offline cracking of credentials |
+| OPAQUE setup key & per-tenant OPRF seeds | Secret provider; seeds AES-256-GCM encrypted at rest | Stolen OPAQUE records become dictionary-attackable |
 | MFA secrets | AES-256-GCM encrypted at rest | Second factor defeated |
 | Refresh tokens & sessions | Stored hashed, single-use rotation | Sustained impersonation |
 | Client & webhook secrets | Hashed / encrypted, redacted from logs | Service-account impersonation; forged events |
@@ -204,6 +225,24 @@ have to be re-established — nothing is assumed across a boundary.
   reset invalidates every existing session. An optional **Have I Been Pwned**
   k-anonymity check (only a five-character hash prefix leaves the server, behind a
   circuit breaker) blocks known-breached passwords.
+- **OPAQUE (RFC 9807) is available as an augmented PAKE** — off by default,
+  enabled per organization or tenant, with a tenant able to tighten but never
+  relax the organization baseline. With it enabled, the plaintext password never
+  reaches the server at all: not a TLS-terminating proxy, not a request-body log,
+  not a heap dump. Stolen OPAQUE records are not offline-attackable at KDF cost
+  the way a hash corpus is — recovering a password additionally requires the
+  tenant's OPRF seed, which is AES-256-GCM encrypted at rest under a key held in
+  the secret provider. Unknown identities receive a stable, well-formed decoy
+  response so the flow is enumeration-safe, and a failed exchange accrues toward
+  the same lockout as a failed password. One audited implementation
+  (`axiam-opaque`, with C-ABI and WebAssembly builds) serves all eleven SDKs and
+  the admin UI, instead of eleven hand-written PAKEs.
+- **SCIM provisioning uses purpose-bound long-lived tokens.** Okta and Entra can
+  only present one static bearer string, so AXIAM mints one that is accepted on
+  `/scim/v2/*` and nowhere else, carries no permissions of its own (the resolved
+  tenant user's RBAC still decides), is stored hashed with the plaintext returned
+  exactly once, and is expiring, revocable and audited. Deprovisioning a user
+  through SCIM also revokes their live sessions and refresh tokens.
 
 ### Authorization & tenant isolation
 
@@ -222,9 +261,13 @@ redundantly rather than at one chokepoint:
   first place, and every traversal that reads one — including group membership,
   the indirect path by which roles are inherited — re-checks the tenant at read
   time rather than trusting the write-time guard.
-- **The authorization engine is RBAC, additive, allow-wins with default-deny.**
+- **The authorization engine is RBAC, default-deny, with explicit deny-override.**
   A route with no declared permission is refused, not allowed. Roles cascade down a
-  resource hierarchy with bounded, cycle-safe traversal.
+  resource hierarchy with bounded, cycle-safe traversal, and a grant carries
+  `effect: "allow" | "deny"` — an explicit deny overrides every allow, at any depth
+  of the hierarchy and at equal specificity, so adding a deny rule can never widen
+  access and can never be undone by adding allows (asserted by an exhaustive
+  property test).
 - **The performance caches are off by default and never change an answer.** AXIAM
   offers two optional caches — one for authorization decisions, one for session
   validation. Both ship disabled, both are keyed per tenant, and both are invalidated
@@ -264,6 +307,17 @@ RFC 6749 / 7636 / 7009 / 7662 MUST matrices and OIDC Core/Discovery conformance:
   to the caller's own tenant; unknown tokens return the uniform inactive response.
 - **userinfo is scope-filtered**; JWKS publishes the active key plus a bounded
   rotation-overlap window.
+- **Clients can authenticate without a copyable secret, and tokens can be bound
+  to their holder.** Mutual-TLS client authentication (RFC 8705) and
+  `private_key_jwt` assertions (with a single-use `jti` and a hard lifetime cap)
+  replace the shared `client_secret`; certificate-bound and DPoP (RFC 9449)
+  access tokens make a leaked token useless without the private key that
+  presented it — and a token obtained through token exchange inherits the
+  sender-constraint the exchanging client proved, so the exchange path cannot be
+  used to launder a bound token into a bearer one. Every authorization response
+  carries the RFC 9207 `iss` parameter, closing the authorization-server mix-up
+  class. Assertion and proof verification derives the algorithm from the key
+  material, never from the token header.
 - **Machine tokens and user tokens are not interchangeable.** Every machine
   credential — a service account's client secret, or an IoT device's client
   certificate — yields a token with a machine audience, while a human login
@@ -340,7 +394,9 @@ against the classic federation attacks:
   verified in constant time before processing; a bad signature is rejected without
   requeue. The v2 message format binds a **per-message nonce and timestamp** so a
   captured, validly-signed message cannot be replayed. Signing is mandatory in
-  production builds.
+  production builds — and the **broker connection is TLS-only**: `amqps://` is the
+  only accepted scheme, refused before a socket is opened in every build profile,
+  with no plaintext escape hatch left in the configuration surface.
 - **Email** is built through a typed API that rejects header injection, renders
   templates with user values as escaped data (never as template source), and
   encrypts provider credentials at rest.
@@ -350,13 +406,23 @@ against the classic federation attacks:
 - **TLS 1.3 is the minimum** for all external communication; HSTS is emitted; the
   optional in-process TLS listener is TLS 1.3-only and fails fast rather than
   falling back to plaintext.
-- **Secrets at rest** — MFA seeds, CA keys, federation and webhook and email
-  secrets — are AES-256-GCM encrypted; passwords are Argon2id-hashed and client
-  secrets are hashed under a **server-held key**, so a database disclosure alone does
-  not yield an offline-crackable corpus. Secret-bearing types carry redacting
-  `Debug`/`toString` implementations so a credential never reaches a log line. A
-  **missing encryption key or pepper fails startup**; no code path substitutes an
-  all-zero, constant or unkeyed fallback.
+- **Secrets at rest** — MFA seeds, CA keys, OPAQUE OPRF seeds, federation and
+  webhook and email secrets — are AES-256-GCM encrypted; passwords are
+  Argon2id-hashed and client secrets are hashed under a **server-held key**, so a
+  database disclosure alone does not yield an offline-crackable corpus.
+  Secret-bearing types carry redacting `Debug`/`toString` implementations so a
+  credential never reaches a log line. A **missing encryption key or pepper fails
+  startup**; no code path substitutes an all-zero, constant or unkeyed fallback.
+- **Long-lived secrets come from a pluggable secret provider — HashiCorp Vault by
+  default in production.** All ten of them — the JWT signing key, the OPAQUE setup
+  and session keys, the PKI, MFA, federation and email encryption keys, the
+  password and pseudonym peppers, and the AMQP signing key — are fetched from
+  Vault rather than the container spec, so none needs to exist as an environment
+  variable or Kubernetes manifest at all. The seeder mints what is missing from a
+  CSPRNG and **never regenerates a secret that already exists** (regenerating the
+  OPAQUE setup key would mean a password reset for every user; regenerating the
+  pepper would invalidate every stored hash), and the status tooling reports
+  presence only, never values.
 - **The eleven client SDKs conform to one cross-language contract.** Strict TLS
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
   them); a plaintext `http://` base URL is refused at construction, with a
@@ -428,10 +494,17 @@ checklist — most of the threat model's open items live here.
 - Put a NetworkPolicy in front of the pods so nothing reaches the service around the
   ingress; keep the data tier off any public route.
 - Give RabbitMQ **per-service credentials with vhost separation** — AXIAM verifies
-  message signatures, but broker access control is yours.
-- Supply secrets as **mounted Secret files, not `AXIAM_*` environment variables**,
-  and enable etcd encryption at rest. A signing key in a ConfigMap or plain env var
-  is effectively public within the namespace.
+  message signatures and refuses any non-TLS broker URL, but broker access control
+  is yours.
+- **Run Vault in production mode, and treat its posture as your secret posture.**
+  The production stacks default to Vault for every long-lived secret, which
+  concentrates all of them behind one KV path: give AXIAM a read-only token scoped
+  to that path, keep unseal keys and the root token offline, enable Vault's audit
+  device, and never run a dev-mode (in-memory, unsealed) Vault in production. If
+  you use the environment fallback instead, supply secrets as **mounted Secret
+  files, not `AXIAM_*` environment variables**, and enable etcd encryption at
+  rest — a signing key in a ConfigMap or plain env var is effectively public
+  within the namespace.
 - **Encrypt backups and volume snapshots** with a key separate from the cluster,
   restrict snapshot IAM, and include backup media in the same access review as the
   live data tier — a snapshot carries the same data under weaker controls.
@@ -483,9 +556,6 @@ checklist — most of the threat model's open items live here.
 - **Access tokens survive revocation for up to 15 minutes** — the price of stateless
   verification. Where immediate revocation matters, verify through the gRPC
   introspection path instead of locally.
-- **The RBAC engine is additive with no deny-override** in the current release; model
-  exclusions by granting lower in the resource hierarchy rather than granting high
-  and excluding. Deny-override is on the roadmap.
 - **Audit records cannot be erased** — append-only by design, which is in tension
   with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period
   consistent with your lawful basis.

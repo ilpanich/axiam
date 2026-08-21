@@ -109,6 +109,25 @@ services:
       AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just prod-up' or export AXIAM__DB__PASSWORD}"
       AXIAM__DB__NAMESPACE: "axiam"
       AXIAM__DB__DATABASE: "axiam"
+      # WebAuthn is validated against the origin the BROWSER is on, not the
+      # address the API answers on. The built-in default is the API's own
+      # `http://localhost:8090`, which no browser is ever on in this stack, so
+      # every register/finish was rejected with a 401 that looked like a session
+      # problem: the authenticator created the passkey and the password manager
+      # saved it, then the server refused the attestation because
+      # `clientDataJSON.origin` did not match.
+      #
+      # Default here is the Caddy front door this stack documents
+      # (`caddy reverse-proxy --from https://localhost --to :8081`). Reaching the
+      # frontend directly on http://localhost:8081 is a DIFFERENT origin — set
+      # AXIAM_WEBAUTHN_RP_ORIGIN to whatever appears in the browser's address
+      # bar, or passkeys will fail there in exactly the same way.
+      #
+      # RP_ID stays the bare registrable domain: it must be the origin's host or
+      # a parent of it, and credentials are bound to it, so changing it later
+      # invalidates every passkey already enrolled.
+      AXIAM__AUTH__WEBAUTHN_RP_ID: "${AXIAM_WEBAUTHN_RP_ID:-localhost}"
+      AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "${AXIAM_WEBAUTHN_RP_ORIGIN:-https://localhost}"
       # SEC-023: AMQP URL must not embed literal credentials.
       # A6: TLS to the broker. Port 5671 is the AMQPS listener configured on
       # the rabbitmq service below. HMAC signing (AXIAM__AMQP__SIGNING_KEY)

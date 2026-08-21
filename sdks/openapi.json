@@ -13210,13 +13210,16 @@
       "RefreshRequest": {
         "type": "object",
         "required": [
-          "tenant_id",
-          "org_id"
+          "tenant_id"
         ],
         "properties": {
           "org_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ignored. `refresh` derives the organization from the tenant record\nbecause a client-supplied `org_id` could scope the minted token to a\nforeign org (NEW-1) — so this is accepted only for wire compatibility\nwith clients built against the original contract, and is optional\nbecause requiring a field the server refuses to read is a rejection\nwith no security value."
           },
           "tenant_id": {
             "type": "string",

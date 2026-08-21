@@ -60,11 +60,21 @@ function processQueue(error: unknown) {
   failedQueue = [];
 }
 
-// Endpoints that must never trigger a silent refresh (avoids infinite loops)
+// Endpoints that must never trigger a silent refresh (avoids infinite loops).
+//
+// The WebAuthn *authentication* ceremony belongs here for a different reason
+// than the rest: it is a way of PROVING an identity, not a call made with one
+// already proven. A 401 from it means "that assertion did not authenticate
+// you", never "your access token aged out", so refreshing and replaying it is
+// meaningless — and actively harmful on the login page, where the failure path
+// below does a full `window.location` redirect that throws the user back to the
+// first step of the form they were filling in.
 const SKIP_REFRESH = [
   "/api/v1/auth/refresh",
   "/api/v1/auth/login",
   "/api/v1/auth/logout",
+  "/api/v1/auth/webauthn/authenticate/start",
+  "/api/v1/auth/webauthn/authenticate/finish",
 ];
 
 // Response interceptor: handle 401 with silent cookie-based refresh (per D-14)
@@ -102,8 +112,21 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        // Cookie-based refresh via the api instance so X-CSRF-Token is attached (CQ-F28)
-        await api.post("/api/v1/auth/refresh", {});
+        // Cookie-based refresh via the api instance so X-CSRF-Token is attached (CQ-F28).
+        //
+        // The refresh TOKEN comes from the httpOnly `axiam_refresh` cookie, but
+        // `RefreshRequest` still needs `tenant_id` in the body: the server uses
+        // it to resolve the owning organization, and posting `{}` here failed
+        // every refresh with `missing field \`tenant_id\``, turning any routine
+        // 401 into a forced logout. `org_id` is deliberately NOT sent — the
+        // handler derives it from the tenant record and ignores whatever the
+        // client claims (NEW-1).
+        const tenantId = useAuthStore.getState().user?.tenant_id;
+        if (!tenantId) {
+          // No tenant means no session to rotate; refreshing would only 400.
+          throw error;
+        }
+        await api.post("/api/v1/auth/refresh", { tenant_id: tenantId });
         // New cookies set by server response — no store update needed
         processQueue(null);
         return api(originalRequest);
@@ -111,7 +134,12 @@ api.interceptors.response.use(
         processQueue(refreshError);
         queryClient.clear();
         useAuthStore.getState().clearAuth();
-        window.location.href = "/login";
+        // Already on /login? Assigning `location.href` there reloads the page,
+        // which re-runs whatever produced the 401 and reloads again. Let the
+        // caller surface the error in place instead.
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 175,
- "open": 23,
- "mitigated": 152,
+ "total": 181,
+ "open": 22,
+ "mitigated": 159,
  "diagrams": [
   {
    "id": 0,
@@ -294,7 +294,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "Each Argon2id verification allocates a ~19 MiB arena; an unauthenticated login flood turns password hashing into a memory-exhaustion vector (~970 MiB RSS observed at ~50 concurrent hashes against a 1024 MiB cap).",
-       "mitigation": "crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly."
+       "mitigation": "crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly. Both credential-verifying surfaces pass through the same gate: the REST login path and gRPC ValidateCredentials (B1) — an ungated path in either protocol would reopen the flood through the other."
       },
       {
        "number": 11,
@@ -304,6 +304,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A handler that trusts a caller-supplied tenant_id, or a repository query that omits the tenant filter, breaks the isolation guarantee that is the core of the product.",
        "mitigation": "Tenant context is derived from the interceptor-verified session or JWT, never from request-body input; tenant filtering is enforced at the repository layer and cross-tenant graph edges are stripped on traversal."
+      },
+      {
+       "number": 181,
+       "title": "Leaked SCIM provisioning token replayed as the IdP",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "SCIM provisioning tokens exist because Okta and Entra can present only one static bearer string, so the credential is deliberately long-lived — pasted once into the IdP and forgotten. Whoever obtains it can drive user provisioning and deprovisioning for the tenant for as long as it lives.",
+       "mitigation": "Containment is the design (#330): a provisioning token is accepted on /scim/v2/* and nowhere else — not /api/v1/*, not /oauth2/*, not gRPC — and carries no permissions of its own: it resolves to an existing tenant user whose RBAC must still pass the same require_scim_provision check as a session would. It is stored SHA-256-hashed with the plaintext returned exactly once, carries an expiry, is revocable independently of every other credential, stamps last_used_at on use, and minting and revocation are audited. SCIM has its own rate-limit bucket (R5.2), and deprovisioning a user through SCIM revokes their live sessions and refresh tokens (SEC-098)."
       }
      ],
      "open": 0
@@ -430,12 +439,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "No deny-override in the RBAC cascade",
        "type": "Elevation of privilege",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource — the only way to remove access to a subtree is to restructure the grant.",
-       "mitigation": "SEC-040, accepted for v1.0-beta and documented in the design document and the roadmap. Deny-override cascade is deferred to post-v1.0-beta. Operators must model exclusions by narrowing the grant rather than by adding a deny."
+       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "b0953520-e5ca-5c39-8233-e8a9a3b7446b",
@@ -536,10 +545,10 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 424,
      "w": 170,
      "h": 80,
-     "name": "Kubernetes Secrets / ConfigMap",
+     "name": "Secret store (Vault / Kubernetes Secrets)",
      "lines": [
-      "Kubernetes Secrets",
-      "/ ConfigMap"
+      "Secret store (Vault /",
+      "Kubernetes Secrets)"
      ],
      "description": "JWT signing keys, datastore credentials, CA key encryption key, provider API keys.",
      "outOfScope": false,
@@ -551,7 +560,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Mitigated",
        "description": "The Ed25519 JWT signing key lets an attacker mint access tokens for any subject in any tenant, defeating authentication entirely.",
-       "mitigation": "Keys live in Kubernetes Secrets, not in the image or ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Enable envelope encryption for etcd and rotate signing keys on a schedule — JWKS publishes multiple keys so rotation is non-breaking."
+       "mitigation": "The signing key is fetched through the pluggable secret provider — HashiCorp Vault by default in the production stacks (AXIAM__AUTH__SECRET_PROVIDER=vault), Kubernetes Secrets otherwise — and never lives in the image or a ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Rotate signing keys on a schedule — JWKS publishes multiple key ids so rotation is non-breaking — and where Kubernetes Secrets are the source, enable envelope encryption for etcd."
       }
      ],
      "open": 0
@@ -872,7 +881,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A tenant admin who can set metadata_url or jwks_uri makes the server fetch internal addresses — cloud metadata endpoints, in-cluster services — and observe the response.",
-       "mitigation": "SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size."
+       "mitigation": "SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size. SEC-107 adds a deliberate, bounded bypass for same-network IdPs: AXIAM__PKI__SSRF_ALLOWED_HOSTS is default-empty, set only at the composition root, matches exact hosts (no wildcards, no CIDRs), applies to the first hop only with redirects always strict, and logs every use — and cloud metadata endpoints stay blocked even for an allowlisted host, with IPv4-mapped canonicalisation running before that check so the allowlist cannot re-open SEC-094."
       }
      ],
      "open": 0
@@ -925,10 +934,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 26,
-   "open": 3,
+   "total": 27,
+   "open": 2,
    "bySeverity": {
-    "High": 13,
+    "High": 14,
     "Medium": 10,
     "Critical": 3
    }
@@ -936,7 +945,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "description": "Password login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.",
+   "description": "Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.",
    "width": 1448,
    "height": 908,
    "boundaries": [
@@ -1035,12 +1044,13 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 74,
      "w": 140,
      "h": 140,
-     "name": "Login endpoint POST /auth/login",
+     "name": "Login endpoints /auth/login + /auth/opaque/*",
      "lines": [
       "Login",
-      "endpoint",
-      "POST",
-      "/auth/login"
+      "endpoints",
+      "/auth/login",
+      "+",
+      "/auth/opaque/*"
      ],
      "description": "",
      "outOfScope": false,
@@ -1062,6 +1072,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "If any code path verifies a password without incrementing the failed-attempt counter, brute force is unbounded through that path even though the main login endpoint is protected.",
        "mitigation": "SEC-026b / D-06: the REST login path and the gRPC UserService::validate_credentials path both call the single shared lockout helper, which is the sole source of truth for failed-attempt accrual."
+      },
+      {
+       "number": 176,
+       "title": "Account existence probed through the OPAQUE login flow",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "POST /auth/opaque/login/start is unauthenticated and must answer for any identity; a response that differs for unknown accounts — in shape, stability or KSF parameters — is a username-enumeration oracle equivalent to a differential /auth/login error.",
+       "mitigation": "RFC 9807 designs the case in: for an unknown identity the server runs the AKE with no password file and returns a well-formed KE2 derived from the setup's dummy public key. AXIAM adds the stability half — the decoy credential identifier is HMAC(decoy_key, tenant_id || lowercased identity), so probing the same non-existent name twice gets the same answer; a random identifier would announce non-existence as loudly as a 404. Stated residual: a decoy carries the tenant's current KSF parameters while a real user carries those they enrolled under, so an attacker who knows the tenant's policy history can tell an account still on the old cost exists; the window closes as passwords rotate."
+      },
+      {
+       "number": 177,
+       "title": "Unauthenticated OPAQUE exchanges consume server state and OPRF budget",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "login/start and register/start are unauthenticated by necessity; each costs the server an OPRF evaluation and in-flight exchange state, so a flood turns the PAKE handshake into a resource-exhaustion vector — the OPAQUE analogue of the Argon2id memory flood (T-10).",
+       "mitigation": "Under OPAQUE the expensive KSF runs on the client, so the server-side cost per attempt is a bounded elliptic-curve OPRF evaluation, not a ~19 MiB Argon2id arena. The endpoints sit under the strict internet-facing per-IP rate limits the tuning presets are prevented from widening; register/start has its own benchmark scenario and budget (opaque_register_start — new in kind, since SRP enrolment cost the server nothing); and in-flight exchange state is sealed for 120 seconds under the cheap-to-rotate opaque_session_key rather than accumulating unbounded server-side sessions. OPAQUE is additionally off by default (opaque_mode: disabled) until an organization or tenant enables it."
       }
      ],
      "open": 0
@@ -1146,6 +1174,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Read-then-write increments lose updates under parallel attempts, letting an attacker exceed the configured threshold.",
        "mitigation": "SEC-032: the increment is a single atomic SurrealQL UPDATE, removing the TOCTOU window."
+      },
+      {
+       "number": 178,
+       "title": "OPAQUE login path sits outside the lockout counter",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A failed OPAQUE authentication is a wrong password, but it surfaces as a failed KE3 inside the AKE rather than a failed hash verify. A path that did not accrue toward lockout would mean enabling OPAQUE silently removed brute-force protection from every account that adopted it — the same unmetered-path defect SEC-026b closed for gRPC (T-31), reopened by a new protocol.",
+       "mitigation": "A failed KE3 accrues toward the shared exponential-backoff lockout exactly as a failed Argon2id verify does. OpaqueRejection deliberately has two variants rather than one so the caller can attribute an attempt before accruing it: a malformed client message (AuthError::OpaqueMalformed, 400) is distinguished from a wrong password, and only the latter counts against the account — and from corrupt stored state (500), so junk from a client is never read as a server fault."
       }
      ],
      "open": 0
@@ -1272,10 +1309,11 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 104,
      "w": 170,
      "h": 80,
-     "name": "user (Argon2id hashes)",
+     "name": "user credentials (Argon2id hashes, OPAQUE records)",
      "lines": [
-      "user",
-      "(Argon2id hashes)"
+      "user credentials",
+      "(Argon2id",
+      "hashes, OPAQUE records)"
      ],
      "description": "",
      "outOfScope": false,
@@ -1288,6 +1326,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A database disclosure exposes every password hash to offline attack at attacker-chosen cost.",
        "mitigation": "Argon2id with OWASP-recommended parameters (m=19 MiB, t=2, p=1) and per-user salts makes bulk cracking expensive; policy enforces a 12-character minimum by default."
+      },
+      {
+       "number": 179,
+       "title": "Stolen OPAQUE records opened offline with the tenant OPRF seed",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "opaque_credential rows are the OPAQUE analogue of password hashes. Unlike an Argon2id or SRP-verifier corpus they are not offline-attackable at KDF cost alone — but only while the per-tenant OPRF seed stays secret. A dump that includes a usable seed reduces OPAQUE to the SRP posture: a dictionary attack priced at the KSF.",
+       "mitigation": "Each tenant's OPRF seed and AKE keypair (opaque_server_setup, schema v42) are AES-256-GCM encrypted at rest under opaque_setup_key, which is held outside the datastore in the secret provider (Vault in production), so a database-only disclosure yields no dictionary attack to mount at any cost. The trade-off is stated in docs/deployment/vault.md: losing opaque_setup_key means a password reset for every user in every tenant — which is why the Vault seeder never regenerates an existing key, and why the setup key is split from the cheap-to-rotate opaque_session_key."
       }
      ],
      "open": 0
@@ -1703,11 +1750,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 22,
+   "total": 26,
    "open": 1,
    "bySeverity": {
-    "High": 9,
-    "Medium": 8,
+    "High": 11,
+    "Medium": 10,
     "Critical": 3,
     "Low": 2
    }
@@ -3203,7 +3250,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the additive allow-wins RBAC engine with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.",
+   "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.",
    "width": 1438,
    "height": 808,
    "boundaries": [
@@ -3447,12 +3494,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "No deny-override in the additive cascade",
        "type": "Elevation of privilege",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.",
-       "mitigation": "SEC-040, accepted for v1.0-beta and documented in the design document. Deny-override cascade is deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy instead of granting high and excluding."
+       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "cb90bd7e-3fb9-5083-b48b-28b85d9208fa",
@@ -3604,7 +3651,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A party with broker access modifies subject, action or resource between publish and consume.",
-       "mitigation": "Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; AMQPS protects the transport."
+       "mitigation": "Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; the broker connection is TLS-only — AXIAM__AMQP__URL must be amqps:// and every other scheme is refused before a socket is opened, in a debug build exactly as in a release one, with the AXIAM__AMQP__ALLOW_PLAINTEXT escape hatch removed."
       }
      ],
      "open": 0
@@ -3774,7 +3821,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 15,
-   "open": 1,
+   "open": 0,
    "bySeverity": {
     "Critical": 4,
     "High": 4,
@@ -4889,7 +4936,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Outbound mail messages carry reset links and verification tokens; anyone able to read the queue can use them.",
-       "mitigation": "Broker access is credentialed per service on the private network and AMQPS protects the transport; tokens are single-use and short-lived so a stale queued message has limited value."
+       "mitigation": "Broker access is credentialed per service on the private network, and the transport is always TLS — the server refuses any non-amqps:// broker URL in every build profile; tokens are single-use and short-lived so a stale queued message has limited value."
       }
      ],
      "open": 0
@@ -5126,7 +5173,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "description": "Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Secrets and backups. Threats here are largely deployment responsibilities rather than application code.",
+   "description": "Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.",
    "width": 1448,
    "height": 848,
    "boundaries": [
@@ -5261,7 +5308,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A transitive Rust or npm dependency with a known advisory ships in the image without anyone noticing.",
-       "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the seven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03)."
+       "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the eleven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03)."
       }
      ],
      "open": 0
@@ -5384,7 +5431,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Open",
        "description": "A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.",
-       "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests."
+       "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests. The transport itself is no longer configurable: the server refuses any non-amqps:// broker URL in every build profile, so a shared credential at least never travels in the clear."
       }
      ],
      "open": 1
@@ -5396,9 +5443,10 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 484,
      "w": 170,
      "h": 80,
-     "name": "Secrets / ConfigMap",
+     "name": "Secrets (Vault / K8s Secrets / ConfigMap)",
      "lines": [
-      "Secrets / ConfigMap"
+      "Secrets (Vault / K8s",
+      "Secrets / ConfigMap)"
      ],
      "description": "",
      "outOfScope": false,
@@ -5410,10 +5458,19 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Open",
        "description": "ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output — a signing key or datastore password there is effectively public within the namespace.",
-       "mitigation": "The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer mounted Secret files, and enable etcd encryption at rest."
+       "mitigation": "The production stacks now default to AXIAM__AUTH__SECRET_PROVIDER=vault, which keeps all ten long-lived secrets out of the container spec entirely; where the environment fallback is used instead, nothing prevents an operator from supplying them as AXIAM_* variables. Prefer Vault, or mounted Secret files, and enable etcd encryption at rest."
+      },
+      {
+       "number": 180,
+       "title": "Vault concentrates every long-lived secret behind one credential",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Open",
+       "description": "With AXIAM__AUTH__SECRET_PROVIDER=vault the production default, all ten long-lived secrets — the JWT signing key, opaque_setup_key, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.",
+       "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: just vault-status reports presence only, never values, and the seeder never rewrites a secret that already exists."
       }
      ],
-     "open": 1
+     "open": 2
     },
     {
      "id": "78160ffe-cb3f-5dbb-8852-1142ff0d92aa",
@@ -5619,10 +5676,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 12,
-   "open": 7,
+   "total": 13,
+   "open": 8,
    "bySeverity": {
-    "High": 8,
+    "High": 9,
     "Medium": 3,
     "Critical": 1
    }
@@ -5630,7 +5687,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "description": "The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.",
+   "description": "The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.",
    "width": 1448,
    "height": 798,
    "boundaries": [
@@ -5689,7 +5746,7 @@ export const THREAT_MODEL: ThreatModel = {
        "type": "Spoofing",
        "severity": "High",
        "status": "Open",
-       "description": "The SDKs are published to seven public registries (crates.io, npm, PyPI, Maven Central, NuGet, Packagist, Go modules). A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.",
+       "description": "The SDKs are published across the public registries — crates.io, npm, PyPI, Maven Central, NuGet, Packagist, the Go module proxy, Swift Package Index / CocoaPods, and GitHub Releases for C and C++. A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.",
        "mitigation": "Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical package names in the SDK contract so integrators can verify what they installed."
       },
       {
@@ -5775,13 +5832,12 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 294,
      "w": 140,
      "h": 140,
-     "name": "SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go)",
+     "name": "SDK HTTP core (11 languages)",
      "lines": [
       "SDK HTTP",
       "core",
-      "(7",
-      "languages:",
-      "rs/ts/py/java/cs/php/go)"
+      "(11",
+      "languages)"
      ],
      "description": "",
      "outOfScope": false,
@@ -5972,7 +6028,7 @@ export const THREAT_MODEL: ThreatModel = {
        "type": "Tampering",
        "severity": "Medium",
        "status": "Mitigated",
-       "description": "The contract is where SDK security behaviour is actually specified — TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across seven implementations at once.",
+       "description": "The contract is where SDK security behaviour is actually specified — TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across eleven implementations at once.",
        "mitigation": "The contract lives in this repository under normal review, and the drift and buf gates make any change to the generated artifacts visible in CI rather than in a downstream repository."
       }
      ],
@@ -6000,7 +6056,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Open",
        "description": "A stolen registry token or a compromised release workflow publishes an SDK version that exfiltrates credentials from every integrator who upgrades.",
-       "mitigation": "Enable 2FA and trusted/OIDC publishing on every registry, pin and review release workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin."
+       "mitigation": "Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere — pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin."
       }
      ],
      "open": 1

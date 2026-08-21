@@ -10,7 +10,7 @@
 
 [package]
 name = "axiam-opaque-wasm"
-version = "1.0.0-alpha34"
+version = "1.0.0-alpha35"
 edition = "2024"
 rust-version = "1.93"
 license = "Apache-2.0"

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha33] - 2026-08-21
+
+### Added
+
+- Seed every AXIAM secret into Vault, minting what is missing (#350)
+
+### Changed
+
+- Correct the SDK and HTTP samples against the real APIs
+- Rebuild the documentation section for a production IAM
+- The baseline resolved in step 3b is OPAQUE's, not SRP's
+- Publish axiam-opaque via Trusted Publishing, not tokens
+
+### Fixed
+
+- Pin axiam-opaque's MSRV explicitly, and gate its vendored copy
+- Cut axiam-opaque on the tag release-opaque.yml triggers on
+
 ## [Unreleased]
 
 ## [1.0.0-alpha32] - 2026-08-20

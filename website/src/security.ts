@@ -148,8 +148,8 @@ export const SEC_SECTIONS: SecSection[] = [
           ],
           [
             "AXIAM ↔ data tier",
-            "Application pods ↔ SurrealDB, RabbitMQ, Secrets",
-            "Private network, credentialed connections, parameterised queries, tenant scoping at the repository layer",
+            "Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets",
+            "Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer",
           ],
           [
             "Tenant ↔ tenant",
@@ -176,7 +176,7 @@ export const SEC_SECTIONS: SecSection[] = [
         rows: [
           [
             "JWT signing key (Ed25519)",
-            "Kubernetes Secret, never in the image",
+            "Secret provider — Vault in production — never in the image",
             "Any identity in any tenant forged",
           ],
           [
@@ -188,6 +188,11 @@ export const SEC_SECTIONS: SecSection[] = [
             "Password hashes",
             "Argon2id, per-user salt, pepper",
             "Offline cracking of credentials",
+          ],
+          [
+            "OPAQUE setup key & per-tenant OPRF seeds",
+            "Secret provider; seeds AES-256-GCM encrypted at rest",
+            "Stolen OPAQUE records become dictionary-attackable",
           ],
           ["MFA secrets", "AES-256-GCM encrypted at rest", "Second factor defeated"],
           [
@@ -227,6 +232,8 @@ export const SEC_SECTIONS: SecSection[] = [
           "**MFA** is built in — TOTP today, WebAuthn/passkeys for phishing-resistant, origin-bound second factors. TOTP codes are single-use within their window (replay is rejected with an atomic compare-and-set), and the MFA challenge is a distinct, single-use, no-authority token so the second factor can never be skipped by replaying it.",
           "**Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The verifier pins the algorithm and never reads it from the token header, so `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens are opaque, server-stored and **single-use with rotation**, consumed through an atomic delete-gate so a race cannot fork the session or hide a stolen-token reuse. In the browser, tokens live only in `Secure` / `HttpOnly` / `SameSite=Strict` cookies — never in `localStorage`, never in a URL.",
           "**Password reset** uses CSPRNG-generated, single-use, short-lived tokens (never time-ordered UUIDs), delivered over an authenticated POST, and consuming a reset invalidates every existing session. An optional **Have I Been Pwned** k-anonymity check (only a five-character hash prefix leaves the server, behind a circuit breaker) blocks known-breached passwords.",
+          "**OPAQUE (RFC 9807) is available as an augmented PAKE** — off by default, enabled per organization or tenant, with a tenant able to tighten but never relax the organization baseline. With it enabled, the plaintext password never reaches the server at all: not a TLS-terminating proxy, not a request-body log, not a heap dump. Stolen OPAQUE records are not offline-attackable at KDF cost the way a hash corpus is — recovering a password additionally requires the tenant's OPRF seed, which is AES-256-GCM encrypted at rest under a key held in the secret provider. Unknown identities receive a stable, well-formed decoy response so the flow is enumeration-safe, and a failed exchange accrues toward the same lockout as a failed password. One audited implementation (`axiam-opaque`, with C-ABI and WebAssembly builds) serves all eleven SDKs and the admin UI, instead of eleven hand-written PAKEs.",
+          "**SCIM provisioning uses purpose-bound long-lived tokens.** Okta and Entra can only present one static bearer string, so AXIAM mints one that is accepted on `/scim/v2/*` and nowhere else, carries no permissions of its own (the resolved tenant user's RBAC still decides), is stored hashed with the plaintext returned exactly once, and is expiring, revocable and audited. Deprovisioning a user through SCIM also revokes their live sessions and refresh tokens.",
         ],
       },
     ],
@@ -247,7 +254,7 @@ export const SEC_SECTIONS: SecSection[] = [
         items: [
           "**Tenant context comes from the verified session or JWT, never from request input.** A caller cannot name a tenant it does not belong to. The organization claim in a token is derived server-side from the tenant record on both login and refresh — it is never accepted from the client.",
           "**Repository queries are tenant-scoped and parameterised.** Every SurrealQL statement uses bind parameters — no query is assembled by string concatenation of user input — and carries a `tenant_id` predicate. Cross-tenant graph edges are stripped during permission resolution rather than followed. The isolation is enforced twice over: an edge that would cross tenants cannot be *written* in the first place, and every traversal that reads one — including group membership, the indirect path by which roles are inherited — re-checks the tenant at read time rather than trusting the write-time guard.",
-          "**The authorization engine is RBAC, additive, allow-wins with default-deny.** A route with no declared permission is refused, not allowed. Roles cascade down a resource hierarchy with bounded, cycle-safe traversal.",
+          "**The authorization engine is RBAC, default-deny, with explicit deny-override.** A route with no declared permission is refused, not allowed. Roles cascade down a resource hierarchy with bounded, cycle-safe traversal, and a grant carries `effect: \"allow\" | \"deny\"` — an explicit deny overrides every allow, at any depth of the hierarchy and at equal specificity, so adding a deny rule can never widen access and can never be undone by adding allows (asserted by an exhaustive property test).",
           "**The performance caches are off by default and never change an answer.** AXIAM offers two optional caches — one for authorization decisions, one for session validation. Both ship disabled, both are keyed per tenant, and both are invalidated by the mutations that could change their answer, so revoking a role or a session takes effect immediately on the replica that handled it. Enabling one is an explicit, logged decision that trades a few seconds of worst-case staleness for throughput — never correctness.",
           "**Revocation propagates across replicas, and a cache that cannot hear it switches itself off.** The decision cache can broadcast invalidations to every replica over the message broker. Those messages are signed with the same per-tenant authenticated envelope as the rest of AXIAM's messaging — nonce, timestamp and constant-time verification — so a party with broker access but no signing key cannot forge one, and a forged message could in any case only *drop* cache entries, never grant access. The design fails safe in both directions: a replica starts out not trusting its cache and only begins using it once it is successfully subscribed, and if a privilege-narrowing change cannot be broadcast, the change itself fails rather than leaving other replicas stale.",
           "**Three protocols, one engine.** REST middleware, gRPC `CheckAccess` and the async AMQP path all evaluate the same policy. The gRPC interceptor authenticates the caller and derives the tenant from its verified identity, so a service account cannot ask about a subject outside its own tenant.",
@@ -270,10 +277,11 @@ export const SEC_SECTIONS: SecSection[] = [
         type: "list",
         items: [
           "**Authorization Code with PKCE (S256 only)** — the `plain` method is rejected; public clients prove possession with the verifier rather than a secret. The implicit grant is not offered.",
-          "**Exact `redirect_uri` matching** — no wildcards, no prefix matching, no normalisation that could widen the match, closing the open-redirect class.",
+          "**Redirect URIs are matched exactly** — no wildcards, no prefix matching, no normalisation of the `redirect_uri` that could widen the match, closing the open-redirect class.",
           "**Single-use authorization codes** bound to client and redirect URI; **refresh rotation** that can only narrow scope, never widen it; `state` and `nonce` required and verified.",
           "**Introspection and revocation require client authentication** and are scoped to the caller's own tenant; unknown tokens return the uniform inactive response.",
           "**userinfo is scope-filtered**; JWKS publishes the active key plus a bounded rotation-overlap window.",
+          "**Clients can authenticate without a copyable secret, and tokens can be bound to their holder.** Mutual-TLS client authentication (RFC 8705) and `private_key_jwt` assertions (with a single-use `jti` and a hard lifetime cap) replace the shared `client_secret`; certificate-bound and DPoP (RFC 9449) access tokens make a leaked token useless without the private key that presented it — and a token obtained through token exchange inherits the sender-constraint the exchanging client proved, so the exchange path cannot be used to launder a bound token into a bearer one. Every authorization response carries the RFC 9207 `iss` parameter, closing the authorization-server mix-up class. Assertion and proof verification derives the algorithm from the key material, never from the token header.",
           "**Machine tokens and user tokens are not interchangeable.** Every machine credential — a service account's client secret, or an IoT device's client certificate — yields a token with a machine audience, while a human login yields a user audience; each is rejected where the other is expected, in both directions. Without that split, one device certificate would silently unlock every endpoint built for people. It is enforced at the request-extraction layer rather than left to individual handlers, so a new route inherits it by default, and the endpoints machines legitimately need — authorization checks — accept either principal while still recording which kind it was, so a device is never written into the audit trail as a person.",
         ],
       },
@@ -315,6 +323,7 @@ export const SEC_SECTIONS: SecSection[] = [
           "**CA signing keys are AES-256-GCM encrypted at rest** in a separate, access-controlled table, with the key held outside the datastore.",
           "**mTLS device authentication verifies the full chain** to the tenant/org CA after the fingerprint lookup, checks the issuing CA is active and within its validity window, and enforces the certificate's own validity period and live revocation status on every connection — a fingerprint match alone is never enough.",
           "**OpenPGP keys** sign the audit trail and encrypt GDPR data exports, so both are independently verifiable and confidential.",
+          "**WebAuthn attestation policy (X3)** verifies the FIDO Alliance's MDS3 metadata BLOB against a **digest-pinned vendored trust anchor** — chaining to the public GlobalSign root alone would only prove \"some GlobalSign EV customer\", so the leaf's SAN DNS identity and the CA/`basicConstraints` status of every issuer in the chain are checked too. Ingestion rejects a rollback to an older BLOB serial and never hard-fails on a stale one (logged, not blocking). This is opt-in (`AXIAM__PKI__MDS_ENABLED=false` by default, zero outbound calls) and enforced only at registration — existing credentials are never auto-revoked on a policy change.",
         ],
       },
     ],
@@ -346,7 +355,7 @@ export const SEC_SECTIONS: SecSection[] = [
         type: "list",
         items: [
           "**Webhook deliveries are signed with a Stripe-style signed-timestamp HMAC** — HMAC-SHA256 over `<timestamp>.<body>`, so a stale or body-only forgery cannot be produced — and use the same resolve-and-pin SSRF guard as federation, so a webhook URL cannot be used to scan internal services.",
-          "**AMQP messages** (async authz, audit ingestion, mail) carry an **HMAC-SHA256 signature over the canonical body with a per-tenant HKDF-derived subkey**, verified in constant time before processing; a bad signature is rejected without requeue. The v2 message format binds a **per-message nonce and timestamp** so a captured, validly-signed message cannot be replayed. Signing is mandatory in production builds.",
+          "**AMQP messages** (async authz, audit ingestion, mail) carry an **HMAC-SHA256 signature over the canonical body with a per-tenant HKDF-derived subkey**, verified in constant time before processing; a bad signature is rejected without requeue. The v2 message format binds a **per-message nonce and timestamp** so a captured, validly-signed message cannot be replayed. Signing is mandatory in production builds — and the **broker connection is TLS-only**: `amqps://` is the only accepted scheme, refused before a socket is opened in every build profile, with no plaintext escape hatch left in the configuration surface.",
           "**Email** is built through a typed API that rejects header injection, renders templates with user values as escaped data (never as template source), and encrypts provider credentials at rest.",
         ],
       },
@@ -363,7 +372,8 @@ export const SEC_SECTIONS: SecSection[] = [
         type: "list",
         items: [
           "**TLS 1.3 is the minimum** for all external communication; HSTS is emitted; the optional in-process TLS listener is TLS 1.3-only and fails fast rather than falling back to plaintext.",
-          "**Secrets at rest** — MFA seeds, CA keys, federation and webhook and email secrets — are AES-256-GCM encrypted; passwords are Argon2id-hashed and client secrets are hashed under a **server-held key**, so a database disclosure alone does not yield an offline-crackable corpus. Secret-bearing types carry redacting `Debug`/`toString` implementations so a credential never reaches a log line. A **missing encryption key or pepper fails startup**; no code path substitutes an all-zero, constant or unkeyed fallback.",
+          "**Secrets at rest** — MFA seeds, CA keys, OPAQUE OPRF seeds, federation and webhook and email secrets — are AES-256-GCM encrypted; passwords are Argon2id-hashed and client secrets are hashed under a **server-held key**, so a database disclosure alone does not yield an offline-crackable corpus. Secret-bearing types carry redacting `Debug`/`toString` implementations so a credential never reaches a log line. A **missing encryption key or pepper fails startup**; no code path substitutes an all-zero, constant or unkeyed fallback.",
+          "**Long-lived secrets come from a pluggable secret provider — HashiCorp Vault by default in production.** All ten of them — the JWT signing key, the OPAQUE setup and session keys, the PKI, MFA, federation and email encryption keys, the password and pseudonym peppers, and the AMQP signing key — are fetched from Vault rather than the container spec, so none needs to exist as an environment variable or Kubernetes manifest at all. The seeder mints what is missing from a CSPRNG and **never regenerates a secret that already exists** (regenerating the OPAQUE setup key would mean a password reset for every user; regenerating the pepper would invalidate every stored hash), and the status tooling reports presence only, never values.",
           "**The eleven client SDKs conform to one cross-language contract.** Strict TLS verification is unconditional and TLS-bypass APIs are prohibited (CI greps for them); a plaintext `http://` base URL is refused at construction, with a loopback-only development exception matched on literal hostnames rather than resolved DNS; secrets are wrapped in redacting types; the browser flow keeps tokens in cookies with single-flight refresh; JWKS relying-party helpers pin the key set to the configured issuer's origin. The server is the single source of truth: a CI drift gate fails the build if an SDK's vendored OpenAPI/protobuf copy diverges.",
           "**Local token verification in the SDK route guards is strict by default, and the standard is written down.** A guard that only checked a signature would accept an expired token, and — because the JWKS is organization-wide — one minted for a different tenant. The SDK contract therefore defines a **normative minimum verification set** that every guard must enforce: algorithm pinned before key lookup, expiry required (not merely checked when present), not-before honoured, tenant asserted against the configured tenant and failing closed when there is nothing to compare against, issuer and audience checked when configured, and a named, bounded clock skew. Stating it once rather than leaving each language to infer it is deliberate — auditing eleven implementations against the written set found real gaps that per-SDK review had missed. Where a raw signature-only primitive still exists it is named to make accidental use hard.",
           "**A guard decides on the caller's credential and no other.** The rules above ask *\"is this token good?\"*; one more asks *\"is this the token the decision is about?\"* — because a guard can satisfy every claim rule and still be a bypass if a failed verification quietly routes into a second, successful one. So a guard must reject when the presented credential fails: never retry, never refresh, and never fall back to the application's own session, which would admit the caller under a service account's identity. Where an SDK offers a refresh-on-failure helper for its own outbound calls, that helper is a separate method that guards do not use.",
@@ -438,11 +448,12 @@ export const SEC_SECTIONS: SecSection[] = [
         type: "list",
         items: [
           "Put a NetworkPolicy in front of the pods so nothing reaches the service around the ingress; keep the data tier off any public route.",
-          "Give RabbitMQ **per-service credentials with vhost separation** — AXIAM verifies message signatures, but broker access control is yours.",
-          "Supply secrets as **mounted Secret files, not `AXIAM_*` environment variables**, and enable etcd encryption at rest. A signing key in a ConfigMap or plain env var is effectively public within the namespace.",
+          "Give RabbitMQ **per-service credentials with vhost separation** — AXIAM verifies message signatures and refuses any non-TLS broker URL, but broker access control is yours.",
+          "**Run Vault in production mode, and treat its posture as your secret posture.** The production stacks default to Vault for every long-lived secret, which concentrates all of them behind one KV path: give AXIAM a read-only token scoped to that path, keep unseal keys and the root token offline, enable Vault's audit device, and never run a dev-mode (in-memory, unsealed) Vault in production. If you use the environment fallback instead, supply secrets as **mounted Secret files** rather than `AXIAM_*` environment variables, and enable etcd encryption at rest — a signing key in a ConfigMap or plain env var is effectively public within the namespace.",
           "**Encrypt backups and volume snapshots** with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data tier — a snapshot carries the same data under weaker controls.",
           "Restrict `kubectl exec` and Secret-read RBAC and enable Kubernetes audit logging; **cluster-admin is equivalent to full AXIAM compromise** and is outside the application's audit trail.",
           "Add edge protection (WAF, connection limits, autoscaling) for volumetric floods, and a **liveness alert on scheduled-job completion** so a missed GDPR-erasure or certificate-expiry run is noticed.",
+          "**Run SurrealDB on a persistent storage engine** — `surrealkv:` or `rocksdb:`, never `memory:`. This is a correctness control, not a durability preference. AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device grants and RFC 9126 PAR `request_uri`s — are redeemed by a guarded `UPDATE` inside an explicit transaction, so a second concurrent redemption is a write-write conflict the engine must abort. Measured (`tools/surreal-race-probe`), `surrealkv` and `rocksdb` abort every one; the in-memory engine arbitrates at the same rate and then silently misses, admitting two winners in roughly 1% of contended rounds. A double redemption there yields two RPTs from one authorization decision, two token sets from one user approval, or a replayable authorization request ([ilpanich/axiam#302](https://github.com/ilpanich/axiam/issues/302)). The shipped compose files and k8s StatefulSet already pin `surrealkv:`; **the server cannot verify this for you** — SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a startup WARN that the engine could not be attested and the requirement lands here. A per-attempt redemption nonce, read back after the transaction commits, is the second layer that catches a missed conflict, so this is a defence-in-depth requirement rather than a single point of failure — but do not spend the second layer to save the first.",
         ],
       },
       { type: "h", id: "integration", text: "Integration & SDKs" },
@@ -460,7 +471,6 @@ export const SEC_SECTIONS: SecSection[] = [
         type: "list",
         items: [
           "**Access tokens survive revocation for up to 15 minutes** — the price of stateless verification. Where immediate revocation matters, verify through the gRPC introspection path instead of locally.",
-          "**The RBAC engine is additive with no deny-override** in the current release; model exclusions by granting lower in the resource hierarchy rather than granting high and excluding. Deny-override is on the roadmap.",
           "**Audit records cannot be erased** — append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.",
         ],
       },

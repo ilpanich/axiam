@@ -819,6 +819,14 @@ async fn main() -> std::io::Result<()> {
             .unwrap_or(axiam_pki::config::DEFAULT_MDS_REFRESH_INTERVAL_SECS),
         mds_leaf_dns: std::env::var("AXIAM__PKI__MDS_LEAF_DNS")
             .unwrap_or_else(|_| axiam_pki::config::DEFAULT_MDS_LEAF_DNS.to_string()),
+        // T-153. An unparseable value falls back to 0 (disabled) rather than
+        // to some non-zero default: silently inventing a staleness bound the
+        // operator did not ask for would start refusing registrations for a
+        // reason nothing in their configuration mentions.
+        mds_max_stale_days: std::env::var("AXIAM__PKI__MDS_MAX_STALE_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     };
     // SEC-107: install the operator's SSRF host exception list, once, here in
     // the composition root so it is visible in one place and logged at
@@ -1858,6 +1866,24 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // T-129: one tracker, shared by the sweep loop (which writes) and
+    // `AppState` (which reads for `GET /health/jobs`). Registering the jobs
+    // up front matters: a sweep that has never run once must still appear,
+    // because "absent from the list" and "never executed" are the same
+    // silence this is meant to break.
+    let job_health =
+        axiam_server::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
+    for job in [
+        "saml_assertion_replay",
+        "federation_login_state",
+        "amqp_nonce_replay",
+        "gdpr_purge",
+        "gdpr_export",
+        "audit_retention",
+    ] {
+        job_health.register(job);
+    }
+
     // Spawn the periodic cleanup task (D-09, D-24).
     // Shutdown channel: main sends `true` after HttpServer returns on SIGTERM.
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1894,6 +1920,7 @@ async fn main() -> std::io::Result<()> {
         config.email_encryption_key,
         Duration::from_secs(config.cleanup_interval_secs),
         audit_retention,
+        job_health.clone(),
         cleanup_shutdown_rx,
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
@@ -1935,6 +1962,8 @@ async fn main() -> std::io::Result<()> {
         auth_config: auth_config.clone(),
         db: db_handle.clone(),
         health_checker: health_checker.clone(),
+        // T-129: the same tracker the cleanup loop writes to.
+        job_health: std::sync::Arc::new(job_health.clone()),
         audit_repo: audit_repo.clone(),
         org_repo: org_repo.clone(),
         tenant_repo: tenant_repo.clone(),

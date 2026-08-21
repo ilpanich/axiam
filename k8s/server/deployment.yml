@@ -24,6 +24,11 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # T-132: group-owns the mounted secret volumes so 0440 key material is
+        # readable by the non-root container user. Without this, Kubernetes
+        # leaves secret files as root:root and the 0440 mode locks the server
+        # out of its own keys — see the `key-material` volume below.
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -61,12 +66,28 @@ spec:
                 name: axiam-config
             - secretRef:
                 name: axiam-secrets
+          env:
+            # T-132: read cryptographic material from mounted files rather than
+            # from AXIAM__* environment variables. `file` resolves each logical
+            # secret name to <dir>/<name>; see k8s/server/key-material-secret.yml.
+            #
+            # An unknown provider name is refused at startup rather than falling
+            # back to `env`, so a typo here stops the server instead of quietly
+            # reverting it to reading variables that are no longer set.
+            - name: AXIAM__AUTH__SECRET_PROVIDER
+              value: "file"
+            - name: AXIAM__AUTH__SECRET_DIR
+              value: "/etc/axiam/secrets"
           volumeMounts:
             # A6: the CA bundle that verifies the broker certificate. Only the
             # `ca.crt` key is projected -- the server verifies the broker, it
             # does not need (and must not hold) the broker's private key.
             - name: broker-tls-ca
               mountPath: /etc/axiam/broker-tls
+              readOnly: true
+            # T-132: one file per logical secret name.
+            - name: key-material
+              mountPath: /etc/axiam/secrets
               readOnly: true
           securityContext:
             runAsNonRoot: true
@@ -87,3 +108,17 @@ spec:
               - key: ca.crt
                 path: ca.crt
             defaultMode: 0444
+        # T-132: key material, mounted 0440 rather than the 0444 used for the
+        # broker CA above. The CA is a public certificate and world-readable is
+        # correct for it; these are signing and encryption keys, so they are
+        # readable only by root and by the pod's fsGroup.
+        #
+        # 0440 REQUIRES the `fsGroup: 65532` in the pod securityContext.
+        # Kubernetes gives secret-volume files to root:root by default, so
+        # without fsGroup a 0440 file is unreadable by the non-root container
+        # user (65532) and the server fails at startup reporting every secret
+        # as absent. Changing one without the other breaks the deployment.
+        - name: key-material
+          secret:
+            secretName: axiam-key-material
+            defaultMode: 0440

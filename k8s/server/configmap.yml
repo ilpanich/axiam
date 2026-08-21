@@ -13,10 +13,19 @@ data:
   AXIAM__DB__URL: "surrealdb:8000"
   AXIAM__DB__NAMESPACE: "axiam"
   AXIAM__DB__DATABASE: "axiam"
+  # AXIAM__AMQP__URL is NOT here. `AmqpConfig` has only a `url` field, so the
+  # broker credentials have to be embedded in it, which makes the whole value a
+  # secret and disqualifies it from a ConfigMap (T-131/T-132). It lives in the
+  # `axiam-secrets` Secret instead.
+  #
+  # The value that used to be here — `amqps://rabbitmq:5671`, with no
+  # credentials at all — could never have authenticated: lapin falls back to
+  # guest/guest, which this broker does not accept and which RabbitMQ restricts
+  # to loopback anyway.
+  #
   # A6: TLS to the broker. HMAC signing stays mandatory regardless -- TLS gives
   # confidentiality in transit, HMAC gives end-to-end authenticity and replay
   # protection across broker hops. They are layers, not alternatives.
-  AXIAM__AMQP__URL: "amqps://rabbitmq:5671"
   # The broker certificate is issued by an in-cluster CA (cert-manager), which
   # the system root store does not know about, so the bundle must be supplied.
   # There is deliberately no verification-skip option in the AMQP client.

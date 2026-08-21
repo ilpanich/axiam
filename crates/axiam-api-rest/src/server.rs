@@ -91,7 +91,13 @@ fn build_client_aware_governor(
 /// `web::Data<AppState<C>>` for its `HealthChecker`.
 pub fn health_routes<C: surrealdb::Connection + Clone>(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(crate::health::health))
-        .route("/ready", web::get().to(crate::health::ready::<C>));
+        .route("/ready", web::get().to(crate::health::ready::<C>))
+        // T-129. Unauthenticated like the other two probes: it reports
+        // whether background sweeps are running and when they last
+        // succeeded, which is operational metadata about this server, not
+        // tenant data — the same category as `/ready` disclosing that the
+        // database is reachable.
+        .route("/health/jobs", web::get().to(crate::health::jobs::<C>));
 }
 
 /// Register Swagger UI and OpenAPI JSON spec routes.

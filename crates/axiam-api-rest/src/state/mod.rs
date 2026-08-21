@@ -276,6 +276,10 @@ pub struct AppState<C: Connection + Clone> {
     /// repositories do, or they permanently 401 after an eviction.
     pub db: DbHandle<C>,
     pub health_checker: Arc<dyn HealthChecker>,
+    /// T-129: last-known outcome of each background sweep, surfaced by
+    /// `GET /health/jobs` so a job that silently stopped running is
+    /// alertable rather than merely logged.
+    pub job_health: Arc<dyn crate::health::JobHealthReporter>,
     pub audit_repo: SurrealAuditLogRepository<C>,
     pub org_repo: SurrealOrganizationRepository<C>,
     pub tenant_repo: SurrealTenantRepository<C>,
@@ -644,6 +648,7 @@ impl<C: Connection + Clone> AppState<C> {
             auth_config,
             db: db.clone(),
             health_checker: Arc::new(crate::health::AlwaysHealthy),
+            job_health: Arc::new(crate::health::NoJobs),
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,

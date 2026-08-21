@@ -2,7 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_core::repository::WebauthnAttestationPolicyRepository;
+use axiam_core::repository::{MdsRepository, WebauthnAttestationPolicyRepository};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -179,6 +179,71 @@ pub async fn start_registration<C: Connection + Clone>(
     }))
 }
 
+/// T-153: refuse an attested registration when the ingested MDS BLOB is too
+/// far past its `nextUpdate` for the operator's taste.
+///
+/// Runs BEFORE the ceremony is finished, not after, so a registration that is
+/// going to be refused is refused without first writing a credential.
+///
+/// Three conditions must all hold, and each omission is deliberate:
+///
+/// - **The tenant's policy requires attestation.** Under
+///   `AttestationMode::None` no metadata is consulted, so stale metadata
+///   cannot have misled the decision and refusing would deny a registration
+///   for a reason that does not apply to it.
+/// - **`mds_max_stale_days > 0`.** Opt-in. The default keeps the documented
+///   fail-open behaviour: a FIDO Alliance outage must not brick registration.
+/// - **A BLOB has actually been ingested.** "Never ingested" is a different
+///   condition from "ingested and old", and it is already handled by the
+///   policy's `unknown_aaguid` setting — an empty metadata source makes every
+///   AAGUID unknown. Treating never-ingested as stale here would make
+///   `mds_max_stale_days` silently disable WebAuthn on a deployment that has
+///   not enabled MDS at all.
+async fn enforce_mds_freshness<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    policy: &axiam_core::models::webauthn_policy::WebauthnAttestationPolicy,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AxiamApiError> {
+    use axiam_core::models::webauthn_policy::{AttestationDenyReason, AttestationMode};
+
+    let max_days = state.webauthn.pki_config.mds_max_stale_days;
+    if max_days == 0 || policy.mode == AttestationMode::None {
+        return Ok(());
+    }
+
+    let Some(meta) = state.webauthn.mds_repo.get_meta().await? else {
+        return Ok(());
+    };
+
+    let days_past = chrono::Utc::now()
+        .date_naive()
+        .signed_duration_since(meta.next_update)
+        .num_days();
+    if days_past <= i64::from(max_days) {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        action = "webauthn.attestation_denied",
+        tenant_id = %tenant_id,
+        user_id = %user_id,
+        reason = ?AttestationDenyReason::MetadataStale,
+        days_past_next_update = days_past,
+        max_stale_days = max_days,
+        mds_no = meta.no,
+        "WebAuthn registration denied: the ingested FIDO MDS BLOB is further past \
+         its nextUpdate than AXIAM__PKI__MDS_MAX_STALE_DAYS permits, so an \
+         authenticator revoked since the last refresh could not be detected"
+    );
+    Err(AxiamApiError(
+        axiam_auth::error::AuthError::WebauthnAttestationDenied {
+            reason: AttestationDenyReason::MetadataStale,
+        }
+        .into(),
+    ))
+}
+
 /// `POST /api/v1/auth/webauthn/register/finish`
 ///
 /// Complete a WebAuthn passkey registration ceremony.
@@ -214,6 +279,8 @@ pub async fn finish_registration<C: Connection + Clone>(
         .get_by_tenant(user.tenant_id)
         .await?
         .unwrap_or_default();
+
+    enforce_mds_freshness(&state, &policy, user.tenant_id, user.user_id).await?;
 
     let cred = state
         .webauthn

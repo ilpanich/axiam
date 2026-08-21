@@ -13,6 +13,8 @@ resources:
   - server/hpa.yml
   - server/configmap.yml
   - server/secret.yml
+  # T-132: cryptographic material, mounted as files (see the manifest).
+  - server/key-material-secret.yml
   - frontend/deployment.yml
   - frontend/service.yml
   - ingress.yml

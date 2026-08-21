@@ -1087,7 +1087,7 @@ Organization CA lifecycle, tenant certificate issuance with policy enforcement, 
 | T-150 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | S | Public-CA root proves "a GlobalSign EV customer", not "FIDO Alliance" | High | Mitigated |
 | T-151 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | T | Vendored trust anchor silently swapped for an attacker-controlled root | Critical | Mitigated |
 | T-152 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | T | Older MDS BLOB replayed to reintroduce a since-revoked authenticator | High | Mitigated |
-| T-153 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | E | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | Medium | Open |
+| T-153 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | E | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | Medium | Mitigated |
 | T-154 | mds_entry / mds_blob_meta (global, X3) <br/>*Store* | T | MDS entry status edited directly in the datastore to hide a revocation | High | Mitigated |
 
 <details>
@@ -1206,11 +1206,34 @@ A validly-signed but older BLOB (a captured earlier serial, or a compromised/rol
 > Ingestion compares the freshly-verified BLOB's serial (`no`) against the stored serial before replacing entries: a lower serial is rejected outright as a rollback, an equal serial only bumps `last_refreshed_at`, and only a strictly higher serial replaces stored entries (`axiam_pki::mds::decide_ingest_outcome`, applied by the `axiam-db` ingestion orchestrator).
 
 **T-153 — Stale MDS metadata leaves a newly-revoked authenticator treated as compliant**  
-`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Elevation of privilege · Medium · Open
+`FIDO MDS3 ingestion (BLOB verify, X3)` (Process) · Elevation of privilege · Medium · Mitigated
 
 A BLOB past its own `nextUpdate` date is deliberately not treated as a hard failure — ingestion still succeeds so a transient FIDO Alliance outage cannot brick registration — but this means an authenticator model FIDO has revoked or decertified since the last successful refresh keeps passing `block_revoked_status` / `require_fido_certified` / `min_certification` until the next successful refresh. Air-gapped deployments on `AXIAM__PKI__MDS_BLOB_PATH` have no automatic refresh path at all.
 
-> Staleness is logged at WARN with the `nextUpdate`/now delta and surfaced on `GET /api/v1/mds/status` (`stale: true`); the weekly background job and the admin-triggered `POST /api/v1/mds/refresh` both re-attempt ingestion. No automated alert on sustained staleness ships yet, and air-gapped operators must re-supply the local BLOB file themselves — accepted as an operational responsibility rather than closed in-product; monitor `stale` and the `mds.refreshed` / `mds.refresh_failed` audit actions.
+> **CLOSED (T-153), opt-in.** `AXIAM__PKI__MDS_MAX_STALE_DAYS` bounds the
+> window: past that many days beyond `nextUpdate`, an attested registration
+> is refused with `AttestationDenyReason::MetadataStale` before the ceremony
+> is finished, so nothing is written and then rejected.
+>
+> Default `0` (disabled) keeps the documented fail-open behaviour, and that
+> is the point rather than a hedge: the right bound is a property of the
+> deployment. A high-assurance tenant may want days; an air-gapped one on
+> `MDS_BLOB_PATH`, with no automatic refresh path at all, would be taken
+> offline by anything short of months. A defaulted value would have made
+> that decision for both of them.
+>
+> Scoped to attested ceremonies only. Under `AttestationMode::None` no
+> metadata is consulted, so stale metadata cannot have misled the decision
+> and refusing would deny a registration for a reason that does not apply to
+> it. Never-ingested is likewise left alone — that is the policy's
+> `unknown_aaguid` setting's job, and treating it as stale would silently
+> disable WebAuthn on deployments that never enabled MDS.
+>
+> A new deny reason rather than reusing an existing one: every other reason
+> is a statement about the authenticator, and this one is a statement about
+> our own data being too old to make such a statement. Staleness still never
+> hard-fails *ingestion*, and air-gapped operators must still re-supply the
+> BLOB themselves.
 
 **T-154 — MDS entry status edited directly in the datastore to hide a revocation**  
 `mds_entry / mds_blob_meta (global, X3)` (Store) · Tampering · High · Mitigated
@@ -1392,10 +1415,10 @@ Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monit
 | T-126 | AXIAM deployment (N replicas, HPA) <br/>*Process* | E | Container escape from an over-privileged pod | High | Mitigated |
 | T-127 | AXIAM deployment (N replicas, HPA) <br/>*Process* | T | Vulnerable dependency reaches production | High | Mitigated |
 | T-128 | Prometheus / Grafana <br/>*Process* | I | Metrics or traces disclose tenant identifiers | Medium | Mitigated |
-| T-129 | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Process* | R | Erasure or expiry job silently stops running | Medium | Open |
+| T-129 | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Process* | R | Erasure or expiry job silently stops running | Medium | Mitigated |
 | T-130 | SurrealDB StatefulSet (cluster) <br/>*Store* | I | Datastore reachable without authentication | Critical | Mitigated |
-| T-131 | RabbitMQ StatefulSet (cluster) <br/>*Store* | I | Default or shared broker credentials | High | Open |
-| T-132 | Secrets / ConfigMap <br/>*Store* | I | Secret material placed in a ConfigMap or plain env var | High | Open |
+| T-131 | RabbitMQ StatefulSet (cluster) <br/>*Store* | I | Default or shared broker credentials | High | Mitigated |
+| T-132 | Secrets / ConfigMap <br/>*Store* | I | Secret material placed in a ConfigMap or plain env var | High | Mitigated |
 | T-133 | Backups / volume snapshots <br/>*Store* | I | Backup media accessible outside the cluster | High | Open |
 | T-134 | scheduled backup <br/>*Flow* | I | Backup stream unencrypted in transit | Medium | Open |
 | T-165 | SurrealDB StatefulSet (cluster) <br/>*Store* | T | A non-persistent storage engine removes single-use arbitration | High | Mitigated |
@@ -1463,11 +1486,28 @@ High-cardinality labels carrying usernames, tenant slugs or resource names turn 
 > Metric labels are bounded to low-cardinality dimensions and carry no user or tenant identifiers; the metrics endpoint is not exposed through the ingress.
 
 **T-129 — Erasure or expiry job silently stops running**  
-`Scheduled jobs (cert expiry, GDPR erasure, sweeps)` (Process) · Repudiation · Medium · Open
+`Scheduled jobs (cert expiry, GDPR erasure, sweeps)` (Process) · Repudiation · Medium · Mitigated
 
 The 30-day GDPR erasure grace period and certificate-expiry warnings depend on scheduled work. A job that fails quietly produces a compliance gap that nobody sees.
 
-> Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack.
+> **CLOSED (T-129).** `GET /health/jobs` reports every background sweep:
+> when it last succeeded, when it last failed, the error text, the
+> consecutive-failure count, and a computed `stalled` flag. Alert on
+> `status == "degraded"`, or on a named job's `stalled`.
+>
+> The distinction that made this worth building: a job that *errors* was
+> already visible in the log, but a job that stops running produces no log
+> line at all, and GDPR erasure failing that way is silent until a regulator
+> asks. `stalled` is therefore measured from the last SUCCESS (falling back
+> to process start, so a sweep that never ran once is still caught), not
+> from the last error — a job failing every time is a different condition,
+> reported separately by `consecutive_failures`.
+>
+> Returns 200 even when degraded, deliberately: this is not a readiness
+> gate. A stuck sweep must not pull a serving pod from the load balancer and
+> shift its traffic to replicas running the identical stuck code. Tolerates
+> three missed intervals before flagging, because a sweep that overruns its
+> interval under load is normal and an alert that fires on that gets muted.
 
 **T-130 — Datastore reachable without authentication**  
 `SurrealDB StatefulSet (cluster)` (Store) · Information disclosure · Critical · Mitigated
@@ -1477,18 +1517,58 @@ SurrealDB exposed on a Service without credentials, or with default credentials,
 > The datastore runs on the private tier with no ingress and credentialed, namespaced connections sourced from Kubernetes Secrets. Verify no LoadBalancer or NodePort Service is created for it in your environment.
 
 **T-131 — Default or shared broker credentials**  
-`RabbitMQ StatefulSet (cluster)` (Store) · Information disclosure · High · Open
+`RabbitMQ StatefulSet (cluster)` (Store) · Information disclosure · High · Mitigated
 
 A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.
 
-> AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests.
+> **CLOSED (T-131).** The shipped manifests never carried guest/guest — the
+> broker's credentials come from the `rabbitmq-credentials` Secret, supplied
+> at deploy time. What was genuinely missing is now added:
+> `RABBITMQ_DEFAULT_VHOST: axiam`, so AXIAM gets its own authorization
+> boundary rather than sharing the default `/` with anything else on a
+> broker it does not have to itself.
+>
+> Fixing this exposed a defect that mattered more than the threat. The
+> server's `AXIAM__AMQP__URL` lived in the **ConfigMap** as
+> `amqps://rabbitmq:5671` — no credentials at all. `AmqpConfig` has only a
+> `url` field, so there was nowhere else for them to go, and lapin falls back
+> to guest/guest, which this broker rejects and RabbitMQ restricts to
+> loopback regardless. The shipped manifests could not have connected to
+> their own broker. The URL now lives in `axiam-secrets` (it embeds a
+> password, so it was never ConfigMap material — T-132) with the `/axiam`
+> vhost suffix.
+>
+> The compose stack deliberately stays on the default vhost, documented in
+> place: nothing else shares that broker, and `RABBITMQ_DEFAULT_VHOST` is
+> honoured only on the first boot of an empty volume, so adopting it there
+> would require full data loss to gain a boundary with nothing behind it.
 
 **T-132 — Secret material placed in a ConfigMap or plain env var**  
-`Secrets / ConfigMap` (Store) · Information disclosure · High · Open
+`Secrets / ConfigMap` (Store) · Information disclosure · High · Mitigated
 
 ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output — a signing key or datastore password there is effectively public within the namespace.
 
-> The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer mounted Secret files, and enable etcd encryption at rest.
+> **CLOSED (T-132).** The `file` secret provider already existed; the
+> manifests simply were not using it. `axiam-key-material` now mounts all
+> eleven cryptographic secrets as files at `/etc/axiam/secrets`, one per
+> logical name (`axiam_core::secrets::ALL_KEYS` + `ALL_SECRETS`), with
+> `AXIAM__AUTH__SECRET_PROVIDER=file`. Mode `0440` plus `fsGroup: 65532` —
+> both, because Kubernetes gives secret files to root:root and 0440 alone
+> would lock the non-root container out of its own keys.
+>
+> Three of those keys (`opaque_session_key`, `opaque_setup_key`,
+> `amqp_signing_key`) were absent from the old env-var Secret entirely, so
+> those features could not be configured through the shipped manifests at
+> all.
+>
+> **Not fully closed, and worth stating plainly:** `AXIAM__DB__USERNAME`,
+> `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` remain environment variables.
+> They are read by the layered configuration before any secret provider
+> exists, so moving them needs the config layer to learn a `_FILE`
+> convention — a real follow-up, not done here. The Vault token stays too,
+> and unavoidably: something must bootstrap the trust chain. Vault (or the
+> Kubernetes auth method, which removes the static token) remains the
+> stronger option — see docs/deployment/vault.md.
 
 **T-133 — Backup media accessible outside the cluster**  
 `Backups / volume snapshots` (Store) · Information disclosure · High · Open
@@ -1667,7 +1747,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-20 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+16 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1675,8 +1755,6 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-18 | High | Backup or snapshot exfiltration | SurrealDB cluster (all tenant data) <br/>*System diagram* | Not addressed by AXIAM itself. Deployment guidance: encrypt backups at rest, restrict snapshot IAM, and treat backup media as in-scope for the same access review as the live… |
 | T-94 | High | Key extracted from device firmware or flash | IoT device <br/>*PKI, certificates & IoT device identity* | Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM… |
 | T-124 | High | Operator credentials grant unaudited data access | Cluster operator / SRE <br/>*Deployment & platform (Kubernetes)* | Outside the application boundary. Restrict RBAC on Secrets and exec, enable Kubernetes audit logging, and treat cluster-admin as equivalent to full AXIAM compromise in your threat… |
-| T-131 | High | Default or shared broker credentials | RabbitMQ StatefulSet (cluster) <br/>*Deployment & platform (Kubernetes)* | AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not… |
-| T-132 | High | Secret material placed in a ConfigMap or plain env var | Secrets / ConfigMap <br/>*Deployment & platform (Kubernetes)* | The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer… |
 | T-133 | High | Backup media accessible outside the cluster | Backups / volume snapshots <br/>*Deployment & platform (Kubernetes)* | Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data… |
 | T-135 | High | Dependency-confusion or typosquatted SDK package | Integrator / developer <br/>*Client SDKs & admin UI integration surface* | Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical… |
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
@@ -1685,10 +1763,8 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-110 | Medium | Personal data over-collected into an immutable log | Audit middleware & service <br/>*Audit, webhooks, email & notifications* | Partially addressed: audit metadata is deliberately minimised and erasure anonymises the subject rather than deleting audit records. Deployments must set an audit retention period… |
 | T-118 | Medium | Audit trail deleted along with the tenant | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
-| T-129 | Medium | Erasure or expiry job silently stops running | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Deployment & platform (Kubernetes)* | Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack. |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
-| T-153 | Medium | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*PKI, certificates & IoT device identity* | Staleness never hard-fails ingestion (a transient FIDO Alliance outage must not brick registration), so a since-revoked authenticator model keeps passing policy until the next… |
 | T-119 | Low | Unbounded audit growth degrades the datastore | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements. |
 | T-161 | Low | A partner's IdP silently populates the AXIAM user table (X4) | Attribute mapping & JIT provisioning <br/>*Federation — SAML SP & OIDC relying party* | Off by default (`linked_only` refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit. |
 
@@ -1698,15 +1774,12 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
 - **Audit records cannot be erased.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.
-- **A stale FIDO MDS3 BLOB is never a hard failure (X3).** A transient outage at the FIDO Alliance must not brick WebAuthn registration, so ingestion past `nextUpdate` still succeeds — logged at WARN and surfaced as `stale: true` on `GET /api/v1/mds/status` — rather than blocking. The cost is T-153: a since-revoked authenticator model keeps passing policy until the next successful refresh.
+- **A stale FIDO MDS3 BLOB is never a hard failure at ingestion (X3),** though `AXIAM__PKI__MDS_MAX_STALE_DAYS` now lets an operator bound how stale metadata may get before attested *registration* is refused (T-153).
 
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
 
-- Per-service RabbitMQ credentials and vhost separation
-- Secrets supplied as mounted files rather than `AXIAM_*` environment variables; etcd encryption at rest
 - Backup encryption, restricted snapshot IAM, and backups included in access review
 - Edge protection (WAF, connection limits) in front of the ingress
-- Alerting on scheduled-job completion, so a missed GDPR erasure or certificate-expiry run is noticed
 - Kubernetes audit logging, since cluster-admin bypasses the AXIAM audit trail entirely
 - Running SurrealDB on a **persistent** storage engine (`surrealkv:` or `rocksdb:`, never `memory:`). This is a correctness control, not a durability preference: the first layer deciding a contended single-use redemption is the engine aborting the loser of a write-write conflict, which the in-memory datastore does not do reliably (T-163, T-164, T-165). The shipped compose files and k8s StatefulSet already pin it, and the server cannot verify it for you — SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a WARN that the engine could not be attested
 - Re-supplying the local FIDO MDS3 BLOB file on air-gapped deployments (`AXIAM__PKI__MDS_BLOB_PATH`) — there is no automatic refresh path off the public network, so an operator who never updates the file never gets the newer BLOB's revocations either
@@ -1718,6 +1791,11 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - **Static client secrets in integrator configuration.** Outside AXIAM's control, but the most common way service-account credentials escape. Prefer mTLS or short-lived workload identity.
 
 **Closed at the 2026-08-21 review** — recorded rather than deleted, as with T-145.
+
+- **~~Secret material in a ConfigMap or plain env var~~ (T-132) — closed.** The `file` secret provider already existed and the manifests were not using it; eleven cryptographic secrets are now mounted as files. Datastore and broker credentials remain env-supplied — see the entry for why, and treat it as the open follow-up.
+- **~~Default or shared broker credentials~~ (T-131) — closed.** A dedicated `axiam` vhost. The larger find was that the shipped manifests carried a credential-free AMQP URL in the ConfigMap and could never have authenticated at all.
+- **~~Erasure or expiry job silently stops running~~ (T-129) — closed.** `GET /health/jobs` reports every sweep's last success, failure and a computed `stalled` flag, measured from the last *success* rather than the last error.
+- **~~Stale MDS metadata~~ (T-153) — closed, opt-in.** `AXIAM__PKI__MDS_MAX_STALE_DAYS` bounds how far past `nextUpdate` metadata may drift before attested registration is refused. Default `0` keeps fail-open, deliberately.
 
 - **~~No deny-override in the RBAC cascade~~ (T-16, T-87) — closed (SEC-040 / B1).** These were carried as open long after the control shipped: their own detail blocks already read "SEC-040 — CLOSED (B1)" while the status column still said `Open`. The engine takes `effect: "allow" | "deny"` and a deny overrides every allow at any depth of the hierarchy and at equal specificity, verified by the precedence-table tests in `crates/axiam-authz/src/engine.rs` — including the property that motivates the choice, `adding_a_deny_can_never_widen_access`. A stale `Open` is not a harmless bookkeeping error: it argues for spending effort on a control that already exists, and it understates the product to anyone reading the model as a security statement.
 - **~~Traffic reaches pods bypassing the ingress~~ (T-125) — closed (SEC-053).** The entry claimed "the shipped k8s manifests do not include NetworkPolicies"; they ship seven, including a namespace-wide default-deny on both ingress and egress. The genuine defect this review found was narrower and worse: the SurrealDB and RabbitMQ ingress policies were present as files but missing from `kustomization.yml`, so they were never applied — and because NetworkPolicy is enforced at both ends, that left the server unable to reach its own datastore or broker. Both are now listed; `kubectl kustomize k8s/` is the check.
@@ -1740,8 +1818,8 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 24 | 1 |
-| High | 68 | 8 |
-| Medium | 66 | 9 |
+| High | 68 | 6 |
+| Medium | 66 | 7 |
 | Low | 7 | 2 |
 
 **By diagram**
@@ -1753,9 +1831,9 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | OAuth2 / OIDC authorization server | 16 | 0 |
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 15 | 0 |
-| PKI, certificates & IoT device identity | 18 | 2 |
+| PKI, certificates & IoT device identity | 18 | 1 |
 | Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 12 | 6 |
+| Deployment & platform (Kubernetes) | 12 | 3 |
 | Client SDKs & admin UI integration surface | 15 | 4 |
 
 ## 8. Assumptions

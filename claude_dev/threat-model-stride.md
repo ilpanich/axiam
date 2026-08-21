@@ -8,24 +8,24 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 175 |
-| **Mitigated / Open** | 152 / 23 |
+| **Threats identified** | 181 |
+| **Mitigated / Open** | 159 / 22 |
 | **Owner** | ilpanich |
 
 ---
 
 ## 1. Scope and purpose
 
-This model covers the AXIAM server (this repository), the components it depends on at runtime — SurrealDB, RabbitMQ, the Kubernetes platform, email providers — and the client-facing integration surface: the React admin UI and the seven client SDKs that live in the `ilpanich/axiam-<lang>-sdk` repositories.
+This model covers the AXIAM server (this repository), the components it depends on at runtime — SurrealDB, RabbitMQ, HashiCorp Vault (the default secret provider in the production stacks), the Kubernetes platform, email providers — and the client-facing integration surface: the React admin UI and the eleven client SDKs that live in the `ilpanich/axiam-<lang>-sdk` repositories.
 
 It is a **design-level** threat model. It reasons about the data flows and trust boundaries described in [`design-document.md`](design-document.md), and records the control that answers each threat where one exists in the codebase. It does not replace the code-level security reviews in this directory ([`security-audit.md`](security-audit.md), [`final-security-review.md`](final-security-review.md)) — it gives them a structure to hang from, and the two should be read together.
 
 **In scope**
 
-- The `axiam-server` binary and every crate it composes
-- REST (Actix-Web), gRPC (Tonic) and AMQP (Lapin) API surfaces
-- SurrealDB as the system of record, and RabbitMQ as the async transport
-- The React admin UI and the seven client SDKs
+- The `axiam-server` binary and every crate it composes — including the OPAQUE (RFC 9807) engine and the shared `axiam-opaque` client core it ships to every SDK, and the SCIM 2.0 provisioning endpoint with its long-lived provisioning tokens
+- REST (Actix-Web), gRPC (Tonic) and AMQP (Lapin) API surfaces — the AMQP transport is TLS-only (`amqps://` is the only accepted scheme)
+- SurrealDB as the system of record, RabbitMQ as the async transport, and HashiCorp Vault as the secret provider the production stacks default to
+- The React admin UI and the eleven client SDKs
 - The documented Kubernetes deployment topology
 - Federated identity providers and email providers as external trust dependencies
 
@@ -80,7 +80,7 @@ Five trust boundaries recur across the diagrams. A flow that crosses one is wher
 | Boundary | Separates | What must hold on every crossing |
 |---|---|---|
 | **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie-borne requests, input validation |
-| **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Secrets | Private network, credentialed connections, parameterised queries, tenant scoping at the repository layer |
+| **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
 | **Tenant ↔ tenant** | Every tenant's data from every other tenant's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, https enforcement, response size caps, HMAC signatures on webhook deliveries |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | `sdks/CONTRACT.md` clauses — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and buf gates |
@@ -89,9 +89,10 @@ Five trust boundaries recur across the diagrams. A flow that crosses one is wher
 
 | Asset | Where | Compromise means |
 |---|---|---|
-| JWT signing key (Ed25519) | Kubernetes Secrets | Any identity in any tenant can be forged |
+| JWT signing key (Ed25519) | Secret provider — Vault in production, Kubernetes Secrets otherwise | Any identity in any tenant can be forged |
 | Organization CA private key | `ca_certificate`, AES-256-GCM encrypted | Any user, service or device certificate can be minted |
 | Password hashes (Argon2id) | `user` | Offline cracking of every credential |
+| OPAQUE setup key + per-tenant OPRF seeds | Secret provider; `opaque_server_setup`, AES-256-GCM encrypted | Stolen OPAQUE records become dictionary-attackable at KSF cost |
 | MFA secrets | `mfa` records, AES-256-GCM encrypted | Second factor defeated indefinitely |
 | Refresh tokens and sessions | `session`, hashed | Sustained impersonation |
 | Client and webhook secrets | hashed / encrypted | Service-account impersonation; forged events |
@@ -106,7 +107,7 @@ Each subsection corresponds to one diagram in the Threat Dragon model. Threat nu
 
 Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces, the shared middleware pipeline, the core service layer and the private data tier. Trust boundaries separate the public Internet, the Kubernetes runtime and the data tier.
 
-*26 threats — 3 critical, 13 high, 10 medium; 3 open.*
+*27 threats — 3 critical, 14 high, 10 medium; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -125,17 +126,18 @@ Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces
 | T-13 | AMQP consumer (Lapin) <br/>*Process* | S | Forged authorization request on the broker | High | Mitigated |
 | T-14 | Security middleware (authn, CSRF, rate limit, CORS, audit) <br/>*Process* | D | Rate limits multiplied by replica count | Medium | Mitigated |
 | T-15 | Security middleware (authn, CSRF, rate limit, CORS, audit) <br/>*Process* | S | X-Forwarded-For spoofing bypasses per-IP limits | Medium | Mitigated |
-| T-16 | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*Process* | E | No deny-override in the RBAC cascade | Medium | Open |
+| T-16 | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*Process* | E | No deny-override in the RBAC cascade | Medium | Mitigated |
 | T-17 | SurrealDB cluster (all tenant data) <br/>*Store* | I | Direct datastore access bypasses every application control | Critical | Mitigated |
 | T-18 | SurrealDB cluster (all tenant data) <br/>*Store* | I | Backup or snapshot exfiltration | High | Open |
 | T-19 | Audit log (append-only, PGP signed) <br/>*Store* | T | Audit record tampering or selective deletion | High | Mitigated |
 | T-20 | RabbitMQ (authz, audit, mail, notification queues) <br/>*Store* | D | Queue flooding delays authorization decisions | Medium | Mitigated |
-| T-21 | Kubernetes Secrets / ConfigMap <br/>*Store* | I | Signing-key disclosure allows arbitrary token minting | Critical | Mitigated |
+| T-21 | Secret store (Vault / Kubernetes Secrets) <br/>*Store* | I | Signing-key disclosure allows arbitrary token minting | Critical | Mitigated |
 | T-22 | Admin UI + auth endpoints <br/>*Flow* | I | Credentials or tokens sent over plaintext HTTP | High | Mitigated |
 | T-23 | SDK REST + gRPC traffic <br/>*Flow* | I | SDK transport downgraded or TLS verification disabled | High | Mitigated |
 | T-24 | Domain reads and writes <br/>*Flow* | T | Query injection into SurrealQL | High | Mitigated |
 | T-25 | Discovery, JWKS, token exchange <br/>*Flow* | I | SSRF via admin-supplied IdP metadata URL | High | Mitigated |
 | T-26 | Event delivery <br/>*Flow* | I | Webhook registration used to probe internal services | Medium | Mitigated |
+| T-181 | REST API (Actix-Web) <br/>*Process* | S | Leaked SCIM provisioning token replayed as the IdP | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -208,7 +210,7 @@ Unauthenticated TLS handshake or slow-loris floods consume ingress worker capaci
 
 Each Argon2id verification allocates a ~19 MiB arena; an unauthenticated login flood turns password hashing into a memory-exhaustion vector (~970 MiB RSS observed at ~50 concurrent hashes against a 1024 MiB cap).
 
-> crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly.
+> crypto_gate bounds concurrent Argon2id operations with a process-wide semaphore and fails fast with 503 backpressure once the acquire timeout elapses, instead of queueing unboundedly. Both credential-verifying surfaces pass through the same gate: the REST login path and gRPC ValidateCredentials (B1) — an ungated path in either protocol would reopen the flood through the other.
 
 **T-11 — Missing tenant scoping exposes another tenant's data**  
 `REST API (Actix-Web)` (Process) · Elevation of privilege · Critical · Mitigated
@@ -246,7 +248,7 @@ A caller that can set XFF freely attributes every request to a different source 
 > SEC-070: only a configured number of rightmost XFF hops (trusted_hops) is trusted, shared by the REST and gRPC extractors; untrusted hops fall back to the socket peer address.
 
 **T-16 — No deny-override in the RBAC cascade**  
-`Core service layer (AuthN, AuthZ, User, PKI, Federation)` (Process) · Elevation of privilege · Medium · Open
+`Core service layer (AuthN, AuthZ, User, PKI, Federation)` (Process) · Elevation of privilege · Medium · Mitigated
 
 The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource — the only way to remove access to a subtree is to restructure the grant.
 
@@ -289,11 +291,11 @@ A producer that floods axiam.authz.request starves legitimate async decisions an
 > Consumer prefetch is bounded by configuration and broker credentials are per-service so a single misbehaving producer can be revoked. Async authz is a deferred path; synchronous gRPC checks are unaffected.
 
 **T-21 — Signing-key disclosure allows arbitrary token minting**  
-`Kubernetes Secrets / ConfigMap` (Store) · Information disclosure · Critical · Mitigated
+`Secret store (Vault / Kubernetes Secrets)` (Store) · Information disclosure · Critical · Mitigated
 
 The Ed25519 JWT signing key lets an attacker mint access tokens for any subject in any tenant, defeating authentication entirely.
 
-> Keys live in Kubernetes Secrets, not in the image or ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Enable envelope encryption for etcd and rotate signing keys on a schedule — JWKS publishes multiple keys so rotation is non-breaking.
+> The signing key is fetched through the pluggable secret provider — HashiCorp Vault by default in the production stacks (`AXIAM__AUTH__SECRET_PROVIDER=vault`), Kubernetes Secrets otherwise — and never lives in the image or a ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Rotate signing keys on a schedule — JWKS publishes multiple key ids so rotation is non-breaking — and where Kubernetes Secrets are the source, enable envelope encryption for etcd.
 
 **T-22 — Credentials or tokens sent over plaintext HTTP**  
 `Admin UI + auth endpoints` (Flow) · Information disclosure · High · Mitigated
@@ -321,7 +323,7 @@ String-built queries would let attacker-controlled identifiers or filters alter 
 
 A tenant admin who can set metadata_url or jwks_uri makes the server fetch internal addresses — cloud metadata endpoints, in-cluster services — and observe the response.
 
-> SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size.
+> SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size. SEC-107 adds a deliberate, bounded bypass for same-network IdPs: `AXIAM__PKI__SSRF_ALLOWED_HOSTS` is default-empty, set only at the composition root, matches exact hosts (no wildcards, no CIDRs), applies to the first hop only with redirects always strict, and logs every use — and cloud metadata endpoints stay blocked even for an allowlisted host, with IPv4-mapped canonicalisation running before that check so the allowlist cannot re-open SEC-094.
 
 **T-26 — Webhook registration used to probe internal services**  
 `Event delivery` (Flow) · Information disclosure · Medium · Mitigated
@@ -330,21 +332,28 @@ A tenant admin registers a webhook pointing at an internal address and uses deli
 
 > Webhook delivery uses the same guarded_fetch resolve-and-pin guard as federation: private and loopback destinations are rejected before connect.
 
+**T-181 — Leaked SCIM provisioning token replayed as the IdP**  
+`REST API (Actix-Web)` (Process) · Spoofing · High · Mitigated
+
+SCIM provisioning tokens exist because Okta and Entra can present only one static bearer string, so the credential is deliberately long-lived — pasted once into the IdP and forgotten. Whoever obtains it can drive user provisioning and deprovisioning for the tenant for as long as it lives.
+
+> Containment is the design (#330): a provisioning token is accepted on `/scim/v2/*` and nowhere else — not `/api/v1/*`, not `/oauth2/*`, not gRPC — and carries no permissions of its own: it resolves to an existing tenant user whose RBAC must still pass the same `require_scim_provision` check as a session would. It is stored SHA-256-hashed with the plaintext returned exactly once, carries an expiry, is revocable independently of every other credential, stamps `last_used_at` on use, and minting and revocation are audited. SCIM has its own rate-limit bucket (R5.2), and deprovisioning a user through SCIM revokes their live sessions and refresh tokens (SEC-098).
+
 </details>
 
 ### 5.2 Authentication & session management
 
-Password login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.
+Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.
 
-*22 threats — 3 critical, 9 high, 8 medium, 2 low; 1 open.*
+*26 threats — 3 critical, 11 high, 10 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
 | T-27 | End user (browser or SDK) <br/>*Actor* | S | Credential stuffing with breached password lists | High | Mitigated |
 | T-28 | End user (browser or SDK) <br/>*Actor* | S | Phishing harvests password and TOTP code | High | Mitigated |
 | T-29 | Email provider <br/>*Actor* | S | Reset link intercepted in transit or at rest in a mailbox | Medium | Mitigated |
-| T-30 | Login endpoint POST /auth/login <br/>*Process* | I | Username enumeration via differential responses | Medium | Mitigated |
-| T-31 | Login endpoint POST /auth/login <br/>*Process* | E | Unmetered credential-check path outside the lockout counter | High | Mitigated |
+| T-30 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | I | Username enumeration via differential responses | Medium | Mitigated |
+| T-31 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | E | Unmetered credential-check path outside the lockout counter | High | Mitigated |
 | T-32 | MFA verification TOTP / WebAuthn <br/>*Process* | E | MFA step skipped by replaying the challenge token | Critical | Mitigated |
 | T-33 | MFA verification TOTP / WebAuthn <br/>*Process* | S | TOTP code replay inside its validity window | Medium | Mitigated |
 | T-34 | MFA verification TOTP / WebAuthn <br/>*Process* | E | Admin MFA reset abused as a takeover path | High | Mitigated |
@@ -356,12 +365,16 @@ Password login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refr
 | T-40 | Password reset & email verification <br/>*Process* | S | Reset token guessing | High | Mitigated |
 | T-41 | Password reset & email verification <br/>*Process* | D | Verification email resend used for mail flooding | Low | Mitigated |
 | T-42 | Password policy + HIBP check <br/>*Process* | I | Password exposed to the breach-check service | Low | Mitigated |
-| T-43 | user (Argon2id hashes) <br/>*Store* | I | Offline cracking of exfiltrated password hashes | High | Mitigated |
+| T-43 | user credentials (Argon2id hashes, OPAQUE records) <br/>*Store* | I | Offline cracking of exfiltrated password hashes | High | Mitigated |
 | T-44 | session / refresh token store <br/>*Store* | I | Stored session tokens usable directly from the datastore | High | Mitigated |
 | T-45 | MFA secrets (AES-256-GCM) <br/>*Store* | I | TOTP seed disclosure allows permanent code generation | High | Mitigated |
 | T-46 | rate-limit counters (shared, write-behind) <br/>*Store* | D | Counter store unavailability disables the shared limit | Medium | Mitigated |
 | T-47 | JWT signing keys (Ed25519) <br/>*Store* | I | Signing-key compromise forges any identity | Critical | Mitigated |
 | T-48 | access + refresh cookies <br/>*Flow* | I | Tokens leaked through URLs, logs or Referer headers | Medium | Mitigated |
+| T-176 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | I | Account existence probed through the OPAQUE login flow | Medium | Mitigated |
+| T-177 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | D | Unauthenticated OPAQUE exchanges consume server state and OPRF budget | Medium | Mitigated |
+| T-178 | Lockout & rate limiting <br/>*Process* | E | OPAQUE login path sits outside the lockout counter | High | Mitigated |
+| T-179 | user credentials (Argon2id hashes, OPAQUE records) <br/>*Store* | I | Stolen OPAQUE records opened offline with the tenant OPRF seed | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -388,14 +401,14 @@ Password-reset links are bearer credentials; a compromised mailbox or provider g
 > Reset tokens are CSPRNG-generated (never UUIDv7 — see the design-document note on id generation), single-use and expire quickly; consuming a reset invalidates existing sessions.
 
 **T-30 — Username enumeration via differential responses**  
-`Login endpoint POST /auth/login` (Process) · Information disclosure · Medium · Mitigated
+`Login endpoints /auth/login + /auth/opaque/*` (Process) · Information disclosure · Medium · Mitigated
 
 Different status codes, error bodies or response times for existing versus non-existent accounts let an attacker enumerate valid usernames and email addresses.
 
 > Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases.
 
 **T-31 — Unmetered credential-check path outside the lockout counter**  
-`Login endpoint POST /auth/login` (Process) · Elevation of privilege · High · Mitigated
+`Login endpoints /auth/login + /auth/opaque/*` (Process) · Elevation of privilege · High · Mitigated
 
 If any code path verifies a password without incrementing the failed-attempt counter, brute force is unbounded through that path even though the main login endpoint is protected.
 
@@ -479,7 +492,7 @@ Sending a password or its full hash to a third-party breach API discloses the cr
 > HIBP is queried with the k-anonymity model: only the first five characters of the SHA-1 hash leave the server. A circuit breaker prevents the optional check from becoming an availability dependency.
 
 **T-43 — Offline cracking of exfiltrated password hashes**  
-`user (Argon2id hashes)` (Store) · Information disclosure · High · Mitigated
+`user credentials (Argon2id hashes, OPAQUE records)` (Store) · Information disclosure · High · Mitigated
 
 A database disclosure exposes every password hash to offline attack at attacker-chosen cost.
 
@@ -519,6 +532,34 @@ The Ed25519 private key mints tokens for any subject in any tenant and cannot be
 Bearer values placed in query strings end up in access logs, browser history and Referer headers sent to third parties.
 
 > Tokens are delivered in the response body and in Secure/HttpOnly cookies, never as URL parameters; secret-bearing types carry manual Debug implementations that redact them from logs (SEC-067 / SECHRD-09).
+
+**T-176 — Account existence probed through the OPAQUE login flow**  
+`Login endpoints /auth/login + /auth/opaque/*` (Process) · Information disclosure · Medium · Mitigated
+
+POST /auth/opaque/login/start is unauthenticated and must answer for any identity; a response that differs for unknown accounts — in shape, stability or KSF parameters — is a username-enumeration oracle equivalent to a differential /auth/login error.
+
+> RFC 9807 designs the case in: for an unknown identity the server runs the AKE with no password file and returns a well-formed KE2 derived from the setup's dummy public key. AXIAM adds the stability half — the decoy credential identifier is `HMAC(decoy_key, tenant_id || lowercased identity)`, so probing the same non-existent name twice gets the same answer; a random identifier would announce non-existence as loudly as a 404. Stated residual: a decoy carries the tenant's *current* KSF parameters while a real user carries those they enrolled under, so an attacker who knows the tenant's policy history can tell an account still on the old cost exists; the window closes as passwords rotate.
+
+**T-177 — Unauthenticated OPAQUE exchanges consume server state and OPRF budget**  
+`Login endpoints /auth/login + /auth/opaque/*` (Process) · Denial of service · Medium · Mitigated
+
+login/start and register/start are unauthenticated by necessity; each costs the server an OPRF evaluation and in-flight exchange state, so a flood turns the PAKE handshake into a resource-exhaustion vector — the OPAQUE analogue of the Argon2id memory flood (T-10).
+
+> Under OPAQUE the expensive KSF runs on the client, so the server-side cost per attempt is a bounded elliptic-curve OPRF evaluation, not a ~19 MiB Argon2id arena. The endpoints sit under the strict internet-facing per-IP rate limits the tuning presets are prevented from widening; register/start has its own benchmark scenario and budget (`opaque_register_start` — new in kind, since SRP enrolment cost the server nothing); and in-flight exchange state is sealed for 120 seconds under the cheap-to-rotate `opaque_session_key` rather than accumulating unbounded server-side sessions. OPAQUE is additionally off by default (`opaque_mode: disabled`) until an organization or tenant enables it.
+
+**T-178 — OPAQUE login path sits outside the lockout counter**  
+`Lockout & rate limiting` (Process) · Elevation of privilege · High · Mitigated
+
+A failed OPAQUE authentication is a wrong password, but it surfaces as a failed KE3 inside the AKE rather than a failed hash verify. A path that did not accrue toward lockout would mean enabling OPAQUE silently removed brute-force protection from every account that adopted it — the same unmetered-path defect SEC-026b closed for gRPC (T-31), reopened by a new protocol.
+
+> A failed KE3 accrues toward the shared exponential-backoff lockout exactly as a failed Argon2id verify does. `OpaqueRejection` deliberately has two variants rather than one so the caller can attribute an attempt before accruing it: a malformed client message (`AuthError::OpaqueMalformed`, 400) is distinguished from a wrong password, and only the latter counts against the account — and from corrupt stored state (500), so junk from a client is never read as a server fault.
+
+**T-179 — Stolen OPAQUE records opened offline with the tenant OPRF seed**  
+`user credentials (Argon2id hashes, OPAQUE records)` (Store) · Information disclosure · High · Mitigated
+
+opaque_credential rows are the OPAQUE analogue of password hashes. Unlike an Argon2id or SRP-verifier corpus they are not offline-attackable at KDF cost alone — but only while the per-tenant OPRF seed stays secret. A dump that includes a usable seed reduces OPAQUE to the SRP posture: a dictionary attack priced at the KSF.
+
+> Each tenant's OPRF seed and AKE keypair (`opaque_server_setup`, schema v42) are AES-256-GCM encrypted at rest under `opaque_setup_key`, which is held outside the datastore in the secret provider (Vault in production), so a database-only disclosure yields no dictionary attack to mount at any cost. The trade-off is stated in `docs/deployment/vault.md`: losing `opaque_setup_key` means a password reset for every user in every tenant — which is why the Vault seeder never regenerates an existing key, and why the setup key is split from the cheap-to-rotate `opaque_session_key`.
 
 </details>
 
@@ -928,9 +969,9 @@ A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown
 
 ### 5.5 Authorization engine — RBAC, hierarchy & scopes
 
-The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the additive allow-wins RBAC engine with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.
+The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override and resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.
 
-*15 threats — 4 critical, 4 high, 7 medium; 1 open.*
+*15 threats — 4 critical, 4 high, 7 medium; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -943,7 +984,7 @@ The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP as
 | T-84 | AMQP async authz consumer <br/>*Process* | I | Decision response delivered to the wrong reply queue | Medium | Mitigated |
 | T-85 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | Cross-tenant graph edge traversed during resolution | Critical | Mitigated |
 | T-86 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | D | Deep or cyclic resource hierarchy stalls resolution | Medium | Mitigated |
-| T-87 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | No deny-override in the additive cascade | Medium | Open |
+| T-87 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | No deny-override in the additive cascade | Medium | Mitigated |
 | T-88 | Decision cache <br/>*Process* | E | Stale allow served after revocation | High | Mitigated |
 | T-89 | Decision cache <br/>*Process* | I | Cache key collision leaks a decision across subjects | High | Mitigated |
 | T-90 | role / permission / resource graph <br/>*Store* | T | Direct edge insertion grants privilege silently | Critical | Mitigated |
@@ -1017,7 +1058,7 @@ Ancestor walking on a deliberately deep — or cyclic — resource tree turns a 
 > Traversal depth is bounded and visited nodes are tracked so a cycle terminates; the decision cache absorbs repeated checks on the same subject/resource pair.
 
 **T-87 — No deny-override in the additive cascade**  
-`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · Medium · Open
+`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · Medium · Mitigated
 
 The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.
 
@@ -1059,7 +1100,7 @@ Without a record of denials there is no signal for probing or privilege-escalati
 
 A party with broker access modifies subject, action or resource between publish and consume.
 
-> Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; AMQPS protects the transport.
+> Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; the broker connection is TLS-only — `AXIAM__AMQP__URL` must be `amqps://` and every other scheme is refused before a socket is opened, in a debug build exactly as in a release one, with the `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch removed.
 
 </details>
 
@@ -1361,7 +1402,7 @@ A derived Debug implementation on the webhook type prints the HMAC secret into a
 
 Outbound mail messages carry reset links and verification tokens; anyone able to read the queue can use them.
 
-> Broker access is credentialed per service on the private network and AMQPS protects the transport; tokens are single-use and short-lived so a stale queued message has limited value.
+> Broker access is credentialed per service on the private network, and the transport is always TLS — the server refuses any non-`amqps://` broker URL in every build profile; tokens are single-use and short-lived so a stale queued message has limited value.
 
 **T-122 — Event payload discloses more than the receiver needs**  
 `event delivery` (Flow) · Information disclosure · Medium · Mitigated
@@ -1381,9 +1422,9 @@ AXIAM enforces TLS to the provider, but the provider-to-recipient hop is outside
 
 ### 5.8 Deployment & platform (Kubernetes)
 
-Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
+Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
 
-*12 threats — 1 critical, 8 high, 3 medium; 7 open.*
+*13 threats — 1 critical, 9 high, 3 medium; 8 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1395,10 +1436,11 @@ Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monit
 | T-129 | Scheduled jobs (cert expiry, GDPR erasure, sweeps) <br/>*Process* | R | Erasure or expiry job silently stops running | Medium | Open |
 | T-130 | SurrealDB StatefulSet (cluster) <br/>*Store* | I | Datastore reachable without authentication | Critical | Mitigated |
 | T-131 | RabbitMQ StatefulSet (cluster) <br/>*Store* | I | Default or shared broker credentials | High | Open |
-| T-132 | Secrets / ConfigMap <br/>*Store* | I | Secret material placed in a ConfigMap or plain env var | High | Open |
+| T-132 | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Store* | I | Secret material placed in a ConfigMap or plain env var | High | Open |
 | T-133 | Backups / volume snapshots <br/>*Store* | I | Backup media accessible outside the cluster | High | Open |
 | T-134 | scheduled backup <br/>*Flow* | I | Backup stream unencrypted in transit | Medium | Open |
 | T-165 | SurrealDB StatefulSet (cluster) <br/>*Store* | T | A non-persistent storage engine removes single-use arbitration | High | Mitigated |
+| T-180 | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Store* | I | Vault concentrates every long-lived secret behind one credential | High | Open |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1429,7 +1471,7 @@ A pod running as root with a writable filesystem turns a process-level bug into 
 
 A transitive Rust or npm dependency with a known advisory ships in the image without anyone noticing.
 
-> CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the seven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03).
+> CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the eleven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03).
 
 **T-128 — Metrics or traces disclose tenant identifiers**  
 `Prometheus / Grafana` (Process) · Information disclosure · Medium · Mitigated
@@ -1457,14 +1499,14 @@ SurrealDB exposed on a Service without credentials, or with default credentials,
 
 A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.
 
-> AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests.
+> AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests. The transport itself is no longer configurable: the server refuses any non-`amqps://` broker URL in every build profile, so a shared credential at least never travels in the clear.
 
 **T-132 — Secret material placed in a ConfigMap or plain env var**  
-`Secrets / ConfigMap` (Store) · Information disclosure · High · Open
+`Secrets (Vault / K8s Secrets / ConfigMap)` (Store) · Information disclosure · High · Open
 
 ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output — a signing key or datastore password there is effectively public within the namespace.
 
-> The layered configuration model reads secrets from Secrets rather than ConfigMaps, but nothing prevents an operator from supplying them as AXIAM_* environment variables. Prefer mounted Secret files, and enable etcd encryption at rest.
+> The production stacks now default to `AXIAM__AUTH__SECRET_PROVIDER=vault`, which keeps all ten long-lived secrets out of the container spec entirely; where the environment fallback is used instead, nothing prevents an operator from supplying them as AXIAM_* variables. Prefer Vault, or mounted Secret files, and enable etcd encryption at rest.
 
 **T-133 — Backup media accessible outside the cluster**  
 `Backups / volume snapshots` (Store) · Information disclosure · High · Open
@@ -1487,11 +1529,18 @@ SurrealDB's in-memory datastore does not reliably arbitrate the write-write conf
 
 > The shipped deployments pin a persistent engine — all three compose files and k8s/surrealdb/statefulset.yml pass surrealkv: — and docs/deployment/README.md carries it as a MUST-level operator requirement. axiam-server attests the engine at startup and refuses a memory datastore unless AXIAM__DB__ALLOW_MEMORY_ENGINE=true; because SurrealDB 3.2.4 publishes no datastore identity over the wire, that attestation currently logs a WARN, and a unit test fails on the version bump that makes the name available. A CI gate re-runs tools/surreal-race-probe whenever Cargo.lock moves surrealdb, surrealdb-core or surrealkv, so a bump cannot remove the arbitration silently.
 
+**T-180 — Vault concentrates every long-lived secret behind one credential**  
+`Secrets (Vault / K8s Secrets / ConfigMap)` (Store) · Information disclosure · High · Open
+
+With `AXIAM__AUTH__SECRET_PROVIDER=vault` the production default, all ten long-lived secrets — the JWT signing key, `opaque_setup_key`, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.
+
+> Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: `just vault-status` reports presence only, never values, and the seeder never rewrites a secret that already exists.
+
 </details>
 
 ### 5.9 Client SDKs & admin UI integration surface
 
-The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.
+The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.
 
 *17 threats — 2 critical, 10 high, 5 medium; 4 open.*
 
@@ -1501,9 +1550,9 @@ The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#
 | T-136 | Browser user (admin UI) <br/>*Actor* | S | Stored XSS in the admin UI escalates to full tenant compromise | High | Mitigated |
 | T-137 | React admin UI (Vite SPA) <br/>*Process* | T | State-changing request forged from another origin | High | Mitigated |
 | T-138 | React admin UI (Vite SPA) <br/>*Process* | I | Tokens placed in localStorage instead of cookies | High | Mitigated |
-| T-139 | SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go) <br/>*Process* | I | Credentials or tokens printed by default formatting | High | Mitigated |
-| T-140 | SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go) <br/>*Process* | D | Concurrent refresh storms invalidate the token family | Medium | Mitigated |
-| T-141 | SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go) <br/>*Process* | T | Contract drift between server and SDKs | Medium | Mitigated |
+| T-139 | SDK HTTP core (11 languages) <br/>*Process* | I | Credentials or tokens printed by default formatting | High | Mitigated |
+| T-140 | SDK HTTP core (11 languages) <br/>*Process* | D | Concurrent refresh storms invalidate the token family | Medium | Mitigated |
+| T-141 | SDK HTTP core (11 languages) <br/>*Process* | T | Contract drift between server and SDKs | Medium | Mitigated |
 | T-142 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | S | JWKS URI taken from discovery without validation | High | Mitigated |
 | T-143 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Local JWT verification misses a revoked entitlement | Medium | Open |
 | T-167 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Certificate-bound access token accepted as a bearer token by a resource server that ignores `cnf` | High | Mitigated |
@@ -1521,7 +1570,7 @@ The React admin UI and the seven client SDKs (Rust, TypeScript, Python, Java, C#
 **T-135 — Dependency-confusion or typosquatted SDK package**  
 `Integrator / developer` (Actor) · Spoofing · High · Open
 
-The SDKs are published to seven public registries (crates.io, npm, PyPI, Maven Central, NuGet, Packagist, Go modules). A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.
+The SDKs are published across the public registries — crates.io, npm, PyPI, Maven Central, NuGet, Packagist, the Go module proxy, Swift Package Index / CocoaPods, and GitHub Releases for C and C++. A typosquatted or hijacked package name delivers an attacker's code straight into an integrator's authentication path.
 
 > Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical package names in the SDK contract so integrators can verify what they installed.
 
@@ -1547,21 +1596,21 @@ Tokens in localStorage are readable by any script on the origin, so a single XSS
 > The browser flow uses the Secure/HttpOnly axiam_access and axiam_refresh cookies (D-05..D-09); the SPA never handles the raw token, and CONTRACT §4 requires SDKs in cookie mode to use a cookie jar rather than application-readable storage.
 
 **T-139 — Credentials or tokens printed by default formatting**  
-`SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go)` (Process) · Information disclosure · High · Mitigated
+`SDK HTTP core (11 languages)` (Process) · Information disclosure · High · Mitigated
 
 A derived Debug/toString/repr on a client or config type prints the client secret or bearer token into the integrator's logs, where it is durably stored and widely readable.
 
 > CONTRACT §7 mandates a Sensitive<T> wrapper for every secret field in every SDK, so the default formatting of a credential-bearing type is redacted — the same discipline applied server-side under SEC-067 / SECHRD-09.
 
 **T-140 — Concurrent refresh storms invalidate the token family**  
-`SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go)` (Process) · Denial of service · Medium · Mitigated
+`SDK HTTP core (11 languages)` (Process) · Denial of service · Medium · Mitigated
 
 Refresh tokens are single-use with rotation. Parallel requests that each notice expiry and refresh independently race, and all but one redeem a rotated token — which reads as theft and can invalidate the family.
 
 > CONTRACT §9 requires a single-flight refresh guard: concurrent callers await one in-flight refresh rather than each issuing their own.
 
 **T-141 — Contract drift between server and SDKs**  
-`SDK HTTP core (7 languages: rs/ts/py/java/cs/php/go)` (Process) · Tampering · Medium · Mitigated
+`SDK HTTP core (11 languages)` (Process) · Tampering · Medium · Mitigated
 
 The SDKs vendor copies of CONTRACT.md, openapi.json and proto/. If the server changes and the copies do not, an SDK can silently stop enforcing a control it believes it implements.
 
@@ -1621,7 +1670,7 @@ Static client secrets in a config file, CI variable or container image are the m
 **T-147 — Contract weakened without review**  
 `sdks/CONTRACT.md, openapi.json, proto/` (Store) · Tampering · Medium · Mitigated
 
-The contract is where SDK security behaviour is actually specified — TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across seven implementations at once.
+The contract is where SDK security behaviour is actually specified — TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across eleven implementations at once.
 
 > The contract lives in this repository under normal review, and the drift and buf gates make any change to the generated artifacts visible in CI rather than in a downstream repository.
 
@@ -1630,7 +1679,7 @@ The contract is where SDK security behaviour is actually specified — TLS polic
 
 A stolen registry token or a compromised release workflow publishes an SDK version that exfiltrates credentials from every integrator who upgrades.
 
-> Enable 2FA and trusted/OIDC publishing on every registry, pin and review release workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin.
+> Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere — pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin.
 
 **T-149 — Unpinned SDK dependency pulls a malicious transitive update**  
 `install SDK package` (Flow) · Tampering · High · Mitigated
@@ -1643,7 +1692,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-23 of 168 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+22 of 181 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1657,10 +1706,9 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-133 | High | Backup media accessible outside the cluster | Backups / volume snapshots <br/>*Deployment & platform (Kubernetes)* | Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data… |
 | T-135 | High | Dependency-confusion or typosquatted SDK package | Integrator / developer <br/>*Client SDKs & admin UI integration surface* | Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical… |
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
+| T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS, scope AXIAM's token to read-only on its… |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
-| T-16 | Medium | No deny-override in the RBAC cascade | Core service layer (AuthN, AuthZ, User, PKI, Federation) <br/>*System diagram* | SEC-040, accepted for v1.0-beta and documented in the design document and the roadmap. Deny-override cascade is deferred to post-v1.0-beta. Operators must model exclusions by… |
 | T-39 | Medium | Access token still valid after entitlement revocation | Token service EdDSA JWT + refresh rotation <br/>*Authentication & session management* | Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation… |
-| T-87 | Medium | No deny-override in the additive cascade | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Authorization engine — RBAC, hierarchy & scopes* | SEC-040, accepted for v1.0-beta and documented in the design document. Deny-override cascade is deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy… |
 | T-110 | Medium | Personal data over-collected into an immutable log | Audit middleware & service <br/>*Audit, webhooks, email & notifications* | Partially addressed: audit metadata is deliberately minimised and erasure anonymises the subject rather than deleting audit records. Deployments must set an audit retention period… |
 | T-118 | Medium | Audit trail deleted along with the tenant | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
@@ -1675,7 +1723,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 **Accepted design trade-offs** — deliberate, documented, and bounded.
 
-- **No deny-override in the RBAC cascade** (SEC-040). The engine is additive, allow-wins, default-deny; a grant on a parent resource cannot be revoked on one child. Deferred to post-v1.0-beta. Model exclusions by granting lower in the hierarchy rather than granting high and excluding.
+- **~~No deny-override in the RBAC cascade~~ (SEC-040, T-16/T-87) — closed.** The engine now supports explicit deny: a grant carries `effect: "allow" | "deny"`, and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity. Recorded here as closed rather than deleted so the history stays legible; see `claude_dev/deny-override-design.md`.
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
 - **Audit records cannot be erased.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.
 - **A stale FIDO MDS3 BLOB is never a hard failure (X3).** A transient outage at the FIDO Alliance must not brick WebAuthn registration, so ingestion past `nextUpdate` still succeeds — logged at WARN and surfaced as `stale: true` on `GET /api/v1/mds/status` — rather than blocking. The cost is T-153: a since-revoked authenticator model keeps passing policy until the next successful refresh.
@@ -1683,8 +1731,9 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
 
 - Network policy so pods are not reachable around the ingress
-- Per-service RabbitMQ credentials and vhost separation
-- Secrets supplied as mounted files rather than `AXIAM_*` environment variables; etcd encryption at rest
+- Per-service RabbitMQ credentials and vhost separation (the transport itself is now always TLS — the server refuses any non-`amqps://` broker URL)
+- Secrets supplied through Vault (the production default) or as mounted files rather than `AXIAM_*` environment variables; etcd encryption at rest
+- Running Vault itself in production mode — TLS, a read-only token scoped to AXIAM's KV path, unseal and root material kept offline, audit device on (T-180). All ten long-lived secrets now sit behind one credential, so the Vault posture is the secret posture
 - Backup encryption, restricted snapshot IAM, and backups included in access review
 - Edge protection (WAF, connection limits) in front of the ingress
 - Alerting on scheduled-job completion, so a missed GDPR erasure or certificate-expiry run is noticed
@@ -1695,7 +1744,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 **Genuine gaps worth scheduling**
 
 - **~~No SDK ships a webhook-signature verifier~~ (T-145) — closed.** The server signs deliveries with the Stripe-style signed-timestamp scheme, and as of the 2026-08-02 remediation every one of the eleven SDKs ships a conformant `verify_webhook(...)` helper against a canonical spec, with `CONTRACT.md` §13 made normative. What remains is integrator discipline, not a missing control: the helper still has to be called. Recorded here as closed rather than deleted so the history stays legible.
-- **SDK package distribution.** Seven public registries are seven opportunities for typosquatting or a hijacked release. Reserve names, require 2FA and trusted publishing, and publish provenance attestations.
+- **SDK package distribution.** Eleven SDKs across the public registries are that many opportunities for typosquatting or a hijacked release. The Rust, TypeScript, Python and C# pipelines and the shared `axiam-opaque` core now publish via Trusted Publishing (OIDC) with no long-lived registry token; Maven Central (Java, Kotlin) still needs stored credentials. Reserve names, keep 2FA on, and publish provenance attestations.
 - **Static client secrets in integrator configuration.** Outside AXIAM's control, but the most common way service-account credentials escape. Prefer mTLS or short-lived workload identity.
 
 ## 7. Coverage
@@ -1704,35 +1753,35 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 | Category | Threats |
 |---|---|
-| Spoofing | 40 |
+| Spoofing | 47 |
 | Tampering | 36 |
 | Repudiation | 5 |
-| Information disclosure | 43 |
-| Denial of service | 16 |
-| Elevation of privilege | 25 |
+| Information disclosure | 47 |
+| Denial of service | 18 |
+| Elevation of privilege | 28 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 24 | 1 |
-| High | 68 | 9 |
-| Medium | 66 | 11 |
+| Critical | 25 | 1 |
+| High | 80 | 10 |
+| Medium | 69 | 9 |
 | Low | 7 | 2 |
 
 **By diagram**
 
 | Diagram | Threats | Open |
 |---|---|---|
-| System diagram | 26 | 3 |
-| Authentication & session management | 22 | 1 |
-| OAuth2 / OIDC authorization server | 16 | 0 |
+| System diagram | 27 | 2 |
+| Authentication & session management | 26 | 1 |
+| OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
-| Authorization engine — RBAC, hierarchy & scopes | 15 | 1 |
+| Authorization engine — RBAC, hierarchy & scopes | 15 | 0 |
 | PKI, certificates & IoT device identity | 18 | 2 |
 | Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 12 | 7 |
-| Client SDKs & admin UI integration surface | 15 | 4 |
+| Deployment & platform (Kubernetes) | 13 | 8 |
+| Client SDKs & admin UI integration surface | 17 | 4 |
 
 ## 8. Assumptions
 
@@ -1750,10 +1799,10 @@ The analysis holds only while these hold. If one stops being true, revisit the d
 
 Revisit the model when any of the following happens, and re-run the generator so this document tracks the JSON:
 
-- A new API surface, protocol or external integration is added
+- A new API surface, protocol or external integration is added (the OPAQUE endpoints, the SCIM provisioning tokens and the Vault secret provider are the 2026-08 examples — each added or changed threats here)
 - A trust boundary moves — a new component, a change in deployment topology
 - A security review raises a finding with no corresponding threat here
-- A deferred item lands (SEC-040 deny-override is the notable one)
+- A deferred item lands (SEC-040 deny-override did, closing T-16/T-87)
 - The SDK contract gains or relaxes a security clause
 
 Threat numbers are stable: add new threats with new numbers and raise `threatTop` rather than renumbering, so review comments and issues keep pointing at the right thing.

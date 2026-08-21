@@ -25,20 +25,20 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 175,
- "open": 23,
- "mitigated": 152,
+ "total": 181,
+ "open": 22,
+ "mitigated": 159,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 26,
-   "open": 3
+   "total": 27,
+   "open": 2
   },
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 22,
+   "total": 26,
    "open": 1
   },
   {
@@ -57,7 +57,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
    "total": 15,
-   "open": 1
+   "open": 0
   },
   {
    "id": 5,
@@ -74,8 +74,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 12,
-   "open": 7
+   "total": 13,
+   "open": 8
   },
   {
    "id": 8,

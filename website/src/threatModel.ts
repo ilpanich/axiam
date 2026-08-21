@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 181,
- "open": 22,
- "mitigated": 159,
+ "total": 182,
+ "open": 16,
+ "mitigated": 166,
  "diagrams": [
   {
    "id": 0,
@@ -1137,6 +1137,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "MFA enrolment reset must exist for lost devices, but an attacker who reaches an admin account can use it to strip the second factor from any user.",
        "mitigation": "Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable."
+      },
+      {
+       "number": 182,
+       "title": "Usernameless passkey sign-in skips the gates of the ordinary login path",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-in: there is no preceding password step for the account-status check, the operator's login veto or lockout to have run in. A path added without re-establishing those gates would verify a discoverable credential for an account that is locked, deactivated or anonymised — or make \"click the passkey button\" a bypass of an operator's login veto (SEC-095's shape, on a new door).",
+       "mitigation": "Each gate is re-established on the new path. The login.post_auth reactor interception fires on the discoverable finish, reusing intercept_federated_login_post_auth because a one-round-trip sign-in has no branch to route require_mfa into. ensure_can_sign_in stands in for the missing first step — lockout first, then account status — refusing as InvalidCredentials so which of the two reasons applies is not disclosed. And start touches no storage: no \"does this workspace have passkey users?\" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (residentKey required, replacing webauthn-rs's discouraged default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor."
       }
      ],
      "open": 0
@@ -1750,10 +1759,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 26,
+   "total": 27,
    "open": 1,
    "bySeverity": {
-    "High": 11,
+    "High": 12,
     "Medium": 10,
     "Critical": 3,
     "Low": 2
@@ -4228,12 +4237,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Stale MDS metadata leaves a newly-revoked authenticator treated as compliant",
        "type": "Elevation of privilege",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A BLOB past its own nextUpdate date is deliberately not treated as a hard failure - ingestion still succeeds so a transient FIDO Alliance outage cannot brick registration - but this means an authenticator model FIDO has revoked or decertified since the last successful refresh keeps passing block_revoked_status / require_fido_certified / min_certification until the next successful refresh. Air-gapped deployments on AXIAM__PKI__MDS_BLOB_PATH have no automatic refresh path at all.",
-       "mitigation": "Staleness is logged at WARN with the nextUpdate/now delta and surfaced on GET /api/v1/mds/status (stale: true); the weekly background job and the admin-triggered POST /api/v1/mds/refresh both re-attempt ingestion. No automated alert on sustained staleness ships yet, and air-gapped operators must re-supply the local BLOB file themselves - accepted as an operational responsibility rather than closed in-product; monitor stale and the refresh audit actions (mds.refreshed / mds.refresh_failed)."
+       "mitigation": "CLOSED (T-153), opt-in. AXIAM__PKI__MDS_MAX_STALE_DAYS bounds the window: past that many days beyond nextUpdate, an attested registration is refused with AttestationDenyReason::MetadataStale before the ceremony is finished, so nothing is written and then rejected. Default 0 (disabled) keeps the documented fail-open behaviour deliberately: the right bound is a property of the deployment — a high-assurance tenant may want days, while an air-gapped one on MDS_BLOB_PATH, with no automatic refresh path at all, would be taken offline by anything short of months. Scoped to attested ceremonies only: under AttestationMode::None no metadata is consulted, and never-ingested metadata is the policy's unknown_aaguid setting's job. Staleness still never hard-fails ingestion, and air-gapped operators must still re-supply the BLOB themselves."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "65a3b482-ded2-5ac6-9daf-0f2a8cdf3b51",
@@ -4533,7 +4542,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 18,
-   "open": 2,
+   "open": 1,
    "bySeverity": {
     "Critical": 6,
     "High": 9,
@@ -4880,12 +4889,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Unbounded audit growth degrades the datastore",
        "type": "Denial of service",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "An append-only table with no retention policy grows without limit, eventually affecting query latency across the datastore.",
-       "mitigation": "No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements."
+       "mitigation": "CLOSED (T-119). AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. AuditLogRepository::prune_older_than is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. 0 disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118)."
       }
      ],
-     "open": 2
+     "open": 1
     },
     {
      "id": "9883f81e-42c5-5275-81eb-22eeaa0782b9",
@@ -5163,7 +5172,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 18,
-   "open": 4,
+   "open": 3,
    "bySeverity": {
     "Medium": 14,
     "High": 2,
@@ -5267,12 +5276,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Traffic reaches pods bypassing the ingress",
        "type": "Elevation of privilege",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Without a NetworkPolicy, any workload in the cluster can call the AXIAM Service directly and skip the ingress, along with any edge protections applied there.",
-       "mitigation": "AXIAM's own authn/authz still applies on every request, so this is defence-in-depth rather than a bypass of access control. The shipped k8s manifests do not include NetworkPolicies; add default-deny ingress and egress policies for the namespace."
+       "mitigation": "CLOSED (SEC-053). AXIAM's own authn/authz still applies on every request, so this was always defence-in-depth rather than a bypass of access control — but the depth is now shipped: k8s/network-policy/ carries a namespace-wide default-deny-all (ingress and egress) plus the minimum allows a working deployment needs — DNS egress, server egress scoped to SurrealDB:8000 and RabbitMQ:5671, public HTTPS with RFC1918/CGN and the cluster CIDRs excluded, a fail-closed SMTP relay range — and receiver-side ingress policies for the server, frontend, SurrealDB and RabbitMQ pods. NetworkPolicy is evaluated at both ends of a connection, and the SurrealDB and RabbitMQ ingress policies existed as files but were missing from kustomization.yml, so they were never applied; both are now listed, and `kubectl kustomize k8s/` is the check that they stay listed. Two values are deliberately placeholders the operator must replace: the cluster pod/service CIDRs in the HTTPS except list, and the SMTP relay range, which ships as RFC 5737 TEST-NET-1 so mail egress is denied until configured rather than open by default."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "76ca990a-d1c4-56fb-b323-38c6185a8aa0",
@@ -5366,12 +5375,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Erasure or expiry job silently stops running",
        "type": "Repudiation",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The 30-day GDPR erasure grace period and certificate-expiry warnings depend on scheduled work. A job that fails quietly produces a compliance gap that nobody sees.",
-       "mitigation": "Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack."
+       "mitigation": "CLOSED (T-129). GET /health/jobs reports every background sweep: when it last succeeded, when it last failed, the error text, the consecutive-failure count, and a computed stalled flag. stalled is measured from the last success (falling back to process start, so a sweep that never ran once is still caught), not from the last error — a job that errors was already visible in the log, but a job that stops running produces no log line at all. Alert on status == \"degraded\", or on a named job's stalled. Returns 200 even when degraded, deliberately: this is not a readiness gate, and a stuck sweep must not pull a serving pod from the load balancer. Three missed intervals are tolerated before flagging, because a sweep that overruns its interval under load is normal and an alert that fires on that gets muted."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "a57f6400-7f09-5560-8e08-3df64d296d56",
@@ -5429,12 +5438,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Default or shared broker credentials",
        "type": "Information disclosure",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.",
-       "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests. The transport itself is no longer configurable: the server refuses any non-amqps:// broker URL in every build profile, so a shared credential at least never travels in the clear."
+       "mitigation": "CLOSED (T-131). The shipped manifests never carried guest/guest — broker credentials come from the rabbitmq-credentials Secret, supplied at deploy time — and now add RABBITMQ_DEFAULT_VHOST: axiam, so AXIAM gets its own authorization boundary rather than sharing the default / with anything else on the broker. Fixing this exposed a defect that mattered more: the server's AXIAM__AMQP__URL lived in the ConfigMap with no credentials at all, so the shipped manifests could never have authenticated to their own broker; the URL now lives in axiam-secrets (it embeds a password) with the /axiam vhost suffix. Splitting one credential per service still belongs to whoever deploys. Unchanged and still applying: HMAC verification on consumed messages, and the amqps://-only transport, so a broker credential never travels in the clear."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "8fbbc2a9-a70f-513d-a1e0-ea9fdce2783b",
@@ -5456,9 +5465,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Secret material placed in a ConfigMap or plain env var",
        "type": "Information disclosure",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output — a signing key or datastore password there is effectively public within the namespace.",
-       "mitigation": "The production stacks now default to AXIAM__AUTH__SECRET_PROVIDER=vault, which keeps all ten long-lived secrets out of the container spec entirely; where the environment fallback is used instead, nothing prevents an operator from supplying them as AXIAM_* variables. Prefer Vault, or mounted Secret files, and enable etcd encryption at rest."
+       "mitigation": "CLOSED (T-132). Two providers keep key material out of the container spec, and the manifests use one of them by default: the production stacks default to AXIAM__AUTH__SECRET_PROVIDER=vault (concentrating secrets behind one credential — T-180, which stays open), and for deployments without Vault, axiam-key-material mounts all eleven cryptographic secrets as files at /etc/axiam/secrets with AXIAM__AUTH__SECRET_PROVIDER=file — mode 0440 plus fsGroup 65532, because Kubernetes gives secret files to root:root. Three keys (opaque_session_key, opaque_setup_key, amqp_signing_key) were absent from the old env-var Secret entirely. One residual, stated plainly: AXIAM__DB__USERNAME, AXIAM__DB__PASSWORD and AXIAM__AMQP__URL remain environment variables, read by the layered configuration before any secret provider exists, and the Vault token must bootstrap the trust chain. Enable etcd encryption at rest either way."
       },
       {
        "number": 180,
@@ -5470,7 +5479,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: just vault-status reports presence only, never values, and the seeder never rewrites a secret that already exists."
       }
      ],
-     "open": 2
+     "open": 1
     },
     {
      "id": "78160ffe-cb3f-5dbb-8852-1142ff0d92aa",
@@ -5677,7 +5686,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 13,
-   "open": 8,
+   "open": 4,
    "bySeverity": {
     "High": 9,
     "Medium": 3,

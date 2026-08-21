@@ -25,9 +25,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 181,
- "open": 22,
- "mitigated": 159,
+ "total": 182,
+ "open": 16,
+ "mitigated": 166,
  "areas": [
   {
    "id": 0,
@@ -38,7 +38,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 26,
+   "total": 27,
    "open": 1
   },
   {
@@ -63,19 +63,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
    "total": 18,
-   "open": 2
+   "open": 1
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 18,
-   "open": 4
+   "open": 3
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
    "total": 13,
-   "open": 8
+   "open": 4
   },
   {
    "id": 8,

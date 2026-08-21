@@ -14,9 +14,16 @@
 >
 > ## Handoff — the website section is in step with this document
 >
-> **Status: published, source and section both current as of 2026-08-21.** The
-> page first went live from a version of this document verified against
-> `3ede4d19` (2026-08-04). Both have since been brought up to `1.0.0-alpha34`:
+> **Status: published, source and section both current as of 2026-08-21
+> (`1.0.0-alpha37`).** The alpha37 pass closed six threats the remediation work
+> shipped — NetworkPolicies applied (T-125), a jobs-health endpoint (T-129), the
+> broker vhost (T-131), the file/Vault secret providers in the manifests (T-132),
+> the MDS staleness bound (T-153) and the default audit-retention window
+> (T-119) — and added T-182 for the usernameless passkey sign-in path, bringing
+> the model to 182 threats, 166 mitigated / 16 open, with `src/security.ts` and
+> the generated model files updated in the same change. Before that, the page
+> first went live from a version of this document verified against `3ede4d19`
+> (2026-08-04). Both were then brought up to `1.0.0-alpha34`:
 > OPAQUE (RFC 9807) replacing SRP, HashiCorp Vault as the production secret
 > provider, TLS-only AMQP, SCIM provisioning tokens, deny-override shipping
 > (SEC-040 closed — it is no longer listed as an accepted trade-off),
@@ -104,7 +111,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 181 threats** and a
+The system is verified against a **STRIDE threat model of 182 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -125,8 +132,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 181 |
-| Mitigated / Open | 159 / 22 |
+| Threats identified | 182 |
+| Mitigated / Open | 166 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -140,13 +147,13 @@ optimistic closed one.
 | Area | Threats | Open |
 |---|---|---|
 | System context | 27 | 2 |
-| Authentication & session management | 26 | 1 |
+| Authentication & session management | 27 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation (SAML SP & OIDC RP) | 23 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 15 | 0 |
-| PKI, certificates & IoT device identity | 18 | 2 |
-| Audit, webhooks, email & notifications | 18 | 4 |
-| Deployment & platform (Kubernetes) | 13 | 8 |
+| PKI, certificates & IoT device identity | 18 | 1 |
+| Audit, webhooks, email & notifications | 18 | 3 |
+| Deployment & platform (Kubernetes) | 13 | 4 |
 | Client SDKs & admin-UI integration surface | 17 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
@@ -212,7 +219,12 @@ have to be re-established — nothing is assumed across a boundary.
   origin-bound second factors. TOTP codes are single-use within their window
   (replay is rejected with an atomic compare-and-set), and the MFA challenge is a
   distinct, single-use, no-authority token so the second factor can never be
-  skipped by replaying it.
+  skipped by replaying it. Passkeys also work as a **usernameless, one-step
+  sign-in** (discoverable credentials), and that path re-establishes every gate
+  the password step would have run: account status and lockout are checked, the
+  operator's login-veto hook still fires, and the anonymous start endpoint
+  touches no storage — so it cannot be used to probe which workspaces or
+  accounts exist.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
   `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
@@ -368,10 +380,13 @@ against the classic federation attacks:
   GlobalSign root alone would only prove "some GlobalSign EV customer", so the
   leaf's SAN DNS identity and the CA/`basicConstraints` status of every issuer in
   the chain are checked too. Ingestion rejects a rollback to an older BLOB serial
-  and never hard-fails on a stale one (logged, not blocking). This is opt-in
-  (`AXIAM__PKI__MDS_ENABLED=false` by default, zero outbound calls) and enforced
-  only at registration — existing credentials are never auto-revoked on a policy
-  change.
+  and never hard-fails on a stale one (logged, not blocking) — but an operator can
+  now bound how stale is acceptable: past `AXIAM__PKI__MDS_MAX_STALE_DAYS` beyond
+  the BLOB's own `nextUpdate`, attested registration is refused rather than decided
+  on metadata too old to trust (off by default, because the right bound is a
+  property of the deployment). This is opt-in (`AXIAM__PKI__MDS_ENABLED=false` by
+  default, zero outbound calls) and enforced only at registration — existing
+  credentials are never auto-revoked on a policy change.
 
 ### Audit & accountability
 
@@ -382,6 +397,11 @@ against the classic federation attacks:
   IP, outcome and timestamp; **both allow and deny decisions** are captured, so
   probing shows up in the trail. Records are structured fields, not formatted
   strings, so log-injection cannot forge a synthetic entry.
+- **Retention is bounded by default**: a background sweep prunes audit records
+  older than 730 days through the table's only deletion path — deployment-wide,
+  never reachable from any HTTP handler, so "prune old records" cannot become
+  "delete the evidence". Set the window to match your lawful basis, or `0` to
+  disable; either state is logged at startup.
 
 ### Webhooks, email & messaging
 
@@ -491,20 +511,27 @@ checklist — most of the threat model's open items live here.
 
 **Platform & operations**
 
-- Put a NetworkPolicy in front of the pods so nothing reaches the service around the
-  ingress; keep the data tier off any public route.
-- Give RabbitMQ **per-service credentials with vhost separation** — AXIAM verifies
-  message signatures and refuses any non-TLS broker URL, but broker access control
-  is yours.
+- Apply the shipped NetworkPolicies (`k8s/network-policy/` — a namespace-wide
+  default-deny on ingress *and* egress, plus the minimum allows a working
+  deployment needs) and replace their two deliberate placeholders: the cluster
+  pod/service CIDRs in the HTTPS egress exception, and the SMTP relay range, which
+  ships as an unroutable value so mail egress is denied until you configure it.
+  Keep the data tier off any public route.
+- Give RabbitMQ **per-service credentials** — the manifests now ship a dedicated
+  `axiam` vhost as AXIAM's own authorization boundary, and AXIAM verifies message
+  signatures and refuses any non-TLS broker URL, but splitting one credential per
+  service is still yours.
 - **Run Vault in production mode, and treat its posture as your secret posture.**
   The production stacks default to Vault for every long-lived secret, which
   concentrates all of them behind one KV path: give AXIAM a read-only token scoped
   to that path, keep unseal keys and the root token offline, enable Vault's audit
-  device, and never run a dev-mode (in-memory, unsealed) Vault in production. If
-  you use the environment fallback instead, supply secrets as **mounted Secret
-  files, not `AXIAM_*` environment variables**, and enable etcd encryption at
-  rest — a signing key in a ConfigMap or plain env var is effectively public
-  within the namespace.
+  device, and never run a dev-mode (in-memory, unsealed) Vault in production. For
+  deployments without Vault, the manifests' `file` provider mounts every
+  cryptographic secret as a file — prefer it over `AXIAM_*` environment variables,
+  since a signing key in a ConfigMap or plain env var is effectively public within
+  the namespace. The datastore and broker credentials are still env-supplied
+  (read before any secret provider exists), so enable etcd encryption at rest
+  either way.
 - **Encrypt backups and volume snapshots** with a key separate from the cluster,
   restrict snapshot IAM, and include backup media in the same access review as the
   live data tier — a snapshot carries the same data under weaker controls.
@@ -512,8 +539,10 @@ checklist — most of the threat model's open items live here.
   **cluster-admin is equivalent to full AXIAM compromise** and is outside the
   application's audit trail.
 - Add edge protection (WAF, connection limits, autoscaling) for volumetric floods,
-  and a **liveness alert on scheduled-job completion** so a missed GDPR-erasure or
-  certificate-expiry run is noticed.
+  and wire monitoring to **`GET /health/jobs`**, which reports every background
+  sweep's last success, last failure and a computed `stalled` flag — alert on
+  `status == "degraded"` so a silently stopped GDPR-erasure or certificate-expiry
+  sweep is noticed, not only one that errors.
 - **Run SurrealDB on a persistent storage engine — `surrealkv:` or `rocksdb:`,
   never `memory:`.** This is a correctness control, not a durability preference.
   AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device
@@ -556,9 +585,10 @@ checklist — most of the threat model's open items live here.
 - **Access tokens survive revocation for up to 15 minutes** — the price of stateless
   verification. Where immediate revocation matters, verify through the gRPC
   introspection path instead of locally.
-- **Audit records cannot be erased** — append-only by design, which is in tension
-  with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period
-  consistent with your lawful basis.
+- **Audit records cannot be erased on demand, only aged out** — append-only by
+  design, which is in tension with GDPR Art. 17; erasure anonymises the subject
+  instead. Retention defaults to a 730-day pruning window applied by the
+  background sweep; tune it (or disable with `0`) to match your lawful basis.
 
 > **Caution — this is alpha software.** AXIAM is in active development and has not
 > reached a stable release. It has not undergone an independent third-party

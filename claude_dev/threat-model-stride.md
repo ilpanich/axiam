@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 181 |
-| **Mitigated / Open** | 159 / 22 |
+| **Threats identified** | 182 |
+| **Mitigated / Open** | 166 / 16 |
 | **Owner** | ilpanich |
 
 ---
@@ -343,9 +343,9 @@ SCIM provisioning tokens exist because Okta and Entra can present only one stati
 
 ### 5.2 Authentication & session management
 
-Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.
+Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn, including usernameless passkey sign-in), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.
 
-*26 threats — 3 critical, 11 high, 10 medium, 2 low; 1 open.*
+*27 threats — 3 critical, 12 high, 10 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -375,6 +375,7 @@ Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn), lockout and rate 
 | T-177 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | D | Unauthenticated OPAQUE exchanges consume server state and OPRF budget | Medium | Mitigated |
 | T-178 | Lockout & rate limiting <br/>*Process* | E | OPAQUE login path sits outside the lockout counter | High | Mitigated |
 | T-179 | user credentials (Argon2id hashes, OPAQUE records) <br/>*Store* | I | Stolen OPAQUE records opened offline with the tenant OPRF seed | High | Mitigated |
+| T-182 | MFA verification TOTP / WebAuthn <br/>*Process* | E | Usernameless passkey sign-in skips the gates of the ordinary login path | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -560,6 +561,13 @@ A failed OPAQUE authentication is a wrong password, but it surfaces as a failed 
 opaque_credential rows are the OPAQUE analogue of password hashes. Unlike an Argon2id or SRP-verifier corpus they are not offline-attackable at KDF cost alone — but only while the per-tenant OPRF seed stays secret. A dump that includes a usable seed reduces OPAQUE to the SRP posture: a dictionary attack priced at the KSF.
 
 > Each tenant's OPRF seed and AKE keypair (`opaque_server_setup`, schema v42) are AES-256-GCM encrypted at rest under `opaque_setup_key`, which is held outside the datastore in the secret provider (Vault in production), so a database-only disclosure yields no dictionary attack to mount at any cost. The trade-off is stated in `docs/deployment/vault.md`: losing `opaque_setup_key` means a password reset for every user in every tenant — which is why the Vault seeder never regenerates an existing key, and why the setup key is split from the cheap-to-rotate `opaque_session_key`.
+
+**T-182 — Usernameless passkey sign-in skips the gates of the ordinary login path**  
+`MFA verification TOTP / WebAuthn` (Process) · Elevation of privilege · High · Mitigated
+
+authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-in: there is no preceding password step for the account-status check, the operator's login veto or lockout to have run in. A path added without re-establishing those gates would verify a discoverable credential for an account that is locked, deactivated or anonymised — or make "click the passkey button" a bypass of an operator's login veto (SEC-095's shape, on a new door).
+
+> Each gate is re-established on the new path. The `login.post_auth` reactor interception fires on the discoverable finish, reusing `intercept_federated_login_post_auth` because a one-round-trip sign-in has no branch to route `require_mfa` into. `ensure_can_sign_in` stands in for the missing first step — lockout first, then account status — refusing as `InvalidCredentials` so which of the two reasons applies is not disclosed. And start touches no storage: no "does this workspace have passkey users?" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (`residentKey` required, replacing webauthn-rs's `discouraged` default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor.
 
 </details>
 
@@ -1289,7 +1297,7 @@ Flipping a stored entry's status reports directly in the datastore would let an 
 
 The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.
 
-*18 threats — 2 high, 14 medium, 2 low; 4 open.*
+*18 threats — 2 high, 14 medium, 2 low; 3 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1306,7 +1314,7 @@ The append-only audit trail and its OpenPGP batch signing, webhook delivery with
 | T-116 | Email service (SMTP / provider API, templates) <br/>*Process* | T | Header injection producing extra recipients | Medium | Mitigated |
 | T-117 | Notification rules (admin alerts) <br/>*Process* | D | Alert flooding buries a real incident | Medium | Mitigated |
 | T-118 | audit_log (append-only, signed) <br/>*Store* | T | Audit trail deleted along with the tenant | Medium | Open |
-| T-119 | audit_log (append-only, signed) <br/>*Store* | D | Unbounded audit growth degrades the datastore | Low | Open |
+| T-119 | audit_log (append-only, signed) <br/>*Store* | D | Unbounded audit growth degrades the datastore | Low | Mitigated |
 | T-120 | webhook (HMAC secrets) <br/>*Store* | I | Webhook secret leaked through derived Debug output | Medium | Mitigated |
 | T-121 | outbound mail queue (RabbitMQ) <br/>*Store* | I | Queued messages readable on the broker | Medium | Mitigated |
 | T-122 | event delivery <br/>*Flow* | I | Event payload discloses more than the receiver needs | Medium | Mitigated |
@@ -1407,11 +1415,11 @@ Deleting a tenant removes its data; if audit records go with it, the evidence of
 > Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink before deletion if your retention obligations require it.
 
 **T-119 — Unbounded audit growth degrades the datastore**  
-`audit_log (append-only, signed)` (Store) · Denial of service · Low · Open
+`audit_log (append-only, signed)` (Store) · Denial of service · Low · Mitigated
 
 An append-only table with no retention policy grows without limit, eventually affecting query latency across the datastore.
 
-> No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements.
+> **CLOSED (T-119).** AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. `AuditLogRepository::prune_older_than` is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing, which is what stops "prune old records" becoming "delete the evidence" — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. `0` disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118).
 
 **T-120 — Webhook secret leaked through derived Debug output**  
 `webhook (HMAC secrets)` (Store) · Information disclosure · Medium · Mitigated
@@ -1809,7 +1817,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 ## 6. Open risk register
 
-17 of 181 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+16 of 182 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1828,7 +1836,6 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
-| T-119 | Low | Unbounded audit growth degrades the datastore | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements. |
 | T-161 | Low | A partner's IdP silently populates the AXIAM user table (X4) | Attribute mapping & JIT provisioning <br/>*Federation — SAML SP & OIDC relying party* | Off by default (`linked_only` refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit. |
 
 ### Grouping
@@ -1837,7 +1844,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 - **~~No deny-override in the RBAC cascade~~ (SEC-040, T-16/T-87) — closed.** The engine now supports explicit deny: a grant carries `effect: "allow" | "deny"`, and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity. Recorded here as closed rather than deleted so the history stays legible; see `claude_dev/deny-override-design.md`.
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
-- **Audit records cannot be erased.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Set a retention period consistent with your lawful basis.
+- **Audit records cannot be erased, only aged out.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Retention now defaults to a 730-day pruning window (T-119) applied by the background sweep — tune it (or disable with `0`) to match your lawful basis; there is still no on-demand deletion path.
 - **A stale FIDO MDS3 BLOB is never a hard failure at ingestion (X3),** though `AXIAM__PKI__MDS_MAX_STALE_DAYS` now lets an operator bound how stale metadata may get before attested *registration* is refused (T-153).
 
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
@@ -1864,6 +1871,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 - **~~Default or shared broker credentials~~ (T-131) — closed.** A dedicated `axiam` vhost. The larger find was that the shipped manifests carried a credential-free AMQP URL in the ConfigMap and could never have authenticated at all.
 - **~~Erasure or expiry job silently stops running~~ (T-129) — closed.** `GET /health/jobs` reports every sweep's last success, failure and a computed `stalled` flag, measured from the last *success* rather than the last error.
 - **~~Stale MDS metadata~~ (T-153) — closed, opt-in.** `AXIAM__PKI__MDS_MAX_STALE_DAYS` bounds how far past `nextUpdate` metadata may drift before attested registration is refused. Default `0` keeps fail-open, deliberately.
+- **~~Unbounded audit growth~~ (T-119) — closed.** A default 730-day retention window, pruned by the background sweep through the table's first (and only) deletion path — deployment-wide, never reachable from any HTTP handler, `0` to disable, and both states logged at startup.
 
 - **~~No deny-override in the RBAC cascade~~ (T-16, T-87) — closed (SEC-040 / B1).** These were carried as open long after the control shipped: their own detail blocks already read "SEC-040 — CLOSED (B1)" while the status column still said `Open`. The engine takes `effect: "allow" | "deny"` and a deny overrides every allow at any depth of the hierarchy and at equal specificity, verified by the precedence-table tests in `crates/axiam-authz/src/engine.rs` — including the property that motivates the choice, `adding_a_deny_can_never_widen_access`. A stale `Open` is not a harmless bookkeeping error: it argues for spending effort on a control that already exists, and it understates the product to anyone reading the model as a security statement.
 - **~~Traffic reaches pods bypassing the ingress~~ (T-125) — closed (SEC-053).** The entry claimed "the shipped k8s manifests do not include NetworkPolicies"; they ship seven, including a namespace-wide default-deny on both ingress and egress. The genuine defect this review found was narrower and worse: the SurrealDB and RabbitMQ ingress policies were present as files but missing from `kustomization.yml`, so they were never applied — and because NetworkPolicy is enforced at both ends, that left the server unable to reach its own datastore or broker. Both are now listed; `kubectl kustomize k8s/` is the check.
@@ -1879,28 +1887,28 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | Repudiation | 5 |
 | Information disclosure | 47 |
 | Denial of service | 18 |
-| Elevation of privilege | 28 |
+| Elevation of privilege | 29 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 25 | 1 |
-| High | 80 | 7 |
+| High | 81 | 7 |
 | Medium | 69 | 7 |
-| Low | 7 | 2 |
+| Low | 7 | 1 |
 
 **By diagram**
 
 | Diagram | Threats | Open |
 |---|---|---|
 | System diagram | 27 | 2 |
-| Authentication & session management | 26 | 1 |
+| Authentication & session management | 27 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 15 | 0 |
 | PKI, certificates & IoT device identity | 18 | 1 |
-| Audit, webhooks, email & notifications | 18 | 4 |
+| Audit, webhooks, email & notifications | 18 | 3 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
 | Client SDKs & admin UI integration surface | 17 | 4 |
 

@@ -2353,6 +2353,17 @@
                   "mitigation": "Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable.",
                   "modelType": "STRIDE",
                   "number": 34
+                },
+                {
+                  "id": "eb4b278d-a564-4f11-ac40-f6737166d08b",
+                  "title": "Usernameless passkey sign-in skips the gates of the ordinary login path",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-in: there is no preceding password step for the account-status check, the operator's login veto or lockout to have run in. A path added without re-establishing those gates would verify a discoverable credential for an account that is locked, deactivated or anonymised \u2014 or make \"click the passkey button\" a bypass of an operator's login veto (SEC-095's shape, on a new door).",
+                  "mitigation": "Each gate is re-established on the new path. The login.post_auth reactor interception fires on the discoverable finish, reusing intercept_federated_login_post_auth because a one-round-trip sign-in has no branch to route require_mfa into. ensure_can_sign_in stands in for the missing first step \u2014 lockout first, then account status \u2014 refusing as InvalidCredentials so which of the two reasons applies is not disclosed. And start touches no storage: no \"does this workspace have passkey users?\" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (residentKey required, replacing webauthn-rs's discouraged default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor.",
+                  "modelType": "STRIDE",
+                  "number": 182
                 }
               ]
             }
@@ -9766,11 +9777,11 @@
                 {
                   "id": "c6501c48-a2fe-538b-89f2-a0bab7c1aeac",
                   "title": "Stale MDS metadata leaves a newly-revoked authenticator treated as compliant",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Elevation of privilege",
                   "description": "A BLOB past its own nextUpdate date is deliberately not treated as a hard failure - ingestion still succeeds so a transient FIDO Alliance outage cannot brick registration - but this means an authenticator model FIDO has revoked or decertified since the last successful refresh keeps passing block_revoked_status / require_fido_certified / min_certification until the next successful refresh. Air-gapped deployments on AXIAM__PKI__MDS_BLOB_PATH have no automatic refresh path at all.",
-                  "mitigation": "Staleness is logged at WARN with the nextUpdate/now delta and surfaced on GET /api/v1/mds/status (stale: true); the weekly background job and the admin-triggered POST /api/v1/mds/refresh both re-attempt ingestion. No automated alert on sustained staleness ships yet, and air-gapped operators must re-supply the local BLOB file themselves - accepted as an operational responsibility rather than closed in-product; monitor stale and the refresh audit actions (mds.refreshed / mds.refresh_failed).",
+                  "mitigation": "CLOSED (T-153), opt-in. AXIAM__PKI__MDS_MAX_STALE_DAYS bounds the window: past that many days beyond nextUpdate, an attested registration is refused with AttestationDenyReason::MetadataStale before the ceremony is finished, so nothing is written and then rejected. Default 0 (disabled) keeps the documented fail-open behaviour deliberately: the right bound is a property of the deployment \u2014 a high-assurance tenant may want days, while an air-gapped one on MDS_BLOB_PATH, with no automatic refresh path at all, would be taken offline by anything short of months. Scoped to attested ceremonies only: under AttestationMode::None no metadata is consulted, and never-ingested metadata is the policy's unknown_aaguid setting's job. Staleness still never hard-fails ingestion, and air-gapped operators must still re-supply the BLOB themselves.",
                   "modelType": "STRIDE",
                   "number": 153
                 }
@@ -10515,11 +10526,11 @@
                 {
                   "id": "5302e738-659d-5711-b655-2dc3f50e9978",
                   "title": "Unbounded audit growth degrades the datastore",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Low",
                   "type": "Denial of service",
                   "description": "An append-only table with no retention policy grows without limit, eventually affecting query latency across the datastore.",
-                  "mitigation": "No retention or archival policy is enforced by AXIAM today. Operators should archive and prune on a schedule consistent with their compliance requirements.",
+                  "mitigation": "CLOSED (T-119). AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. AuditLogRepository::prune_older_than is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler \u2014 retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing \u2014 and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. 0 disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118).",
                   "modelType": "STRIDE",
                   "number": 119
                 }
@@ -11476,11 +11487,11 @@
                 {
                   "id": "f25c4cfc-8eae-5eb3-9e60-bc00bde44677",
                   "title": "Traffic reaches pods bypassing the ingress",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Elevation of privilege",
                   "description": "Without a NetworkPolicy, any workload in the cluster can call the AXIAM Service directly and skip the ingress, along with any edge protections applied there.",
-                  "mitigation": "AXIAM's own authn/authz still applies on every request, so this is defence-in-depth rather than a bypass of access control. The shipped k8s manifests do not include NetworkPolicies; add default-deny ingress and egress policies for the namespace.",
+                  "mitigation": "CLOSED (SEC-053). AXIAM's own authn/authz still applies on every request, so this was always defence-in-depth rather than a bypass of access control \u2014 but the depth is now shipped: k8s/network-policy/ carries a namespace-wide default-deny-all (ingress and egress) plus the minimum allows a working deployment needs \u2014 DNS egress, server egress scoped to SurrealDB:8000 and RabbitMQ:5671, public HTTPS with RFC1918/CGN and the cluster CIDRs excluded, a fail-closed SMTP relay range \u2014 and receiver-side ingress policies for the server, frontend, SurrealDB and RabbitMQ pods. NetworkPolicy is evaluated at both ends of a connection, and the SurrealDB and RabbitMQ ingress policies existed as files but were missing from kustomization.yml, so they were never applied; both are now listed, and `kubectl kustomize k8s/` is the check that they stay listed. Two values are deliberately placeholders the operator must replace: the cluster pod/service CIDRs in the HTTPS except list, and the SMTP relay range, which ships as RFC 5737 TEST-NET-1 so mail egress is denied until configured rather than open by default.",
                   "modelType": "STRIDE",
                   "number": 125
                 }
@@ -11637,11 +11648,11 @@
                 {
                   "id": "019b3e4e-8ffe-55b1-9bbf-7147875913db",
                   "title": "Erasure or expiry job silently stops running",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Repudiation",
                   "description": "The 30-day GDPR erasure grace period and certificate-expiry warnings depend on scheduled work. A job that fails quietly produces a compliance gap that nobody sees.",
-                  "mitigation": "Job failures are logged but AXIAM does not ship an alert on missed runs. Add a liveness alert on job completion in your monitoring stack.",
+                  "mitigation": "CLOSED (T-129). GET /health/jobs reports every background sweep: when it last succeeded, when it last failed, the error text, the consecutive-failure count, and a computed stalled flag. stalled is measured from the last success (falling back to process start, so a sweep that never ran once is still caught), not from the last error \u2014 a job that errors was already visible in the log, but a job that stops running produces no log line at all. Alert on status == \"degraded\", or on a named job's stalled. Returns 200 even when degraded, deliberately: this is not a readiness gate, and a stuck sweep must not pull a serving pod from the load balancer. Three missed intervals are tolerated before flagging, because a sweep that overruns its interval under load is normal and an alert that fires on that gets muted.",
                   "modelType": "STRIDE",
                   "number": 129
                 }
@@ -11760,11 +11771,11 @@
                 {
                   "id": "5bcf3a61-8fd0-53ad-a49f-c74670e3463c",
                   "title": "Default or shared broker credentials",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Information disclosure",
                   "description": "A broker left on guest/guest, or with one credential shared by every service, lets any workload read authz decisions and audit events and publish forged ones.",
-                  "mitigation": "AXIAM verifies HMAC signatures on consumed messages, which limits forgery, but per-service broker credentials and vhost separation are a deployment responsibility and are not enforced by the shipped manifests. The transport itself is no longer configurable: the server refuses any non-amqps:// broker URL in every build profile, so a shared credential at least never travels in the clear.",
+                  "mitigation": "CLOSED (T-131). The shipped manifests never carried guest/guest \u2014 broker credentials come from the rabbitmq-credentials Secret, supplied at deploy time \u2014 and now add RABBITMQ_DEFAULT_VHOST: axiam, so AXIAM gets its own authorization boundary rather than sharing the default / with anything else on the broker. Fixing this exposed a defect that mattered more: the server's AXIAM__AMQP__URL lived in the ConfigMap with no credentials at all, so the shipped manifests could never have authenticated to their own broker; the URL now lives in axiam-secrets (it embeds a password) with the /axiam vhost suffix. Splitting one credential per service still belongs to whoever deploys. Unchanged and still applying: HMAC verification on consumed messages, and the amqps://-only transport, so a broker credential never travels in the clear.",
                   "modelType": "STRIDE",
                   "number": 131
                 }
@@ -11816,11 +11827,11 @@
                 {
                   "id": "a847a11a-7219-5c13-9a73-ed63a2f67005",
                   "title": "Secret material placed in a ConfigMap or plain env var",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Information disclosure",
                   "description": "ConfigMaps are not secret and environment variables appear in pod specs, crash dumps and debug output \u2014 a signing key or datastore password there is effectively public within the namespace.",
-                  "mitigation": "The production stacks now default to AXIAM__AUTH__SECRET_PROVIDER=vault, which keeps all ten long-lived secrets out of the container spec entirely; where the environment fallback is used instead, nothing prevents an operator from supplying them as AXIAM_* variables. Prefer Vault, or mounted Secret files, and enable etcd encryption at rest.",
+                  "mitigation": "CLOSED (T-132). Two providers keep key material out of the container spec, and the manifests use one of them by default: the production stacks default to AXIAM__AUTH__SECRET_PROVIDER=vault (concentrating secrets behind one credential \u2014 T-180, which stays open), and for deployments without Vault, axiam-key-material mounts all eleven cryptographic secrets as files at /etc/axiam/secrets with AXIAM__AUTH__SECRET_PROVIDER=file \u2014 mode 0440 plus fsGroup 65532, because Kubernetes gives secret files to root:root. Three keys (opaque_session_key, opaque_setup_key, amqp_signing_key) were absent from the old env-var Secret entirely. One residual, stated plainly: AXIAM__DB__USERNAME, AXIAM__DB__PASSWORD and AXIAM__AMQP__URL remain environment variables, read by the layered configuration before any secret provider exists, and the Vault token must bootstrap the trust chain. Enable etcd encryption at rest either way.",
                   "modelType": "STRIDE",
                   "number": 132
                 },
@@ -13795,6 +13806,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 181
+    "threatTop": 182
   }
 }

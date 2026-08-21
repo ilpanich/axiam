@@ -237,7 +237,11 @@ frontend-build:
 frontend-test:
     cd frontend && npx playwright test
 
-# Start full production-like stack (build images + run all services).
+# Start full production-like stack (pull official images + run all services).
+#
+# axiam-server and axiam-frontend are pulled from the project's public GitHub
+# registry (ghcr.io/ilpanich/axiam/*) instead of being built locally. Override
+# the release with AXIAM_IMAGE_TAG, e.g. `AXIAM_IMAGE_TAG=1.0.0-alpha32 just prod-up`.
 # Generates a local-only Ed25519 JWT signing keypair on first run under
 # docker/.secrets/ (gitignored) and exports it into the shell so the compose
 # file can forward it to axiam-server. Host port 80 is left free so a local
@@ -308,7 +312,15 @@ prod-up:
         bash scripts/vault-seed.sh
 
     export AXIAM__AUTH__VAULT_TOKEN="$VAULT_TOKEN"
-    docker compose -f docker/docker-compose.prod.yml up --build -d
+    # axiam-server and axiam-frontend come from the official images published
+    # to ghcr.io/ilpanich/axiam/* by the release workflow, so there is no local
+    # build here. `--pull always` is deliberately absent: the tag is a pinned,
+    # immutable release, so re-pulling it every run buys nothing.
+    #
+    # To build from the working tree instead, uncomment the `build:` blocks in
+    # docker/docker-compose.prod.yml and swap the two lines below.
+    # docker compose -f docker/docker-compose.prod.yml up --build -d
+    docker compose -f docker/docker-compose.prod.yml up -d
     echo "AXIAM Frontend: http://localhost:8081 (front it with Caddy for HTTPS)"
     echo "AXIAM REST API: http://localhost:8090"
     echo "AXIAM gRPC:     localhost:50051"

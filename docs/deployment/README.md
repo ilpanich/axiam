@@ -28,7 +28,19 @@ just prod-up
    on first run (`openssl genpkey -algorithm ed25519` / `openssl pkey
    -pubout`), gitignored, and exports it into the shell as
    `AXIAM__AUTH__JWT_PRIVATE_KEY_PEM` / `AXIAM__AUTH__JWT_PUBLIC_KEY_PEM`.
-2. Starts `docker compose -f docker/docker-compose.prod.yml up --build -d`.
+2. Starts `docker compose -f docker/docker-compose.prod.yml up -d`.
+
+`axiam-server` and `axiam-frontend` are **pulled** from the project's public
+GitHub registry (`ghcr.io/ilpanich/axiam/server`, `.../frontend`) — the same
+multi-arch, Trivy-scanned, cosign-signed images `release.yml` publishes — rather
+than built from the working tree. Pin a different release with
+`AXIAM_IMAGE_TAG=<tag> just prod-up`; to build from local source instead,
+uncomment the `build:` blocks on those two services in
+`docker-compose.prod.yml` and restore `--build` in the `prod-up` recipe.
+
+Note that the released images carry no moving `latest` tag: `release.yml`
+applies `latest` only to stable releases, and every AXIAM release so far is a
+pre-release, so `AXIAM_IMAGE_TAG` defaults to an explicit version instead.
 
 `docker-compose.prod.yml` refuses to start without `AXIAM__DB__USERNAME`,
 `AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS`, and

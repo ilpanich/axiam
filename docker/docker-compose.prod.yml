@@ -1,5 +1,10 @@
 # Production-like Docker Compose for local testing of the full AXIAM stack.
-# Usage: docker compose -f docker/docker-compose.prod.yml up --build
+# Usage: docker compose -f docker/docker-compose.prod.yml up -d   (via `just prod-up`)
+#
+# axiam-server and axiam-frontend pull the official released images from
+# ghcr.io/ilpanich/axiam/* rather than building from this working tree. Pin a
+# different release with AXIAM_IMAGE_TAG, or uncomment the `build:` blocks on
+# those two services to go back to a local build.
 #
 # This file is NOT intended for actual production deployment (use Kubernetes
 # manifests in k8s/ for that). It exists so developers can spin up the entire
@@ -56,9 +61,23 @@ services:
   # AXIAM Backend (REST + gRPC)
   # ---------------------------------------------------------------------------
   axiam-server:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.server
+    # Official multi-arch image from the project's public GitHub registry,
+    # built, scanned, signed (cosign) and attested by `.github/workflows/release.yml`.
+    #
+    # NOTE on the tag: release.yml applies the moving `latest` / `major.minor`
+    # tags ONLY to stable releases (`flavor: latest=${{ stable }}`), and AXIAM
+    # has so far published nothing but pre-releases — so `:latest` does NOT
+    # exist in the registry and `:latest` here would fail with "manifest
+    # unknown". AXIAM_IMAGE_TAG therefore defaults to the newest published
+    # release; override it to pull another one:
+    #   AXIAM_IMAGE_TAG=1.0.0-alpha32 just prod-up
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:latest}
+    # Build from local source instead — uncomment this block (and comment out
+    # `image:` above) to test working-tree changes, then use `just prod-up` with
+    # `--build` restored in the justfile recipe.
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile.server
     container_name: axiam-server
     ports:
       # SEC-016: 8090 is published for local dev/testing only.
@@ -143,9 +162,15 @@ services:
   # AXIAM Frontend (React / Nginx)
   # ---------------------------------------------------------------------------
   axiam-frontend:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.frontend
+    # Official image from the project's public GitHub registry — see the tag
+    # note on axiam-server above; both images share AXIAM_IMAGE_TAG so the
+    # frontend can never drift to a different release than the backend.
+    image: ghcr.io/ilpanich/axiam/frontend:${AXIAM_IMAGE_TAG:latest}
+    # Build from local source instead — uncomment this block (and comment out
+    # `image:` above) to test working-tree changes.
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile.frontend
     container_name: axiam-frontend
     ports:
       # Host port 8081 keeps :80 free for a local HTTPS reverse proxy (Caddy).

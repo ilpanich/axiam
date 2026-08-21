@@ -33,6 +33,8 @@ fn config(server: &MockServer) -> VaultConfig {
         token: "test-token".into(),
         mount: "secret".into(),
         path: "axiam".into(),
+        // The mock speaks plain HTTP; a private-CA anchor has nothing to verify.
+        ca_cert_path: None,
     }
 }
 
@@ -163,6 +165,7 @@ async fn an_unreachable_vault_is_an_error() {
         token: "test-token".into(),
         mount: "secret".into(),
         path: "axiam".into(),
+        ca_cert_path: None,
     };
     assert!(
         VaultSecretProvider::fetch(&reqwest::Client::new(), &config, KEYS, SECRETS)

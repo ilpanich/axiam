@@ -24,11 +24,20 @@ just prod-up
 
 `just prod-up` (see [`justfile`](../../justfile)):
 
-1. Generates a local-only Ed25519 JWT signing keypair under `docker/.secrets/`
+1. Mints the SurrealDB and RabbitMQ credentials on first run into
+   `docker/.secrets/stack-credentials.env` (gitignored, mode 600) and sources
+   them. They are persisted rather than regenerated per run because both
+   services only honour these on the first boot of an empty data volume — a
+   fresh password on the second run locks the server out of its own datastore.
+2. Generates a local-only Ed25519 JWT signing keypair under `docker/.secrets/`
    on first run (`openssl genpkey -algorithm ed25519` / `openssl pkey
    -pubout`), gitignored, and exports it into the shell as
    `AXIAM__AUTH__JWT_PRIVATE_KEY_PEM` / `AXIAM__AUTH__JWT_PUBLIC_KEY_PEM`.
-2. Starts `docker compose -f docker/docker-compose.prod.yml up -d`.
+3. Sets `AXIAM_IMAGE_TAG` to the workspace version in `Cargo.toml` unless it is
+   already exported.
+4. Brings Vault up, initialises, unseals and seeds it, then exports the root
+   token as `AXIAM__AUTH__VAULT_TOKEN`.
+5. Starts `docker compose -f docker/docker-compose.prod.yml up -d`.
 
 `axiam-server` and `axiam-frontend` are **pulled** from the project's public
 GitHub registry (`ghcr.io/ilpanich/axiam/server`, `.../frontend`) — the same
@@ -40,15 +49,20 @@ uncomment the `build:` blocks on those two services in
 
 Note that the released images carry no moving `latest` tag: `release.yml`
 applies `latest` only to stable releases, and every AXIAM release so far is a
-pre-release, so `AXIAM_IMAGE_TAG` defaults to an explicit version instead.
+pre-release, so `:latest` does not exist in the registry. `AXIAM_IMAGE_TAG` is
+consequently **required**, and `just prod-up` supplies it from the workspace
+version so there is only one place a release number lives.
 
-`docker-compose.prod.yml` refuses to start without `AXIAM__DB__USERNAME`,
-`AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS`, and
-the two JWT PEM vars being set in the shell environment (Compose's
-`${VAR:?message}` syntax fails fast with a clear error instead of silently
-using a default). This is the `docker/.secrets/` sourcing convention: secret
-material lives in a gitignored local directory or is exported by `just
-prod-up`, never hardcoded into the compose file.
+`docker-compose.prod.yml` refuses to start without `AXIAM_IMAGE_TAG`,
+`AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`,
+`RABBITMQ_DEFAULT_PASS`, `AXIAM__AUTH__VAULT_TOKEN` and the two JWT PEM vars
+being set in the shell environment (Compose's `${VAR:?message}` syntax fails
+fast with a clear error instead of silently using a default). This is the
+`docker/.secrets/` sourcing convention: secret material lives in a gitignored
+local directory or is exported by `just prod-up`, never hardcoded into the
+compose file. Compose interpolates the *whole* file on every invocation, even
+one that targets a single service, so raw `docker compose` against this file is
+not a supported path — `just prod-up` is.
 
 Once up:
 - Frontend: `http://localhost:8081`

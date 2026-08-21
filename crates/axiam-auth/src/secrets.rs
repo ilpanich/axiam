@@ -212,6 +212,19 @@ pub struct VaultConfig {
     pub mount: String,
     /// Path within the mount holding AXIAM's keys as fields.
     pub path: String,
+    /// PEM bundle for the CA that issued Vault's listener certificate.
+    ///
+    /// `None` means "verify against the built-in roots", which is right only
+    /// for a Vault fronted by a publicly-trusted certificate. Anything issued
+    /// by an internal PKI — a cert-manager `ClusterIssuer`, `just tls-certs` —
+    /// needs its trust anchor named here: reqwest is built with `rustls-tls`,
+    /// whose roots are compiled in, so there is no `SSL_CERT_FILE` to fall
+    /// back on and the handshake simply fails.
+    ///
+    /// The same shape as `AXIAM__AMQP__TLS__CA_CERT_PATH` for the broker, and
+    /// for the same reason: a path to a file, because the process needs the
+    /// anchor before it is allowed to read any secret.
+    pub ca_cert_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for VaultConfig {
@@ -221,6 +234,7 @@ impl std::fmt::Debug for VaultConfig {
             .field("token", &"<redacted>")
             .field("mount", &self.mount)
             .field("path", &self.path)
+            .field("ca_cert_path", &self.ca_cert_path)
             .finish()
     }
 }
@@ -373,6 +387,10 @@ impl SecretProviderKind {
                         .unwrap_or_else(|_| "secret".into()),
                     path: std::env::var("AXIAM__AUTH__VAULT_PATH")
                         .unwrap_or_else(|_| "axiam".into()),
+                    ca_cert_path: std::env::var("AXIAM__AUTH__VAULT_CA_CERT_PATH")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                        .map(Into::into),
                 })))
             }
             other => Err(AxiamError::Internal(format!(
@@ -393,6 +411,41 @@ impl SecretProviderKind {
             Self::Env => Box::new(EnvSecretProvider),
             Self::File { dir } => Box::new(FileSecretProvider::new(dir.clone())),
             Self::Vault(config) => {
+                // The shared bootstrap client trusts the built-in roots only.
+                // When the operator names a CA, a second client is built that
+                // also trusts that one — additively, so a Vault behind a public
+                // certificate keeps working. Failing to read or parse the
+                // bundle is fatal: continuing would fall back to the default
+                // trust store, which is the check the operator asked for.
+                let private_ca_client;
+                let client = match &config.ca_cert_path {
+                    None => client,
+                    Some(path) => {
+                        let pem = std::fs::read(path).map_err(|e| {
+                            AxiamError::Internal(format!(
+                                "vault: reading the CA bundle {} failed: {e}",
+                                path.display()
+                            ))
+                        })?;
+                        let anchors = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| {
+                            AxiamError::Internal(format!(
+                                "vault: {} is not a PEM certificate bundle: {e}",
+                                path.display()
+                            ))
+                        })?;
+                        let mut builder = reqwest::Client::builder();
+                        for anchor in anchors {
+                            builder = builder.add_root_certificate(anchor);
+                        }
+                        private_ca_client = builder.build().map_err(|e| {
+                            AxiamError::Internal(format!(
+                                "vault: building an HTTP client trusting {} failed: {e}",
+                                path.display()
+                            ))
+                        })?;
+                        &private_ca_client
+                    }
+                };
                 Box::new(VaultSecretProvider::fetch(client, config, key_names, secret_names).await?)
             }
         })
@@ -527,6 +580,7 @@ mod tests {
             token: "hvs.THIS-MUST-NOT-APPEAR".into(),
             mount: "secret".into(),
             path: "axiam".into(),
+            ca_cert_path: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("THIS-MUST-NOT-APPEAR"), "{rendered}");
@@ -601,6 +655,52 @@ mod tests {
             SecretProviderKind::from_env().unwrap(),
             SecretProviderKind::Env
         );
+    }
+
+    #[test]
+    fn a_vault_ca_bundle_is_optional_and_read_from_the_environment() {
+        // The local stack and every cert-manager deployment front Vault with a
+        // private CA. Without this path the handshake fails with a transport
+        // error that says nothing about trust, so the variable existing — and
+        // staying optional for a publicly-trusted Vault — is the contract.
+        let _guard = env_lock();
+        // SAFETY: serialized by `env_lock`, variables removed before returning.
+        unsafe {
+            std::env::set_var("AXIAM__AUTH__SECRET_PROVIDER", "vault");
+            std::env::set_var("AXIAM__AUTH__VAULT_ADDR", "https://vault:8200");
+            std::env::set_var("AXIAM__AUTH__VAULT_TOKEN", "t");
+            std::env::remove_var("AXIAM__AUTH__VAULT_CA_CERT_PATH");
+        }
+        let without = SecretProviderKind::from_env().unwrap();
+
+        // SAFETY: serialized by `env_lock`.
+        unsafe { std::env::set_var("AXIAM__AUTH__VAULT_CA_CERT_PATH", "/etc/axiam/vault/ca.pem") };
+        let with = SecretProviderKind::from_env().unwrap();
+
+        // An empty value is the same as unset: a compose file that interpolates
+        // a variable nobody exported would otherwise name the path "".
+        // SAFETY: serialized by `env_lock`.
+        unsafe { std::env::set_var("AXIAM__AUTH__VAULT_CA_CERT_PATH", "   ") };
+        let blank = SecretProviderKind::from_env().unwrap();
+
+        // SAFETY: serialized by `env_lock`.
+        unsafe {
+            std::env::remove_var("AXIAM__AUTH__SECRET_PROVIDER");
+            std::env::remove_var("AXIAM__AUTH__VAULT_ADDR");
+            std::env::remove_var("AXIAM__AUTH__VAULT_TOKEN");
+            std::env::remove_var("AXIAM__AUTH__VAULT_CA_CERT_PATH");
+        }
+
+        let ca = |k: &SecretProviderKind| match k {
+            SecretProviderKind::Vault(c) => c.ca_cert_path.clone(),
+            other => panic!("expected a vault provider, got {other:?}"),
+        };
+        assert_eq!(ca(&without), None);
+        assert_eq!(
+            ca(&with),
+            Some(std::path::PathBuf::from("/etc/axiam/vault/ca.pem"))
+        );
+        assert_eq!(ca(&blank), None);
     }
 
     #[test]

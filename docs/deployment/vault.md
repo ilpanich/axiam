@@ -185,6 +185,22 @@ spec:
     - vault
 ```
 
+Then tell AXIAM which CA to trust. `AXIAM__AUTH__VAULT_CA_CERT_PATH` points at a
+PEM bundle mounted into the server; it is **additive**, so a Vault behind a
+publicly-trusted certificate needs nothing and can leave it unset:
+
+```yaml
+env:
+  - name: AXIAM__AUTH__VAULT_CA_CERT_PATH
+    value: /etc/axiam/vault-tls/ca.pem
+```
+
+This is not optional detail for a private issuer. The server's HTTP client is
+built on rustls with its trust anchors compiled in, so there is no
+`SSL_CERT_FILE` or system trust store to drop a certificate into — an unnamed CA
+fails at the handshake, and the startup panic reports only "error sending
+request", which points at the network rather than at trust.
+
 ### 5.2 Initialise — once, and never again
 
 ```bash

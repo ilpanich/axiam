@@ -5,13 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `AXIAM__AUTH__VAULT_CA_CERT_PATH` — trust anchor for a Vault fronted by a
+  private CA. rustls compiles its roots in, so an internal PKI (cert-manager,
+  `just tls-certs`) was previously unverifiable and the server panicked at
+  startup with a bare transport error.
+
+### Fixed
+
+- `just prod-up` could not start any stack: `${AXIAM_IMAGE_TAG:latest}` is not
+  valid Compose interpolation, the SurrealDB and RabbitMQ credentials the
+  compose file requires were never generated, and `AXIAM__AUTH__VAULT_TOKEN`
+  was demanded before the Vault that issues it existed.
+- Vault's listener key was mode 0600, unreadable to uid 100 in the container,
+  so the Vault service restart-looped on "error loading TLS cert".
+- Vault's port is published on loopback, which `prod-up` needs to initialise,
+  unseal and seed it from the host.
+- A Vault init that failed mid-write left an empty `vault-init.json` that
+  wedged every later run; initialisation is now driven by Vault's own
+  `sys/init` status and validated before it replaces the state file.
+
 ## [1.0.0-alpha34] - 2026-08-21
 
 ### Changed
 
 - Maintenance release — no notable changes since v1.0.0-alpha33.
-
-## [Unreleased]
 
 ## [1.0.0-alpha33] - 2026-08-21
 

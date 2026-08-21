@@ -42,7 +42,12 @@ openssl x509 -req -in "$DIR/server.csr" -CA "$DIR/ca.pem" -CAkey "$DIR/ca-key.pe
 
 rm -f "$DIR/server.csr" "$DIR/server.ext"
 chmod 600 "$DIR"/*-key.pem
-# Vault runs as uid 100 in the official image and must be able to read these.
-chmod 644 "$DIR/server.pem" "$DIR/ca.pem"
+# Vault runs as uid 100 in the official image, the bind mount carries the host
+# uid through unchanged, and a 0600 file owned by the host user is unreadable
+# to it — the listener then dies with "error loading TLS cert: permission
+# denied" and the container restart-loops. The server key is therefore 0644,
+# the same trade gen-broker-tls.sh makes for the broker key. The CA key stays
+# 0600: it is what rotates the rest and no container ever reads it.
+chmod 644 "$DIR/server.pem" "$DIR/ca.pem" "$DIR/server-key.pem"
 
 echo "→ Done. CA: $DIR/ca.pem"

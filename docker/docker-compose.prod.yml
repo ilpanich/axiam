@@ -44,6 +44,12 @@ services:
       - ./vault:/vault/config:ro
       - ./.secrets/vault-tls:/vault/tls:ro
     command: ["vault", "server", "-config=/vault/config/vault.hcl"]
+    ports:
+      # SEC-016: bound to the loopback interface only, and published solely so
+      # `just prod-up` can initialise, unseal and seed from the host — those are
+      # host-side curl calls against $VAULT_ADDR. In production (k8s) Vault is
+      # never reachable outside the cluster network; remove this mapping.
+      - "127.0.0.1:8200:8200"
     healthcheck:
       # 501 = not initialised, 503 = sealed, 200 = ready. Only 200 is healthy;
       # a sealed Vault cannot answer a secret read, so starting the server
@@ -68,10 +74,11 @@ services:
     # tags ONLY to stable releases (`flavor: latest=${{ stable }}`), and AXIAM
     # has so far published nothing but pre-releases — so `:latest` does NOT
     # exist in the registry and `:latest` here would fail with "manifest
-    # unknown". AXIAM_IMAGE_TAG therefore defaults to the newest published
-    # release; override it to pull another one:
+    # unknown". AXIAM_IMAGE_TAG is therefore mandatory; `just prod-up` sets it
+    # to the workspace version in Cargo.toml (= the newest released tag).
+    # Override it to pull another release:
     #   AXIAM_IMAGE_TAG=1.0.0-alpha32 just prod-up
-    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:latest}
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:?image tag required - run 'just prod-up', which defaults it to the workspace version, or export AXIAM_IMAGE_TAG=1.0.0-alphaNN}
     # Build from local source instead — uncomment this block (and comment out
     # `image:` above) to test working-tree changes, then use `just prod-up` with
     # `--build` restored in the justfile recipe.
@@ -95,8 +102,9 @@ services:
       # Passing a websocket URL scheme makes the SDK try to resolve the scheme
       # as a hostname and fail with a confusing DNS error.
       AXIAM__DB__URL: "surrealdb:8000"
-      # SEC-023: No literal default credentials. Run `just prod-up` which sources
-      # docker/.secrets/db_credentials before starting compose.
+      # SEC-023: No literal default credentials. Run `just prod-up`, which mints
+      # them on first run into docker/.secrets/stack-credentials.env (gitignored)
+      # and sources that file before starting compose.
       AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just prod-up' or export AXIAM__DB__USERNAME}"
       AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just prod-up' or export AXIAM__DB__PASSWORD}"
       AXIAM__DB__NAMESPACE: "axiam"
@@ -131,12 +139,21 @@ services:
       AXIAM__AUTH__VAULT_TOKEN: "${AXIAM__AUTH__VAULT_TOKEN:?Vault token missing - run 'just prod-up' instead of raw docker compose}"
       AXIAM__AUTH__VAULT_MOUNT: "secret"
       AXIAM__AUTH__VAULT_PATH: "axiam"
+      # Vault's listener certificate is issued by the private CA that
+      # `just tls-certs` generates, and the server's HTTP client is built on
+      # rustls with compiled-in roots — no SSL_CERT_FILE, so the anchor has to
+      # be named. Without it the fetch fails at the TLS handshake with a bare
+      # "error sending request", which says nothing about trust.
+      AXIAM__AUTH__VAULT_CA_CERT_PATH: "/etc/axiam/vault-tls/ca.pem"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just prod-up' instead of raw docker compose}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just prod-up' instead of raw docker compose}"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls:/etc/axiam/broker-tls:ro
+      # Trust anchor for Vault's listener — the server reads every secret over
+      # this connection before it can serve anything, so it must be mounted.
+      - ./.secrets/vault-tls:/etc/axiam/vault-tls:ro
     depends_on:
       surrealdb:
         condition: service_healthy
@@ -165,7 +182,7 @@ services:
     # Official image from the project's public GitHub registry — see the tag
     # note on axiam-server above; both images share AXIAM_IMAGE_TAG so the
     # frontend can never drift to a different release than the backend.
-    image: ghcr.io/ilpanich/axiam/frontend:${AXIAM_IMAGE_TAG:latest}
+    image: ghcr.io/ilpanich/axiam/frontend:${AXIAM_IMAGE_TAG:?image tag required - run 'just prod-up', which defaults it to the workspace version, or export AXIAM_IMAGE_TAG=1.0.0-alphaNN}
     # Build from local source instead — uncomment this block (and comment out
     # `image:` above) to test working-tree changes.
     # build:
@@ -225,7 +242,10 @@ services:
     image: rabbitmq:4-management-alpine
     container_name: axiam-rabbitmq
     environment:
-      # SEC-023: No literal default credentials.
+      # SEC-023: No literal default credentials — see the note on
+      # axiam-server; `just prod-up` sources docker/.secrets/stack-credentials.env.
+      # RabbitMQ only applies these on the FIRST boot of an empty rabbitmq-data
+      # volume, which is why they are persisted rather than regenerated per run.
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?RabbitMQ username required - run 'just prod-up' or export RABBITMQ_DEFAULT_USER}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?RabbitMQ password required - run 'just prod-up' or export RABBITMQ_DEFAULT_PASS}"
     volumes:

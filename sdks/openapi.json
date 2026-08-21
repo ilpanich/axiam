@@ -9022,7 +9022,8 @@
           "unknown_authenticator",
           "authenticator_revoked",
           "not_fido_certified",
-          "certification_too_low"
+          "certification_too_low",
+          "metadata_stale"
         ]
       },
       "AttestationMode": {

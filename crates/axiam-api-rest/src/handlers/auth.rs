@@ -99,7 +99,14 @@ pub struct RefreshSuccessResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RefreshRequest {
     pub tenant_id: Uuid,
-    pub org_id: Uuid,
+    /// Ignored. `refresh` derives the organization from the tenant record
+    /// because a client-supplied `org_id` could scope the minted token to a
+    /// foreign org (NEW-1) — so this is accepted only for wire compatibility
+    /// with clients built against the original contract, and is optional
+    /// because requiring a field the server refuses to read is a rejection
+    /// with no security value.
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

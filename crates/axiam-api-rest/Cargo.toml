@@ -53,7 +53,7 @@ secrecy = { workspace = true }
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
-axiam-opaque = { version = "1.0.0-alpha33", path = "../axiam-opaque" }
+axiam-opaque = { version = "1.0.0-alpha34", path = "../axiam-opaque" }
 
 [features]
 # SAML SP endpoints + DTOs. Forwards to axiam-federation/saml (→ samael).

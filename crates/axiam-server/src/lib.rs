@@ -13,5 +13,6 @@
 //! always links its own library target when both are present).
 
 pub mod cleanup;
+pub mod job_health;
 pub mod mds_job;
 pub mod tls;

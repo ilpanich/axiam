@@ -185,6 +185,16 @@ pub enum AttestationDenyReason {
     NotFidoCertified,
     /// `min_certification` and the MDS entry's highest certified level is below it.
     CertificationTooLow,
+    /// T-153: the ingested MDS BLOB is further past its `nextUpdate` than
+    /// `mds_max_stale_days` permits, so the metadata this decision would rest
+    /// on is too old to be trusted.
+    ///
+    /// Distinct from the other reasons on purpose. Every one of those is a
+    /// statement about the authenticator; this one is a statement about *our
+    /// own* data being too old to make such a statement. An operator reading
+    /// `AuthenticatorRevoked` should go look at the device, and one reading
+    /// this should go look at their MDS refresh.
+    MetadataStale,
 }
 
 /// The outcome of evaluating a [`WebauthnAttestationPolicy`] against an

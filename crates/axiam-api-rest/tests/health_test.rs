@@ -100,3 +100,87 @@ async fn ready_returns_503_when_db_unhealthy() {
     assert_eq!(body["status"], "unavailable");
     assert_eq!(body["database"], "disconnected");
 }
+
+// ---------------------------------------------------------------------------
+// T-129 — scheduled-job liveness
+// ---------------------------------------------------------------------------
+
+use axiam_api_rest::health::{JobHealthReporter, JobStatus};
+
+/// Reports a fixed set of jobs, so the endpoint's aggregation can be tested
+/// without running a real sweep loop.
+struct FixedJobs(Vec<JobStatus>);
+
+impl JobHealthReporter for FixedJobs {
+    fn snapshot(&self) -> Vec<JobStatus> {
+        self.0.clone()
+    }
+}
+
+fn job(name: &str, stalled: bool) -> JobStatus {
+    JobStatus {
+        name: name.into(),
+        last_success_at: Some("2026-08-21T12:00:00+00:00".into()),
+        last_failure_at: None,
+        last_error: None,
+        consecutive_failures: 0,
+        stalled,
+    }
+}
+
+async fn state_with_jobs(jobs: Vec<JobStatus>) -> AppState<TestDb> {
+    let mut state = state_with_checker(Arc::new(MockHealthy)).await;
+    state.job_health = Arc::new(FixedJobs(jobs));
+    state
+}
+
+async fn get_jobs(state: AppState<TestDb>) -> (u16, serde_json::Value) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
+    )
+    .await;
+    let req = test::TestRequest::get().uri("/health/jobs").to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    (status, test::read_body_json(resp).await)
+}
+
+#[actix_rt::test]
+async fn jobs_reports_ok_when_every_sweep_is_running() {
+    let (status, body) = get_jobs(
+        state_with_jobs(vec![
+            job("gdpr_purge", false),
+            job("audit_retention", false),
+        ])
+        .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 2);
+}
+
+#[actix_rt::test]
+async fn jobs_reports_degraded_when_any_sweep_is_stalled() {
+    let (status, body) = get_jobs(
+        state_with_jobs(vec![job("gdpr_purge", true), job("audit_retention", false)]).await,
+    )
+    .await;
+    // 200, not 503, and deliberately so: this is not a readiness gate. A stuck
+    // cleanup sweep must not pull a serving pod out of the load balancer and
+    // shift its traffic onto replicas running the identical stuck code.
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "degraded");
+}
+
+#[actix_rt::test]
+async fn jobs_reports_ok_with_an_empty_list_when_nothing_is_registered() {
+    // The `NoJobs` default. An empty list must not read as "degraded", or a
+    // deployment that never wires a reporter alerts forever and gets muted.
+    let (status, body) = get_jobs(state_with_jobs(vec![]).await).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ok");
+    assert!(body["jobs"].as_array().unwrap().is_empty());
+}

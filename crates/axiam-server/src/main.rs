@@ -91,6 +91,19 @@ fn default_cleanup_interval_secs() -> u64 {
     300
 }
 
+/// Default audit retention, in days (T-119). Two years.
+///
+/// Chosen to be longer than the retention most compliance regimes ask of an
+/// access-control audit trail, because the failure modes are asymmetric:
+/// keeping records too long is a storage cost and a GDPR data-minimisation
+/// argument, while discarding them too early destroys the evidence an incident
+/// investigation runs on, irreversibly and silently. A deployment with a
+/// shorter lawful basis should shorten it deliberately rather than inherit a
+/// default that decided for them.
+fn default_audit_retention_days() -> u64 {
+    730
+}
+
 /// Top-level configuration aggregating all sub-configs.
 #[derive(Debug, Deserialize)]
 struct AppConfig {
@@ -118,6 +131,14 @@ struct AppConfig {
     /// `60..=3600` at startup (T-04-35).
     #[serde(default = "default_cleanup_interval_secs")]
     cleanup_interval_secs: u64,
+    /// How long audit entries are kept, in days (T-119).
+    ///
+    /// `AXIAM__AUDIT_RETENTION_DAYS`. `0` disables pruning entirely and
+    /// restores the previous unbounded-growth behaviour — an explicit opt-out
+    /// for deployments that archive out-of-band, not an accident you can fall
+    /// into, since the default is [`default_audit_retention_days`].
+    #[serde(default = "default_audit_retention_days")]
+    audit_retention_days: u64,
     /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
     /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
@@ -798,6 +819,14 @@ async fn main() -> std::io::Result<()> {
             .unwrap_or(axiam_pki::config::DEFAULT_MDS_REFRESH_INTERVAL_SECS),
         mds_leaf_dns: std::env::var("AXIAM__PKI__MDS_LEAF_DNS")
             .unwrap_or_else(|_| axiam_pki::config::DEFAULT_MDS_LEAF_DNS.to_string()),
+        // T-153. An unparseable value falls back to 0 (disabled) rather than
+        // to some non-zero default: silently inventing a staleness bound the
+        // operator did not ask for would start refusing registrations for a
+        // reason nothing in their configuration mentions.
+        mds_max_stale_days: std::env::var("AXIAM__PKI__MDS_MAX_STALE_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     };
     // SEC-107: install the operator's SSRF host exception list, once, here in
     // the composition root so it is visible in one place and logged at
@@ -1812,6 +1841,49 @@ async fn main() -> std::io::Result<()> {
 
     let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
 
+    // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
+    // that silently deletes records is worse than one that deletes none, so
+    // the window in force has to be visible in the startup log rather than
+    // inferable only from the config file.
+    let audit_retention = match config.audit_retention_days {
+        0 => {
+            tracing::warn!(
+                "audit retention is DISABLED (AXIAM__AUDIT_RETENTION_DAYS=0) — audit_log will \
+                 grow without bound; archive and prune out-of-band, or set a retention in days"
+            );
+            None
+        }
+        days => {
+            tracing::info!(
+                retention_days = days,
+                "audit retention active — entries older than this are pruned by the cleanup sweep"
+            );
+            // i64 for chrono; the cast is safe for any value an operator could
+            // plausibly mean, and saturating rather than wrapping means a
+            // nonsense value becomes "effectively never" instead of a negative
+            // duration that would prune everything ever written.
+            Some(chrono::Duration::days(days.min(i64::MAX as u64) as i64))
+        }
+    };
+
+    // T-129: one tracker, shared by the sweep loop (which writes) and
+    // `AppState` (which reads for `GET /health/jobs`). Registering the jobs
+    // up front matters: a sweep that has never run once must still appear,
+    // because "absent from the list" and "never executed" are the same
+    // silence this is meant to break.
+    let job_health =
+        axiam_server::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
+    for job in [
+        "saml_assertion_replay",
+        "federation_login_state",
+        "amqp_nonce_replay",
+        "gdpr_purge",
+        "gdpr_export",
+        "audit_retention",
+    ] {
+        job_health.register(job);
+    }
+
     // Spawn the periodic cleanup task (D-09, D-24).
     // Shutdown channel: main sends `true` after HttpServer returns on SIGTERM.
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1847,6 +1919,8 @@ async fn main() -> std::io::Result<()> {
         config.gdpr_pseudonym_pepper,
         config.email_encryption_key,
         Duration::from_secs(config.cleanup_interval_secs),
+        audit_retention,
+        job_health.clone(),
         cleanup_shutdown_rx,
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
@@ -1888,6 +1962,8 @@ async fn main() -> std::io::Result<()> {
         auth_config: auth_config.clone(),
         db: db_handle.clone(),
         health_checker: health_checker.clone(),
+        // T-129: the same tracker the cleanup loop writes to.
+        job_health: std::sync::Arc::new(job_health.clone()),
         audit_repo: audit_repo.clone(),
         org_repo: org_repo.clone(),
         tenant_repo: tenant_repo.clone(),

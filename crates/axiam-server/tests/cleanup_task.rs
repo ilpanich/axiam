@@ -215,6 +215,9 @@ impl AuditLogRepository for FailingAuditRepo {
             "synthetic pseudonymize_actor failure (test double)".into(),
         ))
     }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
+        unimplemented!()
+    }
 }
 
 /// Row shape for a `SELECT count() ... GROUP ALL` query.

@@ -85,6 +85,10 @@ pub struct CleanupTask<C: Connection> {
     gdpr_pepper: Option<[u8; 32]>,
     export_encryption_key: Option<[u8; 32]>,
     interval: Duration,
+    /// Audit retention (T-119). `None` = never prune.
+    audit_retention: Option<chrono::Duration>,
+    /// T-129: records each sweep's outcome for `GET /health/jobs`.
+    job_health: crate::job_health::JobHealth,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -182,6 +186,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         gdpr_pepper: Option<[u8; 32]>,
         export_encryption_key: Option<[u8; 32]>,
         interval: Duration,
+        // A required parameter rather than a builder setter, despite the
+        // already-long list: `None` means "never prune", so a forgotten setter
+        // would silently restore unbounded audit growth (T-119) and nothing
+        // would ever complain. Being unable to construct the task without
+        // stating a retention policy is the point.
+        audit_retention: Option<chrono::Duration>,
+        // T-129: passed in rather than constructed here so `main` can hand
+        // the same handle to `AppState`, which is what lets the HTTP layer
+        // read what this loop writes.
+        job_health: crate::job_health::JobHealth,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -206,6 +220,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             gdpr_pepper,
             export_encryption_key,
             interval,
+            audit_retention,
+            job_health,
             shutdown,
         }
     }
@@ -224,58 +240,54 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             tokio::select! {
                 _ = ticker.tick() => {
                     // Existing federation cleanup sweeps.
-                    match self.replay_repo.cleanup_expired().await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(deleted = n, "saml_assertion_replay cleanup");
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(error = ?e, "saml_assertion_replay cleanup failed");
-                        }
-                    }
+                    Self::record(
+                        &self.job_health,
+                        "saml_assertion_replay",
+                        self.replay_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
 
-                    match self.state_repo.cleanup_expired().await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(deleted = n, "federation_login_state cleanup");
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(error = ?e, "federation_login_state cleanup failed");
-                        }
-                    }
+                    Self::record(
+                        &self.job_health,
+                        "federation_login_state",
+                        self.state_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
 
                     // NEW-4: sweep expired AMQP replay-protection nonces.
-                    match self.amqp_nonce_repo.cleanup_expired().await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(deleted = n, "amqp_nonce_replay cleanup");
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(error = ?e, "amqp_nonce_replay cleanup failed");
-                        }
-                    }
+                    Self::record(
+                        &self.job_health,
+                        "amqp_nonce_replay",
+                        self.amqp_nonce_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
 
                     // GDPR purge sweep (D-01..D-06, D-08).
-                    match self.sweep_pending_purges().await {
-                        Ok(n) if n > 0 => {
-                            tracing::info!(purged = n, "GDPR purge sweep completed");
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(error = ?e, "GDPR purge sweep failed");
-                        }
-                    }
+                    Self::record(
+                        &self.job_health,
+                        "gdpr_purge",
+                        self.sweep_pending_purges().await,
+                        tracing::Level::INFO,
+                    );
 
                     // GDPR export sweep (D-10..D-12).
-                    match self.sweep_pending_exports().await {
-                        Ok(n) if n > 0 => {
-                            tracing::info!(exported = n, "GDPR export sweep completed");
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(error = ?e, "GDPR export sweep failed");
-                        }
-                    }
+                    Self::record(
+                        &self.job_health,
+                        "gdpr_export",
+                        self.sweep_pending_exports().await,
+                        tracing::Level::INFO,
+                    );
+
+                    // Audit retention sweep (T-119).
+                    // INFO because this is the one sweep that destroys records
+                    // nothing else can reconstruct: that it ran, and how much it
+                    // removed, belongs in the operational log by default.
+                    Self::record(
+                        &self.job_health,
+                        "audit_retention",
+                        self.sweep_audit_retention().await,
+                        tracing::Level::INFO,
+                    );
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -285,6 +297,70 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 }
             }
         }
+    }
+
+    /// Log one sweep's outcome and record it for `GET /health/jobs` (T-129).
+    ///
+    /// Every sweep in [`Self::run`] goes through here rather than logging for
+    /// itself. That is the point: the previous shape repeated a six-line
+    /// `match` per sweep, and a new sweep added by copying one of them would
+    /// have logged correctly while reporting its liveness nowhere — which is
+    /// the exact failure T-129 describes, reintroduced one sweep at a time.
+    ///
+    /// Errors are recorded and swallowed, never propagated: the loop must
+    /// survive a failing sweep (T-04-36), and now the failure is visible on
+    /// the health endpoint instead of only in the log.
+    fn record(
+        health: &crate::job_health::JobHealth,
+        job: &'static str,
+        outcome: Result<u64, AxiamError>,
+        level: tracing::Level,
+    ) {
+        match outcome {
+            Ok(n) => {
+                if n > 0 {
+                    // `tracing`'s macros need a literal level, so the two cases
+                    // are spelled out rather than computed.
+                    if level == tracing::Level::INFO {
+                        tracing::info!(job, affected = n, "sweep completed");
+                    } else {
+                        tracing::debug!(job, affected = n, "sweep completed");
+                    }
+                }
+                health.record(job, Ok(()));
+            }
+            Err(e) => {
+                tracing::warn!(job, error = ?e, "sweep failed");
+                health.record(job, Err(e.to_string()));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit retention sweep (T-119)
+    // -----------------------------------------------------------------------
+
+    /// Delete audit entries older than the configured retention window.
+    ///
+    /// A no-op returning `Ok(0)` when retention is `None` (`0` days), which is
+    /// the explicit opt-out for deployments that archive out-of-band.
+    ///
+    /// The cutoff is recomputed from `Utc::now()` on every tick rather than
+    /// held as a fixed instant, so a long-running process prunes a moving
+    /// window rather than freezing the boundary at whenever it started.
+    ///
+    /// Runs deployment-wide, not per tenant: retention here is a property of
+    /// the datastore an operator is responsible for, and a per-tenant override
+    /// would let one tenant's settings decide how long another tenant's
+    /// records survive on shared storage. Per-tenant retention is a real
+    /// requirement, but it needs a settings surface (org baseline + tenant
+    /// override + API + UI) rather than a field on this sweep.
+    async fn sweep_audit_retention(&self) -> Result<u64, AxiamError> {
+        let Some(retention) = self.audit_retention else {
+            return Ok(0);
+        };
+        let cutoff = Utc::now() - retention;
+        self.audit_repo.prune_older_than(cutoff).await
     }
 
     // -----------------------------------------------------------------------

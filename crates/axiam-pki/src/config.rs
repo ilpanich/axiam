@@ -38,6 +38,28 @@ pub struct PkiConfig {
     /// change is an ops action, not a code release.
     /// Env: `AXIAM__PKI__MDS_LEAF_DNS`.
     pub mds_leaf_dns: String,
+    /// T-153: refuse attested registration once the ingested MDS BLOB is more
+    /// than this many days past its `nextUpdate`. `0` (the default) disables
+    /// the check and keeps the fail-open behaviour described below.
+    /// Env: `AXIAM__PKI__MDS_MAX_STALE_DAYS`.
+    ///
+    /// Staleness deliberately never hard-fails *ingestion*: a transient outage
+    /// at the FIDO Alliance must not brick WebAuthn registration for everyone.
+    /// The cost of that choice is T-153 — an authenticator model revoked since
+    /// the last successful refresh keeps passing attestation policy, because
+    /// the revocation is in a BLOB this deployment has not seen.
+    ///
+    /// This knob lets an operator put a bound on that window, and it is opt-in
+    /// rather than defaulted to a value because the right bound is a property
+    /// of the deployment: a high-assurance tenant may want days, an air-gapped
+    /// one (`mds_blob_path`, no automatic refresh path at all) would be taken
+    /// offline by anything short of months.
+    ///
+    /// Scope is attestation only. An unattested ceremony under
+    /// `AttestationMode::None` consults no metadata, so stale metadata cannot
+    /// have misled it and refusing it would deny a registration for a reason
+    /// that does not apply to it.
+    pub mds_max_stale_days: u32,
 }
 
 /// Default FIDO MDS3 BLOB fetch source (D10).
@@ -60,6 +82,7 @@ impl Default for PkiConfig {
             mds_blob_path: None,
             mds_refresh_interval_secs: DEFAULT_MDS_REFRESH_INTERVAL_SECS,
             mds_leaf_dns: DEFAULT_MDS_LEAF_DNS.to_string(),
+            mds_max_stale_days: 0,
         }
     }
 }

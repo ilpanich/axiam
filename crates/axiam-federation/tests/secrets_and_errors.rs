@@ -288,6 +288,9 @@ impl AuditLogRepository for MockAuditRepo {
     async fn pseudonymize_actor(&self, _t: Uuid, _u: Uuid, _p: &str) -> AxiamResult<u64> {
         unimplemented!()
     }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
+        unimplemented!()
+    }
 }
 
 #[tokio::test]

@@ -60,6 +60,7 @@ use url::Url;
 use uuid::Uuid;
 use webauthn_rs::Webauthn;
 use webauthn_rs::prelude::*;
+use webauthn_rs_proto::ResidentKeyRequirement;
 
 use crate::config::AuthConfig;
 use crate::error::AuthError;
@@ -69,6 +70,16 @@ use crate::totp;
 /// from `"webauthn_register"` so a token minted for one ceremony can never be
 /// replayed against the other's `finish_*` entry point.
 const PURPOSE_REGISTER_ATTESTED: &str = "webauthn_register_attested";
+
+/// State-token `purpose` for the usernameless (discoverable-credential)
+/// authentication ceremony.
+///
+/// Distinct from `"webauthn_authenticate"` for a reason that matters: this
+/// ceremony's token carries a nil `sub`, because the user is not known when it
+/// is minted. `finish_authentication` *does* trust `sub` as the authenticated
+/// identity, so if the two ceremonies shared a purpose, a discoverable token
+/// replayed there would authenticate the nil user.
+const PURPOSE_AUTHENTICATE_DISCOVERABLE: &str = "webauthn_authenticate_discoverable";
 
 // -------------------------------------------------------------------
 // State-token JWT claims (wraps encrypted ceremony state)
@@ -153,10 +164,12 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let exclude_ids: Vec<CredentialID> =
             exclude_creds.iter().map(|p| p.cred_id().clone()).collect();
 
-        let (ccr, reg_state) = self
+        let (mut ccr, reg_state) = self
             .webauthn
             .start_passkey_registration(user_id, username, username, Some(exclude_ids))
             .map_err(|e| AuthError::WebauthnRegistration(e.to_string()))?;
+
+        require_discoverable_credential(&mut ccr);
 
         let state_token =
             self.encode_state_token(user_id, tenant_id, org_id, "webauthn_register", &reg_state)?;
@@ -276,6 +289,126 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         )?;
 
         Ok((rcr, state_token))
+    }
+
+    /// Start **usernameless** passkey authentication for a tenant.
+    ///
+    /// Unlike [`Self::start_authentication`], no user is known yet: the
+    /// challenge carries an empty `allowCredentials`, the authenticator offers
+    /// whichever discoverable credential it holds for this relying party, and
+    /// the assertion is what names the user. Only the workspace has to be known
+    /// in advance, because the credential must be resolved within one tenant's
+    /// isolation boundary.
+    ///
+    /// # Why there is no "does this tenant have any passkeys?" pre-check
+    ///
+    /// [`Self::start_authentication`] returns [`AuthError::WebauthnNoCredentials`]
+    /// when the named user has none, which is fine there — the caller already
+    /// proved who the user is by holding a valid MFA challenge token. Here the
+    /// caller is anonymous, so the equivalent check would answer "does this
+    /// workspace have any passkey users?" to whoever asks. The ceremony is
+    /// therefore always issued, and an unknown credential fails at
+    /// [`Self::finish_discoverable_authentication`] with the same error any
+    /// other bad assertion produces.
+    pub async fn start_discoverable_authentication(
+        &self,
+        tenant_id: Uuid,
+        org_id: Uuid,
+    ) -> AxiamResult<(RequestChallengeResponse, String)> {
+        let (rcr, auth_state) = self
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
+
+        // `sub` is the one claim this ceremony cannot fill in: the user is
+        // literally what it is trying to discover. The nil UUID is a sentinel,
+        // and `finish_discoverable_authentication` never reads it back — the
+        // authenticated identity comes from the assertion's user handle. The
+        // distinct `purpose` is what stops this token being replayed into
+        // `finish_authentication`, which *would* trust `sub`.
+        let state_token = self.encode_state_token(
+            Uuid::nil(),
+            tenant_id,
+            org_id,
+            PURPOSE_AUTHENTICATE_DISCOVERABLE,
+            &auth_state,
+        )?;
+
+        Ok((rcr, state_token))
+    }
+
+    /// Complete usernameless passkey authentication.
+    ///
+    /// Resolves the user from the assertion's user handle, verifies the
+    /// assertion against that user's stored passkeys, and returns the
+    /// authenticated `(user_id, org_id)`.
+    ///
+    /// The user handle is only a *claim* until the signature is checked. It
+    /// selects which credentials to verify against; it does not authenticate
+    /// anyone by itself. Because the lookup is scoped to `tenant_id` from the
+    /// state token, a handle naming a user in another tenant resolves to no
+    /// credentials and fails — cross-tenant assertions cannot land here.
+    pub async fn finish_discoverable_authentication(
+        &self,
+        tenant_id: Uuid,
+        state_token: &str,
+        response: &PublicKeyCredential,
+    ) -> AxiamResult<(Uuid, Uuid)> {
+        let (_sentinel_user_id, decoded_tenant_id, org_id, auth_state) =
+            self.decode_state_token::<DiscoverableAuthentication>(
+                state_token,
+                PURPOSE_AUTHENTICATE_DISCOVERABLE,
+            )?;
+
+        if decoded_tenant_id != tenant_id {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+
+        let (claimed_user_id, _cred_id) = self
+            .webauthn
+            .identify_discoverable_authentication(response)
+            .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
+
+        let encryption_key = self.require_encryption_key()?;
+        let credentials = self
+            .credential_repo
+            .list_by_user(tenant_id, claimed_user_id)
+            .await?;
+
+        let keys: Vec<DiscoverableKey> = credentials
+            .iter()
+            .filter_map(|c| self.decrypt_passkey(&encryption_key, &c.passkey_json).ok())
+            .map(|p| DiscoverableKey::from(&p))
+            .collect();
+
+        if keys.is_empty() {
+            // Deliberately the generic assertion failure, not
+            // `WebauthnNoCredentials`: distinguishing "no such user in this
+            // tenant" from "assertion did not verify" would answer a question
+            // the caller has not authenticated to ask.
+            return Err(AuthError::WebauthnAuthentication("assertion rejected".into()).into());
+        }
+
+        let auth_result = self
+            .webauthn
+            .finish_discoverable_authentication(response, auth_state, &keys)
+            .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
+
+        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
+        if let Some(cred) = credentials.iter().find(|c| c.credential_id == cred_id_b64)
+            && let Err(e) = self
+                .credential_repo
+                .update_last_used(tenant_id, cred.id)
+                .await
+        {
+            tracing::warn!(
+                credential_id = %cred.id,
+                error = %e,
+                "failed to update last_used_at for WebAuthn credential"
+            );
+        }
+
+        Ok((claimed_user_id, org_id))
     }
 
     /// Complete passkey authentication.
@@ -521,7 +654,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map(|p| p.cred_id().clone())
             .collect();
 
-        let (ccr, reg_state) = self
+        let (mut ccr, reg_state) = self
             .webauthn
             .start_attested_passkey_registration(
                 user_id,
@@ -532,6 +665,13 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
                 None,
             )
             .map_err(|e| AuthError::WebauthnRegistration(e.to_string()))?;
+
+        // Same `residentKey: "discouraged"` default as the unattested ceremony
+        // (`start_attested_passkey_registration` also hard-codes
+        // `require_resident_key(false)`), so it needs the same amendment or an
+        // attestation-enforcing tenant would be the one tenant whose users
+        // cannot sign in without a username.
+        require_discoverable_credential(&mut ccr);
 
         // W2-D2: strip `ca_list` out of the serialized state before it is
         // encrypted and embedded in the state token. On the live BLOB this
@@ -822,6 +962,47 @@ fn extract_attestation_metadata(attested: &AttestedPasskey) -> (Option<Uuid>, Op
     }
 }
 
+/// Upgrade a registration challenge to demand a **discoverable** credential.
+///
+/// `webauthn-rs` 0.5.5's `start_passkey_registration` hard-codes
+/// `require_resident_key(false)` internally, and its core builder turns that
+/// into `residentKey: "discouraged"` — not "unspecified", but an active request
+/// that the authenticator NOT store a discoverable credential. A credential
+/// created that way has no user handle to discover, so usernameless sign-in
+/// cannot find it no matter how the authentication ceremony is written. That is
+/// why this is a registration-side fix and not only an authentication one.
+///
+/// The library exposes no builder knob for this on the passkey path, so the
+/// challenge is amended after the fact. That is safe because residency is a
+/// property of the *request*: `finish_passkey_registration` does not re-derive
+/// or validate `authenticatorSelection` from the stored ceremony state, so the
+/// two cannot disagree.
+///
+/// `requireResidentKey` is set alongside `residentKey` because they are the
+/// WebAuthn L1 and L2 spellings of the same requirement, and an L1-era
+/// authenticator reads only the former.
+///
+/// Everything else on the criteria — notably `userVerification`, which
+/// `start_passkey_registration` sets to `Required` — is preserved rather than
+/// rebuilt, so this widens the request in exactly one dimension.
+///
+/// **Existing credentials are not retroactively discoverable.** Passkeys
+/// enrolled before this change were created under `discouraged`, and whether
+/// any given one is discoverable is the authenticator's decision, not ours —
+/// most platform authenticators (iCloud Keychain, Google Password Manager,
+/// Windows Hello) store one regardless, while a FIDO2 security key generally
+/// honours the hint and does not. Those users keep password sign-in and the
+/// passkey second factor unchanged; re-enrolling a passkey is what makes
+/// usernameless sign-in available to them.
+fn require_discoverable_credential(ccr: &mut CreationChallengeResponse) {
+    let selection = ccr
+        .public_key
+        .authenticator_selection
+        .get_or_insert_with(Default::default);
+    selection.resident_key = Some(ResidentKeyRequirement::Required);
+    selection.require_resident_key = true;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -854,6 +1035,7 @@ mod tests {
     use axiam_core::error::AxiamResult;
     use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
     use serde_json::json;
+    use webauthn_rs_proto::UserVerificationPolicy;
 
     // The Ed25519 pair the rest of this crate's tests use.
     const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
@@ -888,6 +1070,27 @@ mod tests {
         async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!("storage must not be reached") }
     }
 
+    /// Like [`UnusedRepo`], but answers the one query the *registration*
+    /// ceremony legitimately makes: the credential-exclusion lookup. An empty
+    /// list is the first-passkey case.
+    #[derive(Clone)]
+    struct NoCredentialsRepo;
+
+    impl WebauthnCredentialRepository for NoCredentialsRepo {
+        #[rustfmt::skip]
+        async fn create(&self, _i: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<WebauthnCredential> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<WebauthnCredential>> { Ok(Vec::new()) }
+        #[rustfmt::skip]
+        async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { Ok(0) }
+    }
+
     fn config() -> AuthConfig {
         AuthConfig {
             jwt_private_key_pem: PRIV_PEM.into(),
@@ -904,6 +1107,11 @@ mod tests {
 
     fn service() -> WebauthnService<UnusedRepo> {
         WebauthnService::new(UnusedRepo, config()).expect("service builds from a valid config")
+    }
+
+    fn registration_service() -> WebauthnService<NoCredentialsRepo> {
+        WebauthnService::new(NoCredentialsRepo, config())
+            .expect("service builds from a valid config")
     }
 
     fn ids() -> (Uuid, Uuid, Uuid) {
@@ -1342,6 +1550,120 @@ mod tests {
                     .is_err(),
                 "decode: {junk:?}"
             );
+        }
+    }
+
+    // -- usernameless (discoverable) sign-in --------------------------------
+
+    /// The registration-side half of the usernameless fix.
+    ///
+    /// `webauthn-rs` asks for `residentKey: "discouraged"`, which is an active
+    /// request NOT to store a discoverable credential. Without this amendment
+    /// there is nothing for a usernameless ceremony to discover, so this
+    /// asserts the emitted challenge, not just that the helper was called.
+    #[test]
+    fn a_registration_challenge_demands_a_discoverable_credential() {
+        let svc = registration_service();
+        let (tenant_id, org_id, user_id) = ids();
+
+        let ccr = tokio_test_block_on(svc.start_registration(tenant_id, org_id, user_id, "alice"))
+            .expect("registration starts")
+            .0;
+
+        let selection = ccr
+            .public_key
+            .authenticator_selection
+            .expect("authenticatorSelection is present");
+        assert_eq!(
+            selection.resident_key,
+            Some(ResidentKeyRequirement::Required),
+            "residentKey must be `required`, not the library's `discouraged` default"
+        );
+        assert!(
+            selection.require_resident_key,
+            "the WebAuthn L1 spelling must agree with the L2 one"
+        );
+        // Widened in exactly one dimension: UV is still what the library set.
+        assert_eq!(
+            selection.user_verification,
+            UserVerificationPolicy::Required,
+            "amending residency must not relax user verification"
+        );
+    }
+
+    /// The two ceremonies must not share a state-token `purpose`.
+    ///
+    /// A discoverable token carries a nil `sub` because the user is unknown
+    /// when it is minted, while `finish_authentication` trusts `sub` as the
+    /// authenticated identity. If a discoverable token were accepted there, it
+    /// would authenticate the nil user.
+    #[test]
+    fn a_discoverable_token_cannot_be_replayed_into_the_username_ceremony() {
+        let svc = service();
+        let (tenant_id, org_id, _user_id) = ids();
+
+        let token = tokio_test_block_on(svc.start_discoverable_authentication(tenant_id, org_id))
+            .expect("discoverable ceremony starts")
+            .1;
+
+        assert_eq!(
+            svc.state_token_purpose(&token).unwrap(),
+            PURPOSE_AUTHENTICATE_DISCOVERABLE
+        );
+        assert!(
+            svc.decode_state_token_json(&token, "webauthn_authenticate")
+                .is_err(),
+            "a discoverable token must be refused by the username-bound ceremony"
+        );
+        assert!(
+            svc.decode_state_token_json(&token, "webauthn_register")
+                .is_err(),
+            "and by registration"
+        );
+    }
+
+    /// The challenge must carry no `allowCredentials` — that emptiness is what
+    /// makes the authenticator offer whatever discoverable credential it holds
+    /// rather than only ones the server named.
+    #[test]
+    fn a_discoverable_challenge_names_no_credentials() {
+        let svc = service();
+        let (tenant_id, org_id, _user_id) = ids();
+
+        let rcr = tokio_test_block_on(svc.start_discoverable_authentication(tenant_id, org_id))
+            .expect("discoverable ceremony starts")
+            .0;
+
+        assert!(
+            rcr.public_key.allow_credentials.is_empty(),
+            "allowCredentials must be empty for a usernameless ceremony"
+        );
+    }
+
+    /// Starting a ceremony must not touch storage.
+    ///
+    /// `UnusedRepo` panics on every method, so the two tests above passing is
+    /// itself the proof: no "does this workspace have passkey users?" lookup
+    /// happens, which is what keeps an unauthenticated caller from using this
+    /// endpoint to enumerate tenants.
+    #[test]
+    fn starting_a_discoverable_ceremony_asks_storage_nothing() {
+        let svc = service();
+        let (tenant_id, org_id, _user_id) = ids();
+        assert!(
+            tokio_test_block_on(svc.start_discoverable_authentication(tenant_id, org_id)).is_ok()
+        );
+    }
+
+    /// Minimal executor: these futures never yield (no I/O — `UnusedRepo`
+    /// panics if reached), so polling once is sufficient and avoids pulling a
+    /// runtime into unit tests that do not otherwise need one.
+    fn tokio_test_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+        let mut fut = Box::pin(fut);
+        match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("future awaited I/O; these ceremonies must not"),
         }
     }
 }

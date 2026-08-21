@@ -50,6 +50,25 @@ pub struct StartAuthenticationRequest {
     pub challenge_token: String,
 }
 
+/// Body of `POST /api/v1/auth/webauthn/authenticate/discoverable/start`.
+///
+/// There is no `challenge_token` here, and that is the whole point: a
+/// usernameless ceremony has no prior login step to carry one. What it does
+/// need is the workspace, because a discoverable credential still has to be
+/// resolved inside one tenant's isolation boundary. Slugs and UUIDs are both
+/// accepted, matching `POST /api/v1/auth/login`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct StartDiscoverableAuthenticationRequest {
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+    #[serde(default)]
+    pub org_slug: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StartAuthenticationResponse {
     #[schema(value_type = Object)]
@@ -273,6 +292,213 @@ pub async fn start_authentication<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
         challenge,
         state_token,
+    }))
+}
+
+/// `POST /api/v1/auth/webauthn/authenticate/discoverable/start`
+///
+/// Begin a **usernameless** WebAuthn ceremony for a workspace. Needs no
+/// challenge token and no username: the returned challenge carries an empty
+/// `allowCredentials`, so the authenticator offers whichever discoverable
+/// credential it holds and the assertion names the user.
+///
+/// Backs both client mediation modes — the explicit "sign in with a passkey"
+/// button and conditional-mediation passkey autofill. They differ only in how
+/// the browser surfaces the prompt, not in the ceremony.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/webauthn/authenticate/discoverable/start",
+    tag = "webauthn",
+    request_body = StartDiscoverableAuthenticationRequest,
+    responses(
+        (status = 200, description = "Discoverable authentication challenge",
+         body = StartAuthenticationResponse),
+        (status = 400, description = "Neither slug nor id given for org or tenant"),
+        (status = 401, description = "Unknown organization or tenant"),
+    )
+)]
+pub async fn start_discoverable_authentication<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
+    body: web::Json<StartDiscoverableAuthenticationRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+    let (tenant_id, org_id) = resolve_workspace(&state, &b).await?;
+
+    let (challenge, state_token) = state
+        .webauthn
+        .webauthn_service
+        .start_discoverable_authentication(tenant_id, org_id)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
+        challenge,
+        state_token,
+    }))
+}
+
+/// Resolve `(tenant_id, org_id)` for a usernameless ceremony.
+///
+/// Mirrors `handlers::auth::login`, including the two properties that matter
+/// more here than they look:
+///
+/// * slug-resolution failures become 401 `AuthenticationFailed`, not 404, so
+///   this endpoint cannot be used to enumerate which organizations and tenants
+///   exist — it is reachable without any credential at all;
+/// * the org is derived from the **tenant record**, never from what the client
+///   sent. NEW-1 is the same bug in `login`: a caller who supplies a raw
+///   `org_id` alongside their own tenant would otherwise get a ceremony — and
+///   then a session token — scoped to a foreign organization.
+async fn resolve_workspace<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    b: &StartDiscoverableAuthenticationRequest,
+) -> Result<(Uuid, Uuid), AxiamApiError> {
+    use axiam_core::error::AxiamError;
+    use axiam_core::repository::{OrganizationRepository, TenantRepository};
+
+    let unauthenticated = || AxiamError::AuthenticationFailed {
+        reason: "invalid credentials".into(),
+    };
+
+    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            state
+                .org_repo
+                .get_by_slug(slug)
+                .await
+                .map_err(|_| unauthenticated())?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide org_id or org_slug".into(),
+            }));
+        }
+    };
+
+    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            state
+                .tenant_repo
+                .get_by_slug(org_id, slug)
+                .await
+                .map_err(|_| unauthenticated())?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide tenant_id or tenant_slug".into(),
+            }));
+        }
+    };
+
+    // NEW-1: authoritative org comes from the tenant record, and a client that
+    // named a different one is refused rather than quietly corrected.
+    let tenant = state
+        .tenant_repo
+        .get_by_id(tenant_id)
+        .await
+        .map_err(|_| unauthenticated())?;
+    if tenant.organization_id != org_id {
+        return Err(AxiamApiError(unauthenticated()));
+    }
+
+    Ok((tenant_id, tenant.organization_id))
+}
+
+/// `POST /api/v1/auth/webauthn/authenticate/discoverable/finish`
+///
+/// Complete a usernameless ceremony. The user is identified by the assertion
+/// itself; on success a session is created and tokens are issued.
+///
+/// # Why this fires `login.post_auth` when `authenticate/finish` does not
+///
+/// `sdks/CONTRACT.md` §22.5 excludes the ordinary WebAuthn finish because it
+/// "continues a login that was already gated at its first step" — the password
+/// step fired the event before ever issuing the MFA challenge token. A
+/// usernameless sign-in has no such first step; it *is* the first step. Leaving
+/// it out would hand an operator's `login.post_auth` veto — the embargoed-region
+/// example in the feature's own docs — a bypass consisting of clicking "Sign in
+/// with a passkey". That is SEC-095 exactly, which is why this uses the shared
+/// `intercept_federated_login_post_auth` rather than a fourth private copy.
+///
+/// It takes the *federated* variant because, like SAML and OIDC, this path
+/// completes in one round trip and has no step-up branch to route a
+/// `require_mfa` verdict into. A reactor demanding step-up here is refused
+/// rather than silently dropped. The passkey has already provided user
+/// verification, so this is a UV-backed factor, not an unverified one.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/webauthn/authenticate/discoverable/finish",
+    tag = "webauthn",
+    request_body = FinishAuthenticationRequest,
+    responses(
+        (status = 200, description = "Authentication successful",
+         body = WebauthnLoginResponse),
+        (status = 401, description = "Authentication failed"),
+    )
+)]
+pub async fn finish_discoverable_authentication<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+    body: web::Json<FinishAuthenticationRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    use axiam_core::repository::UserRepository;
+
+    let b = body.into_inner();
+    let tenant_id = peek_tenant_id(&b.state_token)?;
+
+    let (user_id, org_id) = state
+        .webauthn
+        .webauthn_service
+        .finish_discoverable_authentication(tenant_id, &b.state_token, &b.response)
+        .await?;
+
+    let user = state
+        .user_repo
+        .get_by_id(tenant_id, user_id)
+        .await
+        .map_err(AxiamApiError)?;
+
+    // A passkey proves possession; it does not say the account may sign in.
+    // The username-bound ceremony inherits that gate from the password step
+    // that minted its challenge token — this one has no such step, so a
+    // deactivated, locked or anonymised user would otherwise get a session.
+    state
+        .auth_service
+        .ensure_can_sign_in(&user)
+        .map_err(|e| AxiamApiError(e.into()))?;
+
+    // X1/SEC-095: after the assertion verifies, before any session exists.
+    state
+        .auth_service
+        .intercept_federated_login_post_auth(
+            tenant_id,
+            org_id,
+            &user,
+            client_ip(&req).as_deref(),
+            user_agent(&req).as_deref(),
+        )
+        .await
+        .map_err(AxiamApiError)?;
+
+    let out = state
+        .auth_service
+        .create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            client_ip(&req),
+            user_agent(&req),
+        )
+        .await?;
+
+    Ok(HttpResponse::Ok().json(WebauthnLoginResponse {
+        access_token: out.access_token,
+        refresh_token: out.refresh_token,
+        session_id: out.session_id,
+        expires_in: out.expires_in,
     }))
 }
 

@@ -131,7 +131,17 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 url = "2"
 subtle = "2"
 base64 = "0.23"
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+# `conditional-ui` is what gates the discoverable-credential API
+# (`start_discoverable_authentication`, `identify_discoverable_authentication`,
+# `finish_discoverable_authentication`, `DiscoverableKey`). It is upstream's
+# name for the feature, not a statement that conditional mediation is the only
+# caller: the same ceremony backs both passkey autofill and the explicit
+# "Sign in with a passkey" button, which are one server flow and two client
+# mediation modes.
+webauthn-rs = { version = "0.5", features = [
+    "danger-allow-state-serialisation",
+    "conditional-ui",
+] }
 webauthn-rs-proto = "0.5"
 aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }

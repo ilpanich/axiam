@@ -1126,6 +1126,79 @@
         }
       }
     },
+    "/api/v1/auth/webauthn/authenticate/discoverable/finish": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "`POST /api/v1/auth/webauthn/authenticate/discoverable/finish`",
+        "description": "Complete a usernameless ceremony. The user is identified by the assertion\nitself; on success a session is created and tokens are issued.\n\n# Why this fires `login.post_auth` when `authenticate/finish` does not\n\n`sdks/CONTRACT.md` §22.5 excludes the ordinary WebAuthn finish because it\n\"continues a login that was already gated at its first step\" — the password\nstep fired the event before ever issuing the MFA challenge token. A\nusernameless sign-in has no such first step; it *is* the first step. Leaving\nit out would hand an operator's `login.post_auth` veto — the embargoed-region\nexample in the feature's own docs — a bypass consisting of clicking \"Sign in\nwith a passkey\". That is SEC-095 exactly, which is why this uses the shared\n`intercept_federated_login_post_auth` rather than a fourth private copy.\n\nIt takes the *federated* variant because, like SAML and OIDC, this path\ncompletes in one round trip and has no step-up branch to route a\n`require_mfa` verdict into. A reactor demanding step-up here is refused\nrather than silently dropped. The passkey has already provided user\nverification, so this is a UV-backed factor, not an unverified one.",
+        "operationId": "finish_discoverable_authentication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishAuthenticationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authentication successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebauthnLoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/webauthn/authenticate/discoverable/start": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "`POST /api/v1/auth/webauthn/authenticate/discoverable/start`",
+        "description": "Begin a **usernameless** WebAuthn ceremony for a workspace. Needs no\nchallenge token and no username: the returned challenge carries an empty\n`allowCredentials`, so the authenticator offers whichever discoverable\ncredential it holds and the assertion names the user.\n\nBacks both client mediation modes — the explicit \"sign in with a passkey\"\nbutton and conditional-mediation passkey autofill. They differ only in how\nthe browser surfaces the prompt, not in the ceremony.",
+        "operationId": "start_discoverable_authentication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartDiscoverableAuthenticationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Discoverable authentication challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartAuthenticationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither slug nor id given for org or tenant"
+          },
+          "401": {
+            "description": "Unknown organization or tenant"
+          }
+        }
+      }
+    },
     "/api/v1/auth/webauthn/authenticate/finish": {
       "post": {
         "tags": [
@@ -14191,6 +14264,38 @@
           },
           "state_token": {
             "type": "string"
+          }
+        }
+      },
+      "StartDiscoverableAuthenticationRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/auth/webauthn/authenticate/discoverable/start`.\n\nThere is no `challenge_token` here, and that is the whole point: a\nusernameless ceremony has no prior login step to carry one. What it does\nneed is the workspace, because a discoverable credential still has to be\nresolved inside one tenant's isolation boundary. Slugs and UUIDs are both\naccepted, matching `POST /api/v1/auth/login`.",
+        "properties": {
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

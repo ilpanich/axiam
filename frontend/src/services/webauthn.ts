@@ -226,4 +226,47 @@ export const webauthnService = {
     );
     return result.data;
   },
+
+  /**
+   * Sign in with a passkey without typing a username first.
+   *
+   * Distinct endpoints from {@link authenticate}, not an empty
+   * `challenge_token` against the same ones. That was the original shape and it
+   * could not work: `authenticate/start` decodes the challenge token to learn
+   * who is signing in, so an empty string is rejected as an invalid token
+   * before anything else happens. There is no user to name here — that is what
+   * the ceremony is for — so the server needs a different entry point, one that
+   * takes the workspace instead.
+   *
+   * The workspace is the one thing the browser must still supply: a
+   * discoverable credential is resolved inside a single tenant. The login page
+   * has already collected it in its first step.
+   *
+   * `conditional` selects passkey autofill over a modal prompt. Both mediation
+   * modes run this same server ceremony; only the browser UI differs.
+   */
+  async authenticateDiscoverable(
+    orgSlug: string,
+    tenantSlug: string,
+    opts?: { conditional?: boolean },
+  ): Promise<WebauthnLoginResult> {
+    const { data } = await api.post<StartAuthenticationDto>(
+      "/api/v1/auth/webauthn/authenticate/discoverable/start",
+      { org_slug: orgSlug, tenant_slug: tenantSlug },
+    );
+
+    const response: AuthenticationResponseJSON = await startAuthentication({
+      optionsJSON: data.challenge.publicKey,
+      useBrowserAutofill: opts?.conditional === true,
+    });
+
+    const result = await api.post<WebauthnLoginResult>(
+      "/api/v1/auth/webauthn/authenticate/discoverable/finish",
+      {
+        state_token: data.state_token,
+        response,
+      },
+    );
+    return result.data;
+  },
 };

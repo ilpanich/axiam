@@ -223,6 +223,18 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 "/webauthn/authenticate/finish",
                 web::post().to(handlers::webauthn::finish_authentication::<C>),
             )
+            // Usernameless (discoverable-credential) sign-in. Separate from the
+            // pair above because the ceremonies differ in what identifies the
+            // user: those continue a login that already named one, these
+            // discover it from the assertion.
+            .route(
+                "/webauthn/authenticate/discoverable/start",
+                web::post().to(handlers::webauthn::start_discoverable_authentication::<C>),
+            )
+            .route(
+                "/webauthn/authenticate/discoverable/finish",
+                web::post().to(handlers::webauthn::finish_discoverable_authentication::<C>),
+            )
             .route(
                 "/verify-email",
                 web::post().to(handlers::email_verification::verify_email::<C>),

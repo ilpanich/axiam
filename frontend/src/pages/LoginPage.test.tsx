@@ -11,6 +11,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 // is tested here. The wrapper's contract with the server lives in
 // services/webauthn.test.ts.
 const authenticateMock = vi.fn();
+const authenticateDiscoverableMock = vi.fn();
 let webauthnSupported = true;
 let conditionalAvailable = false;
 vi.mock("@/services/webauthn", async () => {
@@ -24,6 +25,8 @@ vi.mock("@/services/webauthn", async () => {
       Promise.resolve(conditionalAvailable),
     webauthnService: {
       authenticate: (...a: unknown[]) => authenticateMock(...a),
+      authenticateDiscoverable: (...a: unknown[]) =>
+        authenticateDiscoverableMock(...a),
     },
   };
 });
@@ -510,6 +513,7 @@ describe("LoginPage — passkeys (C2)", () => {
     webauthnSupported = true;
     conditionalAvailable = false;
     authenticateMock.mockReset();
+    authenticateDiscoverableMock.mockReset();
     Object.defineProperty(window, "PublicKeyCredential", {
       value: function PublicKeyCredential() {},
       configurable: true,
@@ -551,8 +555,11 @@ describe("LoginPage — passkeys (C2)", () => {
     );
   });
 
-  it("uses an empty challenge token for discoverable sign-in", async () => {
-    authenticateMock.mockResolvedValue({ session_id: "s", expires_in: 900 });
+  it("runs the discoverable ceremony, scoped to the chosen workspace", async () => {
+    authenticateDiscoverableMock.mockResolvedValue({
+      session_id: "s",
+      expires_in: 900,
+    });
     // A passkey assertion sets the session cookie server-side; the page then
     // hydrates the store through /auth/me exactly as the password path does.
     apiMock.get.mockResolvedValue(res({ user: loginUser, permissions: [] }));
@@ -562,18 +569,27 @@ describe("LoginPage — passkeys (C2)", () => {
       screen.getByRole("button", { name: /sign in with a passkey/i }),
     );
 
-    // An empty token is what asks the server for a challenge with an empty
-    // allowCredentials — i.e. "let the authenticator tell us who this is".
+    // The workspace is the whole payload: there is no username to send, but a
+    // discoverable credential is still resolved within one tenant, so the org
+    // and tenant collected in step 1 are what scope the ceremony.
     await waitFor(() =>
-      expect(authenticateMock).toHaveBeenCalledWith("", { conditional: false }),
+      expect(authenticateDiscoverableMock).toHaveBeenCalledWith(
+        "acme",
+        "default",
+        { conditional: false },
+      ),
     );
+    // It must NOT go through the MFA-challenge ceremony, which cannot serve a
+    // usernameless sign-in: that endpoint rejects a request with no challenge
+    // token before it looks at anything else.
+    expect(authenticateMock).not.toHaveBeenCalled();
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
   });
 
   it("reports a cancelled ceremony without blaming the user", async () => {
     const err = new Error("no");
     err.name = "NotAllowedError";
-    authenticateMock.mockRejectedValue(err);
+    authenticateDiscoverableMock.mockRejectedValue(err);
     await goToCredentials();
 
     await userEvent.click(
@@ -589,12 +605,16 @@ describe("LoginPage — passkeys (C2)", () => {
     conditionalAvailable = true;
     // Never resolves: autofill legitimately stays pending until the user picks
     // a passkey, which is exactly the shape that must not block the page.
-    authenticateMock.mockReturnValue(new Promise(() => {}));
+    authenticateDiscoverableMock.mockReturnValue(new Promise(() => {}));
 
     await goToCredentials();
 
     await waitFor(() =>
-      expect(authenticateMock).toHaveBeenCalledWith("", { conditional: true }),
+      expect(authenticateDiscoverableMock).toHaveBeenCalledWith(
+        "acme",
+        "default",
+        { conditional: true },
+      ),
     );
     // ...and the password form is still fully usable underneath it.
     expect(screen.getByLabelText("Password")).toBeEnabled();
@@ -606,7 +626,7 @@ describe("LoginPage — passkeys (C2)", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Password")).toBeEnabled(),
     );
-    expect(authenticateMock).not.toHaveBeenCalled();
+    expect(authenticateDiscoverableMock).not.toHaveBeenCalled();
   });
 
   it("offers a passkey as a second factor when the account has one", async () => {
@@ -631,9 +651,7 @@ describe("LoginPage — passkeys (C2)", () => {
     // The MFA challenge token, not an empty one: this user is already
     // identified, so the assertion must be bound to their challenge.
     await waitFor(() =>
-      expect(authenticateMock).toHaveBeenCalledWith("chal-1", {
-        conditional: false,
-      }),
+      expect(authenticateMock).toHaveBeenCalledWith("chal-1"),
     );
   });
 

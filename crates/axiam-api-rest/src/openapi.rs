@@ -42,6 +42,8 @@ use crate::handlers;
         handlers::webauthn::finish_registration,
         handlers::webauthn::start_authentication,
         handlers::webauthn::finish_authentication,
+        handlers::webauthn::start_discoverable_authentication,
+        handlers::webauthn::finish_discoverable_authentication,
         // Organizations
         handlers::organizations::create,
         handlers::organizations::list,
@@ -260,6 +262,7 @@ use crate::handlers;
         handlers::webauthn::FinishRegistrationRequest,
         handlers::webauthn::CredentialResponse,
         handlers::webauthn::StartAuthenticationRequest,
+        handlers::webauthn::StartDiscoverableAuthenticationRequest,
         handlers::webauthn::StartAuthenticationResponse,
         handlers::webauthn::FinishAuthenticationRequest,
         handlers::webauthn::WebauthnLoginResponse,

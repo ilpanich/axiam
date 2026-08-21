@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [1.0.0-alpha32] - 2026-08-20
 
 ### Added
@@ -16,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OPAQUE endpoints, enrolment rework and the shared client core
 - Implement the OPAQUE protocol engine and persistence
 - Replace the SRP domain model with OPAQUE (RFC 9807)
+- `crates/axiam-opaque` (layer 0): the single definition of AXIAM's OPAQUE
+  ciphersuite, key-stretching functions and client operations, bound by every
+  SDK and the admin UI. OPAQUE is not a protocol it is reasonable to hand-write
+  once per language, which is what SRP's eleven implementations required.
+- Schema v42: `opaque_credential` and `opaque_server_setup` (per-tenant OPRF
+  seed and AKE keypair, AES-256-GCM at rest); drops `srp_credential`.
+- `opaque_login_start` and `opaque_register_start` benchmark scenarios. The
+  second is new in kind: SRP enrolment cost the server nothing, whereas
+  `register/start` is unauthenticated by necessity and needs its own budget.
 
 ### Changed
 
@@ -24,16 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct comments that still described the new columns as SRP
 - Rewrite CONTRACT §23 from SRP-6a to OPAQUE (contract 1.26)
 - Design document, conformance fixtures, benchmarks and runbook
-
-### Fixed
-
-- Route every long-lived secret through the provider
-- Place axiam-opaque-wasm in the crate-layering table
-
-## [Unreleased]
-
-### Changed
-
 - **BREAKING: replaced SRP-6a with OPAQUE (RFC 9807).** SRP is removed
   entirely — endpoints, domain model, storage, SDK surface and fixtures.
   Nothing migrates and nothing needs to: an SRP verifier cannot be converted
@@ -48,18 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the OPRF, which a client-side SRP verifier did not.
   - `AXIAM__AUTH__SRP_SESSION_KEY` becomes `AXIAM__AUTH__OPAQUE_SESSION_KEY`
     **and** `AXIAM__AUTH__OPAQUE_SETUP_KEY`, split by what rotating them costs.
-
-### Added
-
-- `crates/axiam-opaque` (layer 0): the single definition of AXIAM's OPAQUE
-  ciphersuite, key-stretching functions and client operations, bound by every
-  SDK and the admin UI. OPAQUE is not a protocol it is reasonable to hand-write
-  once per language, which is what SRP's eleven implementations required.
-- Schema v42: `opaque_credential` and `opaque_server_setup` (per-tenant OPRF
-  seed and AKE keypair, AES-256-GCM at rest); drops `srp_credential`.
-- `opaque_login_start` and `opaque_register_start` benchmark scenarios. The
-  second is new in kind: SRP enrolment cost the server nothing, whereas
-  `register/start` is unauthenticated by necessity and needs its own budget.
 
 ### Removed
 
@@ -78,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Route every long-lived secret through the provider
+- Place axiam-opaque-wasm in the crate-layering table
 - A malformed OPAQUE message from a client returned `500`. Client-supplied
   input (`400`) is now separated from corrupt stored state (`500`) by
   `AuthError::OpaqueMalformed` and distinct hex decoders.
@@ -152,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Long-lived provisioning tokens, and two SCIM setup traps closed
 - Close the residual admin-interface gaps before beta
 - Nested-resource authorization depth sweep (N1)
+- Nested-resource authorization depth benchmark — `just bench-nested` (N1)
 
 ### Changed
 
@@ -161,27 +153,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - §22.14 declarative reactor handler binding (contract 1.22)
 - Regenerate openapi.json for the SCIM token endpoints
 - Cover the SCIM and MDS error taxonomies, and the token-exchange refusal codes
-
-### Fixed
-
-- Install the rustls CryptoProvider before dialling amqps://
-- The listener assertion had its own fields backwards
-- Assert the AMQPS listener bound, and bound the test that needs it
-- The broker's TLS config was never valid Erlang args
-- Copy the broker's TLS material in rather than bind-mounting it
-- Configure the AMQPS broker with a file, not mangled erl args
-- Stop error messages from rendering credentials
-- Construct AppState with scim_token_repo, and record the new surface
-- Define the scim_token table instead of relying on implicit creation
-
-## [Unreleased]
-
-### Added
-
-- Nested-resource authorization depth benchmark — `just bench-nested` (N1)
-
-### Changed
-
 - **`AppState` split into seven cohesive sub-states (F3).** The REST
   composition root carried **75 public fields**, nearly all concrete
   `Surreal*Repository<C>` values, and every handler received all of them.
@@ -290,6 +261,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison target is unaffected by it. Re-baseline rather than extending a
   trend line through it.
 
+### Fixed
+
+- Install the rustls CryptoProvider before dialling amqps://
+- The listener assertion had its own fields backwards
+- Assert the AMQPS listener bound, and bound the test that needs it
+- The broker's TLS config was never valid Erlang args
+- Copy the broker's TLS material in rather than bind-mounting it
+- Configure the AMQPS broker with a file, not mangled erl args
+- Stop error messages from rendering credentials
+- Construct AppState with scim_token_repo, and record the new surface
+- Define the scim_token table instead of relying on implicit creation
+
 ### Security
 
 - **`h2` bumped to 0.4.16, and RUSTSEC-2026-0258 ignored for the copy that has
@@ -390,153 +373,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in strict session-revocation mode + document the default (A4/J10)
 - Read-replica routing primitive + staleness contract (A3/J11)
 - Link the Coveralls coverage reports
-
-### Changed
-
-- Quick-run benchmark runbook for alpha25 (AXIAM-only, p0/p2/p3)
-- Execution log update 5b — SEC-096..SEC-107, and a runbook row the fix invalidated
-- Contract 1.20 and the SEC-096..SEC-107 dispositions
-- Correct the CA-trust claim and the nonce backstop's reach (SEC-105, SEC-106)
-- Execution log update 5 — the tracked follow-ups
-- Make the frontend job print the coverage it achieved
-- Provision the scim:provision principal the SCIM scenario needs
-- Detect stale vendored artifacts across the SDK repos (R5.8b)
-- Execution log update 4 — R5.8 fan-out, merges, R5.9, R5.2 tail
-- Ratchet the Rust line-coverage floor 80 -> 88 (R5.9)
-- The two authored k6 scenarios are no longer owed (R5.11)
-- Execution log update 2 — final wave status, residuals and new findings
-- Add the first coverage floor to vitest.config.ts (R5.9)
-- F4-bis review of everything post-2026-08-10 (R6)
-- Drop the on-failure server-log dump entirely (R5.1)
-- Shrink the smoke failure dump to 40 lines (R5.1)
-- Clear the two clippy findings in the reactor test code (R2.2)
-- Rustfmt the gate wiring and drop a literal test credential (R2.2)
-- Prove X4 token exchange against a real Keycloak (R5.4)
-- Close the X2 test gaps — Keycloak RPT compat and a deny-override property test (R5.3)
-- Supply the three mandatory startup secrets to the smoke stack (R5.1)
-- Assert native constraint validation on the login form (R4.7)
-- Make the runtime-smoke failure legible and supply b3's password (R5.1)
-- Drop needless borrows in the contract tests (R3.1)
-- Join the grants_by_role declaration onto one line (R1.3)
-- Add the F3 examples tree with a two-tier CI smoke job (R5.1)
-- State the SEC-089 audience allow-list where operators and callers read it (R1.1)
-- Refresh the frontend coverage matrix for the R4 surfaces
-- Add the execution log for the 2026-08-15 remediation pass
-- Add §22 Reactors and bump the contract to 1.18 (R2.1)
-- Record token exchange's revocation posture where F4 asked for it (R1.2)
-- Add A1's owed sustained-flood integration test (R5.2)
-- Run the limiter suite as a dedicated job (R5.2)
-- Add the missing flood scenarios and the two unwritten R7 cells (R5.2, R7)
-- Correct the stale permissions row in the coverage matrix (R4.9)
-- Emit CycloneDX SBOMs for the Rust workspace and frontend (R5.10)
-- Truth up stale status lines across five planning docs (R5.11)
-- Benchmark Run5 changes
-- Consolidated remediation plan from the 2026-08-15 full verification
-- Drop the owned copies totp-rs 5.x's Secret::Encoded required
-- Keep the RFC 9449 `ath` vector in exactly one place
-- Regenerate openapi.json for the contract 1.16 client fields
-- Bump totp-rs from 5.7.2 to 6.0.0
-- X5 — FAPI 2.0 readiness, conformance harness, and contract 1.15 (#319)
-- Contract 1.14 + STRIDE model for the X6 single-use guarantee
-- Subject_token_type becomes required (contract 1.13)
-- Add X6 — make single-use redemption a guarantee (closes the #302 residual)
-- Bump the minor-patch group across 1 directory with 7 updates
-- Allow BSL-1.0 for xxhash-rust
-- Dispatch /oauth2 errors on the error field (contract 1.12)
-- Lift the §12.6 Swift/C/C++ deferral (contract 1.11)
-- §20 — the UMA 2.0 contract the SDK fan-out implements
-- Shrink test-job target/ so the gRPC relinks stop exhausting runner disk
-- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
-- Bump dtolnay/rust-toolchain
-- Bump github/codeql-action/upload-sarif
-- Bump taiki-e/install-action from 2.85.5 to 2.85.10
-- Bump the minor-patch group in /frontend with 6 updates
-- Bump actions/attest-build-provenance from 4.1.1 to 4.2.2
-- Fold the single-use suite into one test binary
-- E2e specs for the reactor console (X1)
-- Record the reactor console as a P1 gap (X1)
-- Correct the deny-override claim across the live doc set (F2) (#288)
-- F4 review of the B-track; fix SEC-088 sub_kind confusion
-- §16 preamble rewritten from tests, not greps (1.8.3)
-- §16 preamble errata — five SDKs diverged (1.8.2)
-- §16 preamble errata — three SDKs diverged, not two (1.8.1)
-- Contract 1.8 — retry policy, decision memo, close(), telemetry (D5) (#283)
-- Contract 1.7 — device_login credential-adoption errata (D6)
-- Contract §12.7 logout helpers; server logout guide (D4)
-- Contract §14 device grant, §15 token exchange; B5 design (D4)
-- Drive the device-flow suite green — all 14 pass
-- Answer the two questions that decide X3's cost, before starting it
-- One shared test-password helper; lint the AMQP transport posture
-- Add extra B-track features doc (X1-X5) — Reactors, UMA 2.0, MDS3, external-IdP exchange, FAPI 2.0
-- Cut refresh rotation from five datastore round trips to three (A2/J2)
-- Add A6 — AMQP transport encryption (amqps/TLS)
-- Post-run-5 improvement plan — fixes, competitor gaps, frontend/SDK completion
-- Update benchmarks page to run 5, add SDK and §10 sections
-- Benchmark run 5 — release image, full matrix, three mysteries closed (#275)
-- Run 5 targets the published 1.0.0-alpha24 image, not a local build
-
-### Fixed
-
-- Normalize extension-less --scenario; read matrix trees in rl-prod-check
-- Delete must report NotFound for a foreign or unknown id (SEC-104)
-- Deprovisioning must revoke live sessions and refresh tokens (SEC-098)
-- Correct the gate's deny paths and refuse an undispatchable registration (SEC-099, SEC-100, SEC-101)
-- Stop token exchange stripping sender-constraining (SEC-096, SEC-097, SEC-102)
-- B5 back-channel logout URI must be reachable from AXIAM (R5.1)
-- B5 must send tenant_id on the RP-initiated logout URL (R5.1)
-- Declare the containerized reactor test queue durable, not transient (R2.4)
-- Close the three HIGH findings from the F4-bis review (SEC-093, SEC-094, SEC-095)
-- Configure a real OIDC issuer URL for the compose stack (R5.1)
-- Generate the reactor test fixture's password instead of hard-coding it (R2.3)
-- B2 read tenant_id from the wrong path in the /auth/me response (R5.1)
-- B2 must send tenant_id to /oauth2/device_authorization (R5.1)
-- Correct the role-assignment status codes and stop carrying a literal test password (R5.1)
-- B1 asserted 201 where the API returns 204 (R5.1)
-- Use express-rate-limit in the B5 RP example (R5.1)
-- Close the CodeQL findings in the B3 and B5 examples (R5.1)
-- Allow registering the device-code and token-exchange grants
-- Enforce bearer SubjectConfirmationData — Recipient, NotOnOrAfter, InResponseTo (R1.5, SEC-005)
-- Key batch grants per tenant and document the widening fallback (R1.3)
-- Stop claiming the RBAC engine has no deny-override (R4.4)
-- Surface delete failures on the tenants page (R4.6)
-- Gate every protected route and fail closed on a null /auth/me (R4.5, R4.7)
-- Keep proof_replay_repo out of SamlFederationService::new
-- Port TOTP to totp-rs 6.0's builder, struct Secret and Token
-- The authorization-code grant joins the layered single-use mechanism
-- X6 — single-use redemption becomes a guarantee (#302)
-- Repair the db test build, split the frontend format helpers
-- Commit the vendored MDS trust anchor, which .gitignore ate
-- Give resource delete and child create a key to collide on
-- Run the serialisation tests and both deployments on surrealkv
-- Wire X2 into the server binary and regenerate the derived artifacts
-- Stop device-grant and PAR single-use depending on conflict detection
-- Decide the ticket race in `consume` instead of asking SurrealDB to
-- Serialise single-use consumes for device grants and PAR
-- Keep the FormDialog footer reachable on tall forms
-- Register the reactor permissions and routes (X1b)
-- Deny-override precedence pass — end-to-end tests + SEC-092 (#289)
-- Box ClientOutcome::Found — B5's fields tripped large_enum_variant
-- Classify the device verification paths; B5 registration groundwork
-- Give the authorization test fixture B3's new `act` claim
-- One authenticate_client, and use the J1-aware rate-limit check (B3)
-- Apply SDK_BENCH_CONCURRENCY to the C++ client, not just its workers (D2/J6)
-- Record the Python bench's event loop and prefer uvloop (D1/J5)
-- Close the three SDK-harness audits — TS baseline, C# accounting, Rust CPU (D3/J7/J8/J8b)
-- Make the required container env provable, and stop dropping investigation artifacts (E1/E2)
-- Repair the two specs C1/C2 invalidated
-- Set ALLOW_PLAINTEXT on the three release-image stacks A6 broke
-- Generate the budget test's password; bump dev-only nanoid past GHSA-2v37-7h3g-55p8
-- Exempt human-scale limits from the cold-entry seed (A1 follow-up)
-- Pre-mint the refresh session pool inside the login budget (A5/J4)
-- Close the two-layer starvation and boundary over-admission (A1/J1)
-- Repair the dry-run matrix — teardown, seed idempotency, mTLS probe
-- Realign rate-limit assertions with SEC-079; fix run-5 preflight
-- Align the footer link columns
-
-## [Unreleased]
-
-### Added
-
 - **WebAuthn attestation policy enforcement (X3).** Registration has always
   accepted any authenticator; tenants can now opt into "only FIDO-certified /
   non-revoked / explicitly-allowed authenticators may register," backed by
@@ -809,6 +645,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Quick-run benchmark runbook for alpha25 (AXIAM-only, p0/p2/p3)
+- Execution log update 5b — SEC-096..SEC-107, and a runbook row the fix invalidated
+- Contract 1.20 and the SEC-096..SEC-107 dispositions
+- Correct the CA-trust claim and the nonce backstop's reach (SEC-105, SEC-106)
+- Execution log update 5 — the tracked follow-ups
+- Make the frontend job print the coverage it achieved
+- Provision the scim:provision principal the SCIM scenario needs
+- Detect stale vendored artifacts across the SDK repos (R5.8b)
+- Execution log update 4 — R5.8 fan-out, merges, R5.9, R5.2 tail
+- Ratchet the Rust line-coverage floor 80 -> 88 (R5.9)
+- The two authored k6 scenarios are no longer owed (R5.11)
+- Execution log update 2 — final wave status, residuals and new findings
+- Add the first coverage floor to vitest.config.ts (R5.9)
+- F4-bis review of everything post-2026-08-10 (R6)
+- Drop the on-failure server-log dump entirely (R5.1)
+- Shrink the smoke failure dump to 40 lines (R5.1)
+- Clear the two clippy findings in the reactor test code (R2.2)
+- Rustfmt the gate wiring and drop a literal test credential (R2.2)
+- Prove X4 token exchange against a real Keycloak (R5.4)
+- Close the X2 test gaps — Keycloak RPT compat and a deny-override property test (R5.3)
+- Supply the three mandatory startup secrets to the smoke stack (R5.1)
+- Assert native constraint validation on the login form (R4.7)
+- Make the runtime-smoke failure legible and supply b3's password (R5.1)
+- Drop needless borrows in the contract tests (R3.1)
+- Join the grants_by_role declaration onto one line (R1.3)
+- Add the F3 examples tree with a two-tier CI smoke job (R5.1)
+- State the SEC-089 audience allow-list where operators and callers read it (R1.1)
+- Refresh the frontend coverage matrix for the R4 surfaces
+- Add the execution log for the 2026-08-15 remediation pass
+- Add §22 Reactors and bump the contract to 1.18 (R2.1)
+- Record token exchange's revocation posture where F4 asked for it (R1.2)
+- Add A1's owed sustained-flood integration test (R5.2)
+- Run the limiter suite as a dedicated job (R5.2)
+- Add the missing flood scenarios and the two unwritten R7 cells (R5.2, R7)
+- Correct the stale permissions row in the coverage matrix (R4.9)
+- Emit CycloneDX SBOMs for the Rust workspace and frontend (R5.10)
+- Truth up stale status lines across five planning docs (R5.11)
+- Benchmark Run5 changes
+- Consolidated remediation plan from the 2026-08-15 full verification
+- Drop the owned copies totp-rs 5.x's Secret::Encoded required
+- Keep the RFC 9449 `ath` vector in exactly one place
+- Regenerate openapi.json for the contract 1.16 client fields
+- Bump totp-rs from 5.7.2 to 6.0.0
+- X5 — FAPI 2.0 readiness, conformance harness, and contract 1.15 (#319)
+- Contract 1.14 + STRIDE model for the X6 single-use guarantee
+- Subject_token_type becomes required (contract 1.13)
+- Add X6 — make single-use redemption a guarantee (closes the #302 residual)
+- Bump the minor-patch group across 1 directory with 7 updates
+- Allow BSL-1.0 for xxhash-rust
+- Dispatch /oauth2 errors on the error field (contract 1.12)
+- Lift the §12.6 Swift/C/C++ deferral (contract 1.11)
+- §20 — the UMA 2.0 contract the SDK fan-out implements
+- Shrink test-job target/ so the gRPC relinks stop exhausting runner disk
+- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
+- Bump dtolnay/rust-toolchain
+- Bump github/codeql-action/upload-sarif
+- Bump taiki-e/install-action from 2.85.5 to 2.85.10
+- Bump the minor-patch group in /frontend with 6 updates
+- Bump actions/attest-build-provenance from 4.1.1 to 4.2.2
+- Fold the single-use suite into one test binary
+- E2e specs for the reactor console (X1)
+- Record the reactor console as a P1 gap (X1)
+- Correct the deny-override claim across the live doc set (F2) (#288)
+- F4 review of the B-track; fix SEC-088 sub_kind confusion
+- §16 preamble rewritten from tests, not greps (1.8.3)
+- §16 preamble errata — five SDKs diverged (1.8.2)
+- §16 preamble errata — three SDKs diverged, not two (1.8.1)
+- Contract 1.8 — retry policy, decision memo, close(), telemetry (D5) (#283)
+- Contract 1.7 — device_login credential-adoption errata (D6)
+- Contract §12.7 logout helpers; server logout guide (D4)
+- Contract §14 device grant, §15 token exchange; B5 design (D4)
+- Drive the device-flow suite green — all 14 pass
+- Answer the two questions that decide X3's cost, before starting it
+- One shared test-password helper; lint the AMQP transport posture
+- Add extra B-track features doc (X1-X5) — Reactors, UMA 2.0, MDS3, external-IdP exchange, FAPI 2.0
+- Cut refresh rotation from five datastore round trips to three (A2/J2)
+- Add A6 — AMQP transport encryption (amqps/TLS)
+- Post-run-5 improvement plan — fixes, competitor gaps, frontend/SDK completion
+- Update benchmarks page to run 5, add SDK and §10 sections
+- Benchmark run 5 — release image, full matrix, three mysteries closed (#275)
+- Run 5 targets the published 1.0.0-alpha24 image, not a local build
 - **BREAKING (release builds): a plaintext `amqp://` broker URL is now
   refused** unless `AXIAM__AMQP__ALLOW_PLAINTEXT=true`. Mirrors the existing
   fail-closed posture for the AMQP signing key. Debug builds are unaffected,
@@ -866,6 +783,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which means the server predates this change. The rule, and the SDK-side
   obligations that go with it, are in `sdks/CONTRACT.md` §11.2 rule 9
   ("Amended 2026-08 (SDK-Q10)", contract 1.19).
+
+### Fixed
+
+- Normalize extension-less --scenario; read matrix trees in rl-prod-check
+- Delete must report NotFound for a foreign or unknown id (SEC-104)
+- Deprovisioning must revoke live sessions and refresh tokens (SEC-098)
+- Correct the gate's deny paths and refuse an undispatchable registration (SEC-099, SEC-100, SEC-101)
+- Stop token exchange stripping sender-constraining (SEC-096, SEC-097, SEC-102)
+- B5 back-channel logout URI must be reachable from AXIAM (R5.1)
+- B5 must send tenant_id on the RP-initiated logout URL (R5.1)
+- Declare the containerized reactor test queue durable, not transient (R2.4)
+- Close the three HIGH findings from the F4-bis review (SEC-093, SEC-094, SEC-095)
+- Configure a real OIDC issuer URL for the compose stack (R5.1)
+- Generate the reactor test fixture's password instead of hard-coding it (R2.3)
+- B2 read tenant_id from the wrong path in the /auth/me response (R5.1)
+- B2 must send tenant_id to /oauth2/device_authorization (R5.1)
+- Correct the role-assignment status codes and stop carrying a literal test password (R5.1)
+- B1 asserted 201 where the API returns 204 (R5.1)
+- Use express-rate-limit in the B5 RP example (R5.1)
+- Close the CodeQL findings in the B3 and B5 examples (R5.1)
+- Allow registering the device-code and token-exchange grants
+- Enforce bearer SubjectConfirmationData — Recipient, NotOnOrAfter, InResponseTo (R1.5, SEC-005)
+- Key batch grants per tenant and document the widening fallback (R1.3)
+- Stop claiming the RBAC engine has no deny-override (R4.4)
+- Surface delete failures on the tenants page (R4.6)
+- Gate every protected route and fail closed on a null /auth/me (R4.5, R4.7)
+- Keep proof_replay_repo out of SamlFederationService::new
+- Port TOTP to totp-rs 6.0's builder, struct Secret and Token
+- The authorization-code grant joins the layered single-use mechanism
+- X6 — single-use redemption becomes a guarantee (#302)
+- Repair the db test build, split the frontend format helpers
+- Commit the vendored MDS trust anchor, which .gitignore ate
+- Give resource delete and child create a key to collide on
+- Run the serialisation tests and both deployments on surrealkv
+- Wire X2 into the server binary and regenerate the derived artifacts
+- Stop device-grant and PAR single-use depending on conflict detection
+- Decide the ticket race in `consume` instead of asking SurrealDB to
+- Serialise single-use consumes for device grants and PAR
+- Keep the FormDialog footer reachable on tall forms
+- Register the reactor permissions and routes (X1b)
+- Deny-override precedence pass — end-to-end tests + SEC-092 (#289)
+- Box ClientOutcome::Found — B5's fields tripped large_enum_variant
+- Classify the device verification paths; B5 registration groundwork
+- Give the authorization test fixture B3's new `act` claim
+- One authenticate_client, and use the J1-aware rate-limit check (B3)
+- Apply SDK_BENCH_CONCURRENCY to the C++ client, not just its workers (D2/J6)
+- Record the Python bench's event loop and prefer uvloop (D1/J5)
+- Close the three SDK-harness audits — TS baseline, C# accounting, Rust CPU (D3/J7/J8/J8b)
+- Make the required container env provable, and stop dropping investigation artifacts (E1/E2)
+- Repair the two specs C1/C2 invalidated
+- Set ALLOW_PLAINTEXT on the three release-image stacks A6 broke
+- Generate the budget test's password; bump dev-only nanoid past GHSA-2v37-7h3g-55p8
+- Exempt human-scale limits from the cold-entry seed (A1 follow-up)
+- Pre-mint the refresh session pool inside the login budget (A5/J4)
+- Close the two-layer starvation and boundary over-admission (A1/J1)
+- Repair the dry-run matrix — teardown, seed idempotency, mTLS probe
+- Realign rate-limit assertions with SEC-079; fix run-5 preflight
+- Align the footer link columns
 
 ### Security
 
@@ -982,6 +957,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-replica decision-cache invalidation over RabbitMQ fanout
 - Install the client-secret hasher at startup (OBS-1 fail-closed gate)
 - Key client-secret hashing with the server pepper (OBS-1)
+- **Service accounts can now authenticate via OAuth2 client-credentials.**
+  `POST /api/v1/service-accounts` and `rotate-secret` have always returned a
+  `client_secret` to the operator — but **no flow accepted it**. A service
+  account's only working authentication path was mTLS
+  (`POST /api/v1/auth/device`); the client-credentials grant verified against
+  the `oauth2_client` table only, and nothing ever compared
+  `service_account.client_secret_hash` against a presented secret.
+
+  The grant now dispatches on the `client_id` prefix — `oa_` for `oauth2_client`,
+  `sa_` for `service_account`, both server-generated and disjoint, so one lookup
+  still suffices. The prefix is **not** a security decision: it only selects the
+  table, and the presented secret must still verify against the row found.
+
+  Three deliberate properties:
+  - **The secret is verified before the status check**, so a caller cannot
+    distinguish "exists but disabled" from "does not exist" by timing. A
+    non-Active account returns the same generic `invalid_client`.
+  - **No scope may be requested.** A service account registers no scopes, and
+    the subset rule leaves the empty set as the only valid request; its
+    authorization comes from the roles assigned to it, as on the mTLS path.
+  - **The token's `sub` is the service-account id**, not the client id, and its
+    `aud` is `axiam:m2m`, so §4.3/`SEC-006` route narrowing keeps it off user
+    routes. A service account is now the same principal however it authenticated
+    — see the breaking device-audience change below, which makes the mTLS path
+    stamp `axiam:m2m` as well.
+
+- **Legacy client-secret hashes in `service_account` are now countable
+  (§15.2).** `count_legacy_secret_hashes(tenant)` plus a startup warning.
+  With the grant above in place these rows now migrate lazily on first
+  authentication, exactly as `oauth2_client` rows do; the count covers the case
+  migration cannot reach — a service account that never authenticates — which is
+  what decides whether the legacy hash arm can be retired. **Rotation** clears
+  such a row.
+- **CI gate: remediation evidence must resolve on `main` (§11.2).**
+  `scripts/check-remediation-evidence.py` parses the remediation tables in
+  `claude_dev/security-analysis-*.md` and verifies every cited commit is
+  reachable from `origin/main` in the repository it claims. A recorded commit
+  hash is not evidence a fix shipped — a hash exists the moment a commit is
+  authored, on any branch — and this pass caught a real instance of a fix
+  recorded as remediated while still unmerged. Rows that cannot be verified are
+  printed individually under an explicit `SKIPPED, NOT VERIFIED` banner rather
+  than passing silently.
+
+- **`sdks/CONTRACT.md` §10.1 — minimum local-verification set (normative).**
+  States once, for every SDK, what a guard must check before turning a token
+  into an identity: signature with `alg` pinned before key lookup, `exp`
+  REQUIRED, `nbf` honoured when present, `tenant_id` asserted against the
+  configured tenant, `iss`/`aud` checked when configured, and a named bounded
+  clock skew — all fail-closed. Written because `SEC-071` and `SEC-080` were the
+  same defect found independently in two SDKs: each verified a different subset,
+  and each subset looked complete in isolation.
 
 ### Changed
 
@@ -1020,19 +1046,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add public-facing Threat Modeling & Security website section
 - Update benchmarks page to run 4 and add resource usage
 - Run-4 analysis — post-fix matrix verified, resource usage, prod-limit guidance
-
-### Fixed
-
-- Supply the mandatory auth pepper to release-mode stacks
-- Propagate session-revocation failures; warn on mintable rate-limit key; verify remediation evidence
-- Decouple gRPC admin ceiling from authz; bound infra family; tenant-filter member_of; reorder session-cache invalidation
-- SDK bench correctness/telemetry + run-5 harness prep (I9-I19)
-- Correct gRPC units, scope limits per method, revise internet defaults
-
-## [Unreleased]
-
-### Changed
-
 - **⚠ BREAKING — a certificate-authenticated device now receives a machine
   token (`aud: axiam:m2m`), not a user token.** `POST /api/v1/auth/device`
   stamped `aud: axiam:user`, so any device that authenticated by mTLS passed
@@ -1057,89 +1070,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gRPC is unchanged: its interceptor accepts both audiences on all services, so
   the m2m/user split is REST-only.
 
-### Security
-
-- **A client-existence oracle survived on the `authorization_code` grant
-  (SEC-086, second pass).** The first pass unified every token-endpoint
-  `error_description` behind one constant, but only two of the three grants
-  ordered their checks safely. On `authorization_code` the client lookup ran
-  *before* the secret-presence check and the grant-type check ran *before*
-  secret verification, so an unauthenticated caller could still separate "no
-  such client" from "client exists" — with no secret at all, and again with any
-  dummy secret. Both checks now follow verification, matching
-  `client_credentials` and `refresh_token`. `unauthorized_client` is now
-  reachable only by a caller who has already proven possession of the secret.
-
-- **The failed-client-auth audit row could be written into any tenant
-  (SEC-087).** `/oauth2/token` is unauthenticated and takes `tenant_id` from a
-  query parameter, so the audit row added in the previous change let an
-  anonymous caller append rows to an arbitrary — or nonexistent — tenant's
-  append-only log. The tenant is now resolved before the write; the
-  caller-supplied `client_id` is truncated; and the recorded IP is the
-  transport peer address, with the forgeable `X-Forwarded-For` value kept in
-  metadata under a name marking it untrusted.
-
-- **Neither half of the decision-cache staleness bound is operator-removable any
-  more (§15.2).** Two gaps compounded: `decision_cache_ttl_secs` was an
-  unbounded `u64` (unlike `cleanup_interval_secs`, clamped since T-04-35), and
-  the cross-replica heartbeat that shortens the undelivered-invalidation window
-  could be switched off with `..._HEARTBEAT_SECS=0` and only a warning. An
-  operator could therefore set a multi-hour stale-allow window *and* disable the
-  mechanism that detects a replica whose queue has been unbound.
-
-  The TTL is now clamped to 300 s — in the accessor `build_decision_cache`
-  calls, not in `main.rs`, so every construction path is covered. Heartbeats
-  cannot be disabled while broadcast is on; out-of-range intervals clamp to
-  `1..=60`. The `0` escape hatch was introduced in this same unreleased change,
-  so removing it breaks nothing.
-
-- **A replayed heartbeat can no longer satisfy the liveness watchdog (§15.2).**
-  Heartbeats bypass the replay `NonceGuard` deliberately — they arrive on a
-  fixed interval from every replica and would evict real invalidation nonces
-  from its bounded capacity. That left a narrow path: a party with broker rights
-  who captured one signed heartbeat could replay it inside the freshness window
-  to keep a replica's watchdog satisfied while its queue was unbound, which is
-  the exact adversary the heartbeat exists to detect. Acceptance is now bound to
-  nonces the replica itself published and has not yet seen back.
-
-### Added
-
-- **Service accounts can now authenticate via OAuth2 client-credentials.**
-  `POST /api/v1/service-accounts` and `rotate-secret` have always returned a
-  `client_secret` to the operator — but **no flow accepted it**. A service
-  account's only working authentication path was mTLS
-  (`POST /api/v1/auth/device`); the client-credentials grant verified against
-  the `oauth2_client` table only, and nothing ever compared
-  `service_account.client_secret_hash` against a presented secret.
-
-  The grant now dispatches on the `client_id` prefix — `oa_` for `oauth2_client`,
-  `sa_` for `service_account`, both server-generated and disjoint, so one lookup
-  still suffices. The prefix is **not** a security decision: it only selects the
-  table, and the presented secret must still verify against the row found.
-
-  Three deliberate properties:
-  - **The secret is verified before the status check**, so a caller cannot
-    distinguish "exists but disabled" from "does not exist" by timing. A
-    non-Active account returns the same generic `invalid_client`.
-  - **No scope may be requested.** A service account registers no scopes, and
-    the subset rule leaves the empty set as the only valid request; its
-    authorization comes from the roles assigned to it, as on the mTLS path.
-  - **The token's `sub` is the service-account id**, not the client id, and its
-    `aud` is `axiam:m2m`, so §4.3/`SEC-006` route narrowing keeps it off user
-    routes. A service account is now the same principal however it authenticated
-    — see the breaking device-audience change below, which makes the mTLS path
-    stamp `axiam:m2m` as well.
-
-- **Legacy client-secret hashes in `service_account` are now countable
-  (§15.2).** `count_legacy_secret_hashes(tenant)` plus a startup warning.
-  With the grant above in place these rows now migrate lazily on first
-  authentication, exactly as `oauth2_client` rows do; the count covers the case
-  migration cannot reach — a service account that never authenticates — which is
-  what decides whether the legacy hash arm can be retired. **Rotation** clears
-  such a row.
-
 ### Fixed
 
+- Supply the mandatory auth pepper to release-mode stacks
+- Propagate session-revocation failures; warn on mintable rate-limit key; verify remediation evidence
+- Decouple gRPC admin ceiling from authz; bound infra family; tenant-filter member_of; reorder session-cache invalidation
+- SDK bench correctness/telemetry + run-5 harness prep (I9-I19)
+- Correct gRPC units, scope limits per method, revise internet defaults
 - **The cache-invalidation publisher no longer serialises mutations behind a
   network round-trip (§15.3.4).** The channel-slot mutex was held across the
   broker confirm, so every access-narrowing mutation in the process queued on
@@ -1315,33 +1252,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `client_id` now emits a `warn!` naming the caveat and pointing at the sizing
   guide, and `ip_client_id` a softer `info!` — its unforgeable IP half confines
   the collateral to the attacker's own source.
-
-### Added
-
-- **CI gate: remediation evidence must resolve on `main` (§11.2).**
-  `scripts/check-remediation-evidence.py` parses the remediation tables in
-  `claude_dev/security-analysis-*.md` and verifies every cited commit is
-  reachable from `origin/main` in the repository it claims. A recorded commit
-  hash is not evidence a fix shipped — a hash exists the moment a commit is
-  authored, on any branch — and this pass caught a real instance of a fix
-  recorded as remediated while still unmerged. Rows that cannot be verified are
-  printed individually under an explicit `SKIPPED, NOT VERIFIED` banner rather
-  than passing silently.
-
-- **`sdks/CONTRACT.md` §10.1 — minimum local-verification set (normative).**
-  States once, for every SDK, what a guard must check before turning a token
-  into an identity: signature with `alg` pinned before key lookup, `exp`
-  REQUIRED, `nbf` honoured when present, `tenant_id` asserted against the
-  configured tenant, `iss`/`aud` checked when configured, and a named bounded
-  clock skew — all fail-closed. Written because `SEC-071` and `SEC-080` were the
-  same defect found independently in two SDKs: each verified a different subset,
-  and each subset looked complete in isolation.
-
-### Fixed
-
 - **gRPC admin ceiling no longer derives from the read-sized authz ceiling
   (SEC-079).** See the entry below for the units correction that made this
   necessary.
+
+### Security
+
+- **A client-existence oracle survived on the `authorization_code` grant
+  (SEC-086, second pass).** The first pass unified every token-endpoint
+  `error_description` behind one constant, but only two of the three grants
+  ordered their checks safely. On `authorization_code` the client lookup ran
+  *before* the secret-presence check and the grant-type check ran *before*
+  secret verification, so an unauthenticated caller could still separate "no
+  such client" from "client exists" — with no secret at all, and again with any
+  dummy secret. Both checks now follow verification, matching
+  `client_credentials` and `refresh_token`. `unauthorized_client` is now
+  reachable only by a caller who has already proven possession of the secret.
+
+- **The failed-client-auth audit row could be written into any tenant
+  (SEC-087).** `/oauth2/token` is unauthenticated and takes `tenant_id` from a
+  query parameter, so the audit row added in the previous change let an
+  anonymous caller append rows to an arbitrary — or nonexistent — tenant's
+  append-only log. The tenant is now resolved before the write; the
+  caller-supplied `client_id` is truncated; and the recorded IP is the
+  transport peer address, with the forgeable `X-Forwarded-For` value kept in
+  metadata under a name marking it untrusted.
+
+- **Neither half of the decision-cache staleness bound is operator-removable any
+  more (§15.2).** Two gaps compounded: `decision_cache_ttl_secs` was an
+  unbounded `u64` (unlike `cleanup_interval_secs`, clamped since T-04-35), and
+  the cross-replica heartbeat that shortens the undelivered-invalidation window
+  could be switched off with `..._HEARTBEAT_SECS=0` and only a warning. An
+  operator could therefore set a multi-hour stale-allow window *and* disable the
+  mechanism that detects a replica whose queue has been unbound.
+
+  The TTL is now clamped to 300 s — in the accessor `build_decision_cache`
+  calls, not in `main.rs`, so every construction path is covered. Heartbeats
+  cannot be disabled while broadcast is on; out-of-range intervals clamp to
+  `1..=60`. The `0` escape hatch was introduced in this same unreleased change,
+  so removing it breaks nothing.
+
+- **A replayed heartbeat can no longer satisfy the liveness watchdog (§15.2).**
+  Heartbeats bypass the replay `NonceGuard` deliberately — they arrive on a
+  fixed interval from every replica and would evict real invalidation nonces
+  from its bounded capacity. That left a narrow path: a party with broker rights
+  who captured one signed heartbeat could replay it inside the freshness window
+  to keep a replica's watchdog satisfied while its queue was unbound, which is
+  the exact adversary the heartbeat exists to detect. Acceptance is now bound to
+  nonces the replica itself published and has not yet seen back.
 
 ## [1.0.0-alpha23] - 2026-08-02
 
@@ -1373,15 +1331,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add a dry-run mode to rehearse the matrix in minutes
 - Raised RAM resources in benchmarks to improve Keycloak performance (Axiam and Zitadel performs well even with 1024m)
-
-### Fixed
-
-- Hold a live pool reference in repositories, not a boot-time clone
-
-## [Unreleased]
-
-### Added
-
 - **OAuth2 Device Authorization Grant is reachable (RFC 8628, B2).** The
   grant's core, storage and state machine landed earlier; nothing was mounted,
   so no device could use it. Now: `POST /oauth2/device_authorization` issues
@@ -1479,6 +1428,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hold a live pool reference in repositories, not a boot-time clone
 - Two **full table scans on the authorization hot path** (I7). Every uncached authorization
   check — REST, gRPC and AMQP alike — walked the whole `grants` table (every role-to-permission
   grant of every tenant) and the whole `has_role` table (every role assignment of every user

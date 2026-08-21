@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha37] - 2026-08-21
+
+### Added
+
+- Close T-132, T-131, T-129 and T-153
+- Enforce a default audit retention policy (T-119)
+
+### Changed
+
+- Re-export openapi.json for the T-153 metadata_stale deny reason
+- Re-export openapi.json after the RefreshRequest org_id change
+- Cover the two 0% model files, the settings diff, and the reactor bridge
+- Bring the Security section up to alpha34
+- Bring the STRIDE model up to alpha34
+
+### Fixed
+
+- Make usernameless passkey sign-in actually work
+- Treat npmjs.com as bot-hostile in the website link check
+- Repair four broken SDK doc links and check them on a schedule
+- Apply the SEC-053 ingress policies, and close three stale threats
+- Repair token refresh, passkey origin, and the login-page bounce
+- Make prod teardown work and refuse to mint creds for live volumes
+
 ## [1.0.0-alpha35] - 2026-08-21
 
 ### Changed

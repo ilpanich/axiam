@@ -846,4 +846,116 @@ mod tests {
             .permits()
         );
     }
+
+    // --- SEC-101 type-erasure bridge ---
+
+    /// A gate that records what it was asked and answers a fixed outcome.
+    struct RecordingGate {
+        outcome: ReactorOutcome,
+        dispatchable: bool,
+        seen: std::sync::Mutex<Vec<(Uuid, &'static str, serde_json::Value)>>,
+    }
+
+    impl RecordingGate {
+        fn new(outcome: ReactorOutcome, dispatchable: bool) -> Self {
+            Self {
+                outcome,
+                dispatchable,
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ReactorGate for RecordingGate {
+        async fn intercept(
+            &self,
+            tenant_id: Uuid,
+            event: &'static str,
+            payload: serde_json::Value,
+        ) -> ReactorOutcome {
+            self.seen.lock().unwrap().push((tenant_id, event, payload));
+            self.outcome.clone()
+        }
+
+        fn can_dispatch(&self) -> bool {
+            self.dispatchable
+        }
+    }
+
+    /// The erased gate must be indistinguishable from the concrete one.
+    ///
+    /// This bridge exists so a call site can write `gate.intercept(..)` without
+    /// knowing which of the two traits it holds. Its correctness is invisible
+    /// by construction — if `intercept_dyn` dropped an argument or inverted
+    /// `can_dispatch`, every caller would keep compiling and the security gate
+    /// would quietly answer for the wrong tenant, or answer at all when it
+    /// should have refused registration.
+    #[tokio::test]
+    async fn an_erased_gate_forwards_arguments_and_outcome_unchanged() {
+        let tenant = Uuid::new_v4();
+        let payload = serde_json::json!({"username": "alice"});
+        let concrete = std::sync::Arc::new(RecordingGate::new(
+            ReactorOutcome::Deny {
+                reason: "nope".into(),
+            },
+            true,
+        ));
+        let erased: SharedReactorGate = concrete.clone();
+
+        let outcome = erased
+            .intercept(tenant, "user.pre_create", payload.clone())
+            .await;
+        assert_eq!(
+            outcome,
+            ReactorOutcome::Deny {
+                reason: "nope".into()
+            }
+        );
+
+        let seen = concrete.seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "exactly one call must reach the concrete gate"
+        );
+        assert_eq!(seen[0].0, tenant, "the tenant must not be substituted");
+        assert_eq!(
+            seen[0].1, "user.pre_create",
+            "the event must not be substituted"
+        );
+        assert_eq!(seen[0].2, payload, "the payload must arrive unmodified");
+    }
+
+    #[tokio::test]
+    async fn an_erased_gate_forwards_can_dispatch_in_both_directions() {
+        // Both directions, because a bridge that always returned `true` would
+        // pass a test that only checked the `true` case — and `false` is the
+        // answer that stops a tenant registering a reactor that could never be
+        // reached and would then fail closed on every dispatch.
+        for dispatchable in [true, false] {
+            let erased: SharedReactorGate =
+                std::sync::Arc::new(RecordingGate::new(ReactorOutcome::Allow, dispatchable));
+            assert_eq!(erased.can_dispatch(), dispatchable);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_outcome_variant_survives_erasure() {
+        let variants = [
+            ReactorOutcome::Allow,
+            ReactorOutcome::Deny { reason: "r".into() },
+            ReactorOutcome::Mutate {
+                patch: BTreeMap::from([("k".to_string(), "v".to_string())]),
+            },
+            ReactorOutcome::RequireMfa,
+        ];
+        for expected in variants {
+            let erased: SharedReactorGate =
+                std::sync::Arc::new(RecordingGate::new(expected.clone(), true));
+            let got = erased
+                .intercept(Uuid::new_v4(), "login.post_auth", serde_json::json!({}))
+                .await;
+            assert_eq!(got, expected);
+        }
+    }
 }

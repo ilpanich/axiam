@@ -1293,4 +1293,152 @@ mod tests {
         assert_eq!(diff.mfa_enforced, None);
         assert_eq!(diff.max_failed_login_attempts, None);
     }
+
+    // --- SettingsScope Display / FromStr ---
+
+    #[test]
+    fn settings_scope_round_trips_through_its_string_form() {
+        // These strings are persisted and appear in API payloads, so Display
+        // and FromStr have to stay each other's inverse.
+        for scope in [SettingsScope::Org, SettingsScope::Tenant] {
+            let text = scope.to_string();
+            let parsed: SettingsScope = text.parse().unwrap();
+            assert_eq!(parsed, scope, "{text} must parse back to itself");
+        }
+        assert_eq!(SettingsScope::Org.to_string(), "org");
+        assert_eq!(SettingsScope::Tenant.to_string(), "tenant");
+    }
+
+    #[test]
+    fn an_unknown_settings_scope_is_an_error_naming_the_input() {
+        let err = "organisation".parse::<SettingsScope>().unwrap_err();
+        assert!(
+            err.contains("organisation"),
+            "the error must name what was rejected: {err}"
+        );
+        assert!(
+            "Org".parse::<SettingsScope>().is_err(),
+            "parsing is case-sensitive"
+        );
+        assert!("".parse::<SettingsScope>().is_err());
+    }
+
+    // --- diff_against_org completeness ---
+
+    /// Every overridable field must appear in the diff when it differs.
+    ///
+    /// The existing `diff_against_org` tests change four fields, which leaves
+    /// the other nineteen comparisons executed only down their "same" branch.
+    /// That is precisely the shape of bug this guards: a field added to
+    /// `SecuritySettings` and forgotten in `diff_against_org` produces a tenant
+    /// override that silently drops it, so an administrator sets a value, the
+    /// API accepts it, and the setting never takes effect. Nothing errors.
+    #[test]
+    fn diff_against_org_reports_every_field_that_differs() {
+        let org = org_settings();
+
+        let mut changed = system_defaults();
+        changed.min_length += 4;
+        changed.require_uppercase = !changed.require_uppercase;
+        changed.require_lowercase = !changed.require_lowercase;
+        changed.require_digits = !changed.require_digits;
+        changed.require_symbols = !changed.require_symbols;
+        changed.password_history_count += 3;
+        changed.hibp_check_enabled = !changed.hibp_check_enabled;
+        changed.mfa_enforced = !changed.mfa_enforced;
+        changed.mfa_challenge_lifetime_secs += 60;
+        changed.max_failed_login_attempts += 2;
+        changed.lockout_duration_secs += 30;
+        changed.lockout_backoff_multiplier += 0.5;
+        // Kept >= lockout_duration_secs so the row stays internally consistent;
+        // this test is about the diff, not about validation rejecting nonsense.
+        changed.max_lockout_duration_secs += 3_600;
+        changed.access_token_lifetime_secs += 100;
+        changed.refresh_token_lifetime_secs += 1_000;
+        changed.email_verification_required = !changed.email_verification_required;
+        changed.email_verification_grace_period_hours += 12;
+        changed.default_cert_validity_days += 5;
+        changed.max_cert_validity_days += 50;
+        changed.admin_notifications_enabled = !changed.admin_notifications_enabled;
+        changed.opaque_mode = OpaqueMode::Optional;
+        changed.opaque_ksf = OpaqueKsf::Scrypt;
+        // `opaque_suite` is deliberately NOT changed: `OpaqueSuite` has exactly
+        // one variant, so it cannot differ from the baseline and its branch is
+        // unreachable until a second suite exists.
+
+        let tenant = settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &changed);
+        let diff = diff_against_org(&org, &tenant);
+
+        assert_eq!(diff.min_length, Some(changed.min_length));
+        assert_eq!(diff.require_uppercase, Some(changed.require_uppercase));
+        assert_eq!(diff.require_lowercase, Some(changed.require_lowercase));
+        assert_eq!(diff.require_digits, Some(changed.require_digits));
+        assert_eq!(diff.require_symbols, Some(changed.require_symbols));
+        assert_eq!(
+            diff.password_history_count,
+            Some(changed.password_history_count)
+        );
+        assert_eq!(diff.hibp_check_enabled, Some(changed.hibp_check_enabled));
+        assert_eq!(diff.mfa_enforced, Some(changed.mfa_enforced));
+        assert_eq!(
+            diff.mfa_challenge_lifetime_secs,
+            Some(changed.mfa_challenge_lifetime_secs)
+        );
+        assert_eq!(
+            diff.max_failed_login_attempts,
+            Some(changed.max_failed_login_attempts)
+        );
+        assert_eq!(
+            diff.lockout_duration_secs,
+            Some(changed.lockout_duration_secs)
+        );
+        assert_eq!(
+            diff.lockout_backoff_multiplier,
+            Some(changed.lockout_backoff_multiplier)
+        );
+        assert_eq!(
+            diff.max_lockout_duration_secs,
+            Some(changed.max_lockout_duration_secs)
+        );
+        assert_eq!(
+            diff.access_token_lifetime_secs,
+            Some(changed.access_token_lifetime_secs)
+        );
+        assert_eq!(
+            diff.refresh_token_lifetime_secs,
+            Some(changed.refresh_token_lifetime_secs)
+        );
+        assert_eq!(
+            diff.email_verification_required,
+            Some(changed.email_verification_required)
+        );
+        assert_eq!(
+            diff.email_verification_grace_period_hours,
+            Some(changed.email_verification_grace_period_hours)
+        );
+        assert_eq!(
+            diff.default_cert_validity_days,
+            Some(changed.default_cert_validity_days)
+        );
+        assert_eq!(
+            diff.max_cert_validity_days,
+            Some(changed.max_cert_validity_days)
+        );
+        assert_eq!(
+            diff.admin_notifications_enabled,
+            Some(changed.admin_notifications_enabled)
+        );
+        assert_eq!(diff.opaque_mode, Some(changed.opaque_mode));
+        assert_eq!(diff.opaque_ksf, Some(changed.opaque_ksf));
+    }
+
+    /// The mirror of the test above: an identical tenant produces an override
+    /// with nothing set, so re-saving unchanged settings does not manufacture
+    /// overrides that then pin the tenant against future org-baseline changes.
+    #[test]
+    fn diff_against_org_sets_nothing_when_the_tenant_matches_the_baseline() {
+        let org = org_settings();
+        let same = settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &system_defaults());
+        assert!(diff_against_org(&org, &same).is_empty());
+    }
 }

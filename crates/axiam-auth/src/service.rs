@@ -426,6 +426,40 @@ impl<
         Ok(LoginResult::Success(output))
     }
 
+    /// Refuse a sign-in by a principal whose account is not in a state that
+    /// permits one — temporary lockout, then account status.
+    ///
+    /// Every other sign-in path reaches [`Self::check_user_status`] through a
+    /// step that owns a `User` already: [`Self::login`] after the password
+    /// verifies, [`Self::verify_mfa`] after it re-fetches the user, `refresh`
+    /// after it loads the session's owner. A ceremony that authenticates
+    /// *without* any of those steps — usernameless passkey sign-in, where a
+    /// credential alone both names the user and proves them — has no such
+    /// moment, so it needs this one.
+    ///
+    /// Possession of a valid passkey is not the same question as whether the
+    /// account may sign in. Deactivating a user, locking one out for repeated
+    /// failures, or anonymising one under a GDPR erasure must all take effect
+    /// on every path, and a credential enrolled while the account was healthy
+    /// keeps verifying perfectly well afterwards.
+    ///
+    /// The lockout check is deliberately first and deliberately returns
+    /// `InvalidCredentials` rather than `AccountLocked`, matching
+    /// [`Self::login`]: which of the two a caller sees is otherwise a fact
+    /// about the account disclosed to whoever asks.
+    pub fn ensure_can_sign_in(&self, user: &User) -> Result<(), AuthError> {
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Utc::now()
+        {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )
+    }
+
     /// Fire `login.post_auth` for a principal whose authentication has just
     /// succeeded, and apply the verdict (X1 / R2.2, SEC-095).
     ///

@@ -195,6 +195,79 @@ describe("authentication", () => {
   });
 });
 
+describe("discoverable (usernameless) authentication", () => {
+  const mockDiscoverableEndpoints = () =>
+    apiMock.post.mockImplementation((url: string) =>
+      url.endsWith("/authenticate/discoverable/start")
+        ? Promise.resolve(res(authenticationChallenge))
+        : Promise.resolve(res({ session_id: "s1", expires_in: 900 })),
+    );
+
+  it("sends the workspace, never a challenge token", async () => {
+    mockDiscoverableEndpoints();
+    startAuthenticationMock.mockResolvedValue({ id: "assertion" });
+
+    await expect(
+      webauthnService.authenticateDiscoverable("acme", "default"),
+    ).resolves.toEqual({ session_id: "s1", expires_in: 900 });
+
+    // The distinct endpoints are the fix, not a refactor: the challenge-token
+    // ones cannot serve this flow, because they decode that token to learn who
+    // is signing in and reject an empty one before doing anything else.
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/authenticate/discoverable/start",
+      { org_slug: "acme", tenant_slug: "default" },
+    );
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/authenticate/discoverable/finish",
+      { state_token: "state-xyz", response: { id: "assertion" } },
+    );
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/authenticate/start",
+      expect.anything(),
+    );
+  });
+
+  it("passes the server's options through untouched", async () => {
+    mockDiscoverableEndpoints();
+    startAuthenticationMock.mockResolvedValue({ id: "assertion" });
+
+    await webauthnService.authenticateDiscoverable("acme", "default");
+
+    expect(startAuthenticationMock.mock.calls[0][0].optionsJSON).toEqual(
+      authenticationChallenge.challenge.publicKey,
+    );
+    expect(startAuthenticationMock.mock.calls[0][0].useBrowserAutofill).toBe(false);
+  });
+
+  it("enables browser autofill in conditional mode", async () => {
+    mockDiscoverableEndpoints();
+    startAuthenticationMock.mockResolvedValue({ id: "assertion" });
+
+    await webauthnService.authenticateDiscoverable("acme", "default", {
+      conditional: true,
+    });
+
+    expect(startAuthenticationMock.mock.calls[0][0].useBrowserAutofill).toBe(true);
+  });
+
+  it("does not post a finish when the ceremony fails", async () => {
+    mockDiscoverableEndpoints();
+    startAuthenticationMock.mockRejectedValue(
+      Object.assign(new Error("no"), { name: "NotAllowedError" }),
+    );
+
+    await expect(
+      webauthnService.authenticateDiscoverable("acme", "default"),
+    ).rejects.toThrow();
+
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/authenticate/discoverable/finish",
+      expect.anything(),
+    );
+  });
+});
+
 describe("error classification", () => {
   it.each([
     ["NotAllowedError", "cancelled"],

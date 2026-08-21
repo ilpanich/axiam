@@ -311,6 +311,11 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/auth/webauthn/register/finish",
     "/api/v1/auth/webauthn/authenticate/start",
     "/api/v1/auth/webauthn/authenticate/finish",
+    // Usernameless sign-in: public for the same reason as the pair above —
+    // these ARE the authentication, so requiring a credential to reach them
+    // would be circular.
+    "/api/v1/auth/webauthn/authenticate/discoverable/start",
+    "/api/v1/auth/webauthn/authenticate/discoverable/finish",
     // Health probes
     "/health",
     "/ready",

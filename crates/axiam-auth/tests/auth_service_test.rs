@@ -1,6 +1,7 @@
 //! Integration tests for the authentication service.
 
 use axiam_auth::config::AuthConfig;
+use axiam_auth::error::AuthError;
 use axiam_auth::service::{AuthService, LoginInput, LoginResult, RefreshInput, VerifyMfaInput};
 use axiam_auth::token;
 use axiam_core::error::AxiamError;
@@ -1648,4 +1649,148 @@ async fn change_password_new_password_succeeds() {
     )
     .await
     .expect("changing to a new password should succeed");
+}
+
+// ---------------------------------------------------------------------------
+// ensure_can_sign_in — the account-status gate for credential-only sign-in
+// ---------------------------------------------------------------------------
+//
+// Usernameless passkey sign-in authenticates from a credential alone, so it
+// never passes through `login` or `verify_mfa` and never reaches their status
+// checks. These assert the gate that stands in for them: a passkey enrolled
+// while an account was healthy keeps verifying after the account is disabled,
+// so "the assertion is valid" must not be allowed to mean "this user may sign
+// in".
+
+#[tokio::test]
+async fn ensure_can_sign_in_admits_an_active_user() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    svc.ensure_can_sign_in(&user)
+        .expect("an active user may sign in");
+}
+
+#[tokio::test]
+async fn ensure_can_sign_in_refuses_a_deactivated_user() {
+    for status in [
+        UserStatus::Inactive,
+        UserStatus::Locked,
+        UserStatus::Anonymized,
+    ] {
+        let (
+            user_repo,
+            session_repo,
+            fed_repo,
+            refresh_token_repo,
+            _org_id,
+            tenant_id,
+            user_id,
+            _db,
+        ) = setup().await;
+
+        user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+
+        let svc = AuthService::new(
+            user_repo,
+            session_repo,
+            fed_repo,
+            refresh_token_repo,
+            test_config(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        );
+
+        assert!(
+            svc.ensure_can_sign_in(&user).is_err(),
+            "a {status:?} user must not be able to sign in with a passkey alone"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ensure_can_sign_in_refuses_a_user_inside_a_lockout_window() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, _db) =
+        setup().await;
+
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                locked_until: Some(Some(Utc::now() + Duration::seconds(300))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // Brute-force lockout must not be walkable by switching to the passkey
+    // button, and the refusal is the generic one `login` gives so that which
+    // of the two reasons applies is not disclosed.
+    assert!(matches!(
+        svc.ensure_can_sign_in(&user),
+        Err(AuthError::InvalidCredentials)
+    ));
+}
+
+#[tokio::test]
+async fn ensure_can_sign_in_admits_a_user_whose_lockout_has_expired() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, _db) =
+        setup().await;
+
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                locked_until: Some(Some(Utc::now() - Duration::seconds(10))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    svc.ensure_can_sign_in(&user)
+        .expect("an elapsed lockout must not keep locking the account out");
 }

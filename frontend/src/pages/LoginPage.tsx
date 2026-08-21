@@ -124,7 +124,7 @@ export function LoginPage() {
   };
 
   /**
-   * Run a WebAuthn assertion against an MFA challenge token.
+   * Shared wrapper around a passkey ceremony.
    *
    * `conditional` selects passkey autofill (the browser surfaces saved
    * passkeys from the username field). In that mode the promise may never
@@ -132,13 +132,16 @@ export function LoginPage() {
    * rather than shown: an error banner for a prompt the user never engaged
    * with would be noise on a page they are still typing into.
    */
-  const runPasskey = async (challengeToken: string, conditional = false) => {
+  const runPasskey = async (
+    ceremony: () => Promise<unknown>,
+    conditional = false,
+  ) => {
     if (!conditional) {
       setPasskeyBusy(true);
       setError(null);
     }
     try {
-      await webauthnService.authenticate(challengeToken, { conditional });
+      await ceremony();
       await completeSignIn();
     } catch (err) {
       if (!conditional) {
@@ -149,15 +152,33 @@ export function LoginPage() {
     }
   };
 
+  /** Passkey as a *second factor*, against an MFA challenge token. */
+  const runMfaPasskey = (challengeToken: string) =>
+    runPasskey(() => webauthnService.authenticate(challengeToken));
+
   /**
    * Sign in with a passkey without typing a username first.
    *
    * The server issues a challenge with an empty `allowCredentials`, so the
    * authenticator offers whichever discoverable credential it holds for this
-   * relying party and the assertion itself identifies the user. An empty
-   * challenge token is what asks for that shape.
+   * relying party and the assertion itself identifies the user.
+   *
+   * The workspace still has to be named, because a discoverable credential is
+   * resolved within one tenant -- which is why this is reachable only from the
+   * credentials step, after the org/tenant step has collected it.
    */
-  const handleDiscoverablePasskey = () => runPasskey("");
+  const runDiscoverablePasskey = (conditional = false) =>
+    runPasskey(
+      () =>
+        webauthnService.authenticateDiscoverable(
+          orgTenantData.orgSlug,
+          orgTenantData.tenantSlug,
+          { conditional },
+        ),
+      conditional,
+    );
+
+  const handleDiscoverablePasskey = () => runDiscoverablePasskey();
 
   /**
    * C2: conditional mediation ("passkey autofill") -- the browser offers saved
@@ -177,14 +198,14 @@ export function LoginPage() {
     void (async () => {
       if (!(await isConditionalMediationAvailable()) || cancelled) return;
       conditionalStarted.current = true;
-      await runPasskey("", true);
+      await runDiscoverablePasskey(true);
     })();
     return () => {
       cancelled = true;
     };
-    // `runPasskey` closes over navigation state that does not change within a
-    // step, and re-running this effect would start a second ceremony that
-    // aborts the first.
+    // `runDiscoverablePasskey` closes over navigation state and the workspace
+    // slugs, neither of which changes within a step, and re-running this effect
+    // would start a second ceremony that aborts the first.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, passkeySupported]);
 
@@ -632,7 +653,7 @@ export function LoginPage() {
                     type="button"
                     variant="outline"
                     className="w-full"
-                    onClick={() => runPasskey(mfaChallengeToken)}
+                    onClick={() => runMfaPasskey(mfaChallengeToken)}
                     disabled={passkeyBusy || isLoading}
                   >
                     {passkeyBusy ? (

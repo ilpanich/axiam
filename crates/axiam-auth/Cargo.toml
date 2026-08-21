@@ -43,7 +43,13 @@ webauthn-rs = { workspace = true }
 opaque-ke = { version = "4.0.1", default-features = false, features = ["ristretto255", "std"] }
 sha2_v10 = { version = "0.10", package = "sha2" }
 axiam-opaque = { version = "1.0.0-alpha35", path = "../axiam-opaque" }
-# webauthn-rs-proto: removed — only webauthn-rs is used directly in axiam-auth; types come through webauthn-rs re-exports
+# webauthn-rs-proto: was removed once, on the grounds that every type needed
+# here came through a webauthn-rs re-export. That stopped being true with
+# usernameless sign-in: `ResidentKeyRequirement` is the one type
+# `require_discoverable_credential` needs and the only one `webauthn_rs::prelude`
+# does not re-export. Same 0.5 version as webauthn-rs, so cargo unifies it and
+# the type is identical to the one inside `CreationChallengeResponse`.
+webauthn-rs-proto = { workspace = true }
 
 [dev-dependencies]
 axiam-test-support = { workspace = true }

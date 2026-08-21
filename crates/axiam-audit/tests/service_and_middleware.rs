@@ -98,6 +98,9 @@ impl AuditLogRepository for RecordingRepo {
     ) -> AxiamResult<u64> {
         unimplemented!()
     }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
+        unimplemented!()
+    }
 }
 
 /// Poll until the recording repo has at least `n` entries, or time out.
@@ -591,6 +594,9 @@ impl AuditLogRepository for PanicRepo {
         _user_id: Uuid,
         _pseudonym: &str,
     ) -> AxiamResult<u64> {
+        unimplemented!()
+    }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
         unimplemented!()
     }
 }

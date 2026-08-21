@@ -837,6 +837,31 @@ pub trait AuditLogRepository: Send + Sync {
         user_id: Uuid,
         pseudonym: &str,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete audit entries older than `cutoff`, across every tenant.
+    ///
+    /// T-119: the only deletion path on `audit_log`, and the second sanctioned
+    /// non-INSERT write after [`Self::pseudonymize_actor`]. It exists because
+    /// an append-only table with no retention is a table that grows without
+    /// bound until the datastore degrades — an availability failure reached by
+    /// doing nothing at all.
+    ///
+    /// Deliberately **not** reachable from any HTTP handler. Retention is a
+    /// deployment-wide policy applied by the background sweep on a clock, not
+    /// an operation an administrator can invoke against a time range of their
+    /// choosing — the whole value of an audit trail is that the people it
+    /// records cannot edit it. Keeping this off the API surface is what keeps
+    /// "prune old records" from becoming "delete the evidence".
+    ///
+    /// Callers are responsible for the cutoff being a retention boundary
+    /// rather than an arbitrary instant; `0` days must be handled by the
+    /// caller as "never prune", not passed here as `now`.
+    ///
+    /// Returns the count of deleted rows.
+    fn prune_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------

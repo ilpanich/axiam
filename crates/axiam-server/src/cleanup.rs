@@ -85,6 +85,8 @@ pub struct CleanupTask<C: Connection> {
     gdpr_pepper: Option<[u8; 32]>,
     export_encryption_key: Option<[u8; 32]>,
     interval: Duration,
+    /// Audit retention (T-119). `None` = never prune.
+    audit_retention: Option<chrono::Duration>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -182,6 +184,12 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         gdpr_pepper: Option<[u8; 32]>,
         export_encryption_key: Option<[u8; 32]>,
         interval: Duration,
+        // A required parameter rather than a builder setter, despite the
+        // already-long list: `None` means "never prune", so a forgotten setter
+        // would silently restore unbounded audit growth (T-119) and nothing
+        // would ever complain. Being unable to construct the task without
+        // stating a retention policy is the point.
+        audit_retention: Option<chrono::Duration>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -206,6 +214,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             gdpr_pepper,
             export_encryption_key,
             interval,
+            audit_retention,
             shutdown,
         }
     }
@@ -276,6 +285,21 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                             tracing::warn!(error = ?e, "GDPR export sweep failed");
                         }
                     }
+
+                    // Audit retention sweep (T-119).
+                    match self.sweep_audit_retention().await {
+                        Ok(n) if n > 0 => {
+                            // INFO, not DEBUG: this is the one sweep that
+                            // destroys records nothing else can reconstruct,
+                            // so the fact that it ran and how much it removed
+                            // belongs in the operational log by default.
+                            tracing::info!(pruned = n, "audit retention sweep completed");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "audit retention sweep failed");
+                        }
+                    }
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -285,6 +309,33 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit retention sweep (T-119)
+    // -----------------------------------------------------------------------
+
+    /// Delete audit entries older than the configured retention window.
+    ///
+    /// A no-op returning `Ok(0)` when retention is `None` (`0` days), which is
+    /// the explicit opt-out for deployments that archive out-of-band.
+    ///
+    /// The cutoff is recomputed from `Utc::now()` on every tick rather than
+    /// held as a fixed instant, so a long-running process prunes a moving
+    /// window rather than freezing the boundary at whenever it started.
+    ///
+    /// Runs deployment-wide, not per tenant: retention here is a property of
+    /// the datastore an operator is responsible for, and a per-tenant override
+    /// would let one tenant's settings decide how long another tenant's
+    /// records survive on shared storage. Per-tenant retention is a real
+    /// requirement, but it needs a settings surface (org baseline + tenant
+    /// override + API + UI) rather than a field on this sweep.
+    async fn sweep_audit_retention(&self) -> Result<u64, AxiamError> {
+        let Some(retention) = self.audit_retention else {
+            return Ok(0);
+        };
+        let cutoff = Utc::now() - retention;
+        self.audit_repo.prune_older_than(cutoff).await
     }
 
     // -----------------------------------------------------------------------

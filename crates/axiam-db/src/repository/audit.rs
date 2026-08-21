@@ -1,7 +1,19 @@
 //! SurrealDB implementation of [`AuditLogRepository`].
 //!
-//! Audit logs are append-only — the underlying table schema enforces
-//! `FOR update NONE` and `FOR delete NONE`.
+//! Audit logs are append-only, and this module is where that is actually
+//! enforced. The table's `FOR update NONE` / `FOR delete NONE` permissions
+//! read like the guarantee but do not provide it: `axiam-server` connects as
+//! a SurrealDB **root** user, and table permission clauses apply to record and
+//! scope users, not to root. The real control is that only three methods here
+//! write anything other than an INSERT, each deliberate and each documented:
+//!
+//! - [`AuditLogRepository::pseudonymize_actor`] — the GDPR erasure scrub
+//!   (D-03/D-04), which anonymises the subject in place rather than deleting
+//!   the record.
+//! - [`AuditLogRepository::prune_older_than`] — retention (T-119), driven by
+//!   the background sweep on a clock and reachable from no HTTP handler.
+//!
+//! Adding a third is a security decision, not a refactor.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
@@ -427,6 +439,54 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         Ok(count_rows.first().map(|r| r.total).unwrap_or(0))
     }
 
+    async fn prune_older_than(&self, cutoff: DateTime<Utc>) -> AxiamResult<u64> {
+        // T-119. Counted BEFORE deleting: SurrealDB's DELETE returns an empty
+        // result set rather than a row count, and counting afterwards would
+        // report zero no matter how much was removed.
+        let mut count_result = self
+            .db
+            .current()
+            .query("SELECT count() AS total FROM audit_log WHERE timestamp < $cutoff GROUP ALL")
+            .bind(("cutoff", cutoff))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+        let doomed = count_rows.first().map(|r| r.total).unwrap_or(0);
+        if doomed == 0 {
+            return Ok(0);
+        }
+
+        self.db
+            .current()
+            .query("DELETE audit_log WHERE timestamp < $cutoff")
+            .bind(("cutoff", cutoff))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // `audit_signature` is currently defined in the schema but never
+        // written by any code, so today this clause deletes nothing. It is
+        // here so that retention already covers signatures on the day signing
+        // is implemented, rather than silently leaving rows that reference
+        // entries this method has just removed. `signed_at < cutoff` is the
+        // conservative boundary: a signature is written no earlier than the
+        // entries it covers, so anything signed before the cutoff can only
+        // cover entries that are themselves past it.
+        self.db
+            .current()
+            .query("DELETE audit_signature WHERE signed_at < $cutoff")
+            .bind(("cutoff", cutoff))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        Ok(doomed)
+    }
+
     async fn get_by_ids(&self, tenant_id: Uuid, ids: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
         let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         let r = self
@@ -540,5 +600,155 @@ mod tests {
         // Immutable fields preserved
         assert_eq!(scrubbed.action, original_action);
         assert_eq!(scrubbed.timestamp, original_timestamp);
+    }
+
+    // -------------------------------------------------------------------
+    // T-119 — audit retention
+    // -------------------------------------------------------------------
+
+    /// Backdate every existing row, so a subsequently appended entry is the
+    /// only recent one. Simpler and less brittle than trying to target a
+    /// single record by id.
+    async fn backdate_all(db: &Surreal<surrealdb::engine::local::Db>, to: DateTime<Utc>) {
+        db.query("UPDATE audit_log SET timestamp = $to")
+            .bind(("to", to))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prune_older_than_deletes_only_entries_past_the_cutoff() {
+        let db = setup_db().await;
+        let repo = SurrealAuditLogRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+
+        let entry = |action: &str| CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::System,
+            action: action.into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: None,
+        };
+
+        repo.append(entry("old.event")).await.unwrap();
+        backdate_all(&db, Utc::now() - chrono::Duration::days(400)).await;
+        repo.append(entry("recent.event")).await.unwrap();
+
+        let pruned = repo
+            .prune_older_than(Utc::now() - chrono::Duration::days(365))
+            .await
+            .unwrap();
+        assert_eq!(
+            pruned, 1,
+            "exactly the one backdated entry should be pruned"
+        );
+
+        let remaining = repo
+            .list(
+                tenant_id,
+                AuditLogFilter::default(),
+                axiam_core::repository::Pagination::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining.items.len(), 1, "the recent entry must survive");
+        assert_eq!(remaining.items[0].action, "recent.event");
+    }
+
+    /// The count is taken before the DELETE, so this guards the easy mistake
+    /// of counting afterwards and always reporting zero.
+    #[tokio::test]
+    async fn prune_older_than_reports_the_number_actually_deleted() {
+        let db = setup_db().await;
+        let repo = SurrealAuditLogRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+
+        for i in 0..5 {
+            repo.append(CreateAuditLogEntry {
+                tenant_id,
+                actor_id: Uuid::new_v4(),
+                actor_type: ActorType::System,
+                action: format!("event.{i}"),
+                resource_id: None,
+                outcome: AuditOutcome::Success,
+                ip_address: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+        backdate_all(&db, Utc::now() - chrono::Duration::days(400)).await;
+
+        let pruned = repo.prune_older_than(Utc::now()).await.unwrap();
+        assert_eq!(pruned, 5);
+
+        let remaining = repo
+            .list(
+                tenant_id,
+                AuditLogFilter::default(),
+                axiam_core::repository::Pagination::default(),
+            )
+            .await
+            .unwrap();
+        assert!(remaining.items.is_empty());
+    }
+
+    /// Retention is deployment-wide on purpose (see the trait docs), so an
+    /// entry belonging to some other tenant is pruned by the same cutoff.
+    /// Pinning that here means a later change to per-tenant scoping has to be
+    /// deliberate rather than incidental.
+    #[tokio::test]
+    async fn prune_older_than_spans_every_tenant() {
+        let db = setup_db().await;
+        let repo = SurrealAuditLogRepository::new(db.clone());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+
+        for tenant_id in [a, b] {
+            repo.append(CreateAuditLogEntry {
+                tenant_id,
+                actor_id: Uuid::new_v4(),
+                actor_type: ActorType::System,
+                action: "old.event".into(),
+                resource_id: None,
+                outcome: AuditOutcome::Success,
+                ip_address: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+        backdate_all(&db, Utc::now() - chrono::Duration::days(400)).await;
+
+        assert_eq!(repo.prune_older_than(Utc::now()).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_older_than_is_a_no_op_when_nothing_is_old_enough() {
+        let db = setup_db().await;
+        let repo = SurrealAuditLogRepository::new(db.clone());
+
+        repo.append(CreateAuditLogEntry {
+            tenant_id: Uuid::new_v4(),
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::System,
+            action: "recent.event".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let pruned = repo
+            .prune_older_than(Utc::now() - chrono::Duration::days(365))
+            .await
+            .unwrap();
+        assert_eq!(pruned, 0);
     }
 }

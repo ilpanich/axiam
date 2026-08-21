@@ -121,6 +121,9 @@ impl AuditLogRepository for FailingAuditRepo {
     async fn pseudonymize_actor(&self, _t: Uuid, _u: Uuid, _p: &str) -> AxiamResult<u64> {
         unimplemented!()
     }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
+        unimplemented!()
+    }
 }
 
 // Records how many appends happened without a DB, for the counting-only cases.
@@ -162,6 +165,9 @@ impl AuditLogRepository for CountingAuditRepo {
         unimplemented!()
     }
     async fn pseudonymize_actor(&self, _t: Uuid, _u: Uuid, _p: &str) -> AxiamResult<u64> {
+        unimplemented!()
+    }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<chrono::Utc>) -> AxiamResult<u64> {
         unimplemented!()
     }
 }

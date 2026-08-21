@@ -12,23 +12,33 @@
 >
 > ---
 >
-> ## Handoff — the website section is live, and this source has moved ahead of it
+> ## Handoff — the website section is in step with this document
 >
-> **Status: published, source updated 2026-08-21.** The page went live from a
-> version of this document verified against `3ede4d19` (2026-08-04). This source
-> has since been brought up to `1.0.0-alpha34`: OPAQUE (RFC 9807) replacing SRP,
-> HashiCorp Vault as the production secret provider, TLS-only AMQP, SCIM
-> provisioning tokens, deny-override shipping (SEC-040 closed), and the
-> SEC-096…SEC-107 remediation wave. **The website section now needs a refresh
-> pass from this document**: `npm run gen:threat-model` has already been re-run
+> **Status: published, source and section both current as of 2026-08-21.** The
+> page first went live from a version of this document verified against
+> `3ede4d19` (2026-08-04). Both have since been brought up to `1.0.0-alpha34`:
+> OPAQUE (RFC 9807) replacing SRP, HashiCorp Vault as the production secret
+> provider, TLS-only AMQP, SCIM provisioning tokens, deny-override shipping
+> (SEC-040 closed — it is no longer listed as an accepted trade-off),
+> sender-constrained OAuth2 clients and tokens, the WebAuthn MDS3 attestation
+> policy, the SurrealDB persistent-storage-engine requirement, and the
+> SEC-096…SEC-107 remediation wave. `npm run gen:threat-model` has been re-run
 > (the Threat Dragon model gained threats T-176…T-181 and closed T-16/T-87, and
-> `src/threatModel.ts` / `src/threatModelSummary.ts` are regenerated in the same
-> change), so what remains is updating the prose blocks in `src/security.ts` to
-> match the sections below. The new claims here were written against
-> the shipped code and its design documents (`opaque-design.md`,
-> `docs/deployment/vault.md`, `scim-provisioning-token-design.md`,
-> `remediation-plan-2026-08-15.md`); the older claims retain their 2026-08-04
-> file-and-line verification in the analysis document.
+> `src/threatModel.ts` / `src/threatModelSummary.ts` are regenerated from it),
+> and the prose blocks in `src/security.ts` now match the sections below. The
+> alpha34 claims were written against the shipped code and its design documents
+> (`opaque-design.md`, `docs/deployment/vault.md`,
+> `scim-provisioning-token-design.md`, `remediation-plan-2026-08-15.md`); the
+> older claims retain their 2026-08-04 file-and-line verification in the analysis
+> document.
+>
+> **Keeping the two in step.** When this document changes, mirror the change into
+> `src/security.ts` in the same commit. Three bullets there deliberately place
+> their emphasis differently from the Markdown here — the `redirect_uri` bullet,
+> the mounted-Secret-files clause, and the SurrealDB storage-engine bullet. The
+> site's inline renderer splits on backticks before it handles `**`, so a bold
+> span that encloses a code span leaves the rest of the sentence bold; in each
+> case the claim is identical and only the bold markers moved.
 >
 > **Where it lives.** A top-level **Security** nav entry, alongside Docs, SDKs,
 > Benchmarks and Roadmap. In `website/`:

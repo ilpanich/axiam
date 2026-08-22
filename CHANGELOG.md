@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha38] - 2026-08-22
+
+### Changed
+
+- §8b names an enforcement point for Swift, C and C++
+- §24.4 rule 1 does not license dumping a response body
+- Split §24.6 into a JSON bridge and a linked-API helper
+- Add §24 WebAuthn, §25 account lifecycle, §26 PAR; narrow §22.11
+- Carry two review details into the Security section
+- Record the alpha37 closures, and the passkey sign-in path
+
+### Fixed
+
+- Set session cookies when a passkey ceremony completes
+
 ## [1.0.0-alpha37] - 2026-08-21
 
 ### Added

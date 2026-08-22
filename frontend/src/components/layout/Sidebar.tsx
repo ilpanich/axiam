@@ -318,7 +318,7 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
       {/* Footer */}
       <div className="px-5 py-3 border-t border-primary/10">
         <p className="text-[10px] text-muted-foreground/50">
-          AXIAM v1.0.0-alpha37
+          AXIAM v1.0.0-alpha38
         </p>
       </div>
     </aside>

@@ -14,6 +14,9 @@ use webauthn_rs_proto::{
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::client_info::{client_ip, user_agent};
+use crate::middleware::csrf::{
+    HEADER_CSRF, access_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
+};
 use crate::state::AppState;
 
 // -------------------------------------------------------------------
@@ -94,6 +97,67 @@ pub struct WebauthnLoginResponse {
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
+
+/// Build the response for a completed WebAuthn sign-in.
+///
+/// Both passkey ceremonies end here, and both are **primary authentication** —
+/// the same thing `POST /api/v1/auth/login` is — so they must leave the caller
+/// in the same state that endpoint does.
+///
+/// They did not. Until this helper existed, the two `authenticate/*/finish`
+/// handlers answered with the token pair in the JSON body and set no cookies at
+/// all, which made a browser passkey sign-in impossible to complete: the admin
+/// UI runs the ceremony, then calls `GET /api/v1/auth/me` to hydrate the
+/// session, and that endpoint reads `axiam_access` from a cookie that had never
+/// been set. The ceremony succeeded, the session existed server-side, and the
+/// user was bounced back to the login page. `POST /api/v1/auth/refresh` was
+/// unreachable for the same reason (it reads the refresh token from
+/// `axiam_refresh`, never from a body), and every state-changing call after it
+/// would have failed CSRF, there being no `axiam_csrf` to echo.
+///
+/// So this emits the same `Set-Cookie` triple and the same `X-CSRF-Token`
+/// header as `cookie_response_from_output`, the password path's builder.
+///
+/// **The body keeps its tokens.** They are what a non-browser client uses —
+/// CONTRACT.md §24 has the SDKs adopt them directly rather than digging a value
+/// back out of a cookie jar — and dropping them to "match login exactly" would
+/// break every such caller for a symmetry nobody asked for. Adding cookies
+/// beside an unchanged body is additive on the wire: a client that reads only
+/// the body sees no difference.
+fn webauthn_session_response(
+    config: &axiam_auth::config::AuthConfig,
+    out: axiam_auth::LoginOutput,
+) -> HttpResponse {
+    let csrf_token = generate_csrf_token();
+
+    HttpResponse::Ok()
+        .cookie(access_cookie(
+            &out.access_token,
+            config.access_token_lifetime_secs,
+            config.cookie_secure,
+        ))
+        .cookie(refresh_cookie(
+            &out.refresh_token,
+            config.refresh_token_lifetime_secs,
+            config.cookie_secure,
+        ))
+        .cookie(csrf_cookie(
+            &csrf_token,
+            config.access_token_lifetime_secs,
+            config.cookie_secure,
+        ))
+        // CONTRACT.md §3 "Non-browser SDKs" — same reason as the password
+        // path: a cookie jar is awkward to read one value out of, so the
+        // freshly-minted CSRF token is echoed as a header too. No new
+        // disclosure; `axiam_csrf` is not httpOnly and carries the same value.
+        .insert_header((HEADER_CSRF, csrf_token))
+        .json(WebauthnLoginResponse {
+            access_token: out.access_token,
+            refresh_token: out.refresh_token,
+            session_id: out.session_id,
+            expires_in: out.expires_in,
+        })
+}
 
 /// Extract tenant_id from an unverified JWT state token by
 /// base64-decoding the payload segment.  This is safe because the
@@ -501,7 +565,11 @@ async fn resolve_workspace<C: Connection + Clone>(
     tag = "webauthn",
     request_body = FinishAuthenticationRequest,
     responses(
-        (status = 200, description = "Authentication successful",
+        (status = 200,
+         description = "Authentication successful. Sets the axiam_access, \
+                        axiam_refresh and axiam_csrf cookies and echoes the \
+                        CSRF token in X-CSRF-Token, exactly as POST \
+                        /api/v1/auth/login does.",
          body = WebauthnLoginResponse),
         (status = 401, description = "Authentication failed"),
     )
@@ -561,25 +629,26 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
         )
         .await?;
 
-    Ok(HttpResponse::Ok().json(WebauthnLoginResponse {
-        access_token: out.access_token,
-        refresh_token: out.refresh_token,
-        session_id: out.session_id,
-        expires_in: out.expires_in,
-    }))
+    Ok(webauthn_session_response(&state.auth_config, out))
 }
 
 /// `POST /api/v1/auth/webauthn/authenticate/finish`
 ///
-/// Complete a WebAuthn passkey authentication ceremony.  On success
-/// a session is created and access/refresh tokens are issued.
+/// Complete a WebAuthn passkey authentication ceremony.  On success a session
+/// is created and access/refresh tokens are issued **both** as the
+/// `axiam_access`/`axiam_refresh`/`axiam_csrf` cookie triple and in the
+/// response body — see `webauthn_session_response` for why it is both.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/webauthn/authenticate/finish",
     tag = "webauthn",
     request_body = FinishAuthenticationRequest,
     responses(
-        (status = 200, description = "Authentication successful",
+        (status = 200,
+         description = "Authentication successful. Sets the axiam_access, \
+                        axiam_refresh and axiam_csrf cookies and echoes the \
+                        CSRF token in X-CSRF-Token, exactly as POST \
+                        /api/v1/auth/login does.",
          body = WebauthnLoginResponse),
         (status = 401, description = "Authentication failed"),
     )
@@ -609,10 +678,123 @@ pub async fn finish_authentication<C: Connection + Clone>(
         )
         .await?;
 
-    Ok(HttpResponse::Ok().json(WebauthnLoginResponse {
-        access_token: out.access_token,
-        refresh_token: out.refresh_token,
-        session_id: out.session_id,
-        expires_in: out.expires_in,
-    }))
+    Ok(webauthn_session_response(&state.auth_config, out))
+}
+
+// -------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::http::header::SET_COOKIE;
+    use axiam_auth::config::AuthConfig;
+
+    fn out() -> axiam_auth::LoginOutput {
+        axiam_auth::LoginOutput {
+            access_token: "access-token-value".into(),
+            refresh_token: "refresh-token-value".into(),
+            session_id: Uuid::nil(),
+            expires_in: 900,
+        }
+    }
+
+    fn cookies(res: &HttpResponse) -> Vec<String> {
+        res.headers()
+            .get_all(SET_COOKIE)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn cookie_named<'a>(set: &'a [String], name: &str) -> &'a str {
+        set.iter()
+            .find(|c| c.starts_with(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("no {name} cookie in {set:?}"))
+    }
+
+    /// The regression this helper exists for: a completed passkey ceremony
+    /// used to set no cookies at all, so the browser had no session and
+    /// `GET /api/v1/auth/me` answered 401 immediately afterwards.
+    #[test]
+    fn sets_the_same_cookie_triple_as_password_login() {
+        let config = AuthConfig {
+            cookie_secure: true,
+            ..AuthConfig::default()
+        };
+        let set = cookies(&webauthn_session_response(&config, out()));
+
+        let access = cookie_named(&set, "axiam_access");
+        assert!(access.contains("access-token-value"));
+        assert!(
+            access.contains("HttpOnly"),
+            "access cookie must be httpOnly"
+        );
+
+        let refresh = cookie_named(&set, "axiam_refresh");
+        assert!(refresh.contains("refresh-token-value"));
+        assert!(
+            refresh.contains("HttpOnly"),
+            "refresh cookie must be httpOnly"
+        );
+
+        // Readable by JavaScript on purpose — the SPA has to echo it back in
+        // `X-CSRF-Token`, which it cannot do with an httpOnly cookie.
+        let csrf = cookie_named(&set, "axiam_csrf");
+        assert!(!csrf.contains("HttpOnly"), "csrf cookie must be readable");
+    }
+
+    /// §3's non-browser rule: the same token, in the header and the cookie.
+    /// An SDK reads the header; a mismatch would make the very first
+    /// state-changing call after a passkey sign-in fail CSRF validation.
+    #[test]
+    fn echoes_the_csrf_token_in_the_header_and_the_cookie() {
+        let res = webauthn_session_response(&AuthConfig::default(), out());
+
+        let header = res
+            .headers()
+            .get(HEADER_CSRF)
+            .expect("X-CSRF-Token header")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!header.is_empty());
+
+        let set = cookies(&res);
+        let csrf = cookie_named(&set, "axiam_csrf");
+        assert!(
+            csrf.contains(&header),
+            "cookie {csrf} must carry the header value {header}"
+        );
+    }
+
+    /// A fresh token per sign-in, not a constant.
+    #[test]
+    fn mints_a_distinct_csrf_token_per_response() {
+        let config = AuthConfig::default();
+        let first = webauthn_session_response(&config, out());
+        let second = webauthn_session_response(&config, out());
+        assert_ne!(
+            first.headers().get(HEADER_CSRF).unwrap(),
+            second.headers().get(HEADER_CSRF).unwrap()
+        );
+    }
+
+    /// Adding cookies must not have taken the tokens out of the body: the
+    /// non-browser SDKs adopt them from there (CONTRACT.md §24.3).
+    #[test]
+    fn keeps_the_token_pair_in_the_body() {
+        let config = AuthConfig::default();
+        let res = webauthn_session_response(&config, out());
+        assert_eq!(res.status(), actix_web::http::StatusCode::OK);
+
+        let body = actix_web::body::to_bytes(res.into_body());
+        let body = futures::executor::block_on(body).expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(parsed["access_token"], "access-token-value");
+        assert_eq!(parsed["refresh_token"], "refresh-token-value");
+        assert_eq!(parsed["expires_in"], 900);
+        assert!(parsed.get("session_id").is_some());
+    }
 }

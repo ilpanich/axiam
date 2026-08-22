@@ -162,7 +162,9 @@ not answering."
 
 Out of scope for this page — that is
 [`sdks/CONTRACT.md` §22.10](../../sdks/CONTRACT.md)'s `reactor_serve`
-helper, shipped in the eight managed-runtime SDKs. The one rule worth
+helper, shipped in the eight managed-runtime SDKs and, since contract 1.28,
+in the Swift, C and C++ SDKs over a transport the integrator supplies
+(§22.11 defers the AMQP client there, not the protocol). The one rule worth
 repeating here because it is the one an operator, not just an SDK author,
 needs to hold a vendor to: **an unsigned reply is not a reply.** Both
 directions of the exchange are signed with the same §8 v2 primitives

@@ -106,17 +106,47 @@ SDKS = {
         "dials": ["Axiam.Sdk/Reactor/ReactorConnections.cs", "Axiam.Sdk/Amqp/AxiamAmqpConsumer.cs"],
         "reaches": r"RequireAmqps",
     },
+    # Swift, C and C++ bundle no AMQP client (§22.11), so their runtime never
+    # sees a URL and could not validate one. Rule 7's SECOND clause is therefore
+    # the whole of their obligation — ship the constructor — and `dials` names
+    # the example rather than a connection path, because the example is what §8b
+    # rule 7 says must show it. Before contract 1.28 these three sat in
+    # NO_AMQP_RUNTIME below with "a hand-rolled integrator satisfies §8b
+    # themselves", which was rule 7's own failure mode written into rule 7's
+    # index: a requirement stated in prose, enforced nowhere.
+    "axiam-swift-sdk": {
+        "guard": (
+            "Sources/AxiamSDK/Reactor/AmqpsEndpoint.swift",
+            r"public func amqpsEndpoint",
+        ),
+        "dials": ["Examples/Reactor/main.swift"],
+        "reaches": r"amqpsEndpoint\(",
+    },
+    "axiam-c-sdk": {
+        "guard": ("src/reactor.c", r"axiam_error_kind_t axiam_amqps_endpoint"),
+        "dials": ["examples/reactor.c"],
+        "reaches": r"axiam_amqps_endpoint\(",
+    },
+    "axiam-cplusplus-sdk": {
+        "guard": ("src/reactor.cpp", r"AmqpsEndpoint amqps_endpoint"),
+        "dials": ["examples/reactor/reactor.cpp"],
+        "reaches": r"amqps_endpoint\(",
+    },
 }
 
-# Swift, C and C++ ship no AMQP runtime (§22.11), so they have nothing to
-# enforce. Named here rather than omitted so a reader can tell "deliberately
-# absent" from "forgotten".
-NO_AMQP_RUNTIME = ("axiam-swift-sdk", "axiam-c-sdk", "axiam-cplusplus-sdk")
+# Every SDK now ships a §8b enforcement point. Kept as an empty tuple rather
+# than deleted so the next SDK that legitimately has nothing to enforce has a
+# place to be named — "deliberately absent" and "forgotten" must stay
+# distinguishable, which is the whole reason this list existed.
+NO_AMQP_RUNTIME = ()
 
 # Where a plaintext URL would be copied from. Vendored contract/spec files are
 # excluded: CONTRACT.md quotes `amqp://` when explaining why it is refused.
 SCAN_SUFFIXES = (
     ".rs", ".ts", ".py", ".go", ".php", ".kt", ".java", ".cs", ".md",
+    # Contract 1.28: Swift, C and C++ ship the §8b constructor and an example
+    # that calls it, so their examples are now worth scanning too.
+    ".swift", ".c", ".h", ".cpp", ".hpp",
 )
 SCAN_SKIP_DIRS = {
     "node_modules", "target", "build", "bin", "obj", "dist", ".git",

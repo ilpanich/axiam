@@ -682,13 +682,23 @@ bundle, and offers no verification-skip option:
 | Kotlin | `reactorConnectionFactory` |
 | Java | `ReactorConnections.connectionFactory` / `requireAmqps` |
 | C# | `ReactorConnections.CreateConnectionFactory` / `RequireAmqps`, and `AxiamAmqpConsumer.StartAsync` |
-| Swift, C, C++ | No AMQP runtime (§22.11). A hand-rolled integrator satisfies §8b themselves. |
+| Swift | `amqpsEndpoint` (`Sources/AxiamSDK/Reactor/AmqpsEndpoint.swift`) |
+| C | `axiam_amqps_endpoint` (`src/reactor.c`) |
+| C++ | `axiam::amqps_endpoint` (`src/reactor.cpp`) |
 
 Java, Kotlin and C# take a caller-supplied channel in their reactor options, so
 rule 7's second clause is what applies: the runtime cannot inspect a channel
 somebody else opened, and refusing to serve on one whose provenance is
 unknowable would break every legitimate custom setup to catch a mistake the
 constructor already prevents.
+
+Swift, C and C++ are the same clause taken further: they bundle no AMQP client
+at all (§22.11), so their runtime never sees a URL and could not validate one if
+it wanted to. Rule 7's second clause is therefore the whole of their obligation —
+ship the constructor, and show it in the README and the example. Before contract
+1.28 this row read "a hand-rolled integrator satisfies §8b themselves", which was
+rule 7's failure mode written into rule 7's own index: a requirement stated in
+prose, enforced nowhere.
 
 ### On rule 4, specifically
 
@@ -3116,6 +3126,26 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-08 (§25.2 rule 1 — `login` gains a third outcome, contract 1.28)** —
+  **breaking for any SDK whose login result is exhaustively matched by callers.**
+  `POST /api/v1/auth/login` has always been able to answer `403` with
+  `mfa_setup_required: true` and a `setup_token`, meaning "the tenant requires MFA,
+  this account has none, here is how to finish". Every SDK mapped that `403` through
+  §2 to `AuthorizationError` — telling the caller they lack permission to log in,
+  when what the server said was recoverable and came with the means to recover.
+
+  §25.2 rule 1 makes it an **outcome**: a third variant on the SDKs whose `login`
+  returns a discriminated result, and a distinct error type carrying the token
+  everywhere else. Adding a variant breaks an exhaustive match, which is why this is
+  in the log rather than in the additive note below. It is taken because the
+  alternative cannot be fixed by documentation — a caller cannot handle a state the
+  type does not have, and the state is one a correctly-configured tenant produces
+  for every new user.
+
+  Not affected: any SDK whose callers match non-exhaustively, and every caller of
+  `verify_mfa`, `refresh` and `logout`, whose shapes are unchanged. No wire change:
+  the server has answered this `403` since before §1 was written.
+
 - **2026-07 (§9 single-flight guard invariant clarification, contract 1.6)** —
   **non-breaking / clarifying.** No new obligations, no signature changes, no vocabulary
   changes — this states, precisely, what rule 2's pre-existing observable requirement ("exactly
@@ -3375,9 +3405,16 @@ their own answer.
 
 ### §21.1 What an SDK MUST do (normative)
 
-Exactly one thing is mandatory, and it is **§10.1 rule 9** — verifying the `cnf`
-sender constraint when it is present. Everything else in this section is
-informative or optional.
+Exactly one thing is mandatory of **every** SDK, and it is **§10.1 rule 9** —
+verifying the `cnf` sender constraint when it is present. Everything else in this
+section is informative or optional.
+
+*(One addition, contract 1.28: an SDK claiming the FAPI 2.0 **client** role must
+also implement [§26](#§26-pushed-authorization-requests-rfc-9126). This is not a
+new obligation so much as a newly-stated one — `profile: "fapi2"` refuses a
+registration that does not set `require_par`, so a FAPI 2.0 client that cannot push
+an authorization request cannot authorize at all. The guard role, which is what
+rule 9 governs, is unaffected.)*
 
 That asymmetry is deliberate. The mechanism's security depends entirely on the
 *relying party*: the authorization server can stamp `cnf` into every token it
@@ -3581,9 +3618,11 @@ READMEs say so.
 ## §22 Reactors — AMQP Extension Actors (X1)
 
 **Requirement level: SHOULD (v1.0)** for the eight managed-runtime SDKs (rust,
-typescript, python, java, kotlin, csharp, go, php). **The wire protocol below is
-normative for anything that speaks it**, including a hand-rolled integrator on a
-runtime this contract defers (§22.11).
+typescript, python, java, kotlin, csharp, go, php), and — since contract 1.28 —
+for swift, c and cplusplus, which ship §22.1–§22.8 and §22.14 over a
+caller-supplied transport (§22.11). **The wire protocol below is normative for
+anything that speaks it**, including an integrator who supplies their own AMQP
+client on one of those three.
 
 A **Reactor** is an external process that subscribes to named hook events on the
 AMQP bus and answers back — allow, deny, or a field-allow-listed mutation —
@@ -4136,13 +4175,17 @@ language makes natural.
 
 | Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `reactor_serve` | `reactor_serve` | `reactorServe` | `reactor_serve` | `reactorServe` | `reactorServe` | `ReactorServeAsync` | `reactorServe` | `ReactorServe` | — (§22.11) | — (§22.11) | — (§22.11) |
+| `reactor_serve` | `reactor_serve` | `reactorServe` | `reactor_serve` | `reactorServe` | `reactorServe` | `ReactorServeAsync` | `reactorServe` | `ReactorServe` | `reactorServe` † | `axiam_reactor_serve` † | `reactor_serve` † |
 
-Two of those eight do not speak AMQP today: §8's scope list names six SDKs, and
-Kotlin's §8 deferral is a documented pre-existing carve-out. Shipping
-`reactor_serve` in Kotlin or C# means implementing §8 and §8b first — a reactor
-runtime **is** an AMQP consumer, and there is no reactor-shaped subset of §8 that
-would let one arrive without the other.
+† Swift, C and C++ ship the same runtime over a **caller-supplied transport** —
+they bundle no AMQP client. See [§22.11](#§2211-swift-c-and-c--the-protocol-core-and-the-transport-that-is-not-bundled).
+
+Two of the eight managed runtimes did not speak AMQP when this section was
+written: §8's scope list names six SDKs, and Kotlin's §8 deferral is a documented
+pre-existing carve-out. Shipping `reactor_serve` in Kotlin or C# means
+implementing §8 and §8b first — a reactor runtime **is** an AMQP consumer, and
+there is no reactor-shaped subset of §8 that would let one arrive without the
+other.
 
 Four rules on the helper itself:
 
@@ -4157,41 +4200,72 @@ Four rules on the helper itself:
 4. **It SHOULD honour `timeout_ms`** by abandoning work whose window has closed
    rather than replying late (§22.3).
 
-### §22.11 Deferred runtimes — Swift, C and C++
+### §22.11 Swift, C and C++ — the protocol core, and the transport that is not bundled
 
-**No bundled reactor runtime in v1, and this is a scope decision rather than a
-capability claim.** `axiam-swift-sdk`, `axiam-c-sdk` and `axiam-cplusplus-sdk`
-ship no `reactor_serve`: there is no maintained AMQP client for those targets
-this project is willing to vendor onto embedded and mobile deployments — which
-is the same reason §8 scopes itself to the six SDKs that speak AMQP and has
-never listed these three.
+**No bundled AMQP client in v1, and that part is unchanged.** `axiam-swift-sdk`,
+`axiam-c-sdk` and `axiam-cplusplus-sdk` vendor no AMQP dependency: there is no
+maintained client for those targets this project is willing to put onto embedded
+and mobile deployments, which is the same reason §8 scopes itself to the SDKs that
+speak AMQP and has never listed these three.
 
-**What still binds them.** §22.1–§22.8 is a wire protocol, and a wire protocol
-does not become optional because no helper wraps it. An integrator hand-rolling
-a reactor on these runtimes against a third-party AMQP client MUST satisfy every
-normative rule in those subsections — the §8 v2 verification set on the event,
-the signed reply shape with its omission rules, the allow-lists, and the
-hot-path exclusion. The §22.13 vectors are the conformance surface, and they need
-no SDK to run against.
+**What changed in contract 1.28 is what that deferral was allowed to take with
+it.** Until then these three shipped nothing from §22 at all, and the section told
+an integrator that §22.1–§22.8 bound them anyway. Both halves were true and the
+combination was a poor trade: the part deferred for want of a *dependency* was the
+transport, and the part an integrator was left to hand-roll was the **protocol** —
+v2 HMAC over a canonical serialization with a `null` signature placeholder,
+freshness in both directions, nonce and correlation binding, the §22.5 allow-lists.
+That is the half with the sharp edges, none of them AMQP-shaped, and asking eleven
+integrators to reimplement it from prose is how a signing bug ships.
 
-The three SDKs' conformance statements MUST NOT claim §22 while they ship no
-runtime, and their READMEs SHOULD point at this subsection so an integrator
-finds the wire chapter rather than concluding reactors are unavailable.
+So these three now implement **§22.1–§22.8 and §22.14 in full, over a transport the
+caller supplies**, and MAY claim §22 on that basis. The runtime helper exists; what
+it does not do is open a connection.
 
-A **non-normative** C++ sample against a commonly-used AMQP client
-(`examples/reactor/`) is planned for `axiam-cplusplus-sdk`. It is an example,
-not a contract surface: this section governs, and the sample conforms to it or
-is wrong.
+**The transport seam (normative).**
 
-This is the same shape as, and follows the precedent of, the §12.6 deferral that
-contract 1.11 lifted — deferred because no maintained dependency existed to
-carry the feature, not because the feature does not apply. §12.6's lesson is
-recorded here deliberately: that deferral cut across the wrong seam by deferring
-a whole section when only two operations genuinely assumed a browser. This one
-is cut at the seam between *protocol* (binding on everyone) and *runtime
-convenience* (deferred), which is why the chapter above is normative for these
-three SDKs and only the helper is not. Revisit when a vendorable AMQP client
-exists for these targets; the wire protocol will not need to change for it.
+1. The SDK exposes a **transport interface** with exactly the two capabilities the
+   runtime needs: deliver an inbound message (body plus the `reply_to` and
+   `correlation_id` basic properties), and publish a reply to a named destination.
+   It MUST NOT be wider than that. A transport interface that also exposes declare,
+   bind or queue-name derivation hands the integrator the tools §22.1 forbids using.
+
+2. **§22.10's four rules bind the runtime unchanged.** It declares no topology, it
+   fails closed on its own errors, it does not filter a patch, and it honours
+   `timeout_ms`. Rules 2 and 3 in particular are the runtime's, not the transport's,
+   and a caller-supplied transport does not relocate them.
+
+3. **§8b rule 7 cannot be satisfied by a runtime that never sees a URL, so the SDK
+   MUST hand the integrator the check rather than a paragraph.** Each of the three
+   MUST expose the §8b rule 1–5 guard — scheme refusal, no plaintext fallback, no
+   verification-skip switch, fail-closed on an unparseable URL — as a **public,
+   tested function**, and MUST call it in its own example transport. Documenting the
+   requirement instead is precisely the failure contract 1.23 was written to stop:
+   three SDKs asserting `amqps://` in a doc comment above a call that accepted
+   anything.
+
+4. **The README MUST say the transport is caller-supplied**, and the conformance
+   statement MUST NOT imply a bundled broker client. "Conforms to … §22" is the
+   claim; "ships an AMQP client" is not, and a reader who assumes the second from
+   the first will discover it at integration time.
+
+Each of the three ships a **non-normative** sample (`examples/reactor/`,
+`examples/reactor.c`, `Examples/Reactor`) that drives the runtime over a transport
+skeleton and calls the §8b constructor before anything opens a socket — which is
+what rule 7's second clause asks an example to show. The samples are examples, not
+contract surfaces: this chapter governs, and a sample conforms to it or is wrong.
+Where one previously reimplemented §22.1–§22.8 by hand, that copy is gone: the
+library carries it, and a second implementation living beside the first is the
+divergence §1 exists to prevent.
+
+**Why this seam and not the other one.** §12.6's deferral, which contract 1.11
+lifted, cut across the wrong join — it deferred a whole section because two of its
+operations assumed a browser. The 1.18 version of this subsection improved on that
+by cutting between *protocol* and *runtime convenience*, and 1.28 finds that the cut
+was still one notch too wide: the convenience that genuinely needed a vendored
+dependency was the **connection**, and the runtime around it needed none. Revisit
+the remaining deferral when a vendorable AMQP client exists for these targets; the
+wire protocol will not need to change for it, and now neither will the runtime.
 
 ### §22.12 `Sensitive<T>` applicability
 
@@ -4258,7 +4332,10 @@ require).
 
 ### §22.14 Declarative handler binding (contract 1.22)
 
-**Requirement level: SHOULD**, for the eight SDKs that ship a §22.10 runtime.
+**Requirement level: SHOULD**, for the SDKs that ship a §22.10 runtime — the
+eight managed runtimes, and since contract 1.28 the three of
+[§22.11](#§2211-swift-c-and-c--the-protocol-core-and-the-transport-that-is-not-bundled)
+that drive one over a caller-supplied transport.
 Additive in the strongest sense: no signature moves, no existing rule changes,
 and an SDK that ships `reactor_serve` and nothing from this subsection is
 exactly as conformant as it was under 1.21.
@@ -4289,7 +4366,7 @@ the runtime already verified, and re-implements no part of §22.1–§22.8.
 
 | Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `reactor_handlers` | `#[reactor_handler]` + `ReactorRouter` | `reactorHandlers` | `ReactorRouter` / `@on_reactor_event` | `@OnReactorEvent` + `ReactorHandlers` | `reactorHandlers { }` | `[OnReactorEvent]` + `ReactorHandlers` | `#[OnReactorEvent]` + `ReactorHandlers` | `ReactorMux` | — (§22.11) | — (§22.11) | — (§22.11) |
+| `reactor_handlers` | `#[reactor_handler]` + `ReactorRouter` | `reactorHandlers` | `ReactorRouter` / `@on_reactor_event` | `@OnReactorEvent` + `ReactorHandlers` | `reactorHandlers { }` | `[OnReactorEvent]` + `ReactorHandlers` | `#[OnReactorEvent]` + `ReactorHandlers` | `ReactorMux` | `ReactorRouter` | `axiam_reactor_router` | `ReactorRouter` |
 
 Each language uses the metadata mechanism it already uses for §11 — Java
 annotations, C# and PHP attributes, a Python decorator, a Rust attribute macro —
@@ -4298,8 +4375,12 @@ binding table named for `http.ServeMux`. Where an SDK offers both a declarative
 form and a builder, the two MUST produce the same handler and be governed by
 every rule below.
 
-**Kotlin is the one place this section diverges from §11**, and the reason is
-worth recording rather than discovering. §11 gave Kotlin annotations; §22.14
+**Kotlin is the first place this section diverges from §11**, and the reason is
+worth recording rather than discovering. *(Swift joins it under contract 1.28, for
+the same reason in a different runtime: collecting `async` members by reflection
+costs a dependency the SDK should not add to hand out an attribute, and a builder
+type-checks the closure at compile time instead. C and C++ use a binding table, as
+Go does, having no attribute mechanism to reach for.)* §11 gave Kotlin annotations; §22.14
 gives it a type-safe builder, because a Kotlin reactor handler is a `suspend`
 function. Collecting annotated `suspend` members means invoking through the
 hidden `Continuation` parameter, which needs `kotlin-reflect` on every
@@ -4739,12 +4820,800 @@ satisfy.
 
 ---
 
+## §24 WebAuthn and Passkeys (W1)
+
+**Requirement level: SHOULD (v1.0)** for all eleven SDKs. Stated **by name**, like
+§14, §15, §17, §19 and §22 — an SDK that ships it writes, for example:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §22 and §24."
+
+Server implementation: `crates/axiam-auth/src/webauthn.rs` (the ceremonies),
+`crates/axiam-api-rest/src/handlers/webauthn.rs` (the six endpoints) and
+`crates/axiam-api-rest/src/handlers/webauthn_policy.rs` (the per-tenant
+attestation policy).
+
+Contract 1.27 recorded in passing that "WebAuthn is a browser ceremony and no
+SDK speaks it". The first half was true; the conclusion was wrong, and it is
+worth saying why rather than quietly reversing it. A WebAuthn ceremony is **two**
+exchanges stacked: one with an *authenticator*, which needs a platform API, and
+one with *AXIAM*, which is four ordinary JSON round trips. Only the first needs a
+browser. The second is what an SDK is for, and it does not stop existing on a
+runtime that has no authenticator — a Go service enrolling a passkey for a native
+client it fronts, a Java backend completing a ceremony a handset ran, a Python
+harness driving a virtual authenticator in CI all speak the AXIAM half and none of
+them touches `navigator.credentials`.
+
+§24 splits along that seam, and the split is the design:
+
+- **§24.1–§24.5 — the relying-party layer.** The round trips, credential adoption,
+  the error taxonomy. Binding on **every** SDK that claims §24.
+- **§24.6a — the JSON bridge.** Handing the challenge to whatever runs the
+  ceremony, and taking its answer back. Also binding on every SDK, because the
+  platform authenticator APIs take and return exactly this — which is what lets a
+  Kotlin SDK be fully usable from an Android app without linking one Android class.
+- **§24.6b — the linked-API helper.** Driving the authenticator from inside the
+  SDK. Only where the build can reach one; §24.7 records who can.
+
+### §24.0 The division of labour (normative — everything below follows from it)
+
+**The server does all of the crypto and all of the policy.** It generates the
+challenge, chooses `residentKey`, `userVerification`, the attestation conveyance,
+the credential exclusion list and the timeout, and it verifies the resulting
+attestation or assertion against the tenant's attestation policy. An SDK **MUST**
+hand the server's options to the authenticator unchanged, and **MUST** post the
+authenticator's response back unchanged.
+
+This is §23.1's "one implementation, not eleven" argument reached from the
+opposite direction. OPAQUE is centralized because it is too intricate to
+hand-write eleven times. WebAuthn options are centralized because they are *not*
+intricate — and that is the hazard. Every field in
+`PublicKeyCredentialCreationOptions` is a security parameter, every one of them
+looks locally adjustable, and an SDK that relaxes `userVerification` to
+`"preferred"` because a CI authenticator kept prompting has weakened a ceremony
+the server believes it configured. The server cannot catch it: it verifies the
+assertion it receives, and an assertion produced under weaker options is a
+perfectly valid assertion. The damage is invisible at exactly the layer that
+would notice it.
+
+Three consequences an SDK must not talk itself out of:
+
+1. **No defaulting, no filling in, no normalizing.** If the server omits a field,
+   it is omitted on purpose. An SDK MUST NOT supply a `timeout` the server did not
+   send, MUST NOT expand an absent `authenticatorSelection` into an empty object,
+   and MUST NOT reorder or prune `pubKeyCredParams` or `excludeCredentials`.
+2. **No validation that can reject.** An SDK MAY fail to *parse* the options —
+   that is a bug report about the server — but MUST NOT refuse options it parsed
+   merely because it disagrees with them. A client-side allow-list of acceptable
+   algorithms is a second policy engine, and the tenant's is the only one that
+   counts.
+3. **The response goes back verbatim.** `clientDataJSON`, `attestationObject`,
+   `authenticatorData`, `signature`, `userHandle` and the credential `id`/`rawId`
+   are inputs to a signature check over bytes the SDK did not produce. Re-encoding
+   base64url "to be safe" is the single most common way to break a ceremony that
+   was otherwise correct.
+
+The one permitted addition is **§24.6 rule 4's `authenticatorAttachment` hint**,
+and it is permitted because it cannot weaken verification — it selects which
+authenticator the user is prompted for, not what the server will accept.
+
+### §24.1 Canonical operation set and endpoint map
+
+Six wire operations and three composed helpers. Every row is verified against
+`openapi.json`.
+
+| Canonical operation | Wire call | Auth | Request | Success |
+|---|---|---|---|---|
+| `webauthn_register_start` | `POST /api/v1/auth/webauthn/register/start` | **session** | no body | `200` `StartRegistrationResponse` |
+| `webauthn_register_finish` | `POST /api/v1/auth/webauthn/register/finish` | **session** | `application/json` / `FinishRegistrationRequest` | `201` `CredentialResponse` |
+| `webauthn_authenticate_start` | `POST /api/v1/auth/webauthn/authenticate/start` | none | `application/json` / `StartAuthenticationRequest` | `200` `StartAuthenticationResponse` |
+| `webauthn_authenticate_finish` | `POST /api/v1/auth/webauthn/authenticate/finish` | none | `application/json` / `FinishAuthenticationRequest` | `200` `WebauthnLoginResponse` |
+| `webauthn_discoverable_start` | `POST /api/v1/auth/webauthn/authenticate/discoverable/start` | none | `application/json` / `StartDiscoverableAuthenticationRequest` | `200` `StartAuthenticationResponse` |
+| `webauthn_discoverable_finish` | `POST /api/v1/auth/webauthn/authenticate/discoverable/finish` | none | `application/json` / `FinishAuthenticationRequest` | `200` `WebauthnLoginResponse` |
+| `webauthn_register` | the register pair, composed with a §24.6 ceremony | | | `CredentialResponse` |
+| `webauthn_login` | the authenticate pair, composed | | | token set |
+| `webauthn_discoverable_login` | the discoverable pair, composed | | | token set |
+
+**JSON, not form-encoded.** Unlike the `/oauth2/*` operations of §12, §14 and §15,
+every endpoint here takes `application/json` and carries no `tenant_id` query
+parameter. The §5 `X-Tenant-ID` header is still emitted on all six (§5 rule 2
+admits no exceptions).
+
+**Where the tenant actually comes from, which is not the header.** The four
+`authenticate/*` endpoints are unauthenticated and resolve the tenant from the
+request itself:
+
+- `authenticate/start` and both `*/finish` calls read it out of the `state_token`
+  (respectively the `challenge_token`), which is a JWT the server minted. An SDK
+  MUST treat those tokens as **opaque** and MUST NOT decode them to make a
+  decision — the server peeks at the payload to route the request and then
+  verifies the whole thing; an SDK that parsed one would be trusting an unverified
+  claim to do something the server does not need it to do.
+- `discoverable/start` is the exception and carries the workspace explicitly,
+  because a usernameless ceremony has no prior step to have minted a token. It
+  accepts `org_id`/`org_slug` and `tenant_id`/`tenant_slug` and, unlike the five
+  `/oauth2/*` operations of §12.1 rule 2, **accepts slugs** — so a slug-only client
+  can run it. An SDK MUST populate these from its own configured workspace
+  identity, in whichever form it holds, rather than requiring the caller to repeat
+  it.
+
+**`register/*` requires an authenticated session** — enrolling a passkey is
+something an already-signed-in user does to their own account. Calling either
+without credentials MUST raise the §2 `AuthenticationError` **client-side, with no
+wire call**, exactly as §1.1 rule 3 requires of `get_user_info`.
+
+### §24.2 The two authentication ceremonies are different flows, not one with a flag
+
+`authenticate/*` is a **second factor**. It continues a `POST /api/v1/auth/login`
+that answered `202` with `mfa_required` and a `challenge_token`, listing
+`"webauthn"` among its `available_methods`. The challenge token names the user, so
+the server can send an `allowCredentials` list.
+
+`discoverable/*` is a **primary factor**. Nothing precedes it. The server sends an
+empty `allowCredentials`, the authenticator offers whichever discoverable
+credential it holds for the relying party, and the assertion itself identifies the
+user.
+
+**They MUST NOT be merged behind one operation with an optional
+`challenge_token`.** That was the server's original shape and it could not work:
+`authenticate/start` decodes the challenge token to learn who is signing in, so an
+empty string is rejected as a malformed token before anything else happens. An SDK
+that models this as one nullable parameter reproduces a bug the server already
+fixed, and reproduces it as a runtime failure with a misleading message.
+
+The two also differ in what the server does around them, which an SDK's
+documentation SHOULD state because a reactor author will ask:
+`discoverable/finish` fires the `login.post_auth` hook event (§22.5) and
+`authenticate/finish` does not — the latter continues a login that was already
+gated at its password step, and the former has no such step to have been gated at.
+
+### §24.3 Credential adoption (normative)
+
+Both `*/finish` authentication calls answer `200 WebauthnLoginResponse`, carrying
+`access_token`, `refresh_token`, `session_id` and `expires_in` **and** setting the
+`axiam_access` / `axiam_refresh` / `axiam_csrf` cookie triple with an
+`X-CSRF-Token` response header — the same triple and the same header
+`POST /api/v1/auth/login` sets.
+
+*(The cookies arrived with contract 1.28. Before it, these two endpoints answered
+with the body alone, which made a browser passkey sign-in impossible to complete
+and left `POST /api/v1/auth/refresh` — which reads the refresh token from
+`axiam_refresh` and never from a body — unreachable afterwards. An SDK built
+against an older server sees the body exactly as it always did.)*
+
+1. **A completed passkey sign-in MUST leave the client authenticated**, in exactly
+   the state a successful `login()` leaves it. This is **not** the §14.3 rule 4
+   "MAY adopt" posture and MUST NOT be implemented as one: `device_login` and
+   `oidc_exchange` are token-minting operations whose result the caller may want
+   to hand elsewhere, and this is the SDK's own primary authentication. An SDK
+   that returned a token set without adopting it would make
+   `webauthn_login()` the only way to log in that does not log you in.
+2. **Cookie-jar SDKs adopt through the jar** (§4) and MUST capture `X-CSRF-Token`
+   into the same slot `login()` populates (§3). An SDK that adopts the body tokens
+   but skips the CSRF token will pass its own login test and fail on the first
+   state-changing call afterwards.
+3. **Non-cookie SDKs adopt the body tokens.** Both mechanisms are present on the
+   same response precisely so that neither kind of client has to emulate the
+   other.
+4. **The §17 decision memo MUST be cleared** and the §9 refresh guard left
+   untouched-but-usable, exactly as `login()` and `verify_mfa()` do — §17.1 rule 9
+   keys entries by subject, and this call changes the subject.
+5. `refresh_token` from this response is refreshed through the §1 `refresh`
+   operation (`POST /api/v1/auth/refresh`), **not** `oidc_refresh`. It is a session
+   refresh token, not an OAuth2 one, and the two paths are distinct per §12.1.
+
+`webauthn_register_finish` adopts nothing — the caller was already authenticated
+— and returns the `CredentialResponse` describing the credential just enrolled.
+
+### §24.4 Error taxonomy (normative)
+
+§2 maps most of this correctly on status alone. Three rows do not, and each is a
+case where the generic mapping loses the only thing the caller can act on:
+
+| Status | Endpoint | §2 would say | §24 requires |
+|---|---|---|---|
+| `401` | any | `AuthenticationError` | `AuthenticationError` — unchanged |
+| `403` | `register/finish` | `AuthorizationError` | `AuthorizationError`, **and the server's message MUST be surfaced verbatim** |
+| `503` | `register/start` | `NetworkError`/retryable | **`ValidationError`, and NOT retried** |
+| `400` | `discoverable/start` | `ValidationError` | `ValidationError` — unchanged |
+
+1. **`403` on `register/finish` is the tenant's attestation policy refusing this
+   authenticator**, not a permission problem with the user. The message names why
+   — an AAGUID that is not allow-listed, a missing FIDO certification, a revoked
+   status — and it is the only way the person holding the security key learns that
+   *this* key will never work and a different one might. An SDK MUST NOT replace it
+   with a generic string.
+
+   **This does not license dumping the response body into an error.** An SDK whose
+   error taxonomy deliberately redacts bodies — several do, because a body is a
+   place a token can end up — satisfies this rule by decoding the **`message`
+   field** and nothing else, exactly as it already decodes named fields like
+   `action` and `resource_id`. One named field is what the rule asks for; the raw
+   body is not, and an SDK that relaxed its redaction to satisfy §24 would have
+   traded a real protection for a message it could have had either way.
+2. **`503` on `register/start` means the attestation policy requires attestation
+   and the FIDO metadata service has no usable snapshot.** It is a server
+   configuration state, not a transient failure, and §16 MUST NOT retry it: retrying
+   changes nothing, and the bounded budget merely delays a message an operator needs
+   to see. This is a **documented exception to §16.3's "retry every 5xx"**, and the
+   second such exception in this contract after §20's.
+3. **An `InvalidStateError` from the authenticator is not a §2 error at all** — see
+   §24.6 rule 5. It means the authenticator already holds a credential for this
+   account, which is a successful outcome of the exclusion list working.
+
+### §24.5 `Sensitive<T>` applicability
+
+`state_token` and `challenge_token` are **bearer credentials for the duration of a
+ceremony** — a `state_token` is what binds the response to the challenge, and one
+that leaks inside its window is a ceremony an attacker can try to complete. Both
+MUST be wrapped in `Sensitive<T>` (§7) wherever the SDK has that type and MUST NOT
+be logged at any level.
+
+`access_token` and `refresh_token` from `WebauthnLoginResponse` are wrapped
+exactly as the same two fields are everywhere else in this contract.
+
+The **challenge**, the **authenticator response** and the `CredentialResponse` are
+**not** sensitive in the §7 sense and MUST remain readable: a caller that cannot
+inspect the options cannot pass them to a platform API, and a caller that cannot
+read `CredentialResponse` cannot show the user what they just enrolled. They are
+still not info-level log material by default — a credential `id` is a stable
+per-user identifier across sessions, which is exactly what a correlation log
+should not accumulate.
+
+There is **no user private key anywhere in this section**, and an SDK's
+documentation SHOULD say so where it explains passkeys: the private half never
+leaves the authenticator, which is the property the whole mechanism is built on
+and the one a reader coming from password auth will not assume.
+
+### §24.6 Running the ceremony: the JSON bridge, and the linked-API helpers
+
+There are two ways an SDK can help with the authenticator half, and every SDK
+that claims §24 ships the first.
+
+**§24.6a The JSON bridge (required of every SDK claiming §24).**
+
+The WebAuthn "JSON form" is not an internal detail of this contract — it is the
+interchange format the platform authenticator APIs themselves take and return:
+
+| Platform | Takes | Returns |
+|---|---|---|
+| Browsers | `PublicKeyCredential.parseCreationOptionsFromJSON()` / `parseRequestOptionsFromJSON()` | `credential.toJSON()` |
+| **Android** (Credential Manager) | `CreatePublicKeyCredentialRequest(requestJson)` / `GetPublicKeyCredentialOption(requestJson)` | `registrationResponseJson` / `authenticationResponseJson` |
+| **iOS / macOS** (`AuthenticationServices`) | decoded fields | assembled fields |
+
+Android is the row that decides this subsection. Credential Manager's entire
+WebAuthn surface is **a JSON string in and a JSON string out** — so an SDK does
+not need to link a single Android class to be fully usable from an Android app.
+It needs to hand the app the request JSON and take the response JSON back.
+
+Every SDK claiming §24 MUST therefore expose:
+
+1. **The challenge in its wire JSON form**, unparsed and unreassembled, ready to
+   hand to a platform API. Where an SDK models the challenge as a typed value,
+   this is an accessor beside it, not instead of it.
+2. **A `*_finish` that accepts the platform's response JSON**, in addition to
+   whatever typed form it offers. An SDK that only accepts a typed response
+   forces every Android and browser caller to destructure a string the SDK will
+   immediately re-serialize, which is three chances to corrupt a signed buffer
+   in service of nothing.
+
+Both directions MUST be byte-preserving (§24.0). This is the seam that makes
+"no platform ceremony" a statement about *convenience* rather than about
+capability, and it is why the table in §24.7 has no "cannot" column.
+
+**§24.6b The linked-API helper (where the SDK can link an authenticator API).**
+
+An SDK whose build can reach an authenticator API SHOULD additionally expose the
+three composed helpers of §24.1 — `*_start`, ceremony, `*_finish` in one call.
+
+1. **Composed helpers are additive.** The six wire operations and the §24.6a
+   bridge stay public. An SDK MUST NOT make a composed helper the only way to
+   reach them — a caller running a virtual authenticator in a test, or holding a
+   response produced on another device, needs the pieces. Same shape and same
+   argument as §22.14 rule 1.
+2. **No software authenticator, ever.** An SDK MUST NOT emulate an authenticator
+   in process. A "credential" held in process memory is not a second factor, and
+   shipping one under this section's name would make an SDK the weakest link in a
+   mechanism chosen for being the strongest. Where no API is reachable, §24.6a is
+   the answer and it is a complete one.
+3. **Conditional mediation** (passkey autofill) SHOULD be exposed as a flag where
+   the platform supports it, and MUST degrade to the explicit prompt where it does
+   not. The probe for it MUST NOT throw on platforms that lack it. A ceremony in
+   this mode may never settle — the user simply may not pick a passkey — so the SDK
+   MUST let the caller abandon it and MUST NOT surface an abandoned conditional
+   ceremony as an authentication failure.
+4. **`authenticatorAttachment` is the one permitted addition** to the server's
+   options (§24.0), and only from an explicit caller argument. It is a hint about
+   which authenticator the user is reaching for; without it, a user who asked for a
+   security key is prompted for the platform's built-in biometric instead. An SDK
+   MUST NOT infer it and MUST NOT default it.
+5. **The five ceremony failures are classified, not passed through raw.** Every
+   platform reports them as one opaque error type whose only machine-readable part
+   is a name, and translating that once beats translating it in every caller:
+
+   | Platform error | Canonical classification |
+   |---|---|
+   | `NotAllowedError` / `ASAuthorizationError.canceled` | `cancelled` |
+   | `InvalidStateError` | `already_registered` |
+   | `AbortError` / `.timeout` | `timeout` |
+   | `NotSupportedError`, `SecurityError` | `unsupported` |
+   | anything else | `unknown` |
+
+   **`cancelled` covers both an explicit refusal and a silent timeout, and this is
+   correct rather than lossy.** The WebAuthn spec deliberately refuses to
+   distinguish them, because telling a website which one happened leaks whether an
+   authenticator was present. An SDK MUST NOT recover the distinction by timing the
+   call, and its user-facing copy MUST NOT accuse the user of cancelling.
+
+   `already_registered` is the exclusion list doing its job: the authenticator
+   already holds a credential for this account and refused to silently mint a
+   second. It MUST be distinguishable from the other four, because it is the only
+   one whose remedy is "use a different device" rather than "try again".
+
+   An SDK that ships only §24.6a MUST still expose this classification, applied to
+   an error the *caller* hands it — an Android app catching a
+   `CreateCredentialException` has the same five outcomes and the same reason to
+   want one vocabulary for them.
+
+6. **Feature detection is a query, not an exception.** An SDK exposing a linked-API
+   helper MUST expose a predicate for whether this runtime can perform a ceremony,
+   so a caller hides a button rather than offering one that throws.
+
+### §24.7 Per-language naming map and per-SDK posture
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `webauthn_register_start` | `webauthn_register_start` | `webauthnRegisterStart` | `webauthn_register_start` | `webauthnRegisterStart` | `webauthnRegisterStart` | `WebauthnRegisterStartAsync` | `webauthnRegisterStart` | `WebauthnRegisterStart` | `webauthnRegisterStart` | `axiam_webauthn_register_start` | `webauthn_register_start` |
+| `webauthn_register_finish` | `webauthn_register_finish` | `webauthnRegisterFinish` | `webauthn_register_finish` | `webauthnRegisterFinish` | `webauthnRegisterFinish` | `WebauthnRegisterFinishAsync` | `webauthnRegisterFinish` | `WebauthnRegisterFinish` | `webauthnRegisterFinish` | `axiam_webauthn_register_finish` | `webauthn_register_finish` |
+| `webauthn_authenticate_start` | `webauthn_authenticate_start` | `webauthnAuthenticateStart` | `webauthn_authenticate_start` | `webauthnAuthenticateStart` | `webauthnAuthenticateStart` | `WebauthnAuthenticateStartAsync` | `webauthnAuthenticateStart` | `WebauthnAuthenticateStart` | `webauthnAuthenticateStart` | `axiam_webauthn_authenticate_start` | `webauthn_authenticate_start` |
+| `webauthn_authenticate_finish` | `webauthn_authenticate_finish` | `webauthnAuthenticateFinish` | `webauthn_authenticate_finish` | `webauthnAuthenticateFinish` | `webauthnAuthenticateFinish` | `WebauthnAuthenticateFinishAsync` | `webauthnAuthenticateFinish` | `WebauthnAuthenticateFinish` | `webauthnAuthenticateFinish` | `axiam_webauthn_authenticate_finish` | `webauthn_authenticate_finish` |
+| `webauthn_discoverable_start` | `webauthn_discoverable_start` | `webauthnDiscoverableStart` | `webauthn_discoverable_start` | `webauthnDiscoverableStart` | `webauthnDiscoverableStart` | `WebauthnDiscoverableStartAsync` | `webauthnDiscoverableStart` | `WebauthnDiscoverableStart` | `webauthnDiscoverableStart` | `axiam_webauthn_discoverable_start` | `webauthn_discoverable_start` |
+| `webauthn_discoverable_finish` | `webauthn_discoverable_finish` | `webauthnDiscoverableFinish` | `webauthn_discoverable_finish` | `webauthnDiscoverableFinish` | `webauthnDiscoverableFinish` | `WebauthnDiscoverableFinishAsync` | `webauthnDiscoverableFinish` | `WebauthnDiscoverableFinish` | `webauthnDiscoverableFinish` | `axiam_webauthn_discoverable_finish` | `webauthn_discoverable_finish` |
+| `webauthn_request_json` (§24.6a) | `request_json` | `requestJson` | `request_json` | `requestJson` | `requestJson` | `RequestJson` | `requestJson` | `RequestJSON` | `requestJson` | `axiam_webauthn_request_json` | `request_json` |
+| `webauthn_register` (§24.6b) | — | `webauthnRegister` | — | — | — | — | — | — | `webauthnRegister` | — | — |
+| `webauthn_login` (§24.6b) | — | `webauthnLogin` | — | — | — | — | — | — | `webauthnLogin` | — | — |
+| `webauthn_discoverable_login` (§24.6b) | — | `webauthnDiscoverableLogin` | — | — | — | — | — | — | `webauthnDiscoverableLogin` | — | — |
+
+Async-twin rules follow §1: Java and C# add their `*Async` companions, Kotlin uses
+`suspend`, Swift uses `async`, Python exposes every name on both `AxiamClient` and
+`AsyncAxiamClient`. `webauthn_request_json` is pure local computation and is
+synchronous everywhere.
+
+**Who ships a §24.6b linked-API helper, and why the line falls where it does.**
+Reaching an authenticator API is a property of the *build target*, not of the
+language, which is why this table matches none of the others in this contract:
+
+| SDK | RP layer (§24.1) | JSON bridge (§24.6a) | Linked-API helper (§24.6b) |
+|---|---|---|---|
+| TypeScript | yes | yes | **yes** — `navigator.credentials`, in the `axiam-sdk/browser` subpath. Absent from the Node build as a module boundary rather than a runtime throw. |
+| Rust (`axiam-sdk-wasm`) | yes | yes | **yes** — `navigator.credentials` through `web-sys`. |
+| Swift | yes | yes | **yes** — `AuthenticationServices`, on **both** iOS 16+ and macOS 13+, behind `#if canImport(AuthenticationServices)` and an availability guard. Absent on the Linux build, which is a supported target of this SDK. |
+| Kotlin | yes | yes | **no, and this is not a capability gap** — see below. |
+| Rust (native), Python, Java, C#, PHP, Go, C, C++ | yes | yes | no. Server-side and CLI runtimes have no authenticator; §24.6b rule 2 forbids inventing one. |
+
+**Kotlin runs on Android and on the desktop JVM, and §24.6a is what makes both
+work.** `axiam-kotlin-sdk` is a `kotlin("jvm")` library, and it stays one: an
+Android artifact means the Android Gradle Plugin, an `AAR` packaging, an Android
+SDK in CI, and a second published coordinate — a large change to the shape of the
+deliverable, taken to wrap an API that is already a string in and a string out.
+Instead, an Android app passes `requestJson` straight into
+`CreatePublicKeyCredentialRequest` / `GetPublicKeyCredentialOption`, and passes
+`registrationResponseJson` / `authenticationResponseJson` straight back into the
+matching `*Finish`. Nothing is destructured, nothing is re-encoded, and the SDK
+links no Android class. That SDK's README MUST show this — worked, in Kotlin, with
+the Credential Manager call in it — because "Kotlin ships no §24.6b helper" reads
+as "Kotlin cannot do passkeys" to every reader who does not follow the link.
+
+**Swift ships one helper for both its platforms**, not an iOS one and a macOS one.
+`ASAuthorizationPlatformPublicKeyCredentialProvider` and
+`ASAuthorizationSecurityKeyPublicKeyCredentialProvider` exist on both, and the
+presentation anchor is the only genuinely per-platform part; that is supplied by
+the caller. The Linux build keeps the RP layer and §24.6a, compiled without the
+framework.
+
+### §24.8 Required tests
+
+**Relying-party layer — every SDK claiming §24:**
+
+- **Options pass-through.** Given a `register/start` response whose options carry
+  an unusual-but-valid combination — `userVerification: "required"`, a non-empty
+  `excludeCredentials`, an `attestation` conveyance other than `"none"`, a
+  `timeout`, and at least one `pubKeyCredParams` entry the SDK has no opinion about
+  — assert the bytes handed onward are **equal** to the bytes received. Assert
+  structurally (compare the parsed value, or the raw JSON), not by spot-checking
+  three fields.
+- **No synthesized fields.** A `start` response with `authenticatorSelection`
+  absent and `timeout` absent produces a ceremony input with both still absent.
+- **Response verbatim.** A fixed authenticator response round-trips through
+  `*_finish` unchanged, including base64url padding characters exactly as given.
+- **Adoption.** A successful `webauthn_authenticate_finish` leaves the client
+  authenticated (§24.3 rule 1) — assert the client's own authenticated state, not
+  just that a token was returned. A cookie-jar SDK additionally asserts the CSRF
+  token was captured, and that a state-changing call made immediately afterwards
+  carries it.
+- **Memo cleared.** A decision memoized before the ceremony is absent after it
+  (§24.3 rule 4).
+- **`register/*` without a session** raises `AuthenticationError` with **zero**
+  wire calls — assert on the transport, not on the exception type alone.
+- **The `503` is not retried.** A `register/start` answering `503` produces
+  exactly one request. This is §24.4 rule 2 and it will regress the moment
+  someone tidies the retry predicate, which is why it is asserted on the request
+  count.
+- **The `403` message survives.** A `register/finish` answering `403` with a
+  policy message surfaces that message, not a generic one.
+- **Opaque tokens.** Assert the SDK never parses `state_token` — the simplest
+  form is a test whose `state_token` is not a JWT at all and which still
+  round-trips, proving nothing decoded it.
+- **The two ceremonies are separate operations.** A compile-time or signature
+  assertion that `webauthn_authenticate_start` cannot be called without a
+  challenge token, and that the discoverable pair does not accept one.
+- **Sensitive.** `state_token`, `challenge_token` and both returned tokens do not
+  appear in any log line, error payload or debug/`toString` rendering — scan the
+  serialized output for the fixture values, as §12, §14, §15, §20 and §22 all
+  require.
+
+**The §24.6a JSON bridge — every SDK claiming §24:**
+
+- **Round trip.** The request JSON handed to a caller parses to a value equal to
+  the challenge the server sent, field for field — assert structurally, and
+  include a fixture whose `excludeCredentials`, `timeout` and `attestation` are
+  all populated.
+- **A response JSON string reaches `*_finish` unaltered.** Give the bridge a
+  fixed platform response string and assert the request body carries those exact
+  bytes — no re-encode, no key reordering that changes a value, no dropped
+  unknown field.
+- **The error classification is reachable without a linked API**, and maps the
+  five §24.6b rule 5 outcomes.
+
+**§24.6b linked-API helpers — the SDKs that ship one:**
+
+- Each of the five platform errors maps to its canonical classification, and
+  `already_registered` is distinguishable from `cancelled`.
+- `authenticatorAttachment` is applied when the caller passes it and **absent**
+  from the options when they do not.
+- The feature-detection predicate answers `false` rather than throwing on a
+  runtime without an authenticator.
+- The conditional-mediation probe answers `false` rather than throwing where the
+  probe itself is missing, and an abandoned conditional ceremony is not reported
+  as an authentication failure.
+
+---
+
+## §25 Account Lifecycle and MFA Enrolment (W2)
+
+**Requirement level: SHOULD (v1.0)** for all eleven SDKs. Stated by name, like §24.
+
+Server implementation: `crates/axiam-api-rest/src/handlers/auth.rs` (the MFA
+operations), `email_verification.rs` and `password_reset.rs`.
+
+§1 locked a small authentication vocabulary and it has held well, but it locked the
+*middle* of the account's life: `login`, `verify_mfa`, `refresh`, `logout` all
+assume an account that already exists, is already verified, and already has its
+second factor. Everything that gets an account into that state has been reachable
+only by hand-rolling a POST against a path the SDK also knows — which is the exact
+divergence §1 exists to prevent, arrived at through omission rather than through
+disagreement.
+
+Nine operations. None of them is new server surface; all nine have been live and
+undocumented-for-SDKs since before §1 was written.
+
+### §25.1 Canonical operation set and endpoint map
+
+| Canonical operation | Wire call | Auth | Request | Success |
+|---|---|---|---|---|
+| `mfa_enroll` | `POST /api/v1/auth/mfa/enroll` | **session** | no body | `200` `MfaEnrollResponse` |
+| `mfa_confirm` | `POST /api/v1/auth/mfa/confirm` | **session** | `MfaConfirmRequest` | `200` `MfaConfirmResponse` |
+| `mfa_setup_enroll` | `POST /api/v1/auth/mfa/setup/enroll` | none (setup token) | `MfaSetupEnrollRequest` | `200` `MfaEnrollResponse` |
+| `mfa_setup_confirm` | `POST /api/v1/auth/mfa/setup/confirm` | none (setup token) | `MfaSetupConfirmRequest` | `200` `LoginSuccessResponse` |
+| `verify_email` | `POST /api/v1/auth/verify-email` | none | `VerifyEmailRequest` | `200`, empty body |
+| `resend_verification` | `POST /api/v1/auth/resend-verification` | none | `ResendVerificationRequest` | `200`, empty body |
+| `request_password_reset` | `POST /api/v1/auth/reset` | none | `RequestResetBody` | `200`, empty body |
+| `confirm_password_reset` | `POST /api/v1/auth/reset/confirm` | none | `ConfirmResetBody` | `200`, empty body |
+| `password_reset_context` | `GET /api/v1/auth/reset/context?token=<t>` | none | no body | `200` `ResetContextResponse` |
+
+All JSON, all `/api/v1/*`, all carrying `X-Tenant-ID` per §5 rule 2. `tenant_id`
+is a **body field** on `verify_email`, `resend_verification` and
+`confirm_password_reset` — these are not `/oauth2/*` endpoints and the §12.1 rule 2
+query-parameter convention does not reach them. `request_password_reset` accepts
+the workspace in slug form as well, like `login`.
+
+Six of the nine are **deliberately unauthenticated**: a user who cannot log in is
+the entire audience for a password reset, and a user whose email is unverified may
+have no session at all.
+
+### §25.2 The two MFA enrolment paths are different, and confusing them locks users out
+
+`mfa_enroll` / `mfa_confirm` is **voluntary enrolment by a signed-in user**. It
+needs a session and it changes nothing about the current one.
+
+`mfa_setup_enroll` / `mfa_setup_confirm` is **forced enrolment during login**. It
+is reached when `POST /api/v1/auth/login` answers `403` with
+`mfa_setup_required: true` and a `setup_token`, because the tenant requires MFA and
+this account has none. There is no session yet — the setup token *is* the
+credential — and `mfa_setup_confirm` answers `LoginSuccessResponse`, completing the
+login that was interrupted.
+
+1. **`login` MUST surface the setup branch as an outcome, not as an error.** An SDK
+   whose `login` maps the `403` to §2 `AuthorizationError` has told the caller they
+   lack permission to log in, when what the server said was "finish setting up, here
+   is the token". The caller cannot recover from the former and can from the latter.
+   Where an SDK's `login` returns a discriminated result (§1's `LoginResult` shape),
+   it gains a third variant carrying the setup token. Where the language has no such
+   type, the SDK MUST raise a **distinct** error type carrying the token, and MUST
+   NOT reuse `AuthorizationError`.
+
+   *This is a **breaking change** for any SDK whose login result is exhaustively
+   matched by callers — see the Breaking Changes Log entry for contract 1.28. It is
+   taken because the alternative is an SDK that reports a recoverable, guided state
+   as a refusal, and no amount of documentation makes a caller handle a variant the
+   type does not have.*
+
+2. **`mfa_setup_confirm` adopts credentials exactly as `login` does** — it *is* the
+   completion of a login. §24.3's five adoption rules apply verbatim, including
+   clearing the §17 decision memo.
+
+3. **`mfa_enroll` does not adopt anything and does not change the session.** An SDK
+   MUST NOT clear the decision memo on it: the subject has not changed, and
+   discarding a warm memo on an unrelated profile action is a needless round trip
+   for every subsequent check.
+
+4. **Enrolment is two calls and the first one is not enough.** `mfa_enroll` returns
+   a secret; the factor is not active until `mfa_confirm` accepts a code derived
+   from it. An SDK MUST NOT present a composed one-call helper here, because the
+   human step in the middle — scanning the URI, reading a code — is not something a
+   composed helper can wait for, and one that returned after `enroll` would report
+   MFA as enabled when it is not.
+
+### §25.3 `Sensitive<T>` applicability, and the one field that will be got wrong
+
+| Field | Wrapped? | Why |
+|---|---|---|
+| `secret_base32` | **yes** | The TOTP shared secret. Anyone holding it can generate valid codes forever. |
+| `totp_uri` | **yes** | `otpauth://totp/...?secret=<the same secret>` — it *contains* `secret_base32`. An SDK that wraps the secret and leaves the URI bare has wrapped nothing: the URI is the field that actually gets logged, because it is the field the caller passes to a QR renderer. |
+| `setup_token` | **yes** | A bearer credential that completes a login. |
+| `token` (email verification, password reset) | **yes** | Single-use, and single-use is not the same as harmless: it is a credential right up until it is spent. |
+| `new_password` | **yes** | Where the SDK has the type, and per §7 as everywhere else. |
+| `totp_code` | **yes** | Short-lived, but a code in a log is a code in a log. |
+| `mfa_enabled`, the reset context | no | Not credentials. |
+
+`totp_uri` is called out in its own row because it is the one an implementer skips.
+Every SDK's test for §25 MUST scan serialized output for the **secret value itself**
+rather than for the field name, which catches the URI case automatically.
+
+### §25.4 Password reset, and what `password_reset_context` is actually for
+
+`password_reset_context` exists because of §23. A tenant with OPAQUE enabled needs
+the client to build a registration record before it can send a new password, and
+building one needs the server's OPAQUE parameters — which the client cannot know
+before it has a token to ask with. The endpoint answers with the effective OPAQUE
+policy for the account the token belongs to.
+
+1. **An SDK that implements §23 MUST call `password_reset_context` before
+   `confirm_password_reset`** and MUST populate `ConfirmResetBody.opaque` when the
+   context says the tenant requires it. Sending `new_password` in plaintext to a
+   tenant in `opaque_mode: required` is refused, and refused late.
+2. **It discloses no identity.** Contract 1.26 removed the username from this
+   response when OPAQUE replaced SRP — OPAQUE has no identity in its key derivation,
+   so there was nothing left that needed it, and an unauthenticated endpoint that
+   confirms which account a token belongs to is an oracle worth not having. An SDK
+   MUST NOT reintroduce one by inferring the account from elsewhere and displaying
+   it beside the form.
+3. **`404` means unknown, expired or already-consumed**, and the three are
+   deliberately not distinguished. An SDK MUST NOT present a message that
+   distinguishes them either.
+
+`request_password_reset` answers `200` whether or not the address exists. This is
+not an implementation detail an SDK may improve on: an SDK that surfaced a
+"no such user" state — even inferred from timing — would turn the endpoint into
+the enumeration oracle the uniform response exists to prevent.
+
+### §25.5 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `mfa_enroll` | `mfa_enroll` | `mfaEnroll` | `mfa_enroll` | `mfaEnroll` | `mfaEnroll` | `MfaEnrollAsync` | `mfaEnroll` | `MfaEnroll` | `mfaEnroll` | `axiam_mfa_enroll` | `mfa_enroll` |
+| `mfa_confirm` | `mfa_confirm` | `mfaConfirm` | `mfa_confirm` | `mfaConfirm` | `mfaConfirm` | `MfaConfirmAsync` | `mfaConfirm` | `MfaConfirm` | `mfaConfirm` | `axiam_mfa_confirm` | `mfa_confirm` |
+| `mfa_setup_enroll` | `mfa_setup_enroll` | `mfaSetupEnroll` | `mfa_setup_enroll` | `mfaSetupEnroll` | `mfaSetupEnroll` | `MfaSetupEnrollAsync` | `mfaSetupEnroll` | `MfaSetupEnroll` | `mfaSetupEnroll` | `axiam_mfa_setup_enroll` | `mfa_setup_enroll` |
+| `mfa_setup_confirm` | `mfa_setup_confirm` | `mfaSetupConfirm` | `mfa_setup_confirm` | `mfaSetupConfirm` | `mfaSetupConfirm` | `MfaSetupConfirmAsync` | `mfaSetupConfirm` | `MfaSetupConfirm` | `mfaSetupConfirm` | `axiam_mfa_setup_confirm` | `mfa_setup_confirm` |
+| `verify_email` | `verify_email` | `verifyEmail` | `verify_email` | `verifyEmail` | `verifyEmail` | `VerifyEmailAsync` | `verifyEmail` | `VerifyEmail` | `verifyEmail` | `axiam_verify_email` | `verify_email` |
+| `resend_verification` | `resend_verification` | `resendVerification` | `resend_verification` | `resendVerification` | `resendVerification` | `ResendVerificationAsync` | `resendVerification` | `ResendVerification` | `resendVerification` | `axiam_resend_verification` | `resend_verification` |
+| `request_password_reset` | `request_password_reset` | `requestPasswordReset` | `request_password_reset` | `requestPasswordReset` | `requestPasswordReset` | `RequestPasswordResetAsync` | `requestPasswordReset` | `RequestPasswordReset` | `requestPasswordReset` | `axiam_request_password_reset` | `request_password_reset` |
+| `confirm_password_reset` | `confirm_password_reset` | `confirmPasswordReset` | `confirm_password_reset` | `confirmPasswordReset` | `confirmPasswordReset` | `ConfirmPasswordResetAsync` | `confirmPasswordReset` | `ConfirmPasswordReset` | `confirmPasswordReset` | `axiam_confirm_password_reset` | `confirm_password_reset` |
+| `password_reset_context` | `password_reset_context` | `passwordResetContext` | `password_reset_context` | `passwordResetContext` | `passwordResetContext` | `PasswordResetContextAsync` | `passwordResetContext` | `PasswordResetContext` | `passwordResetContext` | `axiam_password_reset_context` | `password_reset_context` |
+
+Async-twin rules follow §1.
+
+**An SDK that already shipped `confirm_password_reset` under a different name keeps
+it as a deprecated alias** for one release rather than renaming in place. Seven SDKs
+had reached `POST /api/v1/auth/reset/confirm` before this section existed, under
+names that did not agree with each other — which is the divergence §25 is closing,
+and breaking those callers to close it faster would be a poor trade.
+
+### §25.6 Required tests
+
+- `mfa_enroll` returns a secret and a URI; the URI contains the secret; **neither
+  the secret nor the URI appears in any log line, error payload or debug rendering**
+  — scan for the secret *value*, per §25.3.
+- `mfa_confirm` with a wrong code raises `AuthenticationError` and leaves
+  `mfa_enabled` false.
+- `mfa_enroll` does **not** clear the decision memo; `mfa_setup_confirm` **does**
+  (§25.2 rules 2–3).
+- A `login` answering `403 mfa_setup_required` produces the setup outcome carrying
+  the token, and **not** `AuthorizationError` (§25.2 rule 1).
+- `mfa_setup_confirm` leaves the client authenticated, asserted on the client's own
+  state.
+- `request_password_reset` for an unknown address resolves successfully — assert the
+  SDK does not raise, and does not expose any signal distinguishing it from a known
+  address.
+- `password_reset_context` on an unknown token raises the §2 mapping of `404` and
+  the SDK exposes no distinction between unknown, expired and consumed.
+- An SDK implementing §23 asserts that `confirm_password_reset` against a tenant
+  whose context requires OPAQUE sends an `opaque` object and **no** plaintext
+  `new_password`.
+- `setup_token`, the verification token and the reset token are `Sensitive<T>`
+  where the SDK has it, and absent from serialized output.
+
+---
+
+## §26 Pushed Authorization Requests (RFC 9126)
+
+**Requirement level: SHOULD (v1.0)** for the eleven SDKs, and **MUST** for any SDK
+claiming the §21 FAPI 2.0 *client* role — `profile: "fapi2"` sets `require_par` on
+the registration, so a FAPI 2.0 client that cannot push cannot authorize at all.
+
+Server implementation: `crates/axiam-oauth2/src/par.rs` and the `request_uri`
+branch of `authorize` in `crates/axiam-api-rest/src/handlers/oauth2.rs`.
+
+PAR moves the authorization request off the browser. Instead of putting
+`scope`, `redirect_uri`, `state` and the PKCE challenge into a URL the user agent
+carries, the client POSTs them straight to AXIAM over an authenticated back
+channel and puts an opaque `request_uri` in the redirect. What travels through the
+browser is then a random string that cannot be edited into meaning something else.
+
+This is a **§12 extension, not a replacement**: `oidc_discover`, `oidc_exchange`,
+`oidc_refresh` and the whole §12.4 ID-token checklist are unchanged, and a client
+that never calls `oidc_par` behaves exactly as it did.
+
+### §26.1 Canonical operation set and endpoint map
+
+| Canonical operation | Wire call | Request | Success |
+|---|---|---|---|
+| `oidc_par` | `POST /oauth2/par?tenant_id=<uuid>` | `application/x-www-form-urlencoded` / `PushedAuthorizationRequest` | **`201`** `PushedAuthorizationResponse` |
+
+The §12.1 wire rules apply unchanged and without exception: form-encoded body,
+`tenant_id` as a **query** parameter and never a body field, `X-Tenant-ID` still
+emitted per §5 rule 2, no HTTP Basic. A slug-only client cannot call `oidc_par`,
+for the same reason and with the same client-side error as the other five
+tenant-scoped `/oauth2/*` operations (§12.1 rule 2).
+
+**It answers `201`, not `200`.** RFC 9126 §2.2 specifies Created, and the response
+names a resource that did not exist before the call. An SDK whose success predicate
+is `status == 200` will treat every successful push as a failure. This is the single
+most likely defect in an implementation of this section, which is why it is stated
+here rather than left to the table above.
+
+**It is authenticated, unlike `/oauth2/device_authorization`.** That asymmetry is
+the point of the mechanism: the parameters stop travelling through the browser, and
+the ones that arrive are attributable to a client that proved it holds a credential.
+Client authentication follows §12.1 rule 4 as amended by SEC-093 — `client_secret`
+for `client_secret_post`, `client_assertion` + `client_assertion_type` for
+`private_key_jwt`, and **nothing at all** for the two mTLS methods, whose credential
+is the TLS connection. An SDK MUST NOT send `client_secret` for a client registered
+for a strong method: it is refused with `invalid_client`, not ignored.
+
+### §26.2 Semantics (normative)
+
+1. **`oidc_par` pushes what `oidc_begin` computed; it does not compute anything
+   itself.** The `state`, `nonce`, `code_verifier` and `code_challenge` are produced
+   exactly as §12.1's `oidc_begin` construction rules 1–4 require — same entropy
+   floors, same encodings, same `S256`. An SDK MUST NOT grow a second generator
+   here. The natural shape is `oidc_begin` → push its parameters → replace its
+   `url`; the `code_verifier` the caller must keep for `oidc_exchange` is the one
+   `oidc_begin` already gave them.
+
+2. **The authorization URL built from a `request_uri` carries exactly two query
+   parameters: `client_id` and `request_uri`.** Not `response_type`, not
+   `redirect_uri`, not `scope`, not `state`, not the PKCE pair — the server
+   **refuses** a request that carries both a `request_uri` and any inline
+   authorization parameter, rather than merging them.
+
+   The refusal is not tidiness and an SDK MUST NOT work around it by "helpfully"
+   re-adding the parameters for compatibility. Merging is where parameter confusion
+   lives: an attacker supplies the inline value they want and lets the pushed copy
+   satisfy whichever check reads the other one. `state` and `nonce` come from the
+   pushed request too, for the same reason — they were the client's to choose at
+   push time, and honouring a query-string copy would let the browser substitute
+   its own.
+
+3. **The `request_uri` is single-use and short-lived.** It is consumed when
+   `/oauth2/authorize` reads it. An SDK MUST NOT retry a redirect with a spent
+   `request_uri`, MUST NOT cache one across authorization attempts, and MUST NOT
+   treat `expires_in` as advisory. A second use is `invalid_request`, not a
+   duplicate-suppressed success.
+
+4. **`oidc_par` is not retryable.** It is a `POST` that creates server state, so it
+   falls outside §16.2's read-only eligibility exactly as `oidc_exchange` does. A
+   transport failure after the request left the client MUST be surfaced, not retried:
+   the safe recovery is a fresh push, which costs one round trip and cannot
+   double-consume anything.
+
+5. **`request_uri` is opaque.** An SDK MUST NOT parse it, MUST NOT validate its
+   `urn:` prefix as a precondition, and MUST NOT reconstruct one. Checking the
+   prefix buys nothing — a server that sends something else is a server the client
+   cannot help — and it breaks the moment the format is versioned.
+
+6. **PAR does not change the token exchange.** `oidc_exchange` sends the same
+   `authorization_code` grant with the same `code_verifier` and the same
+   `redirect_uri` it always did. The `redirect_uri` sent at exchange is the one that
+   was *pushed*, which is the same value `oidc_begin` produced — an SDK that stores
+   the pushed parameters and the exchange parameters separately has created two
+   places for them to disagree.
+
+### §26.3 Error mapping
+
+`400` and `401` from `/oauth2/par` carry an `OAuth2ErrorResponse` and map to
+`OAuthProtocolError` through the shared §12.3 rule 3 mapper — dispatch on the
+`error` field at any status, per contract 1.12. No grant-local mapper is permitted
+here; the whole point of 1.12 was removing the nine that existed.
+
+`invalid_client` on a push is the most common configuration failure in this section
+and an SDK's documentation SHOULD name the three causes: a wrong secret, a secret
+sent by a client registered for `tls_client_auth`/`private_key_jwt`/
+`self_signed_tls_client_auth`, or a client certificate the transport did not
+present.
+
+### §26.4 Per-language naming map
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `oidc_par` | `oidc_par` | `oidcPar` | `oidc_par` | `oidcPar` | `oidcPar` | `OidcParAsync` | `oidcPar` | `OidcPar` | `oidcPar` | `axiam_oidc_par` | `oidc_par` |
+
+Async-twin rules follow §1. Where an SDK offers a helper that builds the
+`request_uri` authorization URL, it MUST be named for the §12 operation it extends
+rather than introducing a second vocabulary — the accepted forms are a flag or an
+overload on the SDK's existing authorize-URL builder, never a parallel
+`par_authorize_url`.
+
+### §26.5 `Sensitive<T>` applicability
+
+`client_secret` and `client_assertion` are wrapped exactly as §12 already wraps
+them.
+
+`request_uri` is **wrapped**. It is short-lived and single-use, and both of those
+are reasons it gets treated as harmless — but between the push and the redirect it
+is a bearer handle to a fully-formed authorization request, and a log line is
+exactly the wrong place for it to sit for the length of that window. `expires_in`
+is not sensitive.
+
+`code_verifier` is wrapped as §12 already requires; the `code_challenge` is not.
+
+### §26.6 Required tests
+
+- A `201` is treated as **success** — assert against a mocked `201`, because a
+  success predicate written as `== 200` passes every other test in this section.
+- The pushed body carries the form fields §26.2 rule 1 names, form-encoded, with
+  `tenant_id` in the **query** and absent from the body.
+- The authorization URL built from a `request_uri` carries **exactly**
+  `client_id` and `request_uri` — assert on the full parameter set, not on the
+  presence of the two.
+- A slug-only client raises the §12.1 rule 2 client-side error with **zero** wire
+  calls.
+- A `400 invalid_request` maps to `OAuthProtocolError` through the shared mapper,
+  carrying the server's `error` value.
+- `oidc_par` is **not** retried on a `5xx` or a transport failure — assert exactly
+  one request (§26.2 rule 4).
+- `request_uri` and `client_secret` do not appear in any log line, error payload or
+  debug rendering — scan the serialized output for the fixture values.
+- An end-to-end assertion that the `code_verifier` surviving from `oidc_begin`
+  through the push is the one `oidc_exchange` sends.
+
+---
+
 ### OpenAPI Export Feature Flag
 
 `openapi.json` (kept in this directory, and mirrored into every SDK repo) is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
 
 ---
 
-*Contract version: 1.27 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST; **§10.1 rule 9 extended for DPoP and §21.6–§21.9 added 2026-08 (contract 1.16)** — the server gained the second half of two X5.1 rows, `private_key_jwt` client authentication (RFC 7523 §2.2) and DPoP sender-constrained tokens (RFC 9449), and rule 9's four-row table becomes a ten-row one **extended in place** rather than duplicated. The SDK-visible surface is the resource-server side only: a `cnf` may now carry `jkt`, an SDK that cannot verify a DPoP proof MUST refuse such a token rather than accept it as a bearer, and a `cnf` naming **both** methods is a conjunction — "check whichever we can" is forbidden, as is reading an empty `cnf` as unbound. No signature moves and no breaking change to any existing call; the compatibility risk again runs the other way, and the positive regression test is widened to say an **unbound** token must still be accepted with no certificate *and* no proof. Client-side proof generation is a per-language judgement call and §21.7.3 makes declining a supported answer with exactly three obligations (reject, document, test) — §21.9 records each SDK's posture, and the C and C++ SDKs decline §21.7.2 deliberately rather than by omission. §21.8 (`private_key_jwt`) is informative throughout: the client role may keep using `client_secret_post` or mTLS; **§10.3 (sender-constrained tokens over gRPC) added 2026-08 (contract 1.17)** — the X5 work landed REST-first, and gRPC introspection was found to carry no `cnf` at all, which meant an SDK validating through `TokenService` could not satisfy rule 9 detail 4 even in principle: it had no way to tell a bound token from a bearer one and was forced into the exact downgrade rule 9 exists to prevent. `ValidateTokenResponse` and `IntrospectTokenResponse` now carry `cnf` and `token_type`, and introspection additionally gains the RFC 7662 §2.2 fields it had always been missing (`scope`, `client_id`) plus `permissions` (§20 UMA RPT) and `ext_exchange_iss` (X4 provenance). All additive proto fields, so an older client keeps working and simply does not see them — which is the risk, and why §10.3 is normative rather than informative. One wire-level subtlety has its own rule: proto3 cannot distinguish an absent string from an empty one, so an **empty** `CnfClaim` must be refused rather than read as unbound, exactly as rule 9's "names neither" row requires. SDKs must NOT copy the server's own gRPC-side refusal of DPoP-bound tokens — AXIAM's interceptor declines them because a tonic interceptor sees neither `htm` nor `htu`, whereas an SDK guarding a real endpoint knows both; **§22 (Reactors — AMQP extension actors) added 2026-08 (contract 1.18)** — **non-breaking / additive**, and additive in the strongest sense: no existing signature moves, no existing rule changes, and an SDK that ships no reactor runtime is exactly as conformant as it was under 1.17. The chapter documents a server surface that already exists (`crates/axiam-amqp/src/reactor/`, `crates/axiam-core/src/models/reactor.rs`): a Reactor is an external process that subscribes to hook events on the AMQP bus and answers allow/deny/mutate under a signed, timeout-bounded, field-allow-listed protocol — Zitadel-Actions parity without loading third-party code into the security kernel. Two things in it are new obligations rather than new options. The first is that §8's HMAC now runs in **both directions** on one exchange: the server signs the event, the reactor signs the reply with the same tenant subkey, and an unsigned or stale reply is discarded as though the reactor had never answered — with one canonicalization difference that will cost an implementer a day if it is not stated, namely that `hmac_signature` is serialized as `null` inside a reactor body rather than omitted as it is in §8's own two message types. That is why §22.13's vectors ship beside the §8 vectors, in the same fixture directory and under the same master key, tenant and derived subkey: one loader serves both, and the difference is a test rather than a paragraph to remember. The second is the hot-path exclusion (§22.7), written as a **MUST NOT** rather than a note — `authz.check`, `authz.check_batch` and `token.introspect` are not hookable and no SDK may present them as such, because a reactor round-trip is milliseconds and the check path's budget is microseconds; an application needing external input on a decision writes a deny grant, which the engine evaluates at hot-path cost. Swift, C and C++ ship no runtime (§22.11) for the same reason §8 has never listed them among the SDKs that speak AMQP — no vendorable client for those targets — but §22.1–§22.8 binds a hand-rolled integrator on them in full, a split that follows the §12.6 precedent contract 1.11 lifted while cutting at the seam between protocol and convenience rather than across a whole section. One scope note travels with the chapter: the server's lapin transport is not yet merged, so the two AMQP basic properties §22.1 names for reply addressing are the standard RPC convention rather than an implemented one — every signed body, field order, allow-list and validation rule in the chapter is implemented and tested today. Recorded here and not in the Breaking Changes Log above, which is untouched, because nothing breaks; **SDK-Q10 closed 2026-08 (contract 1.19)** — the last deferred contract item, and the one that had been deferred because every closure looked like a break. The gRPC decision's `deny_reason` and the REST decision's `reason` were the same string under two names, so an SDK speaking both transports reconciled them in its own mapper and the two same-named `AccessDecision` types could disagree about their own field list. Closed by **deprecate-and-add**: `CheckAccessResponse` gains `reason` (field 4, explicit presence — absent on an allow, present on every refusal, exactly the REST shape), `deny_reason` is marked `[deprecated = true]` and keeps carrying the identical string until it is **removed at AXIAM 2.0**, and §11.2 rule 9's amendment states the one migration rule: read `reason`, fall back to `deny_reason` only when `reason` is absent on a refusal, expose one reason accessor rather than two. Nothing breaks on the wire today and no signature moves. The same amendment settles the two shapes that went with it — the decision is `allowed` + `reason_code` + `reason` and carries no `resource_type`/`resourceType` (the server has never had one), and gRPC `subject_id` becomes optional the way REST's is, with an **empty** value meaning "the subject in the verified token". That last one is deliberately not proto3 `optional`: `buf breaking` refuses the cardinality change, so empty carries the meaning proto3 cannot express as absence — the same constraint §10.3 already records for an empty `CnfClaim`; **§15.2 rule 8, §22.8's listen/unreadable-registry paragraphs and §22.9 rule 3 added 2026-08 (contract 1.20)** — the medium-severity half of the F4-bis security review (SEC-096, SEC-099, SEC-100, SEC-101). One of the four is an SDK-visible **behaviour** change and it is the one to read: an exchanged token (and a §20 RPT) is now sender-constrained to whatever the *exchanging client* proved on that request, so `token_type` may be `DPoP` where it was always `Bearer`, the token may carry a `cnf` that §10.1 rule 9 governs, and a client registered for binding that exchanges without presenting its credential now receives `invalid_client` instead of an unbound token. No signature moves, and a client that registered no binding — every client that existed before X5.1 — receives byte-identical responses. The other three are statements of server behaviour an SDK could not have inferred: a `listen` registration can never deny even on the two out-of-chain failure paths, an unreadable registration store applies the *event's* default policy but exempts a tenant with no registrations at all, and a reactor registration is refused with `503` while the server's transport cannot dispatch — with `enabled: false`, `DELETE` and creating-already-disabled deliberately left open as the operator's way out; **§22.1's scope note closed and §22.9 rule 3 widened 2026-08 (contract 1.21)** — **no SDK behaviour changes and no signature moves**. The server's lapin `ReactorTransport` is merged (`crates/axiam-amqp/src/reactor/transport.rs`) and `axiam-server` composes it, so the one part of §22 that was not pinned by a running implementation — the two AMQP basic properties used for reply addressing — now is, exercised against a live broker in `crates/axiam-amqp/tests/reactor_containerized_test.rs`. An SDK that already echoed `reply_to`/`correlation_id` from the delivery, which the scope note told it to do, needs no change. Two things are worth reading anyway. The first is a server-side clarification with a security reason behind it: an `intercept` event goes to the reactor's queue directly rather than through the topic exchange, because the routing key is per `(tenant, event)` and a fan-out would let whichever reactor answered first be consumed as the reply of whichever reactor the priority-ordered chain was waiting on — the exchange and bindings are still declared by the server, and a reactor runtime still consumes its configured queue and still declares nothing. The second is that §22.9 rule 3's `503` now has a second trigger, `mode: "listen"`, for as long as no hook site fans out to listeners: such a registration receives nothing and, being a listener, produces no outcome in which its silence could be noticed, so refusing it is more honest than accepting it. `enabled: false`, `DELETE` and creating-already-disabled stay open, as they already did. A **broker outage is explicitly not** a `503` trigger — the merged transport reports itself dispatchable while disconnected and lets each registration's `failure_policy` decide, per §22.8, because refusing registrations for the duration of a blip would turn a broker problem into an admin-API problem; **§22.14 (declarative handler binding) added 2026-08 (contract 1.22)** — **additive, SHOULD-level, no signature moves and no behaviour change to any existing call.** §22.10's handler is one function from an event to one answer, which is right for the wire and wrong for the code: a reactor registered for three events opens with a dispatch on the event name, and the catch-all arm of that dispatch is almost always written `return allow()`. That line is §22.10 rule 2's defect — synthesizing an answer for a handler that never ran — relocated out of the runtime, where the rule binds, and into user code, where it does not. Every SDK example this project ships had one, which is how the pattern was found. The subsection defines the declarative form each language already uses for §11 (annotations in Java and Kotlin, attributes in C# and PHP, a decorator in Python, an attribute macro in Rust, a `ServeMux`-shaped binding table in Go and a typed record in TypeScript), and pins six rules on it. Five are restatements aimed one layer up — compose rather than replace, refuse an unregistered name at bind time, one handler per event, propagate a handler's own failure unchanged, never filter a patch. The sixth is the reason the subsection exists: an event with no bound handler MUST abstain, letting the registration's `failure_policy` decide exactly as it decides a timeout, and MUST NOT be answered `allow` or `deny`. Rule 2 carries one instruction that reads backwards until you see why: an SDK MUST NOT keep its own list of the three hot-path operations to give them a better error message, because that list would be a constant naming them and §22.13's hot-path assertion forbids exactly that — they are refused as unknown names, like any other name absent from the §22.5 registry. Nothing here is a new conformance claim: an SDK shipping §22 with the binder and one shipping §22 without it both write "conforms to … §22"; **§8b tightened and the server made TLS-only 2026-08 (contract 1.23)** — the server's `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch is **removed**, so `AXIAM__AMQP__URL` must be `amqps://` in every build profile with no flag that changes it. The flag had existed for a year and four of this project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument (throwaway data on a compose network, an ephemeral broker carrying synthetic fixtures for one job, a hop the benchmark harness measures rather than encrypts). None was wrong; the aggregate was that "AMQP is TLS-only" described the production compose file and the k8s manifests and nothing else the repository ran. Rule 1 is correspondingly restated as *refuse* every non-`amqps://` scheme rather than merely *support* `amqps://`, and two rules are added. **Rule 7** is the one with teeth: rules 1–5 MUST be enforced in code, not stated in documentation, because the review that produced this version found three SDKs asserting `amqps://` in a doc comment attached to a parameter that accepted anything — the TypeScript runtime's own comment read "there is no verification-skip switch and no plaintext fallback" directly above an `amqp.connect(url)` that would happily take `amqp://`. Where an SDK takes a caller-supplied channel (Java, Kotlin, C#) it must additionally ship a constructor that applies rules 1–4 and show that constructor in its README. **Rule 8** removes any loopback exception: §6's `http://localhost` dev carve-out for the HTTP transports does not extend to the broker URL, the server has no plaintext listener for it to reach, and the Rust SDK's AMQP path — the only one that had inherited it — no longer grants it. Two new required tests go with them: a refusal must be asserted as *no connection attempted* rather than as a thrown message, since rule 5 is a claim about the absence of a fallback and an implementation that dialled first and complained second would pass a message-only assertion; and an unparseable URL must fail closed, because a guard written as "check the scheme *if* the URL parses" silently exempts everything malformed — a defect this project shipped in the Rust SDK and fixed under this version. §8b also gains a normative per-SDK index naming each enforcement point, so "where is this actually checked" is answerable without a grep. No message format, field order or signing rule changes, and §22.2's transport paragraph is unchanged: it already deferred to §8b in full; **§23 (Secure Remote Password, SRP-6a) added 2026-08 (contract 1.24)** — **additive, no signature moves, no behaviour change to any existing call.** An SDK that does not implement §23 is exactly as conformant as it was under 1.23, and a server left at the `srp_mode: disabled` default — which is what every existing deployment gets on upgrade — behaves byte-identically to before. The chapter documents a second way to prove a password: an augmented PAKE in which the plaintext never reaches the server, which closes the holes TLS 1.3 does not — a TLS-terminating proxy, an accidental request-body log, a heap dump. §23.0 states the limits in the same breath, because an SDK's own README will repeat them and overclaiming is worse than not shipping the feature: SRP does not defend against a compromised AXIAM server, and in a browser it does not defend against AXIAM serving malicious JavaScript. Three things in it will cost an implementer a day each if they are skimmed. The first is `PAD()` (§23.3 rule 1): every hashed value is left-padded to the modulus width, and an implementation that skips it agrees with everyone else until a value happens to carry a leading zero byte, at which point roughly one login in 256 fails in a way that reads as a flaky network — which is why the vendored vectors are built with a leading-zero salt *and* a leading-zero `x` rather than random ones. The second is that the identity inside the KDF comes from the server's challenge response and never from what the human typed (rule 2): AXIAM lets a user sign in with a username or an email while only one of the two is bound into `x`. The third is that `M2` verification is mandatory (rule 6) — skipping it keeps the half of SRP that authenticates the client to the server and throws away the half that authenticates the server to the client, leaving a rogue endpoint that never knew the verifier indistinguishable from the real one. Two deliberate divergences from RFC 5054 are recorded rather than inherited: SHA-256 rather than SHA-1, and `x` as a memory-hard KDF output rather than a bare hash — the latter because a bare-hash verifier would be *cheaper* to attack offline than the Argon2id hashes AXIAM stores today, making adoption a net regression at rest. Both KDFs (`argon2id`, `pbkdf2_sha256`) are mandatory for login and the server dictates which per exchange; PBKDF2 exists because three languages have no vetted Argon2 binding in their standard distribution, and shipping SRP that only half the SDKs could speak would have been worse than shipping a weaker-but-universal fallback. §23.6 explains a server behaviour an SDK cannot infer and must not undo: `srp_mode: required` refuses password login for **every** principal in the tenant rather than only the enrolled ones, because the per-user variant would split the response on a fact about the account and turn `/auth/login` into an enumeration oracle costing one junk password per name. That uniformity is also why `required` is the last step of a migration and not the first — a verifier needs the plaintext password and a stored Argon2id hash is not invertible, so nobody can be enrolled retroactively. PHP is the one **conditional** posture in §23.8: it has no native bignum and neither `ext-gmp` nor `ext-bcmath` is guaranteed present, so its `srpAvailable()` reports `false` rather than throwing at login time; **§23.3 rule 4 errata and the §23.8 table corrected 2026-08 (contract 1.25)** — **documentation only; no SDK behaviour changes, no signature moves, and nothing that was conformant under 1.24 stops being so.** Implementing §23 across all eleven SDKs turned up a fact the chapter had assumed away: `argon2id` is not universally computable, and not for want of a dependency. PHP's only Argon2id that takes a caller-supplied salt (`sodium_crypto_pwhash`) requires exactly 16 bytes where §23.5's salt is 32, and `password_hash()` accepts no salt at all; Swift Crypto ships no Argon2 and none exists for every platform its SDK supports; C and C++ get it from OpenSSL only at 3.2 and later. Rule 4 already told an SDK what to do about a KDF it cannot perform — refuse with `NetworkError` naming it, never substitute — so no implementation changes; what the errata adds is that such a refusal is **conformant rather than a gap**, and that the SDK must say so in its README together with the trade-off. That trade-off is real and belongs in the open: a tenant serving those clients sets `srp_kdf: pbkdf2_sha256`, and PBKDF2 is not memory-hard, so a leaked verifier database enrolled under it is cheaper to attack with GPUs than one enrolled under Argon2id — while §23.0's threat model, which is about proxies, request logs and heap dumps rather than about the cost of an offline attack, is unaffected either way. The §23.8 table is corrected in the same pass to say what each SDK actually does rather than what was projected for it, and gains a second conditionality axis, because "can this build do SRP at all" and "can this build serve this tenant's KDF" are different questions answered at different times — the first by `srpAvailable()` before a login is attempted, the second by a `NetworkError` during one; **§23 rewritten from SRP-6a to OPAQUE (RFC 9807) 2026-08 (contract 1.26)** — **breaking for any SDK that implemented §23 under 1.24/1.25; no change to §1–§22 and no signature moves outside §23.** SRP is removed from AXIAM entirely rather than deprecated, and nothing migrates: a verifier cannot be converted into a registration record, because both are sealed against a plaintext the server has never had, and AXIAM is unreleased. Three reasons, in descending order of weight. OPAQUE was published as **RFC 9807** in July 2025, closing the one blocker 1.24's own text named — it was a draft when SRP was chosen, and improving implementation coverage was written down as the migration trigger. It resists the pre-computation attack SRP is open to, which is not a marginal gain: a stolen verifier database was offline-attackable at exactly the cost of the KDF, and that is why AXIAM's SRP had to bolt a memory-hard KDF onto RFC 5054's bare hash merely to *match* the Argon2id hashes it replaced, whereas a stolen OPAQUE record additionally requires the tenant's OPRF seed and without it there is no dictionary attack to mount at any cost. And it is specified to the byte, where AXIAM's SRP carried two documented divergences from its own RFC. **The structural change is §23.1, and it is the one to read first: an SDK MUST NOT implement the protocol.** SRP was hand-written eleven times because it is modular arithmetic and every language has a bignum; OPAQUE needs an OPRF, `hash_to_curve`, `expand_message_xmd`, an envelope and a three-message AKE, so every SDK binds one audited implementation — compiled, through WebAssembly, or through a C ABI — with Go the single permitted exception because a vetted RFC 9807 library exists for it and cgo would break `CGO_ENABLED=0` for every consumer. That costs SDKs their pure-source installs and buys back the whole of 1.25's errata: `pbkdf2_sha256` is gone, the second conditionality axis is gone, no tenant has to weaken its KDF policy to serve PHP or Swift clients, and the weaker KSF rung is now scrypt, which is memory-hard. Four §23 obligations disappear rather than change. There is **no server proof to verify** — RFC 9807's AKE authenticates the server during the handshake, so 1.24's rule 6, which had to mandate an `M2` check in capitals because skipping it silently discarded half the protocol, describes a failure mode that no longer exists. There is **no `PAD()`**. There is **no identity in the key derivation**, so `login/start` returns no identity field, `/auth/reset/context` no longer discloses the account's username, and a rename no longer invalidates a credential. And there is **no `register/finish` endpoint**: a record can only be built where the plaintext legitimately exists on the client, and every such moment is already an endpoint that takes a password. What is genuinely new is that enrolment now costs a server round trip — `POST /auth/opaque/register/start`, unauthenticated by necessity because it is called while creating a user who does not exist yet, and safe because the server mints the credential identifier itself. `POST /api/v1/admin/bootstrap` is the one endpoint that takes no enrolment object at all: it already receives the plaintext password because it has to hash it, so it runs both halves itself and stays a single call. §23.7's fixture is correspondingly smaller and an SDK author should read §23.7's first three paragraphs before concluding something is missing — what each SDK still owns is hex, field mapping, honouring the server's KSF parameters and the §2 error taxonomy, and that is what is pinned; **§22.5's firing list gains usernameless passkey sign-in 2026-08 (contract 1.27)** — **no SDK signature moves and no change to any SDK-implemented surface**; WebAuthn is a browser ceremony and no SDK speaks it. It is recorded here because §22.5 enumerates where `login.post_auth` fires, and a reactor author reading that list is the person who needs to know the list grew. The server gained `POST /api/v1/auth/webauthn/authenticate/discoverable/finish`, a sign-in that completes without a username and therefore without the password step that fired the event for the username-bound ceremony. The carve-out the section already carried — WebAuthn `authenticate/finish` does not fire, because it continues a login gated at its first step — reads as covering this one too, and does not: there is no first step to have been gated at. Left unfired it would have been SEC-095 a second time, with the bypass being a button rather than an identity provider. It behaves as the federated paths do, refusing `require_mfa` rather than dropping it, since a one-round-trip sign-in has no step-up branch — and the ceremony required user verification to complete, so the factor a step-up would demand was already presented*
+*Contract version: 1.28 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST; **§10.1 rule 9 extended for DPoP and §21.6–§21.9 added 2026-08 (contract 1.16)** — the server gained the second half of two X5.1 rows, `private_key_jwt` client authentication (RFC 7523 §2.2) and DPoP sender-constrained tokens (RFC 9449), and rule 9's four-row table becomes a ten-row one **extended in place** rather than duplicated. The SDK-visible surface is the resource-server side only: a `cnf` may now carry `jkt`, an SDK that cannot verify a DPoP proof MUST refuse such a token rather than accept it as a bearer, and a `cnf` naming **both** methods is a conjunction — "check whichever we can" is forbidden, as is reading an empty `cnf` as unbound. No signature moves and no breaking change to any existing call; the compatibility risk again runs the other way, and the positive regression test is widened to say an **unbound** token must still be accepted with no certificate *and* no proof. Client-side proof generation is a per-language judgement call and §21.7.3 makes declining a supported answer with exactly three obligations (reject, document, test) — §21.9 records each SDK's posture, and the C and C++ SDKs decline §21.7.2 deliberately rather than by omission. §21.8 (`private_key_jwt`) is informative throughout: the client role may keep using `client_secret_post` or mTLS; **§10.3 (sender-constrained tokens over gRPC) added 2026-08 (contract 1.17)** — the X5 work landed REST-first, and gRPC introspection was found to carry no `cnf` at all, which meant an SDK validating through `TokenService` could not satisfy rule 9 detail 4 even in principle: it had no way to tell a bound token from a bearer one and was forced into the exact downgrade rule 9 exists to prevent. `ValidateTokenResponse` and `IntrospectTokenResponse` now carry `cnf` and `token_type`, and introspection additionally gains the RFC 7662 §2.2 fields it had always been missing (`scope`, `client_id`) plus `permissions` (§20 UMA RPT) and `ext_exchange_iss` (X4 provenance). All additive proto fields, so an older client keeps working and simply does not see them — which is the risk, and why §10.3 is normative rather than informative. One wire-level subtlety has its own rule: proto3 cannot distinguish an absent string from an empty one, so an **empty** `CnfClaim` must be refused rather than read as unbound, exactly as rule 9's "names neither" row requires. SDKs must NOT copy the server's own gRPC-side refusal of DPoP-bound tokens — AXIAM's interceptor declines them because a tonic interceptor sees neither `htm` nor `htu`, whereas an SDK guarding a real endpoint knows both; **§22 (Reactors — AMQP extension actors) added 2026-08 (contract 1.18)** — **non-breaking / additive**, and additive in the strongest sense: no existing signature moves, no existing rule changes, and an SDK that ships no reactor runtime is exactly as conformant as it was under 1.17. The chapter documents a server surface that already exists (`crates/axiam-amqp/src/reactor/`, `crates/axiam-core/src/models/reactor.rs`): a Reactor is an external process that subscribes to hook events on the AMQP bus and answers allow/deny/mutate under a signed, timeout-bounded, field-allow-listed protocol — Zitadel-Actions parity without loading third-party code into the security kernel. Two things in it are new obligations rather than new options. The first is that §8's HMAC now runs in **both directions** on one exchange: the server signs the event, the reactor signs the reply with the same tenant subkey, and an unsigned or stale reply is discarded as though the reactor had never answered — with one canonicalization difference that will cost an implementer a day if it is not stated, namely that `hmac_signature` is serialized as `null` inside a reactor body rather than omitted as it is in §8's own two message types. That is why §22.13's vectors ship beside the §8 vectors, in the same fixture directory and under the same master key, tenant and derived subkey: one loader serves both, and the difference is a test rather than a paragraph to remember. The second is the hot-path exclusion (§22.7), written as a **MUST NOT** rather than a note — `authz.check`, `authz.check_batch` and `token.introspect` are not hookable and no SDK may present them as such, because a reactor round-trip is milliseconds and the check path's budget is microseconds; an application needing external input on a decision writes a deny grant, which the engine evaluates at hot-path cost. Swift, C and C++ ship no runtime (§22.11) for the same reason §8 has never listed them among the SDKs that speak AMQP — no vendorable client for those targets — but §22.1–§22.8 binds a hand-rolled integrator on them in full, a split that follows the §12.6 precedent contract 1.11 lifted while cutting at the seam between protocol and convenience rather than across a whole section. One scope note travels with the chapter: the server's lapin transport is not yet merged, so the two AMQP basic properties §22.1 names for reply addressing are the standard RPC convention rather than an implemented one — every signed body, field order, allow-list and validation rule in the chapter is implemented and tested today. Recorded here and not in the Breaking Changes Log above, which is untouched, because nothing breaks; **SDK-Q10 closed 2026-08 (contract 1.19)** — the last deferred contract item, and the one that had been deferred because every closure looked like a break. The gRPC decision's `deny_reason` and the REST decision's `reason` were the same string under two names, so an SDK speaking both transports reconciled them in its own mapper and the two same-named `AccessDecision` types could disagree about their own field list. Closed by **deprecate-and-add**: `CheckAccessResponse` gains `reason` (field 4, explicit presence — absent on an allow, present on every refusal, exactly the REST shape), `deny_reason` is marked `[deprecated = true]` and keeps carrying the identical string until it is **removed at AXIAM 2.0**, and §11.2 rule 9's amendment states the one migration rule: read `reason`, fall back to `deny_reason` only when `reason` is absent on a refusal, expose one reason accessor rather than two. Nothing breaks on the wire today and no signature moves. The same amendment settles the two shapes that went with it — the decision is `allowed` + `reason_code` + `reason` and carries no `resource_type`/`resourceType` (the server has never had one), and gRPC `subject_id` becomes optional the way REST's is, with an **empty** value meaning "the subject in the verified token". That last one is deliberately not proto3 `optional`: `buf breaking` refuses the cardinality change, so empty carries the meaning proto3 cannot express as absence — the same constraint §10.3 already records for an empty `CnfClaim`; **§15.2 rule 8, §22.8's listen/unreadable-registry paragraphs and §22.9 rule 3 added 2026-08 (contract 1.20)** — the medium-severity half of the F4-bis security review (SEC-096, SEC-099, SEC-100, SEC-101). One of the four is an SDK-visible **behaviour** change and it is the one to read: an exchanged token (and a §20 RPT) is now sender-constrained to whatever the *exchanging client* proved on that request, so `token_type` may be `DPoP` where it was always `Bearer`, the token may carry a `cnf` that §10.1 rule 9 governs, and a client registered for binding that exchanges without presenting its credential now receives `invalid_client` instead of an unbound token. No signature moves, and a client that registered no binding — every client that existed before X5.1 — receives byte-identical responses. The other three are statements of server behaviour an SDK could not have inferred: a `listen` registration can never deny even on the two out-of-chain failure paths, an unreadable registration store applies the *event's* default policy but exempts a tenant with no registrations at all, and a reactor registration is refused with `503` while the server's transport cannot dispatch — with `enabled: false`, `DELETE` and creating-already-disabled deliberately left open as the operator's way out; **§22.1's scope note closed and §22.9 rule 3 widened 2026-08 (contract 1.21)** — **no SDK behaviour changes and no signature moves**. The server's lapin `ReactorTransport` is merged (`crates/axiam-amqp/src/reactor/transport.rs`) and `axiam-server` composes it, so the one part of §22 that was not pinned by a running implementation — the two AMQP basic properties used for reply addressing — now is, exercised against a live broker in `crates/axiam-amqp/tests/reactor_containerized_test.rs`. An SDK that already echoed `reply_to`/`correlation_id` from the delivery, which the scope note told it to do, needs no change. Two things are worth reading anyway. The first is a server-side clarification with a security reason behind it: an `intercept` event goes to the reactor's queue directly rather than through the topic exchange, because the routing key is per `(tenant, event)` and a fan-out would let whichever reactor answered first be consumed as the reply of whichever reactor the priority-ordered chain was waiting on — the exchange and bindings are still declared by the server, and a reactor runtime still consumes its configured queue and still declares nothing. The second is that §22.9 rule 3's `503` now has a second trigger, `mode: "listen"`, for as long as no hook site fans out to listeners: such a registration receives nothing and, being a listener, produces no outcome in which its silence could be noticed, so refusing it is more honest than accepting it. `enabled: false`, `DELETE` and creating-already-disabled stay open, as they already did. A **broker outage is explicitly not** a `503` trigger — the merged transport reports itself dispatchable while disconnected and lets each registration's `failure_policy` decide, per §22.8, because refusing registrations for the duration of a blip would turn a broker problem into an admin-API problem; **§22.14 (declarative handler binding) added 2026-08 (contract 1.22)** — **additive, SHOULD-level, no signature moves and no behaviour change to any existing call.** §22.10's handler is one function from an event to one answer, which is right for the wire and wrong for the code: a reactor registered for three events opens with a dispatch on the event name, and the catch-all arm of that dispatch is almost always written `return allow()`. That line is §22.10 rule 2's defect — synthesizing an answer for a handler that never ran — relocated out of the runtime, where the rule binds, and into user code, where it does not. Every SDK example this project ships had one, which is how the pattern was found. The subsection defines the declarative form each language already uses for §11 (annotations in Java and Kotlin, attributes in C# and PHP, a decorator in Python, an attribute macro in Rust, a `ServeMux`-shaped binding table in Go and a typed record in TypeScript), and pins six rules on it. Five are restatements aimed one layer up — compose rather than replace, refuse an unregistered name at bind time, one handler per event, propagate a handler's own failure unchanged, never filter a patch. The sixth is the reason the subsection exists: an event with no bound handler MUST abstain, letting the registration's `failure_policy` decide exactly as it decides a timeout, and MUST NOT be answered `allow` or `deny`. Rule 2 carries one instruction that reads backwards until you see why: an SDK MUST NOT keep its own list of the three hot-path operations to give them a better error message, because that list would be a constant naming them and §22.13's hot-path assertion forbids exactly that — they are refused as unknown names, like any other name absent from the §22.5 registry. Nothing here is a new conformance claim: an SDK shipping §22 with the binder and one shipping §22 without it both write "conforms to … §22"; **§8b tightened and the server made TLS-only 2026-08 (contract 1.23)** — the server's `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch is **removed**, so `AXIAM__AMQP__URL` must be `amqps://` in every build profile with no flag that changes it. The flag had existed for a year and four of this project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument (throwaway data on a compose network, an ephemeral broker carrying synthetic fixtures for one job, a hop the benchmark harness measures rather than encrypts). None was wrong; the aggregate was that "AMQP is TLS-only" described the production compose file and the k8s manifests and nothing else the repository ran. Rule 1 is correspondingly restated as *refuse* every non-`amqps://` scheme rather than merely *support* `amqps://`, and two rules are added. **Rule 7** is the one with teeth: rules 1–5 MUST be enforced in code, not stated in documentation, because the review that produced this version found three SDKs asserting `amqps://` in a doc comment attached to a parameter that accepted anything — the TypeScript runtime's own comment read "there is no verification-skip switch and no plaintext fallback" directly above an `amqp.connect(url)` that would happily take `amqp://`. Where an SDK takes a caller-supplied channel (Java, Kotlin, C#) it must additionally ship a constructor that applies rules 1–4 and show that constructor in its README. **Rule 8** removes any loopback exception: §6's `http://localhost` dev carve-out for the HTTP transports does not extend to the broker URL, the server has no plaintext listener for it to reach, and the Rust SDK's AMQP path — the only one that had inherited it — no longer grants it. Two new required tests go with them: a refusal must be asserted as *no connection attempted* rather than as a thrown message, since rule 5 is a claim about the absence of a fallback and an implementation that dialled first and complained second would pass a message-only assertion; and an unparseable URL must fail closed, because a guard written as "check the scheme *if* the URL parses" silently exempts everything malformed — a defect this project shipped in the Rust SDK and fixed under this version. §8b also gains a normative per-SDK index naming each enforcement point, so "where is this actually checked" is answerable without a grep. No message format, field order or signing rule changes, and §22.2's transport paragraph is unchanged: it already deferred to §8b in full; **§23 (Secure Remote Password, SRP-6a) added 2026-08 (contract 1.24)** — **additive, no signature moves, no behaviour change to any existing call.** An SDK that does not implement §23 is exactly as conformant as it was under 1.23, and a server left at the `srp_mode: disabled` default — which is what every existing deployment gets on upgrade — behaves byte-identically to before. The chapter documents a second way to prove a password: an augmented PAKE in which the plaintext never reaches the server, which closes the holes TLS 1.3 does not — a TLS-terminating proxy, an accidental request-body log, a heap dump. §23.0 states the limits in the same breath, because an SDK's own README will repeat them and overclaiming is worse than not shipping the feature: SRP does not defend against a compromised AXIAM server, and in a browser it does not defend against AXIAM serving malicious JavaScript. Three things in it will cost an implementer a day each if they are skimmed. The first is `PAD()` (§23.3 rule 1): every hashed value is left-padded to the modulus width, and an implementation that skips it agrees with everyone else until a value happens to carry a leading zero byte, at which point roughly one login in 256 fails in a way that reads as a flaky network — which is why the vendored vectors are built with a leading-zero salt *and* a leading-zero `x` rather than random ones. The second is that the identity inside the KDF comes from the server's challenge response and never from what the human typed (rule 2): AXIAM lets a user sign in with a username or an email while only one of the two is bound into `x`. The third is that `M2` verification is mandatory (rule 6) — skipping it keeps the half of SRP that authenticates the client to the server and throws away the half that authenticates the server to the client, leaving a rogue endpoint that never knew the verifier indistinguishable from the real one. Two deliberate divergences from RFC 5054 are recorded rather than inherited: SHA-256 rather than SHA-1, and `x` as a memory-hard KDF output rather than a bare hash — the latter because a bare-hash verifier would be *cheaper* to attack offline than the Argon2id hashes AXIAM stores today, making adoption a net regression at rest. Both KDFs (`argon2id`, `pbkdf2_sha256`) are mandatory for login and the server dictates which per exchange; PBKDF2 exists because three languages have no vetted Argon2 binding in their standard distribution, and shipping SRP that only half the SDKs could speak would have been worse than shipping a weaker-but-universal fallback. §23.6 explains a server behaviour an SDK cannot infer and must not undo: `srp_mode: required` refuses password login for **every** principal in the tenant rather than only the enrolled ones, because the per-user variant would split the response on a fact about the account and turn `/auth/login` into an enumeration oracle costing one junk password per name. That uniformity is also why `required` is the last step of a migration and not the first — a verifier needs the plaintext password and a stored Argon2id hash is not invertible, so nobody can be enrolled retroactively. PHP is the one **conditional** posture in §23.8: it has no native bignum and neither `ext-gmp` nor `ext-bcmath` is guaranteed present, so its `srpAvailable()` reports `false` rather than throwing at login time; **§23.3 rule 4 errata and the §23.8 table corrected 2026-08 (contract 1.25)** — **documentation only; no SDK behaviour changes, no signature moves, and nothing that was conformant under 1.24 stops being so.** Implementing §23 across all eleven SDKs turned up a fact the chapter had assumed away: `argon2id` is not universally computable, and not for want of a dependency. PHP's only Argon2id that takes a caller-supplied salt (`sodium_crypto_pwhash`) requires exactly 16 bytes where §23.5's salt is 32, and `password_hash()` accepts no salt at all; Swift Crypto ships no Argon2 and none exists for every platform its SDK supports; C and C++ get it from OpenSSL only at 3.2 and later. Rule 4 already told an SDK what to do about a KDF it cannot perform — refuse with `NetworkError` naming it, never substitute — so no implementation changes; what the errata adds is that such a refusal is **conformant rather than a gap**, and that the SDK must say so in its README together with the trade-off. That trade-off is real and belongs in the open: a tenant serving those clients sets `srp_kdf: pbkdf2_sha256`, and PBKDF2 is not memory-hard, so a leaked verifier database enrolled under it is cheaper to attack with GPUs than one enrolled under Argon2id — while §23.0's threat model, which is about proxies, request logs and heap dumps rather than about the cost of an offline attack, is unaffected either way. The §23.8 table is corrected in the same pass to say what each SDK actually does rather than what was projected for it, and gains a second conditionality axis, because "can this build do SRP at all" and "can this build serve this tenant's KDF" are different questions answered at different times — the first by `srpAvailable()` before a login is attempted, the second by a `NetworkError` during one; **§23 rewritten from SRP-6a to OPAQUE (RFC 9807) 2026-08 (contract 1.26)** — **breaking for any SDK that implemented §23 under 1.24/1.25; no change to §1–§22 and no signature moves outside §23.** SRP is removed from AXIAM entirely rather than deprecated, and nothing migrates: a verifier cannot be converted into a registration record, because both are sealed against a plaintext the server has never had, and AXIAM is unreleased. Three reasons, in descending order of weight. OPAQUE was published as **RFC 9807** in July 2025, closing the one blocker 1.24's own text named — it was a draft when SRP was chosen, and improving implementation coverage was written down as the migration trigger. It resists the pre-computation attack SRP is open to, which is not a marginal gain: a stolen verifier database was offline-attackable at exactly the cost of the KDF, and that is why AXIAM's SRP had to bolt a memory-hard KDF onto RFC 5054's bare hash merely to *match* the Argon2id hashes it replaced, whereas a stolen OPAQUE record additionally requires the tenant's OPRF seed and without it there is no dictionary attack to mount at any cost. And it is specified to the byte, where AXIAM's SRP carried two documented divergences from its own RFC. **The structural change is §23.1, and it is the one to read first: an SDK MUST NOT implement the protocol.** SRP was hand-written eleven times because it is modular arithmetic and every language has a bignum; OPAQUE needs an OPRF, `hash_to_curve`, `expand_message_xmd`, an envelope and a three-message AKE, so every SDK binds one audited implementation — compiled, through WebAssembly, or through a C ABI — with Go the single permitted exception because a vetted RFC 9807 library exists for it and cgo would break `CGO_ENABLED=0` for every consumer. That costs SDKs their pure-source installs and buys back the whole of 1.25's errata: `pbkdf2_sha256` is gone, the second conditionality axis is gone, no tenant has to weaken its KDF policy to serve PHP or Swift clients, and the weaker KSF rung is now scrypt, which is memory-hard. Four §23 obligations disappear rather than change. There is **no server proof to verify** — RFC 9807's AKE authenticates the server during the handshake, so 1.24's rule 6, which had to mandate an `M2` check in capitals because skipping it silently discarded half the protocol, describes a failure mode that no longer exists. There is **no `PAD()`**. There is **no identity in the key derivation**, so `login/start` returns no identity field, `/auth/reset/context` no longer discloses the account's username, and a rename no longer invalidates a credential. And there is **no `register/finish` endpoint**: a record can only be built where the plaintext legitimately exists on the client, and every such moment is already an endpoint that takes a password. What is genuinely new is that enrolment now costs a server round trip — `POST /auth/opaque/register/start`, unauthenticated by necessity because it is called while creating a user who does not exist yet, and safe because the server mints the credential identifier itself. `POST /api/v1/admin/bootstrap` is the one endpoint that takes no enrolment object at all: it already receives the plaintext password because it has to hash it, so it runs both halves itself and stays a single call. §23.7's fixture is correspondingly smaller and an SDK author should read §23.7's first three paragraphs before concluding something is missing — what each SDK still owns is hex, field mapping, honouring the server's KSF parameters and the §2 error taxonomy, and that is what is pinned; **§22.5's firing list gains usernameless passkey sign-in 2026-08 (contract 1.27)** — **no SDK signature moves and no change to any SDK-implemented surface**; WebAuthn is a browser ceremony and no SDK speaks it. It is recorded here because §22.5 enumerates where `login.post_auth` fires, and a reactor author reading that list is the person who needs to know the list grew. The server gained `POST /api/v1/auth/webauthn/authenticate/discoverable/finish`, a sign-in that completes without a username and therefore without the password step that fired the event for the username-bound ceremony. The carve-out the section already carried — WebAuthn `authenticate/finish` does not fire, because it continues a login gated at its first step — reads as covering this one too, and does not: there is no first step to have been gated at. Left unfired it would have been SEC-095 a second time, with the bypass being a button rather than an identity provider. It behaves as the federated paths do, refusing `require_mfa` rather than dropping it, since a one-round-trip sign-in has no step-up branch — and the ceremony required user verification to complete, so the factor a step-up would demand was already presented; **§24 (WebAuthn and passkeys), §25 (account lifecycle and MFA enrolment) and §26 (pushed authorization requests) added, and §22.11's deferral narrowed, 2026-08 (contract 1.28)** — one breaking change, logged above, and everything else additive. Contract 1.27 had recorded in passing that “WebAuthn is a browser ceremony and no SDK speaks it”; the first half is true and the conclusion was wrong, because a ceremony is two exchanges stacked and only the one with the *authenticator* needs a browser. The one with AXIAM is four JSON round trips, which is what an SDK is for, and a Go service enrolling a passkey for a client it fronts or a Java backend completing a ceremony a handset ran speaks it without ever touching `navigator.credentials`. §24 therefore cuts three ways. The relying-party layer and the **JSON bridge** (§24.6a) bind all eleven SDKs; the linked-API helper (§24.6b) is offered only where the build can reach an authenticator — TypeScript's browser build, the Rust WASM build, and Swift on both iOS 16+ and macOS 13+. The bridge is the part worth reading twice, because it is what makes the third column a statement about convenience rather than about capability: Android's Credential Manager takes and returns the WebAuthn **JSON form as a string**, so `axiam-kotlin-sdk` stays a plain `kotlin("jvm")` library — no Android Gradle Plugin, no AAR, no second coordinate — and an Android app still runs a full ceremony by passing `requestJson` into `CreatePublicKeyCredentialRequest` and the response JSON straight back. §24.6b rule 2 then makes every remaining absence deliberate rather than a gap by **forbidding** an SDK from emulating an authenticator in software, which would put a key in process memory and call it a second factor. The rule the rest of §24 hangs off is §24.0: the server chooses every option and verifies every response, so an SDK passes both through byte-for-byte. Not because the fields are hard — they are not, and that is the hazard: relaxing `userVerification` to `“preferred”` because a CI authenticator kept prompting weakens a ceremony the server believes it configured, and the server cannot detect it, since an assertion produced under weaker options is a valid assertion. Two mappings override §2 and each loses something real if left generic: a `403` on `register/finish` is the tenant's attestation policy refusing *this* authenticator and its message is the only way the holder of a security key learns a different one would work, and a `503` on `register/start` is a server configuration state that §16 MUST NOT retry — the second documented exception to the retry policy after §20's. §24 also lands with a server fix it depends on: both `authenticate/*/finish` endpoints answered with the token pair in the body and set no cookies, which made a browser passkey sign-in impossible to complete and left `POST /api/v1/auth/refresh` — which reads the refresh token from `axiam_refresh`, never from a body — unreachable afterwards; they now set the same triple and the same `X-CSRF-Token` header as the password path, with the body unchanged so non-browser clients are not asked to read a cookie jar. §25 closes the other end of the same omission: §1 locked the *middle* of an account's life, so the nine operations that get an account into a state where §1 applies — both MFA enrolment paths, email verification, password reset — were reachable only by hand-rolling a POST against a path the SDK also knew, which is the divergence §1 exists to prevent arrived at through omission rather than disagreement. Its one breaking change is logged; its one field an implementer will get wrong is `totp_uri`, which *contains* `secret_base32`, so an SDK that wraps the secret and leaves the URI bare has wrapped nothing — which is why §25.6 requires scanning output for the secret **value** rather than the field name. §26 states PAR, whose likeliest defect is stated in the section rather than left to a table: it answers **`201`**, and a success predicate written `== 200` treats every successful push as a failure. Its other rule worth reading is that the authorization URL carries exactly `client_id` and `request_uri` and the server **refuses** a request mixing a `request_uri` with inline parameters rather than merging them — merging is where parameter confusion lives, and an SDK re-adding the parameters “for compatibility” would restore the attack. Finally §22.11: Swift, C and C++ still bundle no AMQP client, and the deferral is narrowed to that. Until now it also took the **protocol** with it — v2 HMAC over a canonical serialization with a `null` signature placeholder, freshness in both directions, nonce and correlation binding, the §22.5 allow-lists — which is the half with the sharp edges, none of them AMQP-shaped, left for each integrator to reimplement from prose. The three now ship §22.1–§22.8 and §22.14 over a caller-supplied transport and MAY claim §22; because the runtime never sees a URL, §8b rule 7 is satisfied by **exposing the guard as a public tested function** rather than by a paragraph, which is exactly the failure contract 1.23 was written to stop*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

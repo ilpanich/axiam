@@ -89,16 +89,16 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         caption: "sign in, then handle a step-up",
         tabs: [
           {
+            label: "Rust",
+            code: "let result = client.login(\"user@acme.dev\", &password).await?;\n\nif result.mfa_required {\n    client.verify_mfa(\"123456\").await?;\n}",
+          },
+          {
             label: "TypeScript",
             code: "const result = await client.login(email, password);\n\nswitch (result.status) {\n  case 'mfa_required': {\n    const code = await promptForMfaCode(result.availableMethods);\n    await client.verifyMfa(result.mfaToken, code);\n    break;\n  }\n  case 'authenticated':\n    console.log(`Authenticated as ${result.user.username}`);\n    break;\n}",
           },
           {
             label: "Python",
             code: "result = client.login(email, password)\n\nif result.mfa_required:\n    result = client.verify_mfa(result.mfa_token, totp_code)\n\nprint(result.session_id, result.expires_in)",
-          },
-          {
-            label: "Rust",
-            code: "let result = client.login(\"user@acme.dev\", &password).await?;\n\nif result.mfa_required {\n    client.verify_mfa(\"123456\").await?;\n}",
           },
           {
             label: "Go",
@@ -137,6 +137,18 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         type: "codegroup",
         caption: "completing a reset, OPAQUE or not",
         tabs: [
+          {
+            label: "Rust",
+            code: `let context = client.password_reset_context(&token).await?;
+
+client.confirm_password_reset(&PasswordResetConfirmation {
+    token,
+    new_password,
+    tenant_id,
+    opaque: /* build a §23 record when context.opaque is Some */ None,
+})
+.await?;`,
+          },
           {
             label: "TypeScript",
             code: `const context = await client.passwordResetContext(token);
@@ -373,6 +385,19 @@ await client.confirmPasswordReset({
         caption: "handling all three login outcomes",
         tabs: [
           {
+            label: "Rust",
+            code: `let result = client.login(email, password).await?;
+
+if result.mfa_required {
+    client.verify_mfa(code).await?;
+} else if result.mfa_setup_required {
+    let setup_token = result.setup_token.as_ref().expect("populated by §25.2 rule 1");
+    let enrolment = client.mfa_setup_enroll(setup_token).await?;
+    render_qr(enrolment.totp_uri.expose());
+    client.mfa_setup_confirm(setup_token, code).await?;   // completes the login
+}`,
+          },
+          {
             label: "TypeScript",
             code: `switch (result.status) {
   case 'authenticated':
@@ -534,6 +559,22 @@ elif result.mfa_setup_required:
         type: "codegroup",
         caption: "the JSON bridge — any runtime",
         tabs: [
+          {
+            label: "Rust",
+            code: `let challenge = client.webauthn_discoverable_start(None).await?;
+
+// The JSON form every platform authenticator API takes (§24.6a) — the exact
+// string Android's CreatePublicKeyCredentialRequest and a browser's
+// parseRequestOptionsFromJSON() both want.
+let response_json = your_device_channel(&challenge.request_json())?;
+
+let session = client
+    .webauthn_discoverable_finish(
+        &challenge.state_token,
+        webauthn_response_from_json(&response_json)?,
+    )
+    .await?;`,
+          },
           {
             label: "TypeScript",
             code: `import { webauthnRequestJson } from 'axiam-sdk/rest';

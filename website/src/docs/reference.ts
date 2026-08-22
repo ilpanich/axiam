@@ -32,8 +32,13 @@ const CONFORMANCE: { id: string; cells: string[] }[] = [
 
 const byId = (id: string): Sdk | undefined => SDKS.find((s) => s.id === id);
 
-/** The four languages the samples below are shown in, in that order. */
-const SAMPLE_IDS = ["typescript", "python", "go", "java"];
+/**
+ * The languages the samples below are shown in, in that order.
+ *
+ * Rust leads because the server, the OPAQUE core and the reference SDK are all
+ * Rust — a reader comparing an SDK against the thing it talks to reads it first.
+ */
+const SAMPLE_IDS = ["rust", "typescript", "python", "go", "java"];
 const SAMPLES: Sdk[] = SAMPLE_IDS.map(byId).filter((s): s is Sdk => Boolean(s));
 
 const tabs = (pick: (sdk: Sdk) => string): DocCodeTab[] =>

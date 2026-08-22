@@ -340,6 +340,32 @@ X-Axiam-Delivery: 018f3c2a-8f11-7b0e-9a54-2c1f7d3e5b90
         caption: "verifying a delivery",
         tabs: [
           {
+            label: "Rust",
+            code: `use axiam_sdk::webhook::{WebhookVerifyOptions, verify_webhook};
+
+async fn receive(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    let header = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("");
+
+    let opts = WebhookVerifyOptions::new()
+        .event_type(header("X-Axiam-Event"))
+        .delivery_id(header("X-Axiam-Delivery"))
+        .timestamp_header(header("X-Axiam-Timestamp"));
+
+    // \`body\` is the UNPARSED request body — verify first, parse after.
+    match verify_webhook(&secret, header("X-Axiam-Signature"), &body, &opts) {
+        Ok(event) => {
+            if already_seen(event.delivery_id) {
+                return HttpResponse::Ok().finish();   // at-least-once retry
+            }
+            handle(serde_json::from_slice(event.body).unwrap());
+            HttpResponse::Ok().finish()
+        }
+        // Never echo the reason back to the sender.
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}`,
+          },
+          {
             label: "TypeScript",
             code: `import { verifyWebhook, WebhookVerifyError } from 'axiam-sdk';
 
@@ -718,6 +744,21 @@ w.WriteHeader(http.StatusOK)`,
         type: "codegroup",
         caption: "declarative handler binding",
         tabs: [
+          {
+            label: "Rust",
+            code: `use axiam_sdk::amqp::reactor::{ReactorDecision, ReactorRouter, events, reactor_serve};
+
+let handler = ReactorRouter::new()
+    .bind(events::TOKEN_PRE_ISSUE, |event| async move {
+        ReactorDecision::mutate([("ext.cost_center", "42")])
+    })
+    .bind(events::LOGIN_POST_AUTH, |event| async move {
+        ReactorDecision::deny("embargoed region")
+    })
+    .build()?;   // every rejected binding at once, not one per run
+
+reactor_serve(config, handler).await`,
+          },
           {
             label: "TypeScript",
             code: `import { REACTOR_EVENTS, reactorHandlers, reactorServe } from 'axiam-sdk/amqp';

@@ -78,12 +78,11 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
           { method: "POST", path: "/api/v1/auth/login", summary: "Authenticate with username/email and password.", public: true },
           { method: "POST", path: "/api/v1/auth/refresh", summary: "Exchange a refresh token for a new pair. Rotates.", public: true },
           { method: "POST", path: "/api/v1/auth/logout", summary: "End the session." },
-          { method: "POST", path: "/api/v1/auth/verify-email", summary: "Confirm an email address from a mailed token.", public: true },
-          { method: "POST", path: "/api/v1/auth/resend-verification", summary: "Re-send the verification mail.", public: true },
-          { method: "POST", path: "/api/v1/auth/reset", summary: "Begin a password reset.", public: true },
-          { method: "POST", path: "/api/v1/auth/reset/confirm", summary: "Complete a reset with the mailed token.", public: true },
-          { method: "GET", path: "/api/v1/auth/reset/context", summary: "Policy context a reset page needs to render.", public: true },
         ],
+      },
+      {
+        type: "p",
+        text: "`login` has **three** outcomes, not two: authenticated, MFA required, and MFA *setup* required — the last on a tenant that enforces MFA for an account that has none. It comes back as a `403` carrying a setup token, and it is recoverable: see [Multi-factor auth](#/docs/mfa) for the branch and what to do with it.",
       },
       {
         type: "codegroup",
@@ -110,6 +109,50 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
             code: "LoginResult result = client.login(\"user@acme.dev\", password);\n\nif (result.mfaRequired()) {\n    result = client.verifyMfa(result.challengeToken(), \"123456\");\n}",
           },
         ],
+      },
+      { type: "h", id: "lifecycle", text: "Account lifecycle" },
+      {
+        type: "p",
+        text: "Everything above assumes an account that already exists and is already verified. These five endpoints are what gets it there and back — and six of the nine account-lifecycle operations are unauthenticated on purpose, because a user who cannot log in is the entire audience for a password reset, and a user whose address is unverified may have no session at all.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "POST", path: "/api/v1/auth/verify-email", summary: "Confirm an address from a mailed token. `tenant_id` is a body field.", public: true },
+          { method: "POST", path: "/api/v1/auth/resend-verification", summary: "Re-send the verification mail.", public: true },
+          { method: "POST", path: "/api/v1/auth/reset", summary: "Begin a password reset. Accepts the workspace in slug form, like login.", public: true },
+          { method: "GET", path: "/api/v1/auth/reset/context", summary: "The effective OPAQUE policy for the account a reset token belongs to.", public: true },
+          { method: "POST", path: "/api/v1/auth/reset/confirm", summary: "Set the new password with the mailed token.", public: true },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**These endpoints are enumeration-safe, and your UI must not undo that.** `POST /auth/reset` answers `200` whether or not the address exists. `GET /auth/reset/context` answers `404` for a token that is unknown, expired *or* already consumed, without distinguishing the three, and discloses no identity — an unauthenticated endpoint that confirmed which account a token belongs to would be an oracle worth not having. A screen that says “no such user”, or that shows the account beside the form, hands back exactly what the uniform response was protecting.",
+      },
+      {
+        type: "p",
+        text: "The reset context exists because of OPAQUE. A tenant with OPAQUE enabled needs the client to build a registration record before it can send a new password, and building one needs the server's parameters — which the client cannot know before it has a token to ask with. So on any tenant that might have OPAQUE enabled, read the context first and populate the `opaque` field when it says the tenant requires it; sending a plaintext `new_password` to a tenant in `opaque_mode: required` is refused, and refused late.",
+      },
+      {
+        type: "codegroup",
+        caption: "completing a reset, OPAQUE or not",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: `const context = await client.passwordResetContext(token);
+
+await client.confirmPasswordReset({
+  token,
+  newPassword,
+  tenantId,
+  ...(context.opaque ? { opaque: await client.opaqueEnrollment(newPassword) } : {}),
+});`,
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The tokens in these mails are single-use and short-lived, which is what bounds the risk of the final mail hop being unencrypted — an inherent property of email that no server-side control closes. See [OPAQUE](#/docs/opaque) for when the password never reaches the server at all.",
       },
       { type: "h", id: "sessions", text: "Sessions end, not users" },
       {
@@ -258,7 +301,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
     navLabel: "Multi-factor auth",
     title: "Multi-factor authentication",
     intro:
-      "TOTP as the baseline second factor, enrolled by the user or enforced by policy, with secrets encrypted at rest.",
+      "TOTP as the baseline second factor, enrolled voluntarily by a signed-in user or forced during a login that cannot complete without it.",
     blocks: [
       { type: "h", id: "totp", text: "TOTP" },
       {
@@ -269,14 +312,107 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         type: "p",
         text: "Stored TOTP secrets are encrypted at rest with AES-256-GCM under `AXIAM__AUTH__MFA_ENCRYPTION_KEY`. Losing that key makes every enrolled secret undecryptable and forces every user to re-enrol.",
       },
+      {
+        type: "warn",
+        text: "**Treat the provisioning URI as the secret, because it is one.** `otpauth://totp/…?secret=…` contains the shared secret verbatim, and it is the field that actually reaches a log — it is the one you hand to a QR renderer. Every SDK wraps both in its redacting type; a receiver that unwraps the URI to render it has unwrapped the secret.",
+      },
+      { type: "h", id: "paths", text: "Two enrolment paths, and they are not interchangeable" },
+      {
+        type: "p",
+        text: "Confusing these two is the failure mode worth spelling out: they use different endpoints, different credentials and different starting states, and reaching for the wrong pair locks a user out of an account they are entitled to.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["", "Voluntary", "Forced during login"],
+        rows: [
+          ["Who starts it", "A signed-in user adding a factor", "Anyone whose tenant requires MFA on an account that has none"],
+          ["Credential", "The existing session", "A `setup_token` the failed login handed back — there is no session yet"],
+          ["Endpoints", "`/auth/mfa/enroll` then `/auth/mfa/confirm`", "`/auth/mfa/setup/enroll` then `/auth/mfa/setup/confirm`"],
+          ["What confirming does", "Arms the factor; the current session is untouched", "**Completes the interrupted login** — the response is a normal login success"],
+        ],
+      },
+      { type: "h", id: "voluntary", text: "Voluntary enrolment" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Enrol",
+            body: "`POST /api/v1/auth/mfa/enroll` with the user's session and no body. The response carries `secret_base32` and `totp_uri`.",
+          },
+          {
+            title: "Show it once",
+            body: "Render the URI as a QR code, and offer the base32 secret for manual entry. This is the only time the secret is available.",
+          },
+          {
+            title: "Confirm",
+            body: "`POST /api/v1/auth/mfa/confirm` with a code generated from it. **The factor is not active until this succeeds** — a client that reports MFA as enabled after the first call is reporting a factor nobody can use.",
+          },
+        ],
+      },
+      { type: "h", id: "forced", text: "Forced enrolment during login" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "The login is refused, with the means to recover",
+            body: "`POST /api/v1/auth/login` answers `403` with `mfa_setup_required: true` and a `setup_token`. This is an outcome, not a permission failure: the caller can act on it, and an SDK that reports it as an authorization error has told them they may not log in when the server said “finish setting up, here is the token”.",
+          },
+          {
+            title: "Enrol with the setup token",
+            body: "`POST /api/v1/auth/mfa/setup/enroll`. The setup token *is* the credential — there is no session to authenticate with yet.",
+          },
+          {
+            title: "Confirm, and the login completes",
+            body: "`POST /api/v1/auth/mfa/setup/confirm` returns the normal login success, cookies and all. Nothing needs re-submitting a password.",
+          },
+        ],
+      },
+      {
+        type: "codegroup",
+        caption: "handling all three login outcomes",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: `switch (result.status) {
+  case 'authenticated':
+    break;
+  case 'mfa_required':
+    await client.verifyMfa(result.mfaToken, code);
+    break;
+  case 'mfa_setup_required': {
+    const enrolment = await client.mfaSetupEnroll(result.setupToken);
+    renderQr(enrolment.totpUri.expose());
+    await client.mfaSetupConfirm(result.setupToken, codeTypedByUser);
+    break;                                  // this completes the login
+  }
+}`,
+          },
+          {
+            label: "Python",
+            code: `result = client.login(email, password)
+
+if result.mfa_required:
+    result = client.verify_mfa(result.mfa_token, totp_code)
+elif result.mfa_setup_required:
+    enrolment = client.mfa_setup_enroll(setup_token=result.setup_token)
+    render_qr(enrolment.totp_uri.get_secret_value())
+    client.mfa_setup_confirm(setup_token=result.setup_token, totp_code=code)`,
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Contract 1.28 made the setup branch a first-class login outcome across all eleven SDKs. If you match a login result exhaustively, that is the edit: a genuine authorization refusal is still an authorization error, because the SDK matches on the body's own discriminant rather than on the `403` alone.",
+      },
       { type: "h", id: "endpoints", text: "Endpoints" },
       {
         type: "api",
         endpoints: [
-          { method: "POST", path: "/api/v1/auth/mfa/setup/enroll", summary: "Begin enrolment during initial account setup.", public: true },
-          { method: "POST", path: "/api/v1/auth/mfa/setup/confirm", summary: "Confirm setup-time enrolment with a generated code.", public: true },
-          { method: "POST", path: "/api/v1/auth/mfa/enroll", summary: "Enrol an additional factor on an authenticated account." },
-          { method: "POST", path: "/api/v1/auth/mfa/confirm", summary: "Confirm that enrolment." },
+          { method: "POST", path: "/api/v1/auth/mfa/enroll", summary: "Begin voluntary enrolment. **Requires a session**; no body." },
+          { method: "POST", path: "/api/v1/auth/mfa/confirm", summary: "Arm the factor with a generated code. **Requires a session.**" },
+          { method: "POST", path: "/api/v1/auth/mfa/setup/enroll", summary: "Begin forced enrolment, authenticated by the login's setup token.", public: true },
+          { method: "POST", path: "/api/v1/auth/mfa/setup/confirm", summary: "Arm it and complete the interrupted login.", public: true },
           { method: "POST", path: "/api/v1/auth/mfa/verify", summary: "Answer an MFA challenge during login.", public: true },
           { method: "GET", path: "/api/v1/users/{user_id}/mfa-methods", summary: "List a user's enrolled factors." },
           { method: "DELETE", path: "/api/v1/users/{user_id}/mfa-methods/{method_id}", summary: "Remove one factor." },
@@ -286,12 +422,12 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
       { type: "h", id: "stepup", text: "The step-up in a login" },
       {
         type: "p",
-        text: "When a factor is required, `POST /auth/login` does not establish a session. It returns an MFA challenge, and the SDK surfaces it as a flag rather than an exception — the session is established only once `/auth/mfa/verify` succeeds. The challenge has its own lifetime, `mfa_challenge_lifetime_secs`, set per tenant.",
+        text: "When a factor is required, `POST /auth/login` does not establish a session. It returns an MFA challenge, and the SDK surfaces it as an outcome rather than an exception — the session is established only once `/auth/mfa/verify` succeeds. The challenge has its own lifetime, `mfa_challenge_lifetime_secs`, set per tenant.",
       },
       { type: "h", id: "policy", text: "Enforcing it" },
       {
         type: "p",
-        text: "`mfa_enforced` is a policy field on the settings baseline: set it at the organization and every tenant inherits it, or tighten it on one tenant. As with every setting, a tenant may make the posture stricter than the organization's baseline but never looser.",
+        text: "`mfa_enforced` is a policy field on the settings baseline: set it at the organization and every tenant inherits it, or tighten it on one tenant. As with every setting, a tenant may make the posture stricter than the organization's baseline but never looser. Turning it on is what produces the forced-enrolment branch above for accounts that have no factor yet.",
       },
       {
         type: "warn",
@@ -299,7 +435,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "TOTP is the baseline, not the ceiling. **Passkeys and security keys are phishing-resistant in a way a typed code is not** — a code can be entered into a lookalike page and forwarded to the real one inside its window. See [Passkeys & WebAuthn](#/docs/passkeys).",
+        text: "TOTP is the baseline, not the ceiling. **Passkeys and security keys are phishing-resistant in a way a typed code is not** — a code can be entered into a lookalike page and forwarded to the real one inside its window. A registered passkey appears as `webauthn` among a challenge's available methods. See [Passkeys & WebAuthn](#/docs/passkeys).",
       },
     ],
   },
@@ -310,7 +446,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
     navLabel: "Passkeys & WebAuthn",
     title: "Passkeys & WebAuthn",
     intro:
-      "Phishing-resistant authentication bound to your origin, with an attestation policy for deployments that need to say which authenticators are acceptable.",
+      "Phishing-resistant authentication bound to your origin — as a second factor, or as the only factor — with an attestation policy for deployments that need to say which authenticators are acceptable.",
     blocks: [
       { type: "h", id: "why", text: "Why they are different" },
       {
@@ -321,59 +457,203 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         type: "p",
         text: "A one-time code cannot make that promise. It can be typed into a fake page and forwarded to the real one inside its thirty-second window, which is precisely how modern credential-phishing kits work.",
       },
-      { type: "h", id: "flows", text: "Registration and authentication" },
+      { type: "h", id: "endpoints", text: "Six endpoints, three ceremonies" },
       {
         type: "api",
         endpoints: [
-          { method: "POST", path: "/api/v1/auth/webauthn/register/start", summary: "Get creation options for a new credential." },
-          { method: "POST", path: "/api/v1/auth/webauthn/register/finish", summary: "Submit the attestation; the credential is stored." },
-          { method: "POST", path: "/api/v1/auth/webauthn/authenticate/start", summary: "Get request options for a sign-in ceremony.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/register/start", summary: "Creation options for a new credential. **Requires a session.**" },
+          { method: "POST", path: "/api/v1/auth/webauthn/register/finish", summary: "Submit the attestation; the credential is stored. **Requires a session.**" },
+          { method: "POST", path: "/api/v1/auth/webauthn/authenticate/start", summary: "Request options for a second-factor ceremony, from a login's challenge token.", public: true },
           { method: "POST", path: "/api/v1/auth/webauthn/authenticate/finish", summary: "Submit the assertion; the session is established.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/authenticate/discoverable/start", summary: "Request options for a usernameless sign-in — no prior step.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/authenticate/discoverable/finish", summary: "Submit the assertion; the assertion itself identifies the user.", public: true },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**The two authentication ceremonies are different flows, not one with a flag.** `authenticate/*` is a *second* factor: it continues a login that answered with an MFA challenge, and the challenge token names the user so the server can send an `allowCredentials` list. `discoverable/*` is a *primary* factor: nothing precedes it, `allowCredentials` is empty, and the authenticator offers whichever credential it holds for your origin. Modelling them as one call with an optional token reproduces a bug the server already fixed — `authenticate/start` decodes the token to learn who is signing in, so an empty one is rejected as malformed before anything else happens.",
+      },
+      { type: "h", id: "register", text: "Enrolling a passkey" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Ask the server for creation options",
+            body: "`POST /api/v1/auth/webauthn/register/start`, with the user's existing session. The response carries the challenge and a state token. The server chooses `residentKey`, `userVerification`, the attestation conveyance, the exclusion list and the timeout — every one of them is a security parameter.",
+          },
+          {
+            title: "Run the ceremony",
+            body: "Hand the options to the platform: `navigator.credentials.create()` in a browser, `CreatePublicKeyCredentialRequest` on Android, `AuthenticationServices` on Apple platforms. Pass them **unchanged** — see the note below.",
+          },
+          {
+            title: "Post the attestation back",
+            body: "`POST /api/v1/auth/webauthn/register/finish` with the state token and the authenticator's response verbatim. A `201` returns the stored credential. A `403` is the tenant's attestation policy refusing *this authenticator* rather than a permission problem — surface its message, because it is how the person holding the key learns that this one will never work and a different one might.",
+          },
+          {
+            title: "Have the user name it, and enrol a second",
+            body: "A passkey lives on the device that created it. If that device is the only factor and it is lost, the account is locked out — and “Passkey 2” is not a name anyone can act on when deciding which to revoke.",
+          },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Pass the options through untouched, in both directions.** Do not supply a `timeout` the server omitted, do not expand an absent `authenticatorSelection` into an empty object, do not reorder or prune `pubKeyCredParams` or `excludeCredentials`, and do not re-encode the response's base64url fields. Relaxing `userVerification` to `preferred` because a CI authenticator kept prompting weakens a ceremony the server believes it configured, and the server cannot detect it: an assertion produced under weaker options is a perfectly valid assertion.",
+      },
+      { type: "h", id: "signin", text: "Signing in" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "As a second factor",
+            body: "`POST /api/v1/auth/login` answers with an MFA challenge listing `webauthn` among its methods. Call `authenticate/start` with that challenge token, run the ceremony, and post the assertion to `authenticate/finish`.",
+          },
+          {
+            title: "Usernameless, as the only factor",
+            body: "Call `discoverable/start` with your workspace — it accepts `org_id`/`org_slug` and `tenant_id`/`tenant_slug`, and unlike the OAuth2 endpoints it accepts slugs, so a slug-only client can run it. Then run the ceremony and post to `discoverable/finish`.",
+          },
+          {
+            title: "Either way, you are signed in",
+            body: "Both `finish` calls answer `200` with `access_token`, `refresh_token`, `session_id` and `expires_in`, **and** set the `axiam_access` / `axiam_refresh` / `axiam_csrf` cookie triple with an `X-CSRF-Token` response header — the same triple `POST /api/v1/auth/login` sets. Browser clients are authenticated by the cookies; non-browser clients adopt the body tokens.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The cookies arrived in **1.0.0-alpha38**. Before it these two endpoints answered with the body alone, which made a browser passkey sign-in impossible to complete: `POST /api/v1/auth/refresh` reads the refresh token from `axiam_refresh` and never from a body, so the session could not be kept alive. If you built against an older server, the body is unchanged — the cookies are additive.",
+      },
+      {
+        type: "note",
+        text: "Only the usernameless path fires the `login.post_auth` reactor hook. The username-bound ceremony continues a login that was already gated at its first step; the discoverable one has no first step to have been gated at. See [Reactors](#/docs/reactors).",
+      },
+      { type: "h", id: "sdks", text: "From an SDK" },
+      {
+        type: "p",
+        text: "A WebAuthn ceremony is two exchanges stacked: one with an *authenticator*, which needs a platform API, and one with *AXIAM*, which is four ordinary JSON round trips. Only the first needs a browser — which is why all eleven SDKs carry the AXIAM half. They expose the challenge in its wire JSON form and accept the platform's response JSON back, because that is exactly what the platform APIs take and return: `parseCreationOptionsFromJSON()` and `credential.toJSON()` in browsers, `requestJson` in and `registrationResponseJson` out on Android.",
+      },
+      {
+        type: "codegroup",
+        caption: "the JSON bridge — any runtime",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: `import { webauthnRequestJson } from 'axiam-sdk/rest';
+
+const { challenge, stateToken } = await client.webauthnDiscoverableStart();
+const requestJson = webauthnRequestJson(challenge);   // → give this to the platform
+
+// …the platform runs the ceremony and hands back a JSON string…
+await client.webauthnDiscoverableFinish(stateToken, responseJson);`,
+          },
+          {
+            label: "Browser",
+            code: `// The half that needs a browser, and only this half.
+const options = PublicKeyCredential.parseRequestOptionsFromJSON(requestJson);
+const assertion = await navigator.credentials.get({ publicKey: options });
+const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
+          },
         ],
       },
       {
         type: "p",
-        text: "Both ceremonies are the standard WebAuthn two-step. The browser does the work — your code passes the options through to `navigator.credentials` and posts the result back.",
-      },
-      {
-        type: "code",
-        caption: "registration · browser",
-        code: "// 1. Ask the server for creation options.\nconst options = await postJson('/api/v1/auth/webauthn/register/start', {});\n\n// 2. Let the browser and authenticator do the ceremony.\nconst credential = await navigator.credentials.create({ publicKey: options });\n\n// 3. Hand the attestation back.\nawait postJson('/api/v1/auth/webauthn/register/finish', credential);",
-      },
-      {
-        type: "note",
-        text: "Tell users to register **at least two**, on different devices. A passkey lives on the device that created it; if that device is the only factor and it is lost, the account is locked out. Naming them at registration matters too — \"Passkey 2\" is not a name anybody can act on when deciding which one to revoke.",
+        text: "TypeScript (browser build), the Rust WebAssembly build and Swift additionally compose the whole thing into one call, because their build can reach an authenticator API. The other SDKs deliberately do not: a server or CLI runtime has no authenticator, and emulating one in software would make the SDK the weakest link in a mechanism chosen for being the strongest.",
       },
       { type: "h", id: "attestation", text: "Attestation policy" },
       {
         type: "p",
-        text: "Most deployments should accept any authenticator the user has. Some — regulated environments, or a fleet standardised on issued hardware — need to say which models are acceptable, and prove afterwards that the rule held. That is what the per-tenant attestation policy is for.",
+        text: "Most deployments should accept any authenticator the user has. Some — regulated environments, or a fleet standardised on issued hardware — need to say which models are acceptable, and prove afterwards that the rule held. That is what the per-tenant attestation policy is for. A tenant with no policy row behaves exactly as one with the defaults below.",
+      },
+      {
+        type: "table",
+        headers: ["Field", "Default", "Meaning"],
+        rows: [
+          [
+            "mode",
+            "`none`",
+            "`none`, `indirect` or `direct_required` — whether attestation is requested at all. `none` short-circuits every other field and performs no metadata lookup.",
+          ],
+          [
+            "require_fido_certified",
+            "`false`",
+            "Deny unless the authenticator has any FIDO certification in its metadata history. Only enforceable when `mode` is not `none`.",
+          ],
+          [
+            "min_certification",
+            "`null`",
+            "`L1` … `L3Plus` — deny unless the authenticator's highest ever certified level meets the bar.",
+          ],
+          [
+            "allowed_aaguids",
+            "`null`",
+            "`null` allows every model except the blocked list. An explicitly empty array means *nothing* may register — a deliberate lockout rather than an unset field.",
+          ],
+          ["blocked_aaguids", "`[]`", "Never registrable, regardless of the allow-list. Blocking wins."],
+          [
+            "block_revoked_status",
+            "`true`",
+            "Deny an authenticator whose metadata history ever reported a revocation or key compromise.",
+          ],
+          [
+            "unknown_aaguid",
+            "`null`",
+            "What to do about a model with no metadata entry. Unset resolves to `allow` under `none` and `indirect`, and to **`deny`** under `direct_required`, so the strictest mode fails closed. A read returns `effective_unknown_aaguid` alongside your stored intent.",
+          ],
+        ],
       },
       {
         type: "api",
         endpoints: [
-          { method: "GET", path: "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy", summary: "Read the tenant's policy." },
-          { method: "PUT", path: "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy", summary: "Set it." },
-          { method: "GET", path: "/api/v1/tenants/{tenant_id}/webauthn/compliance-report", summary: "Which registered credentials satisfy the current policy." },
-          { method: "GET", path: "/api/v1/mds/status", summary: "FIDO Metadata Service snapshot status." },
-          { method: "POST", path: "/api/v1/mds/refresh", summary: "Refresh the MDS trust anchors." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy", summary: "Read the tenant's policy, with the resolved `unknown_aaguid`." },
+          { method: "PUT", path: "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy", summary: "Set it. Certification fields are refused while `mode` is `none`." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/webauthn/compliance-report", summary: "Which already-registered credentials satisfy the current policy." },
+          { method: "GET", path: "/api/v1/mds/status", summary: "The ingested FIDO metadata snapshot: serial, `next_update`, entry count, `stale`." },
+          { method: "POST", path: "/api/v1/mds/refresh", summary: "Ingest a new snapshot now. Refuses to run when metadata is disabled." },
         ],
-      },
-      {
-        type: "p",
-        text: "Authenticator models are identified against the FIDO Metadata Service (MDS3). The snapshot is refreshable on demand, which is also the air-gap story: an operator with no outbound access refreshes from a fetched blob rather than from the network.",
       },
       {
         type: "warn",
         text: "**Passkeys frequently carry no meaningful attestation.** Platform authenticators commonly attest as `none` by design, for user-privacy reasons. A strict attestation policy therefore tends to exclude exactly the credentials most users have, and turns into a security-key-only policy in practice. Decide which of those two things you actually want before setting it.",
       },
-      { type: "h", id: "signin", text: "How users sign in" },
+      { type: "h", id: "mds", text: "FIDO metadata, refresh and air gaps" },
+      {
+        type: "p",
+        text: "Authenticator models are identified against the FIDO Metadata Service (MDS3), and ingestion is **off by default** — with it disabled there are no outbound calls at all. Ingestion verifies the snapshot's signature and refuses a lower serial number than the one already stored, so an older validly-signed blob cannot be replayed to quietly reintroduce a model that has since been revoked.",
+      },
+      {
+        type: "table",
+        headers: ["Setting", "Default", "Meaning"],
+        rows: [
+          ["AXIAM__PKI__MDS_ENABLED", "`false`", "Master switch. `false` means no background job and a refresh endpoint that refuses to run."],
+          ["AXIAM__PKI__MDS_BLOB_URL", "the FIDO Alliance endpoint", "Fetch source for the network path."],
+          [
+            "AXIAM__PKI__MDS_BLOB_PATH",
+            "unset",
+            "A local file for air-gapped deployments. When set it wins over the URL and **no network fetch happens at all** — you re-supply the file yourself.",
+          ],
+          ["AXIAM__PKI__MDS_REFRESH_INTERVAL_SECS", "`604800`", "Background refresh interval — weekly. `0` disables the job; the admin endpoint still works."],
+          ["AXIAM__PKI__MDS_LEAF_DNS", "`mds.fidoalliance.org`", "Expected DNS name on the snapshot's signing certificate, so a legitimate hostname change is an ops action rather than a release."],
+          [
+            "AXIAM__PKI__MDS_MAX_STALE_DAYS",
+            "`0`",
+            "How far past its `next_update` the snapshot may drift before **attested** registration is refused. `0` keeps the fail-open behaviour.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "Staleness never blocks ingestion or the use of already-ingested entries: a transient outage at the FIDO Alliance must not brick registration everywhere. The cost of that choice is that a model revoked since your last refresh keeps passing policy, which is what the staleness bound is for — it is opt-in rather than defaulted because the right bound is a property of the deployment. A high-assurance tenant may want days; an air-gapped one with no automatic refresh path would be taken offline by anything short of months. It applies to attested ceremonies only, since an unattested one consults no metadata and stale metadata cannot have misled it.",
+      },
+      {
+        type: "note",
+        text: "`register/start` answering `503` is this state, not a transient failure: the policy requires attestation and there is no usable metadata snapshot. It is a documented exception to the SDK retry policy — retrying changes nothing and only delays a message an operator needs to see. The full decision order, the known `USER_VERIFICATION_BYPASS` limitation and the air-gap procedure are in [docs/admin/authenticator-policies.md](https://github.com/ilpanich/axiam/blob/main/docs/admin/authenticator-policies.md).",
+      },
+      { type: "h", id: "users", text: "How users experience it" },
       {
         type: "list",
         items: [
-          "**Autofill** — tapping the username field offers a saved passkey alongside saved passwords.",
-          "**An explicit button** — \"Sign in with a passkey\" below the password field, for users whose browser did not offer autofill.",
+          "**Autofill** — tapping the username field offers a saved passkey alongside saved passwords. A conditional ceremony may never settle, because the user simply may not pick one; abandon it on navigation rather than reporting an authentication failure.",
+          "**An explicit button** — “Sign in with a passkey” below the password field, for users whose browser did not offer autofill. This is the usernameless path.",
           "**As a second factor** — after a password, where policy requires a step-up rather than a replacement.",
+          "End-user guidance, including what to do when a device is lost, is in [docs/user/passkeys.md](https://github.com/ilpanich/axiam/blob/main/docs/user/passkeys.md).",
         ],
       },
     ],

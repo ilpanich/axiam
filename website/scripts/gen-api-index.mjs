@@ -57,6 +57,12 @@ const DOMAINS = [
     tags: ["users", "groups", "service-accounts"],
   },
   {
+    label: "Data-subject rights",
+    blurb:
+      "GDPR export (Art. 15) and erasure (Art. 17), acting on the caller's own account.",
+    tags: ["gdpr"],
+  },
+  {
     label: "Authorization",
     blurb:
       "The graph a decision is read from — roles, permissions, resources and scopes — the check endpoints, and UMA's protection API.",
@@ -120,16 +126,30 @@ function summarize(method, path, operation) {
 
   if (summary && !isEcho) {
     // A summary that says something beyond the route: keep it, minus the
-    // leading "`METHOD /path` — " the doc comments open with.
-    return summary.replace(/^`[^`]+`\s*(?:[—–-]{1,2}\s*)?/, "").trim();
+    // leading "`METHOD /path` — " the doc comments open with. When nothing is
+    // left, the whole summary *was* the route — one with a query string, say,
+    // which the equality test above cannot recognise — so fall through to the
+    // description rather than returning an empty cell.
+    const stripped = summary.replace(/^`[^`]+`\s*(?:[—–-]{1,2}\s*)?/, "").trim();
+    if (stripped) return stripped;
   }
 
   const description = (operation.description ?? "").trim();
   if (!description) return "";
-  // First sentence, on one line. Doc comments wrap, so join first.
-  const flat = description.replace(/\s+/g, " ");
-  const stop = flat.search(/\.(\s|$)/);
-  return (stop === -1 ? flat : flat.slice(0, stop + 1)).trim();
+
+  // First sentence, on one line. Doc comments wrap, so join first — and skip a
+  // period that ends an abbreviation rather than a sentence, or "Enqueues an
+  // async GDPR Art. 15 data-export job." becomes "Enqueues an async GDPR Art."
+  const flat = description.replace(/\s+/g, " ").replace(/^\*\*[^*]+\*\*\s*/, "");
+  const ABBREVIATIONS = /(?:^|\s)(?:Art|art|Sec|No|Nos|e\.g|i\.e|cf|vs|Fig|approx|Dr|Mr|Ms)$/;
+  for (let i = 0; i < flat.length; i++) {
+    if (flat[i] !== ".") continue;
+    const next = flat[i + 1];
+    if (next !== undefined && next !== " ") continue;
+    if (ABBREVIATIONS.test(flat.slice(0, i))) continue;
+    return flat.slice(0, i + 1).trim();
+  }
+  return flat.trim();
 }
 
 const rank = new Map(METHODS.map((m, i) => [m, i]));

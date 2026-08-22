@@ -98,16 +98,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "gdpr", text: "GDPR endpoints" },
       {
         type: "p",
-        text: "These four are **absent from the OpenAPI document** — the handlers carry their annotations but are not registered in the exported specification, so they do not appear in the index above and no SDK generator will see them. They are listed here by hand until that is fixed.",
-      },
-      {
-        type: "api",
-        endpoints: [
-          { method: "POST", path: "/api/v1/account/export", summary: "Request a data export (GDPR Art. 15)." },
-          { method: "GET", path: "/api/v1/account/export/{token}", summary: "Collect it, optionally PGP-encrypted." },
-          { method: "POST", path: "/api/v1/account/delete", summary: "Request erasure (Art. 17)." },
-          { method: "POST", path: "/api/v1/account/delete/cancel", summary: "Cancel a pending erasure inside the grace window." },
-        ],
+        text: "The four data-subject endpoints are in the index above, under *Data-subject rights*. Export and erasure act on the caller's own account, or on another's with `users:erase`. The cancel link is the odd one: it arrives by email as a single-use token, so it is a `GET` with the token in the query and is reachable without a session — the person cancelling an erasure may already have lost access to the account they are rescuing.",
       },
       {
         type: "note",

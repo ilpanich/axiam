@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-alpha38";
-export const API_OPERATION_COUNT = 177;
-export const API_PATH_COUNT = 117;
+export const API_OPERATION_COUNT = 181;
+export const API_PATH_COUNT = 121;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -440,7 +440,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/users",
-    "summary": "Creates a user and atomically records a `terms_of_service` consent row (REQ-8 / Art."
+    "summary": "Creates a user and atomically records a `terms_of_service` consent row (REQ-8 / Art. 7 proof of consent)."
    },
    {
     "method": "GET",
@@ -476,6 +476,34 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/users/{user_id}/unlock",
     "summary": "Resets a locked user account: clears `locked_until`, resets `failed_login_attempts` to 0, and sets status back to `Active`."
+   }
+  ]
+ },
+ {
+  "id": "api-data-subject-rights",
+  "label": "Data-subject rights",
+  "blurb": "GDPR export (Art. 15) and erasure (Art. 17), acting on the caller's own account.",
+  "operations": [
+   {
+    "method": "POST",
+    "path": "/api/v1/account/delete",
+    "summary": "Initiates Art. 17 erasure: immediately disables the account, revokes all sessions, emails a single-use cancel link, and schedules purge at +30 d (D-07/D-08/D-09)."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/account/export",
+    "summary": "Enqueues an async GDPR Art. 15 data-export job."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/account/export/{token}",
+    "summary": "Single-use download of the GDPR export blob (D-13)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/auth/account/delete/cancel",
+    "summary": "(token-authenticated; listed in `PUBLIC_PATHS`).",
+    "public": true
    }
   ]
  },

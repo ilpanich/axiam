@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 182 |
-| **Mitigated / Open** | 166 / 16 |
+| **Threats identified** | 186 |
+| **Mitigated / Open** | 170 / 16 |
 | **Owner** | ilpanich |
 
 ---
@@ -567,7 +567,7 @@ opaque_credential rows are the OPAQUE analogue of password hashes. Unlike an Arg
 
 authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-in: there is no preceding password step for the account-status check, the operator's login veto or lockout to have run in. A path added without re-establishing those gates would verify a discoverable credential for an account that is locked, deactivated or anonymised — or make "click the passkey button" a bypass of an operator's login veto (SEC-095's shape, on a new door).
 
-> Each gate is re-established on the new path. The `login.post_auth` reactor interception fires on the discoverable finish, reusing `intercept_federated_login_post_auth` because a one-round-trip sign-in has no branch to route `require_mfa` into. `ensure_can_sign_in` stands in for the missing first step — lockout first, then account status — refusing as `InvalidCredentials` so which of the two reasons applies is not disclosed. And start touches no storage: no "does this workspace have passkey users?" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (`residentKey` required, replacing webauthn-rs's `discouraged` default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor.
+> Each gate is re-established on the new path. The `login.post_auth` reactor interception fires on the discoverable finish, reusing `intercept_federated_login_post_auth` because a one-round-trip sign-in has no branch to route `require_mfa` into. `ensure_can_sign_in` stands in for the missing first step — lockout first, then account status — refusing as `InvalidCredentials` so which of the two reasons applies is not disclosed. And start touches no storage: no "does this workspace have passkey users?" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (`residentKey` required, replacing webauthn-rs's `discouraged` default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor. Since 1.0.0-alpha38 the two authenticate/\*/finish handlers also emit the same Set-Cookie triple (`axiam_access`, `axiam_refresh`, `axiam_csrf`) and `X-CSRF-Token` header as the password path's cookie builder: a completed browser passkey ceremony lands in the same HttpOnly-cookie, CSRF-protected session posture as a password login, instead of leaving the token pair only in the JSON body. The body keeps its tokens for non-browser clients, which adopt them directly per CONTRACT §24.
 
 </details>
 
@@ -1665,9 +1665,9 @@ With `AXIAM__AUTH__SECRET_PROVIDER=vault` the production default, all ten long-l
 
 ### 5.9 Client SDKs & admin UI integration surface
 
-The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.
+The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, the WebAuthn relying-party layer, account lifecycle and PAR operations (contract 1.28, §24–§26), AMQP HMAC consumption and the reactor protocol core, webhook verification and package-distribution supply chain.
 
-*17 threats — 2 critical, 10 high, 5 medium; 4 open.*
+*21 threats — 2 critical, 13 high, 6 medium; 4 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1688,6 +1688,10 @@ The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, K
 | T-148 | Public package registries <br/>*Store* | T | Compromised release pipeline publishes a backdoored SDK | Critical | Open |
 | T-149 | install SDK package <br/>*Flow* | T | Unpinned SDK dependency pulls a malicious transitive update | High | Mitigated |
 | T-175 | SDK token verification (JWKS cache, iss/aud) <br/>*Process* | E | Sender-constrained token downgraded to a bearer token by a validator that cannot check `cnf` | High | Mitigated |
+| T-183 | SDK HTTP core (11 languages) <br/>*Process* | T | SDK reshapes the WebAuthn ceremony the server configured | High | Mitigated |
+| T-184 | SDK HTTP core (11 languages) <br/>*Process* | I | TOTP secret or setup token leaks through account-lifecycle serialization | High | Mitigated |
+| T-185 | SDK HTTP core (11 languages) <br/>*Process* | I | Lifecycle helpers turned into an account-enumeration oracle | Medium | Mitigated |
+| T-186 | SDK AMQP consumer (HMAC verify, nonce) <br/>*Process* | I | Caller-supplied reactor transport connects without TLS | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1813,11 +1817,39 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 
 > Finding CI-03 flagged that SDK dependencies were unscanned. This repository runs cargo-audit, cargo-deny and npm audit with SARIF upload and Dependabot on cargo, frontend npm and GitHub Actions; each SDK repository must carry the equivalent for its own ecosystem, and integrators should commit lockfiles.
 
+**T-183 — SDK reshapes the WebAuthn ceremony the server configured**  
+`SDK HTTP core (11 languages)` (Process) · Tampering · High · Mitigated
+
+Contract 1.28 (§24) gives every SDK the relying-party half of the WebAuthn ceremony — four JSON round trips against the server. Every field in the server's `PublicKeyCredentialCreationOptions` is a security parameter, every one looks locally adjustable, and an SDK that "fixes" one — relaxing `userVerification` because a CI authenticator kept prompting, supplying a timeout the server omitted, re-encoding base64url "to be safe" — has weakened or broken a ceremony the server believes it configured. The server cannot catch a relaxation: an assertion produced under weaker options is still a valid assertion.
+
+> CONTRACT §24.0 makes the pass-through rules normative for every SDK claiming §24: the server does all of the crypto and all of the policy; the SDK hands the server's options to the authenticator unchanged (no defaulting, no filling in, no normalizing), may not refuse options it parsed — a client-side algorithm allow-list is a second policy engine, and the tenant's is the only one that counts — and posts the authenticator's response back verbatim. The only permitted addition is the `authenticatorAttachment` hint, which selects which authenticator is prompted for, not what the server accepts. §24.8's required tests pin byte-identical pass-through, and §24.4 rule 1 does not license dumping a raw response body into an error an integrator would then log.
+
+**T-184 — TOTP secret or setup token leaks through account-lifecycle serialization**  
+`SDK HTTP core (11 languages)` (Process) · Information disclosure · High · Mitigated
+
+Contract 1.28 (§25) brings MFA enrolment, email verification and password reset into every SDK, and with them a new crop of credential-bearing fields: `secret_base32`, the `otpauth://` URI that *contains* it, the forced-enrolment `setup_token` that completes a login, and the single-use reset and verification tokens. `totp_uri` is the field an implementer skips: wrapping the secret while leaving the URI bare wraps nothing, because the URI is what the caller passes to a QR renderer — and therefore the field that actually gets logged.
+
+> CONTRACT §25.3 wraps every one of these fields in `Sensitive<T>`, names `totp_uri` in its own row precisely because it embeds the secret, and requires each SDK's §25 test to scan serialized output for the secret **value** itself rather than for the field name — which catches the URI case automatically. Single-use tokens are wrapped too: single-use is not the same as harmless, and a token is a credential right up until it is spent.
+
+**T-185 — Lifecycle helpers turned into an account-enumeration oracle**  
+`SDK HTTP core (11 languages)` (Process) · Information disclosure · Medium · Mitigated
+
+Six of §25's nine operations are deliberately unauthenticated — a user who cannot log in is the entire audience for a password reset. Each is an enumeration oracle in waiting: an SDK that surfaces a "no such user" state on `request_password_reset` (even inferred from timing), distinguishes unknown from expired from already-consumed on a reset token, or displays the account a token belongs to beside the form re-creates exactly the oracle the server's uniform responses exist to prevent.
+
+> CONTRACT §25.4 forbids all three, normatively: `request_password_reset` answers `200` whether or not the address exists and an SDK may not improve on it; `404` on the reset context means unknown, expired or already-consumed and the SDK's presentation may not distinguish them either; and the context response discloses no identity — contract 1.26 removed the username when OPAQUE made it unnecessary, and an SDK must not reintroduce one by inferring the account from elsewhere.
+
+**T-186 — Caller-supplied reactor transport connects without TLS**  
+`SDK AMQP consumer (HMAC verify, nonce)` (Process) · Information disclosure · High · Mitigated
+
+Contract 1.28 (§22.11) brings the reactor protocol core — v2 HMAC over the canonical serialization, freshness in both directions, nonce and correlation binding, the §22.5 allow-lists — to Swift, C and C++ over a transport the caller supplies, because no vendorable AMQP client exists for those targets. The runtime never sees a broker URL, so it cannot enforce §8b itself: the integrator's transport is where a plaintext `amqp://` connection or a verification-skip flag would slip in, carrying signed-but-cleartext events and replies. Before 1.28 these three shipped nothing from §22 at all, and the sharper risk was integrators re-implementing the signing protocol from prose — which is how a signing bug ships.
+
+> §8b rule 7's second clause is the whole of their obligation and it is discharged in code, not documentation: each of the three ships the rule 1–5 guard as a public, tested function (`amqpsEndpoint`, `axiam_amqps_endpoint`, `axiam::amqps_endpoint`) — scheme refusal with no loopback exception, no plaintext fallback, no verification-skip switch, fail-closed on an unparseable URL — and calls it in its own example transport before anything opens a socket. The transport seam is deliberately no wider than deliver-inbound and publish-reply, so it cannot hand the integrator the topology tools §22.1 forbids; the protocol core itself is now library code, ending the hand-rolled-HMAC divergence. HMAC signing (§8/§22.2) remains mandatory on every message regardless of transport.
+
 </details>
 
 ## 6. Open risk register
 
-16 of 182 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+16 of 186 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -1883,9 +1915,9 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | Category | Threats |
 |---|---|
 | Spoofing | 47 |
-| Tampering | 36 |
+| Tampering | 37 |
 | Repudiation | 5 |
-| Information disclosure | 47 |
+| Information disclosure | 50 |
 | Denial of service | 18 |
 | Elevation of privilege | 29 |
 
@@ -1894,8 +1926,8 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 25 | 1 |
-| High | 81 | 7 |
-| Medium | 69 | 7 |
+| High | 84 | 7 |
+| Medium | 70 | 7 |
 | Low | 7 | 1 |
 
 **By diagram**
@@ -1910,7 +1942,7 @@ An SDK's own dependency tree is part of the integrator's authentication path; an
 | PKI, certificates & IoT device identity | 18 | 1 |
 | Audit, webhooks, email & notifications | 18 | 3 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
-| Client SDKs & admin UI integration surface | 17 | 4 |
+| Client SDKs & admin UI integration surface | 21 | 4 |
 
 ## 8. Assumptions
 
@@ -1932,7 +1964,7 @@ Revisit the model when any of the following happens, and re-run the generator so
 - A trust boundary moves — a new component, a change in deployment topology
 - A security review raises a finding with no corresponding threat here
 - A deferred item lands (SEC-040 deny-override did, closing T-16/T-87)
-- The SDK contract gains or relaxes a security clause
+- The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them)
 
 Threat numbers are stable: add new threats with new numbers and raise `threatTop` rather than renumbering, so review comments and issues keep pointing at the right thing.
 

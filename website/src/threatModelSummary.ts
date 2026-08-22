@@ -25,9 +25,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 182,
+ "total": 186,
  "open": 16,
- "mitigated": 166,
+ "mitigated": 170,
  "areas": [
   {
    "id": 0,
@@ -80,7 +80,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 17,
+   "total": 21,
    "open": 4
   }
  ]

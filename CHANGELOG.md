@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Threat model brought up to `1.0.0-alpha38`: the contract 1.28 SDK surface —
+  WebAuthn (§24), account lifecycle (§25), PAR (§26) and the Swift/C/C++
+  reactor protocol core (§22.11) — is recorded as four new mitigated threats on
+  the SDK diagram (T-183…T-186, 186 threats total, 170 mitigated / 16 open),
+  T-182 notes the passkey session-cookie fix, and the website Security section
+  (`src/security.ts` plus the generated model files) is updated in step.
 - Website Security section brought up to `1.0.0-alpha34` from
   `claude_dev/threat-modeling-and-security.md`: OPAQUE (RFC 9807) as an
   optional augmented PAKE, Vault as the production secret provider, TLS-only

@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.7.0",
  "diagramCount": 9,
- "total": 182,
+ "total": 186,
  "open": 16,
- "mitigated": 166,
+ "mitigated": 170,
  "diagrams": [
   {
    "id": 0,
@@ -1145,7 +1145,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-in: there is no preceding password step for the account-status check, the operator's login veto or lockout to have run in. A path added without re-establishing those gates would verify a discoverable credential for an account that is locked, deactivated or anonymised — or make \"click the passkey button\" a bypass of an operator's login veto (SEC-095's shape, on a new door).",
-       "mitigation": "Each gate is re-established on the new path. The login.post_auth reactor interception fires on the discoverable finish, reusing intercept_federated_login_post_auth because a one-round-trip sign-in has no branch to route require_mfa into. ensure_can_sign_in stands in for the missing first step — lockout first, then account status — refusing as InvalidCredentials so which of the two reasons applies is not disclosed. And start touches no storage: no \"does this workspace have passkey users?\" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (residentKey required, replacing webauthn-rs's discouraged default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor."
+       "mitigation": "Each gate is re-established on the new path. The login.post_auth reactor interception fires on the discoverable finish, reusing intercept_federated_login_post_auth because a one-round-trip sign-in has no branch to route require_mfa into. ensure_can_sign_in stands in for the missing first step — lockout first, then account status — refusing as InvalidCredentials so which of the two reasons applies is not disclosed. And start touches no storage: no \"does this workspace have passkey users?\" pre-check, because the caller is anonymous and that answer is a tenant-enumeration oracle (pinned by unit tests whose repository double panics on every method); an unknown credential fails at finish with the same error as any other bad assertion. Registration now requests a discoverable credential (residentKey required, replacing webauthn-rs's discouraged default); passkeys enrolled before that are not retroactively discoverable and keep password sign-in with the passkey second factor. Since 1.0.0-alpha38 the two authenticate/*/finish handlers also emit the same Set-Cookie triple (axiam_access, axiam_refresh, axiam_csrf) and X-CSRF-Token header as the password path's cookie builder: a completed browser passkey ceremony lands in the same HttpOnly-cookie, CSRF-protected session posture as a password login, instead of leaving the token pair only in the JSON body. The body keeps its tokens for non-browser clients, which adopt them directly per CONTRACT §24."
       }
      ],
      "open": 0
@@ -5696,7 +5696,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "description": "The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, AMQP HMAC consumption, webhook verification and package-distribution supply chain.",
+   "description": "The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, the WebAuthn relying-party layer, account lifecycle and PAR operations (contract 1.28, §24–§26), AMQP HMAC consumption and the reactor protocol core, webhook verification and package-distribution supply chain.",
    "width": 1448,
    "height": 798,
    "boundaries": [
@@ -5877,6 +5877,33 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The SDKs vendor copies of CONTRACT.md, openapi.json and proto/. If the server changes and the copies do not, an SDK can silently stop enforcing a control it believes it implements.",
        "mitigation": "CI enforces this repository as the single source of truth: the SDK OpenAPI Drift Gate rebuilds the server, exports a fresh spec and fails on any difference from sdks/openapi.json, and the buf gates lint the protos and block breaking changes."
+      },
+      {
+       "number": 183,
+       "title": "SDK reshapes the WebAuthn ceremony the server configured",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Contract 1.28 (§24) gives every SDK the relying-party half of the WebAuthn ceremony — four JSON round trips against the server. Every field in the server's PublicKeyCredentialCreationOptions is a security parameter, every one looks locally adjustable, and an SDK that \"fixes\" one — relaxing userVerification because a CI authenticator kept prompting, supplying a timeout the server omitted, re-encoding base64url \"to be safe\" — has weakened or broken a ceremony the server believes it configured. The server cannot catch a relaxation: an assertion produced under weaker options is still a valid assertion.",
+       "mitigation": "CONTRACT §24.0 makes the pass-through rules normative for every SDK claiming §24: the server does all of the crypto and all of the policy; the SDK hands the server's options to the authenticator unchanged (no defaulting, no filling in, no normalizing), may not refuse options it parsed — a client-side algorithm allow-list is a second policy engine, and the tenant's is the only one that counts — and posts the authenticator's response back verbatim. The only permitted addition is the authenticatorAttachment hint, which selects which authenticator is prompted for, not what the server accepts. §24.8's required tests pin byte-identical pass-through, and §24.4 rule 1 does not license dumping a raw response body into an error an integrator would then log."
+      },
+      {
+       "number": 184,
+       "title": "TOTP secret or setup token leaks through account-lifecycle serialization",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Contract 1.28 (§25) brings MFA enrolment, email verification and password reset into every SDK, and with them a new crop of credential-bearing fields: secret_base32, the otpauth:// URI that contains it, the forced-enrolment setup_token that completes a login, and the single-use reset and verification tokens. totp_uri is the field an implementer skips: wrapping the secret while leaving the URI bare wraps nothing, because the URI is what the caller passes to a QR renderer — and therefore the field that actually gets logged.",
+       "mitigation": "CONTRACT §25.3 wraps every one of these fields in Sensitive<T>, names totp_uri in its own row precisely because it embeds the secret, and requires each SDK's §25 test to scan serialized output for the secret value itself rather than for the field name — which catches the URI case automatically. Single-use tokens are wrapped too: single-use is not the same as harmless, and a token is a credential right up until it is spent."
+      },
+      {
+       "number": 185,
+       "title": "Lifecycle helpers turned into an account-enumeration oracle",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Six of §25's nine operations are deliberately unauthenticated — a user who cannot log in is the entire audience for a password reset. Each is an enumeration oracle in waiting: an SDK that surfaces a \"no such user\" state on request_password_reset (even inferred from timing), distinguishes unknown from expired from already-consumed on a reset token, or displays the account a token belongs to beside the form re-creates exactly the oracle the server's uniform responses exist to prevent.",
+       "mitigation": "CONTRACT §25.4 forbids all three, normatively: request_password_reset answers 200 whether or not the address exists and an SDK may not improve on it; 404 on the reset context means unknown, expired or already-consumed and the SDK's presentation may not distinguish them either; and the context response discloses no identity — contract 1.26 removed the username when OPAQUE made it unnecessary, and an SDK must not reintroduce one by inferring the account from elsewhere."
       }
      ],
      "open": 0
@@ -5955,6 +5982,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Finding X-1: AMQP HMAC verification was implemented but did not actually reject bad signatures in the Go and Rust SDKs — a security control that appears present and enforces nothing is worse than an absent one, because it is trusted.",
        "mitigation": "CONTRACT §8 specifies the protocol precisely — strip hmac_signature, canonicalise, HMAC-SHA256, constant-time compare, nack-without-requeue on mismatch, strict mode by default — and §8 v2 adds the mandatory nonce and issued_at replay fields. Conformance tests belong in each SDK repository."
+      },
+      {
+       "number": 186,
+       "title": "Caller-supplied reactor transport connects without TLS",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Contract 1.28 (§22.11) brings the reactor protocol core — v2 HMAC over the canonical serialization, freshness in both directions, nonce and correlation binding, the §22.5 allow-lists — to Swift, C and C++ over a transport the caller supplies, because no vendorable AMQP client exists for those targets. The runtime never sees a broker URL, so it cannot enforce §8b itself: the integrator's transport is where a plaintext amqp:// connection or a verification-skip flag would slip in, carrying signed-but-cleartext events and replies. Before 1.28 these three shipped nothing from §22 at all, and the sharper risk was integrators re-implementing the signing protocol from prose — which is how a signing bug ships.",
+       "mitigation": "§8b rule 7's second clause is the whole of their obligation and it is discharged in code, not documentation: each of the three ships the rule 1–5 guard as a public, tested function (amqpsEndpoint, axiam_amqps_endpoint, axiam::amqps_endpoint) — scheme refusal with no loopback exception, no plaintext fallback, no verification-skip switch, fail-closed on an unparseable URL — and calls it in its own example transport before anything opens a socket. The transport seam is deliberately no wider than deliver-inbound and publish-reply, so it cannot hand the integrator the topology tools §22.1 forbids; the protocol core itself is now library code, ending the hand-rolled-HMAC divergence. HMAC signing (§8/§22.2) remains mandatory on every message regardless of transport."
       }
      ],
      "open": 0
@@ -6320,11 +6356,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 17,
+   "total": 21,
    "open": 4,
    "bySeverity": {
-    "High": 10,
-    "Medium": 5,
+    "High": 13,
+    "Medium": 6,
     "Critical": 2
    }
   }

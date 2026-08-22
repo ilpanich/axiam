@@ -202,10 +202,35 @@ seed_axiam() {
   }
 
   echo "[seed/axiam] bootstrapping org + default tenant + admin (gated by AXIAM_BOOTSTRAP_ADMIN_EMAIL)"
+  # `opaque_mode` is what makes the two opaque_* cells measurable. It defaults
+  # to `disabled` per tenant, and a disabled tenant answers 404 on every
+  # /api/v1/auth/opaque/* route, so without this the cells fail every pass
+  # against a 200 expectation.
+  #
+  # `optional`, never `required`: under `required` the server refuses a
+  # password-only account, which would take oauth2_password_login.js and every
+  # scenario that mints a user token down with it. Under `optional` the
+  # password paths are untouched and the OPAQUE routes additionally answer.
+  #
+  # The bench USER deliberately gets no OPAQUE enrolment, and does not need
+  # one: `/auth/opaque/login/start` answers 200 for any syntactically valid
+  # request — including one naming a user with no record — via the decoy
+  # exchange, which is built to cost what a real one costs. That is the
+  # property `opaque_login_start.js` measures against, and it is an
+  # anti-enumeration guarantee, so a run that ever saw the two diverge would
+  # have found a bug rather than a bad fixture. The bootstrap ADMIN is enrolled
+  # for real, by the server running both halves of the registration (it already
+  # holds the plaintext password at this one endpoint) — that is a one-off cost
+  # paid here, outside every measured window.
+  #
+  # Requires AXIAM__AUTH__OPAQUE_SESSION_KEY and AXIAM__AUTH__OPAQUE_SETUP_KEY
+  # on the container, or bootstrap rejects the request rather than producing a
+  # deployment whose only admin cannot authenticate. `just bench-up` sets both.
   local boot code body
+  local opaque_mode="${BENCH_OPAQUE_MODE:-optional}"
   boot=$(curl -sSk -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
     -H "Content-Type: application/json" \
-    -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+    -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\",\"opaque_mode\":\"$opaque_mode\"}")
   code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
   case "$code" in
     201)

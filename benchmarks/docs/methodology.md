@@ -55,7 +55,29 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `authz_batch_rest.js`           | Batch authorization decision (REST)            | HTTP/REST     | AXIAM-only*  |
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
 | `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
+| `oauth2_revoke.js`              | Token revocation (RFC 7009)                    | HTTP/OAuth2   | AXIAM-only*  |
+| `device_authorization.js`       | Device grant, authorization request (RFC 8628) | HTTP/OAuth2   | AXIAM-only*  |
+| `device_verify.js`              | Device grant, user-code lookup                 | HTTP/REST     | AXIAM-only*  |
+| `device_flow_poll.js`           | Device grant, token polling (`authorization_pending`) | HTTP/OAuth2 | AXIAM-only* |
+| `token_exchange.js`             | Token exchange (RFC 8693)                      | HTTP/OAuth2   | AXIAM-only*  |
+| `uma2_perm.js`                  | UMA 2.0 permission ticket                      | HTTP/REST     | AXIAM-only*  |
+| `uma_ticket_grant.js`           | UMA 2.0 `uma-ticket` grant                     | HTTP/OAuth2   | AXIAM-only*  |
+| `userinfo_grpc.js`              | Identity read (`UserInfoService/GetUserInfo`)  | gRPC          | AXIAM-only*  |
+| `grpc_admin_validate.js`        | `UserService/ValidateCredentials` (Argon2id)   | gRPC          | AXIAM-only*  |
+| `grpc_infra.js`                 | Reflection + health (unauthenticated surface)  | gRPC          | AXIAM-only*  |
+| `authz_nested_rest.js`          | Nested-resource decision at depth N            | HTTP/REST     | Sweep rung‡  |
+| `authz_nested_grpc.js`          | Nested-resource decision at depth N            | gRPC          | Sweep rung‡  |
+| `scim_provisioning.js`          | SCIM 2.0 provisioning (RFC 7644)               | HTTP/SCIM     | Pending§     |
+| `oauth2_client_credentials_reactor_hook.js` | Token issuance with a `token.pre_issue` reactor | HTTP/OAuth2 | Pending§ |
 | `zitadel_userinfo_grpc.js`      | Identity read (`AuthService/GetMyUser`)        | gRPC          | Zitadel-only†|
+
+This table is the scenario inventory, and `runner/run-benchmark.sh`'s filter
+lists are what enforce it. The two must agree: a scenario classified
+"AXIAM-only" here and absent from `AXIAM_ONLY_SCENARIOS` there does not get
+skipped for the other targets, it gets *run* against them and fails in
+`setup()` — a red cell that reads as a broken benchmark rather than as a
+product without the endpoint. Both `opaque_*` rows spent several releases in
+exactly that state.
 
 \* Most competitors do not expose a directly equivalent authorization-decision
 endpoint (REST or gRPC, single or batch); these scenarios are reported separately
@@ -83,6 +105,22 @@ comparison (REST vs gRPC, same logical operation, same vendor) — see
 it from the cross-vendor "Efficiency comparison" tables the same way it
 excludes the AXIAM-only authz scenarios above (both are listed in
 `report.py`'s `NON_COMPARATIVE_SCENARIOS`).
+
+‡ Rungs of the N1 nested-resource depth sweep, not default-matrix cells:
+their meaning comes from the `nesteddepths` knob driving them, so
+`run-benchmark.sh`'s `OPT_IN_SCENARIOS` keeps them out of `--scenario all` and
+`just bench-nested` drives them instead. Their results land under
+`results/nested/` and are read by `runner/nested_report.py`, which `bench-report`
+deliberately never walks. `authz_nested_rest.js` is wired for all three targets;
+`authz_nested_grpc.js` is AXIAM-only. Read `scenarios/lib/nested.js` before
+quoting any cross-target number from either — the three arms do not run the same
+product mechanism.
+
+§ Written against a documented contract the deployment cannot satisfy yet, and
+skipped unless `BENCH_ENABLE_PENDING_SCENARIOS=1`. Each file's header carries the
+current blocker; `run-benchmark.sh`'s `PENDING_SCENARIOS` is the list. A pending
+scenario is removed from that list in the same commit that closes the LAST thing
+it was pending on, never the first.
 
 A comparable gRPC "introspect" scenario was considered and deliberately
 **not** added: Zitadel's `session.v2.SessionService` (`GetSession`,

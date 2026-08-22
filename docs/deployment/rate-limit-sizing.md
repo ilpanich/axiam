@@ -129,6 +129,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | 5 | 5 | 5 |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | 3 | 3 | 3 |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | 5 | 5 | 5 |
+| `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 120 | 600 | 6000 |
 | `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 600 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 60 | 600 | 6000 |

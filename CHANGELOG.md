@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Rate-limit the six `/api/v1/auth/webauthn/*` ceremony routes. They carried no
+  limiter at all — no governor, no shared counter, and no `webauthn_per_min`
+  knob existed — while the MFA routes directly above them and the OPAQUE routes
+  directly below each carried one. Two of the six are the unauthenticated
+  usernameless sign-in path. New `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN`,
+  defaulting to 10 and applying to each of the six routes independently —
+  deliberately the same per-IP sign-in allowance `login_per_min` already
+  grants passwords.
+
+### Fixed
+
+- Benchmark harness and quick runbook brought up to alpha38. The two `opaque_*`
+  cells could not pass — missing from `AXIAM_ONLY_SCENARIOS`, so they ran
+  against Keycloak and Zitadel and failed in `setup()`, and the bench tenant
+  left `opaque_mode` disabled so they 404'd against AXIAM too. `bench-quick`'s
+  reactor probe had gone stale into a false negative. `rl_prod_check.py` had
+  rows for eleven of sixteen REST rate-limit families, with five absent rather
+  than reported unchecked.
+
 ## [1.0.0-alpha38] - 2026-08-22
 
 ### Changed

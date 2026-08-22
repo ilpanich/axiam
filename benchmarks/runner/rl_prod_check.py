@@ -186,10 +186,21 @@ ENDPOINTS = {
     ),
     "mfa_per_min": (
         None,
-        "POST /api/v1/auth/mfa/* (one bucket spans enroll, confirm, verify and the two setup/* routes)",
+        "POST /api/v1/auth/mfa/* (applies to enroll, confirm, verify and the two setup/* routes)",
     ),
     "par_per_min": (None, "POST /oauth2/par (pushed authorization requests, RFC 9126)"),
     "end_session_per_min": (None, "GET|POST /oauth2/end_session (OIDC RP-initiated logout)"),
+    # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
+    # family could not appear here even as "not checked" — a knob that does not
+    # exist cannot be extracted or compared, which is precisely how an
+    # unlimited endpoint stays invisible to a pass whose job is to verify
+    # limits. It exists now. Driving it needs a scenario that can complete a
+    # WebAuthn ceremony from k6, which means signing an assertion with a
+    # software authenticator; that is a real piece of work, not an oversight.
+    "webauthn_per_min": (
+        None,
+        "POST /api/v1/auth/webauthn/* (applies to each of the six ceremony routes)",
+    ),
 }
 
 
@@ -235,7 +246,10 @@ def read_configured_defaults():
                   "scim_per_min",
                   # alpha38: the five families that had no row at all. Same
                   # extraction; they were simply never asked for.
-                  "par_per_min", "end_session_per_min"):
+                  "par_per_min", "end_session_per_min",
+                  # The seventeenth family, added with the limiter that closed
+                  # the unlimited /auth/webauthn/* surface.
+                  "webauthn_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

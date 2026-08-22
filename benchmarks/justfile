@@ -157,6 +157,7 @@ bench-up:
         export AXIAM__RATE_LIMIT__REGISTER_PER_MIN=5
         export AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN=3
         export AXIAM__RATE_LIMIT__MFA_PER_MIN=5
+        export AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN=10
         # Machine endpoints — I3 revision. Previous values, for the record:
         # token 20, introspect 10, revoke 10, authz_check 300. If these drift
         # from RateLimitConfig::default() again, `just rl-prod-check` FAILS the

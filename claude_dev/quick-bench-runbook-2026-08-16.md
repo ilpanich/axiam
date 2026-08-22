@@ -378,25 +378,28 @@ leaves a reader assuming the round covered them. List them explicitly.
 
 | Surface | Contract | Rate-limited? | Cell |
 |---|---|---|---|
-| WebAuthn / passkeys — six `/api/v1/auth/webauthn/*` routes | §24 | **No — see below** | none |
+| WebAuthn / passkeys — six `/api/v1/auth/webauthn/*` routes | §24 | yes, **as of this round** (`webauthn_per_min` = 10) | none (a "not checked" row) |
 | Account lifecycle — export, delete, delete/cancel | §25 | yes (`register_per_min`, `password_reset_per_min`) | none |
 | PAR — `POST /oauth2/par` | §26 | yes (`par_per_min` = 120) | none (a §0 M5 "not checked" row) |
 
-**The WebAuthn row is a finding, not a scheduling note, and it belongs in the write-up
-even though it is not a benchmark result.** The six routes registered in
-`crates/axiam-api-rest/src/server.rs` carry no rate limiter — no `build_governor`, no
-`RateLimitShared` — and there is no `webauthn_per_min` field in `RateLimitConfig`. The
-MFA routes immediately above them in the same scope each carry `mfa_per_min`, and the
-OPAQUE routes below them each carry `login_per_min`, so this reads as an omission
-rather than a decision. Two of the six —
-`/webauthn/authenticate/discoverable/{start,finish}` — are the unauthenticated
-usernameless sign-in path.
+**The WebAuthn row was a finding, and the write-up should say so rather than quietly
+show it limited.** Those six routes carried no rate limiter at all — no
+`build_governor`, no `RateLimitShared`, and no `webauthn_per_min` field existed — while
+the MFA routes immediately above them in the same scope each carried `mfa_per_min` and
+the OPAQUE routes below them each carried `login_per_min`. Two of the six,
+`/webauthn/authenticate/discoverable/{start,finish}`, are the unauthenticated
+usernameless sign-in path. The limiter landed with this round's harness work; it is the
+seventeenth family, and the bench compose's neutralized posture carries it from its
+first release rather than after tripping over it.
 
-The consequence for this round is narrow and worth stating precisely: `rl-prod` (§4)
-cannot report a gap here, because a family that does not exist cannot be extracted,
-compared, or listed as "not checked". It is invisible to the pass by construction. So
-say it in prose. Sizing a limit is a server decision, not a benchmark one — the
-benchmark's job is to have noticed.
+**The part worth carrying forward is how it stayed invisible.** `rl-prod` (§4) could
+not have reported this gap, at any effort level, because a family that does not exist
+cannot be extracted from the source, compared against an admitted rate, or listed as
+"not checked". A pass whose whole job is verifying limits is blind, by construction, to
+an endpoint that has none. `rl_prod_check.py` reads `RateLimitConfig` — so it can only
+ever audit the set of things somebody already decided to limit. Finding the next one of
+these means reading the route table against the config, which is not something this
+pass does. Worth a check script; it does not exist yet.
 
 ---
 

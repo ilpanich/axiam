@@ -233,6 +233,13 @@ services:
       # (device_*) or "never preset" (scim, end_session), for exactly the reason
       # login_per_min is: at `rl=neutralized` the limiter must be out of the way
       # so the number on the other side is the endpoint's, not the governor's.
+      #
+      # The seventeenth family arrived: `webauthn_per_min`. The six
+      # /auth/webauthn/* routes carried no limiter at all until it was added,
+      # so unlike every knob above it never had a shipped default that this
+      # block could forget — it is neutralized here from its first release,
+      # under the rule rather than after tripping over it. No scenario drives
+      # it yet, which is why `rl_prod_check.py` lists it as "not checked".
       AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN: "${AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__END_SESSION_PER_MIN: "${AXIAM__RATE_LIMIT__END_SESSION_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__PAR_PER_MIN: "${AXIAM__RATE_LIMIT__PAR_PER_MIN:-1000000}"
@@ -240,6 +247,7 @@ services:
       AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN: "${AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN: "${AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__SCIM_PER_MIN: "${AXIAM__RATE_LIMIT__SCIM_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN: "${AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN:-1000000}"
       # AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN is DELIBERATELY ABSENT — do not
       # "complete" the list by adding it. `RateLimitConfig::validate` asserts the
       # OWASP user-code bound, `charset^len / (rate x lifetime) > 10^6`, and with

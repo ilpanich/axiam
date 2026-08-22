@@ -9,6 +9,8 @@
 //! scope for a headless integration test — see the equivalent constraint
 //! documented in `axiam-auth/tests/webauthn_tests.rs`.
 
+use std::net::SocketAddr;
+
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
@@ -31,6 +33,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// The six `/auth/webauthn/*` routes are wrapped in `build_governor`, whose
+/// per-peer key extractor fails the request outright with 500 "no peer address"
+/// when none is set — so every request below must carry one, exactly as
+/// `auth_test.rs` does for the login/MFA routes. A bare `TestRequest` never
+/// reaches the handler.
+const TEST_PEER: &str = "127.0.0.1:12345";
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
@@ -196,6 +204,7 @@ async fn start_registration_requires_auth() {
         .uri("/api/v1/auth/webauthn/register/start")
         .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -213,6 +222,7 @@ async fn start_registration_succeeds_with_valid_token() {
         .insert_header(("Authorization", format!("Bearer {token}")))
         .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -240,6 +250,7 @@ async fn finish_registration_requires_auth() {
             "credential_name": "my key",
             "response": dummy_register_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -262,6 +273,7 @@ async fn finish_registration_rejects_garbage_state_token() {
             "credential_name": "my key",
             "response": dummy_register_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -285,6 +297,7 @@ async fn finish_registration_rejects_cross_tenant_state_token() {
         .insert_header(("Authorization", format!("Bearer {token_a}")))
         .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
     assert_eq!(start_resp.status().as_u16(), 200);
@@ -315,6 +328,7 @@ async fn finish_registration_rejects_cross_tenant_state_token() {
             "credential_name": "my key",
             "response": dummy_register_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let finish_resp = test::call_service(&app, finish_req).await;
     assert_eq!(finish_resp.status().as_u16(), 401);
@@ -335,6 +349,7 @@ async fn start_authentication_rejects_garbage_challenge_token() {
         .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(json!({ "challenge_token": "not.a.jwt" }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -369,6 +384,7 @@ async fn start_authentication_with_real_challenge_but_no_credentials_errors() {
             "username_or_email": "wa-user-a",
             "password": TEST_PASSWORD,
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let login_resp = test::call_service(&app, login_req).await;
     assert_eq!(
@@ -387,6 +403,7 @@ async fn start_authentication_with_real_challenge_but_no_credentials_errors() {
         .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(json!({ "challenge_token": challenge_token }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
     assert_eq!(start_resp.status().as_u16(), 401);
@@ -410,6 +427,7 @@ async fn finish_authentication_rejects_two_segment_token() {
             "state_token": "only.two",
             "response": dummy_auth_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -429,6 +447,7 @@ async fn finish_authentication_rejects_non_base64_payload() {
             "state_token": "header.not!!valid!!base64.signature",
             "response": dummy_auth_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -449,6 +468,7 @@ async fn finish_authentication_rejects_non_json_payload() {
             "state_token": state_token,
             "response": dummy_auth_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -469,6 +489,7 @@ async fn finish_authentication_rejects_invalid_tenant_uuid() {
             "state_token": state_token,
             "response": dummy_auth_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -494,6 +515,7 @@ async fn finish_authentication_peek_succeeds_but_service_rejects_invalid_jwt() {
             "state_token": state_token,
             "response": dummy_auth_response_json(),
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);

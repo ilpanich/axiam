@@ -213,33 +213,88 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::post().to(handlers::auth::setup_confirm_mfa::<C>)),
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
-            .route(
-                "/webauthn/register/start",
-                web::post().to(handlers::webauthn::start_registration::<C>),
+            // All six WebAuthn ceremony routes take their limit from
+            // `webauthn_per_min`, the way the five MFA routes above take theirs
+            // from `mfa_per_min`. Each route still gets its OWN bucket —
+            // `RateLimitShared` keys `"{endpoint}:{ip}"` — so the value is the
+            // allowance each route carries, not one pool they divide. That is
+            // why it equals `login_per_min` rather than doubling it: a ceremony
+            // spends one from `start` and one from `finish`.
+            //
+            // They carried NO limiter at all until this change — neither
+            // `build_governor` nor `RateLimitShared` — while the MFA routes
+            // directly above and the OPAQUE routes directly below each carried
+            // one, which is what made it an omission rather than a decision.
+            //
+            // D8 applies here for the same reason it applies to `/auth/login`:
+            // a ceremony authenticates a USER and carries no OAuth2 client
+            // identity to key on, so the IP-only constructors are used
+            // unconditionally, never the client-identity-aware variants.
+            .service(
+                web::resource("/webauthn/register/start")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_register_start",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::start_registration::<C>)),
             )
-            .route(
-                "/webauthn/register/finish",
-                web::post().to(handlers::webauthn::finish_registration::<C>),
+            .service(
+                web::resource("/webauthn/register/finish")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_register_finish",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::finish_registration::<C>)),
             )
-            .route(
-                "/webauthn/authenticate/start",
-                web::post().to(handlers::webauthn::start_authentication::<C>),
+            .service(
+                web::resource("/webauthn/authenticate/start")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_authenticate_start",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::start_authentication::<C>)),
             )
-            .route(
-                "/webauthn/authenticate/finish",
-                web::post().to(handlers::webauthn::finish_authentication::<C>),
+            .service(
+                web::resource("/webauthn/authenticate/finish")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_authenticate_finish",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::finish_authentication::<C>)),
             )
             // Usernameless (discoverable-credential) sign-in. Separate from the
             // pair above because the ceremonies differ in what identifies the
             // user: those continue a login that already named one, these
             // discover it from the assertion.
-            .route(
-                "/webauthn/authenticate/discoverable/start",
-                web::post().to(handlers::webauthn::start_discoverable_authentication::<C>),
+            //
+            // These two are UNAUTHENTICATED — no session, no username — which
+            // makes them the pair whose missing limiter mattered most, and the
+            // reason this bucket could not wait for a capacity measurement.
+            .service(
+                web::resource("/webauthn/authenticate/discoverable/start")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_discoverable_start",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(
+                        web::post().to(handlers::webauthn::start_discoverable_authentication::<C>),
+                    ),
             )
-            .route(
-                "/webauthn/authenticate/discoverable/finish",
-                web::post().to(handlers::webauthn::finish_discoverable_authentication::<C>),
+            .service(
+                web::resource("/webauthn/authenticate/discoverable/finish")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_discoverable_finish",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(
+                        web::post().to(handlers::webauthn::finish_discoverable_authentication::<C>),
+                    ),
             )
             .route(
                 "/verify-email",

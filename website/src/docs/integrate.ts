@@ -88,7 +88,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "index", text: "Every endpoint" },
       {
         type: "p",
-        text: `**${API_OPERATION_COUNT} operations across ${API_PATH_COUNT} paths**, grouped by domain and in path order. This index is generated from \`sdks/openapi.json\` at \`${API_VERSION}\` — it is not a curated selection, so a route that exists appears here, and one that appears here exists. Endpoints marked \`PUBLIC\` are reachable without an access token; everything else needs one, and a permission behind it.`,
+        text: `**${API_OPERATION_COUNT} operations across ${API_PATH_COUNT} paths**, grouped by domain and in path order. This index is generated from \`sdks/openapi.json\` at \`${API_VERSION}\` — it is not a curated selection, so a route that exists appears here, and one that appears here exists. Endpoints marked \`PUBLIC\` are reachable **without an access token**; everything else needs one, and a permission behind it. Read that marker precisely on the OAuth2 endpoints: \`/oauth2/token\`, \`/oauth2/par\`, \`/oauth2/introspect\` and \`/oauth2/revoke\` take no bearer token, but they do authenticate the *client* — by secret, assertion or the TLS connection — so “no access token” is not “open”.`,
       },
       {
         type: "note",

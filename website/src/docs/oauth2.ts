@@ -437,8 +437,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           {
             method: "GET",
             path: "/oauth2/authorize?client_id={id}&request_uri={uri}",
-            summary: "Redeem it — exactly those two parameters and no others.",
-            public: true,
+            summary: "Redeem it — exactly those two parameters and no others. Needs the user's session, as it always did.",
           },
         ],
       },

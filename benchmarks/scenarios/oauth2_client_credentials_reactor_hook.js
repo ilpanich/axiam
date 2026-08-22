@@ -30,19 +30,27 @@
 // 2. **The registration this cell needs doesn't yet produce the round trip
 //    the plan describes.** The plan's one-line description ("+1 AMQP RTT ≈
 //    1-3 ms p50") assumes a real reactor process is answering the queue.
-//    As of R2.4, `axiam-server` composes `axiam_amqp::UnavailableReactorTransport`
-//    (the lapin `ReactorTransport` is not merged — `dispatcher.rs`'s doc
-//    comment on that type, and `sdks/CONTRACT.md` §22.1's scope note, are
-//    both explicit about this). Every dispatch to a registered reactor
-//    therefore resolves as a `Transport` failure SYNCHRONOUSLY — no socket,
-//    no broker round trip — and `token.pre_issue`'s default `fail_open`
-//    policy turns that into an immediate `Allow`. Running this cell today
-//    would measure "routing-table lookup + failure-policy resolution for an
-//    unreachable reactor," which is a real number but not the one the cell
-//    is named for. Getting the genuine "+1 AMQP RTT" number needs either
-//    R2.5 (a real `reactor_serve` process backing the registration) or a
-//    hand-rolled no-op consumer standing in for one — either way, something
-//    that actually answers the queue.
+//
+//    UPDATED at alpha38 — half of this blocker closed, and it is worth being
+//    precise about which half, because the closed half is the one that used
+//    to be written first. `axiam_amqp::LapinReactorTransport` is merged and
+//    `axiam-server/src/main.rs` composes it, so the old description here is
+//    no longer true: a dispatch is a real publish to a real broker, not the
+//    synchronous `Transport` failure `UnavailableReactorTransport` produced.
+//
+//    What has NOT changed is that nothing consumes the queue. With a
+//    registration in place and no reactor process behind it, a dispatch now
+//    publishes and then waits out the registration's `timeout_ms` for a reply
+//    that cannot arrive (`reactor/transport.rs` says so in those words),
+//    before `token.pre_issue`'s default `fail_open` resolves it to `Allow`.
+//
+//    So this cell got *further* from measurable, not closer. The old number
+//    was wrong and looked wrong — a fast failure path. The number available
+//    today is wrong and looks RIGHT: a per-request cost dominated by a
+//    timeout, in the units and roughly the shape a reader expects a hook cost
+//    to have. That is the more dangerous artifact to publish. Closing this
+//    still needs what it always needed — R2.5's `reactor_serve`, or a
+//    hand-rolled no-op consumer — namely something that answers the queue.
 //
 // Once both are closed, the shape below needs no further changes: create
 // the reactor once in `setup()` (mode `intercept`, the registry's default

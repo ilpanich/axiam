@@ -66,6 +66,13 @@ services:
       # and is NOT optional. Only the OIDC issuer URL is optional — empty means
       # "feature off".
       AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?run via 'just bench-up'}"
+      # OPAQUE (RFC 9807). Both keys or neither — the server logs a warning and
+      # leaves OPAQUE off if only one is present. Required for the two opaque_*
+      # cells; see the `just bench-up` block that generates them, and seed.sh,
+      # which bootstraps the bench tenant with `opaque_mode: optional` so the
+      # endpoints answer 200 rather than the 404 a disabled tenant returns.
+      AXIAM__AUTH__OPAQUE_SESSION_KEY: "${AXIAM__AUTH__OPAQUE_SESSION_KEY:?run via 'just bench-up'}"
+      AXIAM__AUTH__OPAQUE_SETUP_KEY: "${AXIAM__AUTH__OPAQUE_SETUP_KEY:?run via 'just bench-up'}"
       AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?run via 'just bench-up'}"
       AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?run via 'just bench-up' which generates it under docker/.secrets/ (OBS-1: mandatory in the release image)}"

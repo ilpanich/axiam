@@ -58,6 +58,13 @@ check_skip() {
 check_skip axiam    scim_provisioning    scim_provisioning "pending scenario"
 # Target-scoping guard — an AXIAM-only cell run against another vendor.
 check_skip keycloak authz_check_rest     authz_check_rest  "AXIAM-only scenario"
+# Same guard, for the two cells that were missing from AXIAM_ONLY_SCENARIOS for
+# several releases. Their setup() throws "target <t> has no OPAQUE endpoint", so
+# the bug did not hide — it presented a capability gap as a red benchmark cell on
+# every competitor arm of every matrix pass. A scenario-side guard cannot fix
+# that; only the filter list can, which is why these are asserted here.
+check_skip keycloak opaque_login_start    opaque_login_start    "AXIAM-only scenario"
+check_skip zitadel  opaque_register_start opaque_register_start "AXIAM-only scenario"
 # The already-correct spelling must behave identically — normalization is
 # idempotent, not a second code path.
 check_skip axiam    scim_provisioning.js scim_provisioning "pending scenario, spelled with .js"

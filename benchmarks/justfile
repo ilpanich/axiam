@@ -119,6 +119,21 @@ bench-up:
       export AXIAM__EMAIL_ENCRYPTION_KEY="${AXIAM__EMAIL_ENCRYPTION_KEY:-$(genhex email_enc.hex)}"
       export AXIAM__GDPR_PSEUDONYM_PEPPER="${AXIAM__GDPR_PSEUDONYM_PEPPER:-$(genhex gdpr_pepper.hex)}"
       export AXIAM__AUTH__PEPPER="${AXIAM__AUTH__PEPPER:-$(genhex auth_pepper.hex)}"
+      # OPAQUE (RFC 9807) keys. Both are 32-byte/64-hex, same shape as the keys
+      # above, and BOTH are required or the server treats OPAQUE as unconfigured
+      # (`axiam-server/src/main.rs` warns on a half-configured pair and
+      # `/auth/opaque/*` answers 503).
+      #
+      # These exist so the two opaque_* cells can run at all. `opaque_mode`
+      # defaults to `disabled` per tenant, and a disabled tenant answers 404 on
+      # every /auth/opaque/* route while the scenarios expect 200 — so without
+      # this pair AND seed.sh's `opaque_mode: optional`, both cells fail every
+      # matrix pass. Note the stability requirement is stronger here than for
+      # the others: losing opaque_setup_key makes every registration record in
+      # the bench tenant unopenable, so genhex's generate-once-and-reuse is
+      # load-bearing across a persisted DB volume, not just convenient.
+      export AXIAM__AUTH__OPAQUE_SESSION_KEY="${AXIAM__AUTH__OPAQUE_SESSION_KEY:-$(genhex opaque_session.hex)}"
+      export AXIAM__AUTH__OPAQUE_SETUP_KEY="${AXIAM__AUTH__OPAQUE_SETUP_KEY:-$(genhex opaque_setup.hex)}"
       export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM__AUTH__OAUTH2_ISSUER_URL:-${BENCH_ISSUER_URL:-http://localhost:${BENCH_APP_PORT:-8090}}}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
@@ -1146,14 +1161,28 @@ bench-quick:
     # whether a reactor dispatcher is actually invoked from a request path,
     # not whether the module exists.
     #
-    # As of this recipe's addition it is not: crates/axiam-amqp carries the
-    # dispatcher, the event model, the DB config and the admin CRUD, but
-    # nothing outside that module invokes ReactorDispatcher — X1.4
-    # (server-side dispatch) is not wired. So this cell reports that it did
-    # not run, and why, rather than producing the cost of a code path that
-    # never executes.
+    # As of this recipe's addition it was not, and the probe below looked for
+    # `ReactorDispatcher` by name in the request-path crates.
+    #
+    # alpha38: that probe had gone stale into a FALSE NEGATIVE, which is the
+    # dangerous direction for it to fail — it kept printing "not wired" about a
+    # hook that is wired, so the cell stayed silently skipped instead of
+    # flagging that it needed writing. The request path never names
+    # `ReactorDispatcher`; it holds a `SharedReactorGate` and calls through it
+    # (`axiam-oauth2/src/token.rs`, `axiam-api-rest/src/reactor_hooks.rs` and
+    # the handlers that use them). The gate is what a request actually touches,
+    # so the gate is what this greps for.
+    #
+    # Note what this probe does and does not tell you. It answers "is a reactor
+    # hook invoked from a request path", which is X5's condition. It does NOT
+    # answer "would measuring it produce the number this cell is named for" —
+    # that additionally needs something consuming the reactor queue, or the
+    # dispatch spends `timeout_ms` waiting for a reply that cannot arrive and
+    # the cell measures a timeout wearing a hook's name. See
+    # `runner/run-benchmark.sh`'s PENDING_SCENARIOS note on
+    # oauth2_client_credentials_reactor_hook.js.
     HOOK_STATE="not wired"
-    if grep -rqs "ReactorDispatcher" ../crates/axiam-api-rest/src ../crates/axiam-oauth2/src 2>/dev/null; then
+    if grep -rqsE "reactor_gate|ReactorGate" ../crates/axiam-api-rest/src ../crates/axiam-oauth2/src 2>/dev/null; then
       HOOK_STATE="wired"
     fi
 
@@ -1202,14 +1231,24 @@ bench-quick:
     lines.append("## Cell 2 — X1 reactor hook cost")
     lines.append("")
     if hook_state == "wired":
-        lines.append("A reactor dispatcher IS invoked from a request path, so this cell is now")
-        lines.append("measurable and this recipe needs the arm written. It has not been.")
+        lines.append("**Not run — but no longer for the original reason.** A reactor gate IS")
+        lines.append("invoked from a request path now (`axiam-oauth2`'s token path holds a")
+        lines.append("`SharedReactorGate`), and `LapinReactorTransport` makes a dispatch a real")
+        lines.append("broker publish rather than a synchronous failure. X5's condition is met and")
+        lines.append("this recipe still has no arm written for the cell.")
+        lines.append("")
+        lines.append("Write one only together with a process that CONSUMES the reactor queue.")
+        lines.append("With a registration and no consumer, a dispatch waits out the")
+        lines.append("registration's `timeout_ms` for a reply that cannot arrive and then resolves")
+        lines.append("through `fail_open`. That produces a number, and the number is a timeout")
+        lines.append("rather than a hook cost — a more convincing wrong answer than the old")
+        lines.append("`UnavailableReactorTransport` one, which at least failed fast.")
     else:
-        lines.append("**Not run.** X1's dispatcher, event model, DB config and admin CRUD are on")
-        lines.append("main, but nothing outside `crates/axiam-amqp/src/reactor/` invokes")
-        lines.append("`ReactorDispatcher` — X1.4 (server-side dispatch) is not wired into any")
-        lines.append("request path. There is no hook on the token path to measure, and")
-        lines.append("measuring one anyway would report the cost of code that never executes.")
+        lines.append("**Not run.** No reactor gate is invoked from any request path")
+        lines.append("(`crates/axiam-api-rest/src`, `crates/axiam-oauth2/src`), so X1's")
+        lines.append("server-side dispatch is not wired. There is no hook on the token path to")
+        lines.append("measure, and measuring one anyway would report the cost of code that never")
+        lines.append("executes.")
     lines.append("")
     lines.append("## What this run establishes")
     lines.append("")

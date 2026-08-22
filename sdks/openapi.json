@@ -1146,7 +1146,7 @@
         },
         "responses": {
           "200": {
-            "description": "Authentication successful",
+            "description": "Authentication successful. Sets the axiam_access, axiam_refresh and axiam_csrf cookies and echoes the CSRF token in X-CSRF-Token, exactly as POST /api/v1/auth/login does.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1205,7 +1205,7 @@
           "webauthn"
         ],
         "summary": "`POST /api/v1/auth/webauthn/authenticate/finish`",
-        "description": "Complete a WebAuthn passkey authentication ceremony.  On success\na session is created and access/refresh tokens are issued.",
+        "description": "Complete a WebAuthn passkey authentication ceremony.  On success a session\nis created and access/refresh tokens are issued **both** as the\n`axiam_access`/`axiam_refresh`/`axiam_csrf` cookie triple and in the\nresponse body — see `webauthn_session_response` for why it is both.",
         "operationId": "finish_authentication",
         "requestBody": {
           "content": {
@@ -1219,7 +1219,7 @@
         },
         "responses": {
           "200": {
-            "description": "Authentication successful",
+            "description": "Authentication successful. Sets the axiam_access, axiam_refresh and axiam_csrf cookies and echoes the CSRF token in X-CSRF-Token, exactly as POST /api/v1/auth/login does.",
             "content": {
               "application/json": {
                 "schema": {

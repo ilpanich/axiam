@@ -231,7 +231,18 @@ fi
 # no per-resource authorization-decision RPC, so there is nothing to compare it
 # against. Its REST sibling (authz_nested_rest.js) is deliberately NOT here —
 # that one IS wired for all three targets (see scenarios/lib/nested.js).
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js"
+#
+# The two opaque_* scenarios were added with the OPAQUE (RFC 9807) work and
+# were missing from this list until now, which was a real hole rather than a
+# tidy-up: `docs/methodology.md` has always classified both as AXIAM-only, and
+# `lib/targets.js` defines `opaqueLoginStart`/`opaqueRegisterStart` on the
+# axiam adapter alone. Auto-discovery therefore handed them to the Keycloak and
+# Zitadel arms, where each one's `setup()` throws
+# `target "<t>" has no OPAQUE endpoint` — a hard cell failure standing in for
+# "this product has no such endpoint". That is exactly the confusion this list
+# exists to prevent, and it is why a capability gap belongs here rather than in
+# a scenario-side guard.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js opaque_login_start.js opaque_register_start.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -293,6 +304,18 @@ skip_oauth2() {
 # transport / a real no-op reactor process); see that file's own header for
 # the full explanation. Remove it from this list in the commit that closes
 # BOTH, not the first one alone.
+#
+# STATUS as of alpha38: blocker 2 is HALF closed and the half that closed is
+# the one that used to be named first. `axiam_amqp::LapinReactorTransport`
+# exists and `axiam-server/src/main.rs` composes it, so a dispatch is now a
+# real broker publish rather than the synchronous `Transport` failure that
+# `UnavailableReactorTransport` produced. What is still missing is the other
+# half of that same blocker — something that ANSWERS the queue. Without a
+# reactor process consuming it, a `token.pre_issue` dispatch now measures a
+# publish plus the registration's reply timeout, which is a worse number to
+# publish than the old one, not a better one: it looks like a hook cost and is
+# actually a timeout. Blocker 1 (no admin-session helper in lib/auth.js) is
+# untouched. So this stays listed, for two reasons that are both still real.
 PENDING_SCENARIOS="scim_provisioning.js oauth2_client_credentials_reactor_hook.js"
 
 # N1: scenarios that are complete and runnable but are NOT default-matrix

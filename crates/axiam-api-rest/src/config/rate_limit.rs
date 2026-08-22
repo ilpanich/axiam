@@ -218,6 +218,8 @@ pub const ENV_REGISTER_PER_MIN: &str = "AXIAM__RATE_LIMIT__REGISTER_PER_MIN";
 pub const ENV_PASSWORD_RESET_PER_MIN: &str = "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN";
 /// `AXIAM__RATE_LIMIT__MFA_PER_MIN` — human endpoint, never preset.
 pub const ENV_MFA_PER_MIN: &str = "AXIAM__RATE_LIMIT__MFA_PER_MIN";
+/// Env var pinning [`RateLimitConfig::webauthn_per_min`].
+pub const ENV_WEBAUTHN_PER_MIN: &str = "AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN";
 
 impl RateLimitProfile {
     /// Stable, log-safe name — identical to the
@@ -321,6 +323,41 @@ pub struct RateLimitConfig {
     /// Max MFA requests per minute per IP (default: 5).
     /// Covers /auth/mfa/enroll, /confirm, /verify, /setup/enroll, /setup/confirm (SEC-020).
     pub mfa_per_min: u32,
+    /// Max WebAuthn ceremony requests per minute per IP (default: 10).
+    /// Covers the six `/auth/webauthn/*` routes: register start/finish,
+    /// authenticate start/finish, and the discoverable (usernameless) pair.
+    ///
+    /// **Read "per route", not "per family".** `RateLimitShared` keys its
+    /// bucket `"{endpoint}:{ip}"`, so each of the six gets its own independent
+    /// allowance of this value — the same way `mfa_per_min` applies to each of
+    /// its five routes rather than being divided among them. A ceremony spends
+    /// one request from the `start` bucket and one from the `finish` bucket, so
+    /// this number *is* the ceremonies-per-minute allowance rather than half
+    /// of it.
+    ///
+    /// That is why it equals `login_per_min` exactly: ten WebAuthn sign-in
+    /// attempts a minute per IP, matching what password sign-in already gets.
+    /// `shipped_internet_defaults_are_pinned` asserts the equality rather than
+    /// the literal, so retuning one forces a deliberate decision about the
+    /// other instead of letting the two drift apart.
+    ///
+    /// Sizing it at `mfa_per_min`'s 5 would have been the tempting mistake: it
+    /// puts the *more* phishing-resistant sign-in method on a tighter budget
+    /// than the password it exists to replace, and passkey ceremonies are
+    /// retried more often than passwords, not less (a cancelled biometric
+    /// prompt, the wrong authenticator, a platform timeout). Throttling the
+    /// good path harder than the bad one is how a security control gets
+    /// switched off by its users.
+    ///
+    /// Like the other human endpoints this is NOT sized from capacity. A
+    /// WebAuthn assertion is one signature verification — cheap next to
+    /// Argon2id — so throughput was never what needed bounding. Two things
+    /// are: every `start` allocates challenge state, and
+    /// `authenticate/start` is reachable per-username, which makes an
+    /// unbounded version a credential-enumeration oracle. The discoverable
+    /// pair is additionally unauthenticated, being the usernameless sign-in
+    /// path, and is the reason this bucket cannot wait for a capacity number.
+    pub webauthn_per_min: u32,
     /// Max oauth2/introspect requests per minute per IP (default: 600 — I3).
     /// SEC-020: introspect endpoint rate-limited to prevent token probing.
     pub introspect_per_min: u32,
@@ -487,6 +524,7 @@ impl Default for RateLimitConfig {
             register_per_min: 5,
             password_reset_per_min: 3,
             mfa_per_min: 5,
+            webauthn_per_min: 10,
             // --- Machine endpoints: I3 revision (run-4 sizing) ------------
             // Run 4 measured the `internet` machine-endpoint defaults against
             // the actual capacity behind them on a 2-core envelope
@@ -711,6 +749,7 @@ impl RateLimitConfig {
             "end_session_per_min must be >= 1"
         );
         assert!(self.scim_per_min >= 1, "scim_per_min must be >= 1");
+        assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
         // guessing against a code space of 20^8 over the grant's 10-minute
@@ -842,6 +881,7 @@ mod tests {
             ),
             (ENV_DEVICE_VERIFY_PER_MIN, d.device_verify_per_min),
             (ENV_SCIM_PER_MIN, d.scim_per_min),
+            (ENV_WEBAUTHN_PER_MIN, d.webauthn_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -903,12 +943,14 @@ mod tests {
             assert_eq!(cfg.password_reset_per_min, shipped.password_reset_per_min);
             assert_eq!(cfg.mfa_per_min, shipped.mfa_per_min);
             assert_eq!(cfg.scim_per_min, shipped.scim_per_min);
+            assert_eq!(cfg.webauthn_per_min, shipped.webauthn_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
                 ENV_PASSWORD_RESET_PER_MIN,
                 ENV_MFA_PER_MIN,
                 ENV_SCIM_PER_MIN,
+                ENV_WEBAUTHN_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1118,6 +1160,19 @@ mod tests {
         assert_eq!(d.register_per_min, 5);
         assert_eq!(d.password_reset_per_min, 3);
         assert_eq!(d.mfa_per_min, 5);
+        assert_eq!(d.webauthn_per_min, 10);
+        // The relationship is the point, not the literal. `RateLimitShared`
+        // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
+        // carries this allowance independently and a ceremony spends one from
+        // `start` and one from `finish` — making the value the ceremonies-per-
+        // minute budget, which is deliberately the same budget `login_per_min`
+        // gives password sign-in. Anyone retuning login should decide about
+        // this rather than let the two silently diverge.
+        assert_eq!(
+            d.webauthn_per_min, d.login_per_min,
+            "WebAuthn sign-in and password sign-in are deliberately given the \
+             same per-IP attempt allowance"
+        );
     }
 
     /// R3.1/B4: the SCIM bucket is pinned to the gRPC `Admin` family's

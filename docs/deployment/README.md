@@ -492,6 +492,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
+| `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN` | Max WebAuthn ceremony requests per minute per key (default `10`). Applies to each of the six `/auth/webauthn/*` routes independently, so it is the per-minute ceremony allowance — deliberately equal to `LOGIN_PER_MIN`. |
 | `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `600`). |
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `60`). |
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `1800`). |

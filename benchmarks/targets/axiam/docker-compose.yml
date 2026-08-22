@@ -66,6 +66,13 @@ services:
       # and is NOT optional. Only the OIDC issuer URL is optional — empty means
       # "feature off".
       AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?run via 'just bench-up'}"
+      # OPAQUE (RFC 9807). Both keys or neither — the server logs a warning and
+      # leaves OPAQUE off if only one is present. Required for the two opaque_*
+      # cells; see the `just bench-up` block that generates them, and seed.sh,
+      # which bootstraps the bench tenant with `opaque_mode: optional` so the
+      # endpoints answer 200 rather than the 404 a disabled tenant returns.
+      AXIAM__AUTH__OPAQUE_SESSION_KEY: "${AXIAM__AUTH__OPAQUE_SESSION_KEY:?run via 'just bench-up'}"
+      AXIAM__AUTH__OPAQUE_SETUP_KEY: "${AXIAM__AUTH__OPAQUE_SETUP_KEY:?run via 'just bench-up'}"
       AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?run via 'just bench-up'}"
       AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?run via 'just bench-up' which generates it under docker/.secrets/ (OBS-1: mandatory in the release image)}"
@@ -226,6 +233,13 @@ services:
       # (device_*) or "never preset" (scim, end_session), for exactly the reason
       # login_per_min is: at `rl=neutralized` the limiter must be out of the way
       # so the number on the other side is the endpoint's, not the governor's.
+      #
+      # The seventeenth family arrived: `webauthn_per_min`. The six
+      # /auth/webauthn/* routes carried no limiter at all until it was added,
+      # so unlike every knob above it never had a shipped default that this
+      # block could forget — it is neutralized here from its first release,
+      # under the rule rather than after tripping over it. No scenario drives
+      # it yet, which is why `rl_prod_check.py` lists it as "not checked".
       AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN: "${AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__END_SESSION_PER_MIN: "${AXIAM__RATE_LIMIT__END_SESSION_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__PAR_PER_MIN: "${AXIAM__RATE_LIMIT__PAR_PER_MIN:-1000000}"
@@ -233,6 +247,7 @@ services:
       AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN: "${AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN: "${AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN:-1000000}"
       AXIAM__RATE_LIMIT__SCIM_PER_MIN: "${AXIAM__RATE_LIMIT__SCIM_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN: "${AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN:-1000000}"
       # AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN is DELIBERATELY ABSENT — do not
       # "complete" the list by adding it. `RateLimitConfig::validate` asserts the
       # OWASP user-code bound, `charset^len / (rate x lifetime) > 10^6`, and with

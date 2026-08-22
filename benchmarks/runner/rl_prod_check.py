@@ -100,7 +100,21 @@ RUN_DIR_RE = re.compile(r"run-\d+")
 # limit and no scenario driving it — the same hole J1c closed for
 # revoke/grpc_admin/grpc_infra in run 5. The R5.2 tail then closed the
 # inverse hole for SCIM: a shipped ENDPOINT with no configured limit at all.
-# Every rate-limited family AXIAM ships now has a row here.
+#
+# alpha38 correction: the line that used to stand here said "every rate-limited
+# family AXIAM ships now has a row" and it was wrong when written. Five of
+# `RateLimitConfig`'s sixteen REST families had no row at all — register,
+# password_reset, mfa, par and end_session — so they did not degrade to the
+# honest "not checked" row the paragraph above promises, they vanished from the
+# table entirely. A reader counting sixteen knobs in `rate_limit.rs` against
+# sixteen rows here would have concluded the coverage was complete; it was
+# eleven REST families plus authz_batch plus the four gRPC ones.
+#
+# They are listed below with `scenario=None`. That is the whole point of the
+# None path: an unmeasured limiter should say "unmeasured" in the same table as
+# the measured ones, where the gap is countable, rather than be absent from it.
+# Whoever writes a scenario for one of them replaces the None with its filename
+# and nothing else here changes.
 ENDPOINTS = {
     "login_per_min": (
         "oauth2_password_login.js",
@@ -142,6 +156,50 @@ ENDPOINTS = {
     "scim_per_min": (
         "scim_provisioning.js",
         "PATCH /scim/v2/Users/{id} (SCIM 2.0 provisioning, B4; one bucket spans all of /scim/v2)",
+    ),
+    # --- Configured, shipped, and NOT driven by any scenario (alpha38) -------
+    #
+    # Each of these has a real limiter wrapped around a real route in
+    # `crates/axiam-api-rest/src/server.rs`. None has a bench cell, so none can
+    # be verified against its configured value; `scenario=None` makes that
+    # visible in the table instead of silently absent. Why each lacks one, so
+    # the next person does not re-derive it:
+    #
+    #   register / password_reset — both MUTATE and both send mail. A capacity
+    #     probe against them creates users or reset tokens for the length of
+    #     the window, which no other cell in this suite does; a scenario would
+    #     need its own teardown before it could be a matrix cell.
+    #   mfa — the bucket spans six enrol/confirm/verify routes whose fixtures
+    #     are stateful (an enrolment must precede a confirmation), so one
+    #     closed-loop scenario cannot drive the family the way this map's
+    #     one-scenario-per-family invariant requires.
+    #   par / end_session — no fixture problem at all; nobody has written the
+    #     cells. These two are the cheapest of the five to close.
+    "register_per_min": (
+        None,
+        "POST /api/v1/users (one bucket also spans /admin/bootstrap, "
+        "/account/export and /account/delete)",
+    ),
+    "password_reset_per_min": (
+        None,
+        "POST /api/v1/auth/reset (one bucket also spans /reset/context and /password/change)",
+    ),
+    "mfa_per_min": (
+        None,
+        "POST /api/v1/auth/mfa/* (applies to enroll, confirm, verify and the two setup/* routes)",
+    ),
+    "par_per_min": (None, "POST /oauth2/par (pushed authorization requests, RFC 9126)"),
+    "end_session_per_min": (None, "GET|POST /oauth2/end_session (OIDC RP-initiated logout)"),
+    # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
+    # family could not appear here even as "not checked" — a knob that does not
+    # exist cannot be extracted or compared, which is precisely how an
+    # unlimited endpoint stays invisible to a pass whose job is to verify
+    # limits. It exists now. Driving it needs a scenario that can complete a
+    # WebAuthn ceremony from k6, which means signing an assertion with a
+    # software authenticator; that is a real piece of work, not an oversight.
+    "webauthn_per_min": (
+        None,
+        "POST /api/v1/auth/webauthn/* (applies to each of the six ceremony routes)",
     ),
 }
 
@@ -185,7 +243,13 @@ def read_configured_defaults():
                   "device_authorization_per_min", "device_verify_per_min",
                   "token_exchange_per_min", "uma_perm_per_min", "uma_ticket_per_min",
                   # R5.2 tail: B4 SCIM — same extraction, no special-casing.
-                  "scim_per_min"):
+                  "scim_per_min",
+                  # alpha38: the five families that had no row at all. Same
+                  # extraction; they were simply never asked for.
+                  "par_per_min", "end_session_per_min",
+                  # The seventeenth family, added with the limiter that closed
+                  # the unlimited /auth/webauthn/* surface.
+                  "webauthn_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

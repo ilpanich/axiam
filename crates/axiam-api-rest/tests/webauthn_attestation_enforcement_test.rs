@@ -46,6 +46,7 @@ use axiam_db::{SurrealMdsRepository, SurrealWebauthnAttestationPolicyRepository}
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -53,6 +54,10 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// `/auth/webauthn/*` is `build_governor`-wrapped, whose per-peer key extractor
+/// 500s with "no peer address" when none is set — see `auth_test.rs`, which does
+/// the same for the login and MFA routes.
+const TEST_PEER: &str = "127.0.0.1:12345";
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
@@ -188,6 +193,7 @@ macro_rules! start_registration {
             .insert_header(("Authorization", format!("Bearer {}", $token)))
             .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .to_request();
         let resp = test::call_service(&$app, req).await;
         read_start_registration_attestation(resp).await
@@ -434,6 +440,7 @@ async fn finish_status(
                 "extensions": {}
             }
         }))
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .to_request();
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();

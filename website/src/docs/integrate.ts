@@ -371,59 +371,286 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "That boundary is what makes the feature safe to have. A crashing, hanging or malicious Reactor cannot take the authorization server with it — it can, at worst, fail its own hook inside the declared timeout, and the configured failure policy decides what that means.",
       },
-      { type: "h", id: "modes", text: "Two modes" },
+      { type: "h", id: "registry", text: "The five hookable events" },
+      {
+        type: "p",
+        text: "The registry is data, not prose: it lives in [EVENT_REGISTRY](https://github.com/ilpanich/axiam/blob/main/crates/axiam-core/src/models/reactor.rs), in `crates/axiam-core/src/models/reactor.rs`, and is served live at `GET /api/v1/reactors/events`, which is the copy a tool should read — the REST layer validates a registration against it and the dispatcher validates a reply against it, so there is one source and no second list to drift. The table below is that data as of this release.",
+      },
       {
         type: "table",
-        proseFirstCol: true,
-        headers: ["", "Webhook", "Listener Reactor (`mode: \"listen\"`)"],
+        headers: ["Event", "Interceptable", "A patch may set", "Default failure policy", "Purpose"],
         rows: [
-          ["Transport", "Outbound HTTPS POST to a URL", "AMQP consume from a durable, server-declared queue"],
           [
-            "Authenticity",
-            "HMAC-SHA256 over the body",
-            "HMAC over the whole message, replay-protected with a nonce and freshness window",
+            "token.pre_issue",
+            "yes",
+            "the `ext.` namespace only",
+            "`fail_open`",
+            "Enrich or veto token issuance. May add claims under `ext.` only.",
           ],
           [
-            "Delivery",
-            "At-least-once with retry, backoff and a DLQ",
-            "At-least-once — **your consumer must be idempotent**",
+            "login.post_auth",
+            "yes",
+            "nothing — veto, or `require_mfa`",
+            "`fail_closed`",
+            "After credentials verify, before session issuance: veto or require step-up MFA.",
           ],
           [
-            "Event catalog",
-            "Domain events: `user.created`, `role.assigned`, … a fixed, growing list",
-            "Any event in the reactor registry, **including non-interceptable ones**",
+            "user.pre_create",
+            "yes",
+            "`username`, `email`, the `metadata.` namespace",
+            "`fail_closed`",
+            "Validate or normalize a new user's profile fields.",
           ],
           [
-            "Can it affect the operation?",
-            "Never — the change is already committed when it fires",
-            "Never, by construction — the server does not wait for a listener's reply",
+            "user.pre_update",
+            "yes",
+            "`username`, `email`, the `metadata.` namespace",
+            "`fail_closed`",
+            "Validate or normalize a profile update.",
+          ],
+          [
+            "grant.pre_assign",
+            "yes",
+            "nothing — veto only",
+            "`fail_closed`",
+            "Veto a role or permission assignment (four-eyes workflows). Veto-only.",
           ],
         ],
       },
       {
         type: "p",
-        text: "The other mode intercepts: the server waits, within its declared timeout, and the Reactor's validated reply can allow, deny, or apply a mutation limited to an explicitly allow-listed set of fields.",
+        text: "An allow-list entry ending in a dot is a **namespace prefix**, and it matches a field that starts with the entry and has at least one character after the dot. So `ext.` admits `ext.department` and `ext.a.b.c`, and refuses `ext.` itself, `ext`, `extra`, `external_id` and `evil.ext.department`. Everything else follows from that one rule: `token.pre_issue` cannot reach `iss`, `sub`, `aud`, `exp`, `scope` or any other standard claim, because none of them begins with `ext.` — a hook that can rewrite `sub` is a hook that can mint a token for anyone, and a correctly signed reply setting it is refused exactly as a forged one is.",
       },
-      { type: "h", id: "failure", text: "Failure policy is the decision that matters" },
+      {
+        type: "p",
+        text: "**The asymmetry in the last column is the most instructive fact on this page.** `token.pre_issue` defaults to fail-open because its mutation is optional enrichment — an unreachable reactor costs you a claim, and degrading a feature is the right answer. The other four default to fail-closed because they can veto: a fraud check that times out has not passed, and an unreachable approver is not an approval. A registration that names several events inherits the **strictest** default among them, in either array order.",
+      },
+      {
+        type: "note",
+        text: "`login.post_auth` covers every interactive sign-in, not only password login: it fires on password authentication, on SAML ACS, on the OIDC callback and on usernameless passkey sign-in — in each case after the credentials verify and before any session or token is issued. MFA completion and the username-bound WebAuthn ceremony are not separate firings; both continue a login already gated at its first step. The federated and usernameless paths have no step-up branch, so a `require_mfa` answer there fails the sign-in rather than being silently dropped — see [CONTRACT §22.5](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md).",
+      },
+      { type: "h", id: "modes", text: "Intercept and listen" },
+      {
+        type: "p",
+        text: "A registration is `intercept` or `listen`. An interceptor sits in the operation: the server publishes the event to that reactor's queue, waits up to the declared timeout, and applies the validated reply. A listener is fire-and-forget observation — the server never waits and never reads a reply, so it cannot affect any outcome.",
+      },
       {
         type: "warn",
-        text: "An intercepting Reactor sits in the path of a real operation. Its failure policy decides what happens when it times out or answers unintelligibly — fail open (proceed) or fail closed (refuse). Fail-closed turns a Reactor outage into an outage of whatever it hooks; fail-open turns it into a silently unenforced control. Choose deliberately, and monitor either way.",
+        text: "**Listen registrations are refused today.** `POST` and `PUT` answer `503` for `mode: \"listen\"`, because no hook site fans out to listeners yet: the registration would receive nothing, and — being a listener — would produce no outcome in which you could notice. Register with `mode: \"intercept\"`, or create it with `enabled: false` until the fan-out ships.",
+      },
+      {
+        type: "p",
+        text: "All five events above are interceptable, so the registry's `interceptable` flag has no effect today. It is carried because a sixth event may be listen-only, and the rule is already fixed: a listener may subscribe to **every** registered event, including one the registry marks non-interceptable — precisely because it cannot influence it.",
+      },
+      { type: "h", id: "vs", text: "Reactor or webhook?" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["", "Webhook", "Intercepting Reactor"],
+        rows: [
+          ["Transport", "Outbound HTTPS POST to a URL you configure", "AMQP consume from a durable, server-declared queue"],
+          [
+            "Authenticity",
+            "HMAC-SHA256 over `timestamp.body`, in a signed-timestamp header",
+            "HMAC over the whole message, in **both** directions, replay-protected with a nonce and a freshness window",
+          ],
+          ["When it runs", "After the change is committed", "Inside the operation, before it commits"],
+          [
+            "Can it affect the operation?",
+            "Never",
+            "Allow, deny, or a mutation limited to the event's allow-list",
+          ],
+          [
+            "What it hears",
+            "The domain events a webhook can subscribe to — see [Webhooks](#/docs/webhooks)",
+            "The five registry events above, and nothing else",
+          ],
+          [
+            "If it is unreachable",
+            "Retried, then dead-lettered; the operation already happened",
+            "The registration's `failure_policy` decides — and for four of the five events the default is to refuse",
+          ],
+        ],
+      },
+      { type: "h", id: "wire", text: "On the wire" },
+      {
+        type: "p",
+        text: "Both directions carry the same v2 signature: `HMAC-SHA256` with the tenant's HKDF-derived AMQP subkey over the canonical serialization, with `nonce` and `issued_at` **inside** the signed bytes and a ±300 s two-sided freshness window. A reply is an instruction to change a token or refuse a login, so an unsigned reply is not a weak reply — it is not a reply at all. The two shapes below are illustrative; [CONTRACT §22.3–§22.4](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md) is normative.",
+      },
+      {
+        type: "code",
+        caption: "event — server → reactor",
+        code: `{
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "event": "token.pre_issue",
+  "correlation_id": "22222222-2222-2222-2222-222222222222",
+  "payload": { "sub": "alice", "client_id": "portal" },
+  "timeout_ms": 500,
+  "key_version": 2,
+  "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "issued_at": "2026-07-10T12:00:00Z",
+  "hmac_signature": "…"
+}`,
+      },
+      {
+        type: "code",
+        caption: "reply — reactor → server",
+        code: `{
+  "correlation_id": "22222222-2222-2222-2222-222222222222",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "event": "token.pre_issue",
+  "decision": "mutate",
+  "patch": { "ext.cost_center": "42", "ext.department": "eng" },
+  "key_version": 2,
+  "nonce": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "issued_at": "2026-07-10T12:00:00Z",
+  "hmac_signature": "…"
+}`,
+      },
+      {
+        type: "p",
+        text: "`payload` never carries a credential, a token or a signing key: a reactor is told what is being decided, not handed the means to act on it elsewhere. `correlation_id` is the single-use handle for one dispatch and must be echoed **in the reply body** — copying it only into the AMQP property produces a reply the server discards. `timeout_ms` is inside the signed body so it cannot be widened in transit; it is sent so an actor can shed load rather than answer into a closed window.",
+      },
+      {
+        type: "list",
+        items: [
+          "The server validates in a fixed order — identity, freshness, signature, then semantics — so allow-list logic is never spent on bytes nobody authenticated.",
+          "**One forbidden patch key rejects the whole patch**, including the fields that would have been fine. An SDK must not quietly filter a handler's patch down to the allowed subset: that leaves the author believing a field was set when it was dropped.",
+          "**`allow` and `patch` are mutually exclusive** — a mutation must be `decision: \"mutate\"`. `require_mfa` rides on `allow`, on `login.post_auth` only.",
+          "Every rejection is audited and resolves to the registration's failure policy. A rejected reply is not a softer failure than no reply at all.",
+        ],
+      },
+      { type: "h", id: "budget", text: "Timeouts and the budget" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Setting", "Value"],
+        rows: [
+          ["`timeout_ms` default", "500 ms"],
+          ["`timeout_ms` accepted range", "1 … 5 000 ms — `0` and anything larger is refused at registration"],
+          ["Chain wall-clock ceiling", "5 000 ms"],
+          ["Effective per-reactor budget", "`min(timeout_ms, 5000 − elapsed)`"],
+          ["Per-tenant in-flight interceptions", "64 by default"],
+        ],
+      },
+      {
+        type: "p",
+        text: "Interceptors for one event run sequentially in ascending `priority`, and a deny short-circuits the rest. The budget is wall-clock rather than a sum, and running out of it is **not** a way to skip a check: when the ceiling is exhausted the remaining reactors are not contacted and each of their failure policies is applied anyway, so an unreached fail-closed veto still denies. Back-pressure is immediate rather than queued — breaching the in-flight cap fails the interception at once and applies the policy, because queueing behind a concurrency bound just turns it into an unbounded latency bound.",
+      },
+      {
+        type: "note",
+        text: "A fail-open timeout produces `allow` **and** an audit record naming the reactor. That pair is the whole difference between “no reactor was configured” and “the reactor never answered”, so do not infer reactor health from the outcome alone — `GET /api/v1/reactors/{id}` reports `last_seen_at`, `recent_timeout_count` and `recent_veto_count` for exactly this reason.",
+      },
+      { type: "h", id: "hotpath", text: "Never on the check path" },
+      {
+        type: "warn",
+        text: "`authz.check`, `authz.check_batch` and `token.introspect` are **not hookable**, and no SDK may present them as such: they are absent from the registry, a registration naming one is refused as an unknown event, and the dispatcher resolves an unregistered event to `allow` without contacting anything. The reason is arithmetic, not policy — a reactor round trip is milliseconds and the check path's budget is microseconds. An application that needs external input on an authorization decision writes a **deny grant**, which the engine evaluates in the hot path at hot-path cost.",
+      },
+      { type: "h", id: "handlers", text: "Binding handlers" },
+      {
+        type: "p",
+        text: "A reactor registered for three events opens with a dispatch on the event name, and that dispatch is where the expensive defect lives: the catch-all arm that returns *allow* answers on behalf of code that never ran, defeating an operator's fail-closed setting from a file they never read. Every SDK that ships the runtime therefore also ships a declarative binder — one handler per event, composed into the single handler the runtime takes. A name outside the registry is refused **at bind time**, and an event with no handler **abstains**: no reply, and the failure policy decides.",
+      },
+      {
+        type: "codegroup",
+        caption: "declarative handler binding",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: `import { REACTOR_EVENTS, reactorHandlers, reactorServe } from 'axiam-sdk/amqp';
+
+await reactorServe(
+  options,
+  reactorHandlers({
+    [REACTOR_EVENTS.TOKEN_PRE_ISSUE]: (event) => mutate({ 'ext.cost_center': '42' }),
+    [REACTOR_EVENTS.LOGIN_POST_AUTH]: async (event) => deny('embargoed region'),
+  }),
+);`,
+          },
+          {
+            label: "Python",
+            code: `from axiam_sdk.amqp import LOGIN_POST_AUTH, TOKEN_PRE_ISSUE, ReactorRouter, reactor_serve
+
+router = ReactorRouter()
+
+@router.on(TOKEN_PRE_ISSUE)
+def enrich_token(event):            # sync or async, both work
+    return mutate({"ext.cost_center": "42"})
+
+@router.on(LOGIN_POST_AUTH)
+async def screen_login(event):
+    return deny("embargoed region") if await embargoed(event) else allow()
+
+await reactor_serve(dialer, config, router.handler())`,
+          },
+          {
+            label: "Go",
+            code: `handler, err := amqp.NewReactorMux().
+    On(amqp.ReactorEventTokenPreIssue, enrichToken).
+    On(amqp.ReactorEventLoginPostAuth, screenLogin).
+    Handler()
+if err != nil {
+    return err // every rejected binding at once, not one per run
+}
+err = amqp.ReactorServe(ctx, dialer, cfg, handler)`,
+          },
+          {
+            label: "Swift",
+            code: `// The §8b guard is a public, tested function — call it before
+// anything opens a socket.
+let endpoint = try amqpsEndpoint(brokerURL, caPEM: caPEM)
+
+var router = ReactorRouter()
+try router.on(.loginPostAuth) { event in
+    let payload = try event.decodePayload(LoginPayload.self)
+    return suspicious(payload) ? .allowWithStepUp : .allow
+}
+
+let config = ReactorConfig(tenantID: tenantID, reactorID: reactorID, signingKey: subkey)
+try await reactorServe(config: config, transport: yourTransport, handler: router.handler())`,
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "The eight managed runtimes — Rust, TypeScript, Python, Java, Kotlin, C#, PHP and Go — bundle the AMQP client and connect for you. **Swift, C and C++ ship the protocol core over a transport you supply**: the same verification, canonical signing, allow-lists and binder, with no vendored broker client, because there is no maintained AMQP client for those targets this project is willing to put onto embedded and mobile deployments. Their transport interface has exactly two capabilities — take the next delivery, publish a reply to a named destination — and deliberately no declare, bind or queue-name derivation, since a reactor that can bind can bind itself to another tenant's issuance events.",
+      },
+      {
+        type: "note",
+        text: "Because that runtime never sees a broker URL, each of the three exposes the transport guard — `amqps://` only, no loopback exception, no plaintext fallback, no verification-skip switch — as a public, tested function (`amqpsEndpoint`, `axiam_amqps_endpoint`, `axiam::amqps_endpoint`) and calls it in its own example transport. A requirement that reads as enforced and is not is the failure mode that rule exists to stop.",
       },
       { type: "h", id: "registering", text: "Registering one" },
       {
         type: "api",
         endpoints: [
-          { method: "GET", path: "/api/v1/reactors", summary: "List registered Reactors." },
-          { method: "POST", path: "/api/v1/reactors", summary: "Register one." },
-          { method: "GET", path: "/api/v1/reactors/{id}", summary: "Read one." },
+          { method: "GET", path: "/api/v1/reactors", summary: "List registered Reactors, with health counters." },
+          { method: "POST", path: "/api/v1/reactors", summary: "Register one. `400` on an unknown event or an out-of-range timeout." },
+          { method: "GET", path: "/api/v1/reactors/{id}", summary: "Read one, including `last_seen_at` and the 24-hour timeout and veto counts." },
           { method: "PUT", path: "/api/v1/reactors/{id}", summary: "Update it." },
-          { method: "DELETE", path: "/api/v1/reactors/{id}", summary: "Remove it." },
-          { method: "GET", path: "/api/v1/reactors/events", summary: "The event registry — what can be hooked, and which events are interceptable." },
+          { method: "DELETE", path: "/api/v1/reactors/{id}", summary: "Remove it — never refused, so a bad registration can always be undone." },
+          { method: "GET", path: "/api/v1/reactors/events", summary: "The event registry, verbatim — the live copy of the table above." },
         ],
       },
       {
+        type: "code",
+        caption: "POST /api/v1/reactors",
+        code: `{
+  "name": "fraud-screen",
+  "description": "Denies logins from embargoed regions",
+  "events": ["login.post_auth"],
+  "mode": "intercept",
+  "priority": 10,
+  "timeout_ms": 500,
+  "enabled": true
+}`,
+      },
+      {
+        type: "p",
+        text: "Omit `timeout_ms` to take the 500 ms default, and omit `failure_policy` to take the strictest default among the events named. Every endpoint is permission-gated (`reactors:list`, `reactors:create`, `reactors:get`, `reactors:update`, `reactors:delete`), and the server declares the exchange, the queue and the bindings — an actor consumes, and never declares topology of its own.",
+      },
+      {
         type: "note",
-        text: "The wire protocol — message shape, signing, the reply schema and the timeout semantics — is normative in `sdks/CONTRACT.md` §22. The admin console's Reactors page is the same surface with a form on top.",
+        text: "The wire protocol — message shape, signing, the reply schema and the timeout semantics — is normative in [CONTRACT.md §22](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md). The admin console's Reactors page is the same surface with a form on top.",
       },
     ],
   },

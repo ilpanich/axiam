@@ -174,7 +174,7 @@ await client.confirmPasswordReset({
       { type: "h", id: "rate", text: "Rate limiting" },
       {
         type: "p",
-        text: "`/auth/login` is always keyed per source IP regardless of the deployment's rate-limit key mode, and stays strict under every posture preset. Register, password-reset and MFA endpoints are likewise per-IP. The reasoning — and why `client_id` keying is a fairness control rather than an abuse control — is in [Configuration](#/docs/configuration).",
+        text: "`/auth/login` is always keyed per source IP regardless of the deployment's rate-limit key mode, and stays strict under every posture preset. Register, password-reset, MFA and WebAuthn endpoints are likewise per-IP. The reasoning — and why `client_id` keying is a fairness control rather than an abuse control — is in [Configuration](#/docs/configuration).",
       },
     ],
   },
@@ -686,6 +686,11 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "note",
         text: "`register/start` answering `503` is this state, not a transient failure: the policy requires attestation and there is no usable metadata snapshot. It is a documented exception to the SDK retry policy — retrying changes nothing and only delays a message an operator needs to see. The full decision order, the known `USER_VERIFICATION_BYPASS` limitation and the air-gap procedure are in [docs/admin/authenticator-policies.md](https://github.com/ilpanich/axiam/blob/main/docs/admin/authenticator-policies.md).",
+      },
+      { type: "h", id: "limits", text: "Rate limiting" },
+      {
+        type: "p",
+        text: "All six ceremony routes are throttled per source IP by `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN`, which defaults to **10** and is deliberately the same allowance `/auth/login` gives passwords. Each route carries that budget independently, so a ceremony — one `start`, one `finish` — spends one request from each rather than two from one bucket, and the number is the ceremonies-per-minute figure rather than half of it. It is not sized from throughput: an assertion is a single signature check, cheap next to Argon2id. What needed bounding is that every `start` allocates challenge state, and that the username-bound `authenticate/start` would otherwise be a credential-enumeration oracle.",
       },
       { type: "h", id: "users", text: "How users experience it" },
       {

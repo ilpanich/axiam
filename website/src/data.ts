@@ -150,7 +150,7 @@ def read_doc(doc_id: str,
     examplesUrl: "https://github.com/ilpanich/axiam-java-sdk/tree/main/examples",
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-java-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk",
-    install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0")',
+    install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0-alpha38")',
     blurb:
       "Fluent builder client for the JVM, with servlet and Spring-friendly guards.",
     highlights: [
@@ -309,7 +309,7 @@ mux.Handle("GET /docs/{id}",
     examplesUrl: "https://github.com/ilpanich/axiam-kotlin-sdk/tree/main/examples",
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-kotlin-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk-kotlin",
-    install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha15")',
+    install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha38")',
     blurb:
       "Coroutine-native REST client for the JVM, with Ktor route guards and declarative helpers.",
     highlights: [
@@ -358,7 +358,7 @@ routing {
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-swift-sdk?branch=main",
     pkg: "AxiamSDK",
     install:
-      '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-alpha15")',
+      '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-alpha38")',
     blurb:
       "Cross-platform REST client on SwiftNIO — client-cert mTLS works on Linux and Apple platforms alike.",
     highlights: [

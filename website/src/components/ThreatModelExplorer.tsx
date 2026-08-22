@@ -1,6 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { THREAT_MODEL } from "../threatModel";
 import type { TmDiagram, TmEdge, TmNode, TmThreat } from "../threatModelTypes";
+import {
+  SECURITY_DEEP_LINK_RE,
+  diagramHash,
+  elementHash,
+  threatHash,
+} from "../securityLinks";
 
 /**
  * Interactive browser for the OWASP Threat Dragon model.
@@ -399,22 +405,276 @@ function Diagram({
   );
 }
 
+/* ---- Deep links ---------------------------------------------------------- */
+
+/**
+ * Which diagram, element and threat the explorer is showing.
+ *
+ * Kept in the URL rather than in component state alone, because the point of a
+ * threat model is being able to cite it: the STRIDE document, the open risk
+ * register, commit messages and the SDK contract all refer to threats by
+ * number, and none of those references is useful if the reader cannot be sent
+ * to the thing itself.
+ */
+interface View {
+  diagramId: number;
+  selectedId: string | null;
+  focusThreat: number | null;
+}
+
+const FIRST_DIAGRAM = THREAT_MODEL.diagrams[0].id;
+const DEFAULT_VIEW: View = {
+  diagramId: FIRST_DIAGRAM,
+  selectedId: null,
+  focusThreat: null,
+};
+
+function buildHash(view: View): string {
+  if (view.focusThreat !== null) return threatHash(view.diagramId, view.focusThreat);
+  if (view.selectedId) return elementHash(view.diagramId, view.selectedId);
+  return diagramHash(view.diagramId);
+}
+
+/** The diagram and element a threat number lives on, or `null` if unknown. */
+function locate(number: number): { diagramId: number; elementId: string } | null {
+  for (const diagram of THREAT_MODEL.diagrams) {
+    for (const el of [...diagram.nodes, ...diagram.edges]) {
+      if (el.threats.some((t) => t.number === number)) {
+        return { diagramId: diagram.id, elementId: el.id };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the view out of the current URL.
+ *
+ * A threat number wins over the diagram in the link: threat numbers are unique
+ * across the whole model, so `T-186` resolves to the right diagram even if the
+ * rest of the link is stale — which is exactly the case where a citation would
+ * otherwise quietly land on the wrong page.
+ */
+function readHash(): View {
+  if (typeof window === "undefined") return DEFAULT_VIEW;
+  const match = SECURITY_DEEP_LINK_RE.exec(window.location.hash);
+  if (!match) return DEFAULT_VIEW;
+
+  const diagramId = Number(match[1]);
+  const known = THREAT_MODEL.diagrams.some((d) => d.id === diagramId);
+  const view: View = {
+    diagramId: known ? diagramId : FIRST_DIAGRAM,
+    selectedId: null,
+    focusThreat: null,
+  };
+
+  const target = match[2];
+  if (!target) return view;
+
+  const asThreat = /^T-(\d+)$/.exec(target);
+  if (asThreat) {
+    const number = Number(asThreat[1]);
+    const found = locate(number);
+    if (!found) return view;
+    return { diagramId: found.diagramId, selectedId: found.elementId, focusThreat: number };
+  }
+  return { ...view, selectedId: target };
+}
+
+/* ---- Filtering ----------------------------------------------------------- */
+
+const SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"];
+const CATEGORY_ORDER = [
+  "Spoofing",
+  "Tampering",
+  "Repudiation",
+  "Information disclosure",
+  "Denial of service",
+  "Elevation of privilege",
+];
+
+const ALL_THREATS = THREAT_MODEL.diagrams.flatMap((d) =>
+  [...d.nodes, ...d.edges].flatMap((el) => el.threats),
+);
+
+/** Values the model actually uses, in canonical order, unknowns last. */
+function present(order: string[], values: string[]): string[] {
+  const seen = new Set(values);
+  return [
+    ...order.filter((v) => seen.has(v)),
+    ...[...seen].filter((v) => !order.includes(v)).sort(),
+  ];
+}
+
+const SEVERITIES = present(SEVERITY_ORDER, ALL_THREATS.map((t) => t.severity));
+const CATEGORIES = present(CATEGORY_ORDER, ALL_THREATS.map((t) => t.type));
+
+/**
+ * One lowercased haystack per threat, built once.
+ *
+ * The search runs on every keystroke over 186 threats whose mitigation text can
+ * run to a paragraph; concatenating and lowercasing that on each pass is work
+ * that never changes, so it is done here instead.
+ */
+const HAYSTACK = new Map<number, string>(
+  ALL_THREATS.map((t) => [
+    t.number,
+    `t-${t.number} ${t.title} ${t.description} ${t.mitigation}`.toLowerCase(),
+  ]),
+);
+
+interface Filters {
+  query: string;
+  severities: string[];
+  categories: string[];
+  openOnly: boolean;
+}
+
+const NO_FILTERS: Filters = {
+  query: "",
+  severities: [],
+  categories: [],
+  openOnly: false,
+};
+
+const filtersActive = (f: Filters) =>
+  f.openOnly || f.query.trim() !== "" || f.severities.length > 0 || f.categories.length > 0;
+
+function matches(threat: TmThreat, f: Filters, query: string): boolean {
+  if (f.openOnly && threat.status === "Mitigated") return false;
+  if (f.severities.length > 0 && !f.severities.includes(threat.severity)) return false;
+  if (f.categories.length > 0 && !f.categories.includes(threat.type)) return false;
+  if (query && !(HAYSTACK.get(threat.number) ?? "").includes(query)) return false;
+  return true;
+}
+
+/** Toggle `value` in a filter list. */
+const toggle = (list: string[], value: string) =>
+  list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+
 /* ---- Threat list --------------------------------------------------------- */
 
-function ThreatCard({ threat }: { threat: TmThreat }) {
+/** A filter chip. Selected chips carry their own colour so severity reads at a glance. */
+function FilterChip({
+  label,
+  active,
+  color,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  color: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="ax-pill"
+      aria-pressed={active}
+      onClick={onClick}
+      style={{
+        padding: "4px 11px",
+        fontSize: 12,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        border: `1px solid ${active ? `${color}88` : "rgba(148,163,184,.25)"}`,
+        background: active ? `${color}1a` : "transparent",
+        color: active ? color : SLATE,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * The threat's identifier, as a copyable anchor.
+ *
+ * Everything else in the project cites threats as `T-186`; until the card
+ * carried the number, nothing on the website could be cited back.
+ */
+function ThreatAnchor({ diagramId, number }: { diagramId: number; number: number }) {
+  const [copied, setCopied] = useState(false);
+  const href = threatHash(diagramId, number);
+
+  const copy = () => {
+    const url =
+      typeof window === "undefined"
+        ? href
+        : `${window.location.origin}${window.location.pathname}${window.location.search}${href}`;
+    // Clipboard access is permission-gated and absent over plain HTTP, so a
+    // failure here is expected rather than exceptional: the anchor beside the
+    // button is still copyable by hand.
+    navigator.clipboard?.writeText(url).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      },
+      () => undefined,
+    );
+  };
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <a
+        href={href}
+        style={{
+          font: "700 12.5px ui-monospace,Menlo,monospace",
+          color: CYAN_SOFT,
+          textDecoration: "none",
+          borderBottom: `1px solid ${CYAN}44`,
+        }}
+      >
+        T-{number}
+      </a>
+      <button
+        type="button"
+        onClick={copy}
+        title={`Copy a link to T-${number}`}
+        aria-label={`Copy a link to T-${number}`}
+        style={{
+          border: "1px solid rgba(148,163,184,.25)",
+          background: "transparent",
+          borderRadius: 5,
+          color: copied ? "#27c93f" : SLATE,
+          font: "10.5px ui-monospace,Menlo,monospace",
+          padding: "1px 5px",
+          cursor: "pointer",
+        }}
+      >
+        {copied ? "copied" : "link"}
+      </button>
+    </span>
+  );
+}
+
+function ThreatCard({
+  threat,
+  diagramId,
+  focused,
+}: {
+  threat: TmThreat;
+  diagramId: number;
+  /** Deep-linked: highlighted and scrolled to. */
+  focused: boolean;
+}) {
   return (
     <div
+      id={`tm-threat-${threat.number}`}
       className="glass-card"
       style={{
         padding: "14px 16px",
-        borderColor:
-          threat.status === "Mitigated"
+        scrollMarginTop: 100,
+        borderColor: focused
+          ? "rgba(0,212,255,.75)"
+          : threat.status === "Mitigated"
             ? "rgba(0,212,255,.14)"
             : "rgba(255,189,46,.34)",
         background:
           threat.status === "Mitigated"
             ? "rgba(255,255,255,.035)"
             : "rgba(255,189,46,.05)",
+        boxShadow: focused ? "0 0 0 1px rgba(0,212,255,.35)" : undefined,
       }}
     >
       <div
@@ -426,6 +686,7 @@ function ThreatCard({ threat }: { threat: TmThreat }) {
           marginBottom: 8,
         }}
       >
+        <ThreatAnchor diagramId={diagramId} number={threat.number} />
         <span style={{ fontWeight: 700, fontSize: 14.5, color: "#e2e8f0" }}>
           {threat.title}
         </span>
@@ -460,13 +721,59 @@ function ThreatCard({ threat }: { threat: TmThreat }) {
 /* ---- Explorer ------------------------------------------------------------ */
 
 export default function ThreatModelExplorer() {
-  const [index, setIndex] = useState(0);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [openOnly, setOpenOnly] = useState(false);
+  const [view, setView] = useState<View>(readHash);
+  const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const [fit, setFit] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
 
-  const diagram = THREAT_MODEL.diagrams[index];
+  const diagram =
+    THREAT_MODEL.diagrams.find((d) => d.id === view.diagramId) ?? THREAT_MODEL.diagrams[0];
+
+  // Follow the URL. A link into the explorer clears the filters with it: a
+  // citation that lands on "no threats match" would be worse than no link.
+  useEffect(() => {
+    const onHashChange = () => {
+      if (!SECURITY_DEEP_LINK_RE.test(window.location.hash)) return;
+      const next = readHash();
+      setView(next);
+      setFilters(NO_FILTERS);
+      // Canonicalise here as well as on mount: a link that names the wrong
+      // diagram for its threat resolves to the right one, and if the reader was
+      // already looking at that threat the view does not change, so the effect
+      // below would never fire to correct the address bar.
+      const canonical = buildHash(next);
+      if (window.location.hash !== canonical) {
+        window.history.replaceState(null, "", canonical);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  // Publish the view back to the URL. On mount this only *canonicalises* a link
+  // that was already an explorer link — a citation naming the wrong diagram for
+  // its threat is rewritten to the one the threat is really on — because
+  // writing unconditionally would replace an in-page anchor (`#responsibility`)
+  // with a diagram link nobody asked for. `replaceState` keeps selections out
+  // of the back stack, so Back leaves the page rather than unwinding clicks.
+  const hash = buildHash(view);
+  const mounted = useRef(false);
+  useEffect(() => {
+    const first = !mounted.current;
+    mounted.current = true;
+    if (first && !SECURITY_DEEP_LINK_RE.test(window.location.hash)) return;
+    if (window.location.hash !== hash) {
+      window.history.replaceState(null, "", hash);
+    }
+  }, [hash]);
+
+  // Bring a deep-linked threat into view once its card has rendered.
+  useEffect(() => {
+    if (view.focusThreat === null) return;
+    document
+      .getElementById(`tm-threat-${view.focusThreat}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [view.focusThreat]);
 
   const elements: Selectable[] = useMemo(
     () => [
@@ -490,47 +797,64 @@ export default function ThreatModelExplorer() {
     [diagram],
   );
 
-  const selected = elements.find((el) => el.id === selectedId) ?? null;
+  const selected = elements.find((el) => el.id === view.selectedId) ?? null;
+  const query = filters.query.trim().toLowerCase();
+  const active = filtersActive(filters);
 
   const shown = useMemo(() => {
     const base = selected ? [selected] : elements;
     return base
-      .map((el) => ({
-        ...el,
-        threats: openOnly
-          ? el.threats.filter((t) => t.status !== "Mitigated")
-          : el.threats,
-      }))
+      .map((el) => ({ ...el, threats: el.threats.filter((t) => matches(t, filters, query)) }))
       .filter((el) => el.threats.length > 0);
-  }, [elements, selected, openOnly]);
+  }, [elements, selected, filters, query]);
 
   const shownCount = shown.reduce((n, el) => n + el.threats.length, 0);
 
-  const pick = (id: string) => setSelectedId((cur) => (cur === id ? null : id));
-  const switchDiagram = (next: number) => {
-    setIndex(next);
-    setSelectedId(null);
-  };
+  // How many threats the filters match on each *other* diagram, so an empty
+  // result says where the matches actually are instead of just "none".
+  const elsewhere = useMemo(() => {
+    if (shownCount > 0 || !active) return [];
+    return THREAT_MODEL.diagrams
+      .filter((d) => d.id !== diagram.id)
+      .map((d) => ({
+        id: d.id,
+        title: d.title,
+        count: [...d.nodes, ...d.edges]
+          .flatMap((el) => el.threats)
+          .filter((t) => matches(t, filters, query)).length,
+      }))
+      .filter((d) => d.count > 0);
+  }, [shownCount, active, diagram.id, filters, query]);
+
+  const pick = (id: string) =>
+    setView((cur) => ({
+      ...cur,
+      selectedId: cur.selectedId === id ? null : id,
+      focusThreat: null,
+    }));
+
+  const switchDiagram = (id: number) =>
+    setView({ diagramId: id, selectedId: null, focusThreat: null });
 
   return (
     <div>
       {/* Diagram picker */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-        {THREAT_MODEL.diagrams.map((d, i) => (
+        {THREAT_MODEL.diagrams.map((d) => (
           <button
             key={d.id}
-            onClick={() => switchDiagram(i)}
+            onClick={() => switchDiagram(d.id)}
             className="ax-pill"
             style={{
               padding: "6px 13px",
               cursor: "pointer",
               fontFamily: "inherit",
               border:
-                i === index
+                d.id === diagram.id
                   ? `1px solid ${CYAN}`
                   : "1px solid rgba(148,163,184,.28)",
-              background: i === index ? "rgba(0,212,255,.14)" : "transparent",
-              color: i === index ? CYAN_SOFT : SLATE,
+              background: d.id === diagram.id ? "rgba(0,212,255,.14)" : "transparent",
+              color: d.id === diagram.id ? CYAN_SOFT : SLATE,
             }}
           >
             {d.title}
@@ -595,7 +919,7 @@ export default function ThreatModelExplorer() {
 
       <Diagram
         diagram={diagram}
-        selectedId={selectedId}
+        selectedId={view.selectedId}
         onSelect={pick}
         fit={fit}
         showLabels={showLabels}
@@ -603,8 +927,103 @@ export default function ThreatModelExplorer() {
 
       <p style={{ color: "#64748b", fontSize: 12.5, margin: "10px 0 22px" }}>
         Hover a flow to read its label; click any element or flow to see the
-        threats recorded against it. Badged elements carry an open item.
+        threats recorded against it. Badged elements carry an open item. Every
+        threat has a copyable <code>T-nnn</code> link.
       </p>
+
+      {/* Filters */}
+      <div
+        className="glass-card"
+        style={{ padding: "12px 14px", margin: "0 0 16px", background: "rgba(8,8,28,.4)" }}
+      >
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            flexWrap: "wrap",
+            marginBottom: 10,
+          }}
+        >
+          <input
+            type="search"
+            value={filters.query}
+            onChange={(e) => setFilters((f) => ({ ...f, query: e.target.value }))}
+            placeholder="Search title, description, mitigation or T-number…"
+            aria-label="Search threats"
+            style={{
+              flex: "1 1 260px",
+              minWidth: 0,
+              padding: "7px 11px",
+              borderRadius: 8,
+              border: "1px solid rgba(148,163,184,.28)",
+              background: "rgba(0,0,0,.28)",
+              color: "#e2e8f0",
+              font: "13px inherit",
+            }}
+          />
+          <FilterChip
+            label="Open only"
+            active={filters.openOnly}
+            color={AMBER}
+            onClick={() => setFilters((f) => ({ ...f, openOnly: !f.openOnly }))}
+          />
+          {active && (
+            <button
+              className="ax-pill"
+              onClick={() => setFilters(NO_FILTERS)}
+              style={{
+                padding: "4px 11px",
+                fontSize: 12,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                border: "1px solid rgba(148,163,184,.28)",
+                background: "transparent",
+                color: SLATE,
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, color: "#64748b", minWidth: 62 }}>Severity</span>
+          {SEVERITIES.map((s) => (
+            <FilterChip
+              key={s}
+              label={s}
+              active={filters.severities.includes(s)}
+              color={SEVERITY_COLOR[s] ?? SLATE}
+              onClick={() =>
+                setFilters((f) => ({ ...f, severities: toggle(f.severities, s) }))
+              }
+            />
+          ))}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap",
+            alignItems: "center",
+            marginTop: 8,
+          }}
+        >
+          <span style={{ fontSize: 11.5, color: "#64748b", minWidth: 62 }}>STRIDE</span>
+          {CATEGORIES.map((c) => (
+            <FilterChip
+              key={c}
+              label={c}
+              active={filters.categories.includes(c)}
+              color={PURPLE}
+              onClick={() =>
+                setFilters((f) => ({ ...f, categories: toggle(f.categories, c) }))
+              }
+            />
+          ))}
+        </div>
+      </div>
 
       {/* Threat list */}
       <div
@@ -620,29 +1039,14 @@ export default function ThreatModelExplorer() {
           {selected ? selected.name : diagram.title} —{" "}
           <span style={{ color: SLATE, fontWeight: 500 }}>
             {shownCount} threat{shownCount === 1 ? "" : "s"}
+            {active || selected ? ` of ${diagram.total} in this diagram` : ""}
           </span>
         </span>
         <span style={{ flex: 1 }} />
-        <button
-          className="ax-pill"
-          onClick={() => setOpenOnly((v) => !v)}
-          style={{
-            padding: "5px 12px",
-            cursor: "pointer",
-            fontFamily: "inherit",
-            border: openOnly
-              ? `1px solid ${AMBER}88`
-              : "1px solid rgba(148,163,184,.28)",
-            background: openOnly ? "rgba(255,189,46,.1)" : "transparent",
-            color: openOnly ? AMBER : SLATE,
-          }}
-        >
-          {openOnly ? "Showing open only" : "Show open only"}
-        </button>
         {selected && (
           <button
             className="ax-pill"
-            onClick={() => setSelectedId(null)}
+            onClick={() => setView((cur) => ({ ...cur, selectedId: null, focusThreat: null }))}
             style={{
               padding: "5px 12px",
               cursor: "pointer",
@@ -658,9 +1062,37 @@ export default function ThreatModelExplorer() {
       </div>
 
       {shownCount === 0 && (
-        <p style={{ color: SLATE, fontSize: 14 }}>
-          No threats match the current filter.
-        </p>
+        <div style={{ marginBottom: 18 }}>
+          <p style={{ color: SLATE, fontSize: 14, margin: "0 0 8px" }}>
+            {selected
+              ? `No threat on ${selected.name} matches the current filters.`
+              : `No threat in ${diagram.title} matches the current filters.`}
+          </p>
+          {elsewhere.length > 0 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 12.5, color: "#64748b" }}>Matches elsewhere:</span>
+              {elsewhere.map((d) => (
+                <button
+                  key={d.id}
+                  className="ax-pill"
+                  onClick={() => switchDiagram(d.id)}
+                  style={{
+                    padding: "4px 11px",
+                    fontSize: 12,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    border: "1px solid rgba(0,212,255,.3)",
+                    background: "rgba(0,212,255,.06)",
+                    color: CYAN_SOFT,
+                  }}
+                >
+                  {d.title}
+                  <span style={{ opacity: 0.7, fontWeight: 500 }}>{d.count}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
@@ -694,7 +1126,12 @@ export default function ThreatModelExplorer() {
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {el.threats.map((t) => (
-                <ThreatCard key={t.number} threat={t} />
+                <ThreatCard
+                  key={t.number}
+                  threat={t}
+                  diagramId={diagram.id}
+                  focused={t.number === view.focusThreat}
+                />
               ))}
             </div>
           </div>

@@ -30,26 +30,40 @@ const scrollTop = () => {
 const hashIsDocLink = () =>
   typeof window !== "undefined" && /^#\/docs\/[a-z0-9-]+$/.test(window.location.hash);
 
+/**
+ * True when the URL hash is a deep link into the Security section — a diagram,
+ * an element or a threat in the threat-model explorer, which owns everything
+ * after `#/security/`.
+ */
+const hashIsSecurityLink = () =>
+  typeof window !== "undefined" && /^#\/security(\/|$)/.test(window.location.hash);
+
 export default function App() {
-  const [page, setPage] = useState<Page>(() => (hashIsDocLink() ? "docs" : "home"));
+  const [page, setPage] = useState<Page>(() =>
+    hashIsDocLink() ? "docs" : hashIsSecurityLink() ? "security" : "home",
+  );
   const [sdkId, setSdkId] = useState("typescript");
   const [postSlug, setPostSlug] = useState("feature-complete");
 
-  // A shared `#/docs/<slug>` link must open that page on a cold load, and the
-  // browser's back button must return to it. `Docs` owns which page is shown;
-  // this only decides whether the docs section is the one on screen.
+  // A shared `#/docs/<slug>` or `#/security/diagram/...` link must open that
+  // page on a cold load, and the browser's back button must return to it. The
+  // section owns which page or threat is shown; this only decides whether the
+  // section is the one on screen.
   useEffect(() => {
     const onHashChange = () => {
       if (hashIsDocLink()) setPage("docs");
+      else if (hashIsSecurityLink()) setPage("security");
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
   const go = (next: Page) => {
-    // Leaving the docs section: drop the stale doc slug so a refresh does not
-    // bounce the reader back into documentation they had navigated away from.
-    if (next !== "docs" && hashIsDocLink()) {
+    // Leaving a hash-routed section: drop its stale deep link so a refresh does
+    // not bounce the reader back into the page they had navigated away from.
+    const leavingSection =
+      (next !== "docs" && hashIsDocLink()) || (next !== "security" && hashIsSecurityLink());
+    if (leavingSection) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
     setPage(next);

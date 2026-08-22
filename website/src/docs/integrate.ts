@@ -288,63 +288,226 @@ export const INTEGRATE_PAGES: DocPage[] = [
     navLabel: "Webhooks",
     title: "Webhooks",
     intro:
-      "Fire-and-forget HTTP callbacks on domain events, signed so a receiver can prove they came from AXIAM.",
+      "Fire-and-forget HTTP callbacks on domain events, signed with a timestamped HMAC so a receiver can prove they came from AXIAM and reject a replay.",
     blocks: [
       { type: "h", id: "delivery", text: "Signed delivery" },
       {
         type: "p",
-        text: "A webhook delivers an event notification to an endpoint you configure, as an outbound HTTPS POST. Every payload is signed with HMAC-SHA256 over the raw body, so a receiver can confirm the request genuinely came from AXIAM and was not altered in transit.",
+        text: "A webhook delivers an event notification to an endpoint you configure, as an outbound HTTPS POST. Delivery is **at-least-once**: the server queues each delivery on a durable AMQP topology, retries with exponential backoff, and dead-letters what never succeeds. Your receiver must be idempotent — nothing here promises exactly-once, and a retry replays a validly signed request.",
       },
       {
         type: "p",
-        text: "Delivery is **at-least-once**, over the AMQP bus, with retry and exponential backoff and a dead-letter queue after `max_attempts`. Your receiver must therefore be idempotent — nothing here promises exactly-once, and a broker hiccup is a redelivery.",
+        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. The shared secret is stored AES-256-GCM encrypted under `AXIAM__PKI__ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
       },
-      { type: "h", id: "verify", text: "Verifying a payload" },
+      { type: "h", id: "headers", text: "What arrives" },
+      {
+        type: "table",
+        headers: ["Header", "Value"],
+        rows: [
+          ["X-Axiam-Signature", "`t=<unix_seconds>,v1=<hex_lowercase>`"],
+          ["X-Axiam-Timestamp", "unix seconds, decimal — the same value as `t=`"],
+          ["X-Axiam-Event", "the event type, e.g. `user.created`"],
+          ["X-Axiam-Delivery", "delivery UUID — the at-least-once dedup key"],
+        ],
+      },
       {
         type: "p",
-        text: "Compute the HMAC-SHA256 of the **raw** request body with your endpoint's shared secret and compare it in constant time against the signature header. Parse the body only after the comparison succeeds.",
+        text: "`v1` is `HMAC-SHA256(secret, \"<timestamp>.<raw_body>\")`, hex-encoded lowercase, where `<timestamp>` is byte-identical to the `t=` field. Binding the timestamp into the signed string is what lets a receiver enforce a replay window: a captured delivery replayed an hour later carries a valid MAC over a timestamp that is now stale.",
+      },
+      {
+        type: "code",
+        caption: "a delivery, on the wire",
+        code: `POST /webhooks/axiam HTTP/1.1
+Content-Type: application/json
+X-Axiam-Timestamp: 1785700000
+X-Axiam-Signature: t=1785700000,v1=3f2b…c91d
+X-Axiam-Event: user.created
+X-Axiam-Delivery: 018f3c2a-8f11-7b0e-9a54-2c1f7d3e5b90
+
+{"id":"018f3c2a-…","username":"alice"}`,
+      },
+      {
+        type: "note",
+        text: "The body is the **event payload itself** — there is no envelope around it. The event type and the delivery id travel in headers, so read them there rather than expecting them in the JSON.",
+      },
+      { type: "h", id: "verify", text: "Verifying a delivery" },
+      {
+        type: "p",
+        text: "Every SDK ships the verifier, so this is not a thing to hand-roll: `verify_webhook` in Rust and Python, `verifyWebhook` in TypeScript, `AxiamWebhooks.verify` in Java, Kotlin and Swift, `AxiamWebhooks.Verify` in C#, `AxiamWebhooks::verify` in PHP, `webhook.Verify` in Go, `axiam_webhook_verify` in C and `axiam::webhook::verify` in C++. Each takes the secret, the raw `X-Axiam-Signature` value, the raw body bytes and an optional tolerance defaulting to **300 s**, compares in constant time, and fails closed and quiet — the error never carries the expected signature.",
       },
       {
         type: "codegroup",
-        caption: "signature verification",
+        caption: "verifying a delivery",
         tabs: [
           {
-            label: "Node",
-            code: "import { createHmac, timingSafeEqual } from 'node:crypto';\n\nfunction verify(rawBody, signature, secret) {\n  const expected = createHmac('sha256', secret)\n    .update(rawBody)\n    .digest('hex');\n  return expected.length === signature.length &&\n    timingSafeEqual(Buffer.from(expected), Buffer.from(signature));\n}",
+            label: "TypeScript",
+            code: `import { verifyWebhook, WebhookVerifyError } from 'axiam-sdk';
+
+app.post('/webhooks/axiam', (req, res) => {
+  try {
+    // req.rawBody is the exact bytes off the wire — express.json() alone
+    // discards them; capture them with its verify callback.
+    verifyWebhook(secret, req.header('X-Axiam-Signature'), req.rawBody);
+  } catch (err) {
+    if (err instanceof WebhookVerifyError) return res.status(400).end();
+    throw err;
+  }
+
+  const type = req.header('X-Axiam-Event');
+  const deliveryId = req.header('X-Axiam-Delivery');   // dedup on this
+  res.status(200).end();
+});`,
           },
           {
             label: "Python",
-            code: "import hmac, hashlib\n\ndef verify(raw_body: bytes, signature: str, secret: str) -> bool:\n    expected = hmac.new(\n        secret.encode(), raw_body, hashlib.sha256\n    ).hexdigest()\n    return hmac.compare_digest(expected, signature)",
+            code: `from axiam_sdk.webhook import WebhookVerifyError, verify_webhook
+
+@app.post("/webhooks/axiam")
+def axiam_webhook():
+    try:
+        event = verify_webhook(
+            secret=WEBHOOK_SECRET,
+            signature_header=request.headers["X-Axiam-Signature"],
+            body=request.get_data(),          # raw bytes, NOT re-serialized JSON
+            event_type=request.headers.get("X-Axiam-Event"),
+            delivery_id=request.headers.get("X-Axiam-Delivery"),
+        )
+    except WebhookVerifyError:
+        return "invalid signature", 400
+
+    # event.delivery_id is the at-least-once dedup key.
+    return "", 200`,
           },
           {
             label: "Go",
-            code: "func verify(rawBody []byte, signature, secret string) bool {\n    mac := hmac.New(sha256.New, []byte(secret))\n    mac.Write(rawBody)\n    expected := hex.EncodeToString(mac.Sum(nil))\n    return hmac.Equal([]byte(expected), []byte(signature))\n}",
+            code: `body, err := io.ReadAll(r.Body)
+if err != nil {
+    http.Error(w, "failed to read body", http.StatusBadRequest)
+    return
+}
+
+if _, err := webhook.Verify(
+    axiam.Sensitive(webhookSecret),
+    r.Header.Get("X-Axiam-Signature"),
+    body,
+); err != nil {
+    http.Error(w, "invalid webhook signature", http.StatusUnauthorized)
+    return
+}
+
+deliveryID := r.Header.Get("X-Axiam-Delivery")   // dedup on this
+w.WriteHeader(http.StatusOK)`,
           },
         ],
       },
       {
         type: "warn",
-        text: "Compare in constant time, and compare against the **raw** bytes. Re-serialising the parsed JSON and hashing that will not match — key order and whitespace are part of what was signed.",
+        text: "**Verify the raw bytes.** Re-serialising the parsed JSON and hashing that will not match — key order and whitespace are part of what was signed, and most JSON body parsers discard the original bytes by default. Parse only after the comparison succeeds, take `t=` from the signature header rather than from `X-Axiam-Timestamp` (only the former is covered by the MAC), and treat a header with no `v1` as a failure rather than as nothing to check.",
+      },
+      { type: "h", id: "events", text: "The event catalog" },
+      {
+        type: "p",
+        text: "A webhook subscribes to a list of event-type names. Three are emitted today, from the user-management endpoints and from SCIM provisioning alike, so an IdP-driven provisioning run raises the same events as an API call:",
+      },
+      {
+        type: "table",
+        headers: ["Event", "Raised when", "Payload"],
+        rows: [
+          ["user.created", "A user is created through `POST /api/v1/users` or SCIM provisioning", "`id`, `username`"],
+          ["user.updated", "A user is updated through the API, SCIM `PUT` or SCIM `PATCH`", "`id`, `username`"],
+          ["user.deleted", "A user is deleted through the API or deprovisioned through SCIM", "`id`"],
+        ],
+      },
+      {
+        type: "note",
+        text: "The subscription list is not validated against a catalog — it must be non-empty, and that is all. Subscribing to a name the server does not raise is accepted and simply never fires, so treat a silent webhook as a possible typo before treating it as a delivery failure. The catalog is expected to grow; a delivery you do not recognise should be ignored rather than rejected.",
+      },
+      { type: "h", id: "retry", text: "Retry, backoff and the dead-letter queue" },
+      {
+        type: "p",
+        text: "Retry scheduling belongs to the broker, not to a sleeping task. A delivery is published to `axiam.webhook`; a failed attempt is republished to `axiam.webhook.retry` with a per-message TTL and no consumer attached, so when the TTL expires RabbitMQ dead-letters it back onto `axiam.webhook` for the next attempt. Once the attempts are exhausted the delivery lands on `axiam.webhook.dlq`, where it is real and replayable rather than silently dropped. Every attempt and every terminal outcome is written to the audit log.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__WEBHOOK__MAX_ATTEMPTS",
+            "`5`",
+            "Total delivery attempts before the message is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__WEBHOOK__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry.",
+          ],
+          [
+            "AXIAM__WEBHOOK__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single retry delay — one hour.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "The delay is `base × 2^(attempt − 1)`, clamped to the ceiling — 5 s, 10 s, 20 s, 40 s on the defaults. The multiplier is fixed at 2 and is not configurable.",
+      },
+      {
+        type: "warn",
+        text: "A webhook also carries a per-endpoint `retry_policy` (`max_retries`, `initial_delay_secs`, `backoff_multiplier`), which is validated and stored — `max_retries` at most 10, `initial_delay_secs` between 1 and 3600, `backoff_multiplier` between 0 and 10. The delivery consumer does **not** read it: the schedule that runs is the deployment-wide one above. Treat the field as recorded intent, not as a per-endpoint control.",
       },
       { type: "h", id: "managing", text: "Managing webhooks" },
       {
         type: "api",
         endpoints: [
-          { method: "GET", path: "/api/v1/webhooks", summary: "List configured webhooks." },
+          { method: "GET", path: "/api/v1/webhooks", summary: "List configured webhooks. The secret is never included." },
           { method: "POST", path: "/api/v1/webhooks", summary: "Create one, subscribing to a list of event types." },
           { method: "GET", path: "/api/v1/webhooks/{id}", summary: "Read one." },
-          { method: "PUT", path: "/api/v1/webhooks/{id}", summary: "Update it." },
+          { method: "PUT", path: "/api/v1/webhooks/{id}", summary: "Update the URL, the subscription, the enabled flag or the secret." },
           { method: "DELETE", path: "/api/v1/webhooks/{id}", summary: "Delete it." },
-          { method: "GET", path: "/api/v1/reactors/events", summary: "The event catalog — every event type that can be subscribed to." },
         ],
       },
       {
-        type: "p",
-        text: "A webhook subscribes to a list of event type names — `user.created` and `auth.login` are typical. The catalog is a growing list rather than a fixed enum; query `/api/v1/reactors/events` for what this build actually emits rather than hard-coding a list from documentation.",
+        type: "code",
+        caption: "POST /api/v1/webhooks",
+        code: `{
+  "url": "https://hooks.example.com/axiam",
+  "events": ["user.created", "user.updated", "user.deleted"],
+  "secret": "whsec_…",
+  "retry_policy": { "max_retries": 5, "initial_delay_secs": 10, "backoff_multiplier": 2.0 }
+}`,
       },
       {
-        type: "note",
-        text: "Webhook secrets are encrypted at rest under `AXIAM__PKI__ENCRYPTION_KEY`, alongside the CA signing keys.",
+        type: "p",
+        text: "The URL must be HTTPS and must resolve to a globally routable address — a private, loopback or link-local target is refused at creation as well as at delivery. Every endpoint is permission-gated (`webhooks:create`, `webhooks:list`, `webhooks:get`, `webhooks:update`, `webhooks:delete`).",
+      },
+      { type: "h", id: "rotation", text: "Rotating a secret" },
+      {
+        type: "p",
+        text: "AXIAM signs each delivery with exactly one secret and sends exactly one `v1` value, so there is no overlap window on the server side. The overlap has to live in your receiver, which is why the order below matters: the secret is read fresh on every attempt, so a delivery still being retried when you rotate is re-signed with the new secret.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Generate the new secret",
+            body: "Use a high-entropy random value. It is a MAC key, not a password — length beats memorability, and nothing ever needs to type it.",
+          },
+          {
+            title: "Teach the receiver to accept either",
+            body: "Verify against the new secret and fall back to the old one on failure, using the same SDK helper twice. Deploy this **before** rotating, so no delivery arrives with a secret your receiver has never heard of.",
+          },
+          {
+            title: "Rotate on the server",
+            body: "`PUT` the webhook with the new `secret`. It is encrypted with AES-256-GCM before storage and never returned in a response, so this is also the only way to change it — there is no read-back.",
+            code: `PUT /api/v1/webhooks/{id}
+{ "secret": "whsec_new_…" }`,
+          },
+          {
+            title: "Wait out the retry window, then drop the old secret",
+            body: "Anything still in flight is re-signed with the new secret on its next attempt, so the fallback is only needed for deliveries already accepted by your receiver. Give it the worst-case retry span — `MAX_ATTEMPTS` attempts of backoff, up to the ceiling — before removing the old key, then redeploy with the single new secret.",
+          },
+        ],
       },
       { type: "h", id: "vs", text: "Webhook or Reactor?" },
       {

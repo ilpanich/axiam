@@ -5005,6 +5005,14 @@ case where the generic mapping loses the only thing the caller can act on:
    status — and it is the only way the person holding the security key learns that
    *this* key will never work and a different one might. An SDK MUST NOT replace it
    with a generic string.
+
+   **This does not license dumping the response body into an error.** An SDK whose
+   error taxonomy deliberately redacts bodies — several do, because a body is a
+   place a token can end up — satisfies this rule by decoding the **`message`
+   field** and nothing else, exactly as it already decodes named fields like
+   `action` and `resource_id`. One named field is what the rule asks for; the raw
+   body is not, and an SDK that relaxed its redaction to satisfy §24 would have
+   traded a real protection for a message it could have had either way.
 2. **`503` on `register/start` means the attestation policy requires attestation
    and the FIDO metadata service has no usable snapshot.** It is a server
    configuration state, not a transient failure, and §16 MUST NOT retry it: retrying

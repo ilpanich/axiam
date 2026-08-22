@@ -682,13 +682,23 @@ bundle, and offers no verification-skip option:
 | Kotlin | `reactorConnectionFactory` |
 | Java | `ReactorConnections.connectionFactory` / `requireAmqps` |
 | C# | `ReactorConnections.CreateConnectionFactory` / `RequireAmqps`, and `AxiamAmqpConsumer.StartAsync` |
-| Swift, C, C++ | No AMQP runtime (§22.11). A hand-rolled integrator satisfies §8b themselves. |
+| Swift | `amqpsEndpoint` (`Sources/AxiamSDK/Reactor/AmqpsEndpoint.swift`) |
+| C | `axiam_amqps_endpoint` (`src/reactor.c`) |
+| C++ | `axiam::amqps_endpoint` (`src/reactor.cpp`) |
 
 Java, Kotlin and C# take a caller-supplied channel in their reactor options, so
 rule 7's second clause is what applies: the runtime cannot inspect a channel
 somebody else opened, and refusing to serve on one whose provenance is
 unknowable would break every legitimate custom setup to catch a mistake the
 constructor already prevents.
+
+Swift, C and C++ are the same clause taken further: they bundle no AMQP client
+at all (§22.11), so their runtime never sees a URL and could not validate one if
+it wanted to. Rule 7's second clause is therefore the whole of their obligation —
+ship the constructor, and show it in the README and the example. Before contract
+1.28 this row read "a hand-rolled integrator satisfies §8b themselves", which was
+rule 7's failure mode written into rule 7's own index: a requirement stated in
+prose, enforced nowhere.
 
 ### On rule 4, specifically
 
@@ -3608,9 +3618,11 @@ READMEs say so.
 ## §22 Reactors — AMQP Extension Actors (X1)
 
 **Requirement level: SHOULD (v1.0)** for the eight managed-runtime SDKs (rust,
-typescript, python, java, kotlin, csharp, go, php). **The wire protocol below is
-normative for anything that speaks it**, including a hand-rolled integrator on a
-runtime this contract defers (§22.11).
+typescript, python, java, kotlin, csharp, go, php), and — since contract 1.28 —
+for swift, c and cplusplus, which ship §22.1–§22.8 and §22.14 over a
+caller-supplied transport (§22.11). **The wire protocol below is normative for
+anything that speaks it**, including an integrator who supplies their own AMQP
+client on one of those three.
 
 A **Reactor** is an external process that subscribes to named hook events on the
 AMQP bus and answers back — allow, deny, or a field-allow-listed mutation —
@@ -4237,9 +4249,14 @@ it does not do is open a connection.
    claim; "ships an AMQP client" is not, and a reader who assumes the second from
    the first will discover it at integration time.
 
-A **non-normative** C++ sample against a commonly-used AMQP client
-(`examples/reactor/`) shows the seam wired to a real broker. It is an example, not a
-contract surface: this chapter governs, and the sample conforms to it or is wrong.
+Each of the three ships a **non-normative** sample (`examples/reactor/`,
+`examples/reactor.c`, `Examples/Reactor`) that drives the runtime over a transport
+skeleton and calls the §8b constructor before anything opens a socket — which is
+what rule 7's second clause asks an example to show. The samples are examples, not
+contract surfaces: this chapter governs, and a sample conforms to it or is wrong.
+Where one previously reimplemented §22.1–§22.8 by hand, that copy is gone: the
+library carries it, and a second implementation living beside the first is the
+divergence §1 exists to prevent.
 
 **Why this seam and not the other one.** §12.6's deferral, which contract 1.11
 lifted, cut across the wrong join — it deferred a whole section because two of its

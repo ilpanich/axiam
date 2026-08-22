@@ -516,10 +516,15 @@ checklist — most of the threat model's open items live here.
   deployment needs) and replace their two deliberate placeholders: the cluster
   pod/service CIDRs in the HTTPS egress exception, and the SMTP relay range, which
   ships as an unroutable value so mail egress is denied until you configure it.
-  Keep the data tier off any public route.
+  Keep the data tier off any public route, and check with `kubectl kustomize k8s/`
+  that every policy is actually applied — the SurrealDB and RabbitMQ ingress
+  policies once existed as files but were missing from the kustomization, which
+  enforces nothing.
 - Give RabbitMQ **per-service credentials** — the manifests now ship a dedicated
-  `axiam` vhost as AXIAM's own authorization boundary, and AXIAM verifies message
-  signatures and refuses any non-TLS broker URL, but splitting one credential per
+  `axiam` vhost as AXIAM's own authorization boundary and carry the AMQP URL in a
+  Secret rather than the ConfigMap, where it previously sat without credentials at
+  all; AXIAM verifies message signatures and refuses any non-TLS broker URL, but
+  splitting one credential per
   service is still yours.
 - **Run Vault in production mode, and treat its posture as your secret posture.**
   The production stacks default to Vault for every long-lived secret, which

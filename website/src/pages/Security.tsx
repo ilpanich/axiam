@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import type { Page } from "../types";
 import { SEC_GROUPS, SEC_SECTIONS } from "../security";
+import { SECURITY_VERIFIED_DATE, SECURITY_VERIFIED_RELEASE } from "../version";
 import { THREAT_MODEL_SUMMARY } from "../threatModelSummary";
 import Block from "../components/DocBlocks";
 
@@ -123,6 +124,16 @@ export default function Security({ go }: SecurityProps) {
             </div>
           ))}
         </div>
+
+        {/* Which release the claims on this page were checked against. Silent
+            staleness is the failure mode a security page cannot afford. */}
+        <p style={{ margin: "14px 0 0", fontSize: 13, color: "#64748b" }}>
+          Verified against{" "}
+          <code style={{ color: "#94a3b8", fontFamily: "ui-monospace,Menlo,monospace" }}>
+            {SECURITY_VERIFIED_RELEASE}
+          </code>{" "}
+          · last re-derived from source on {SECURITY_VERIFIED_DATE}
+        </p>
       </div>
 
       {/* Section index + document */}

@@ -14,14 +14,21 @@
 >
 > ## Handoff — the website section is in step with this document
 >
-> **Status: published, source and section both current as of 2026-08-21
-> (`1.0.0-alpha37`).** The alpha37 pass closed six threats the remediation work
+> **Status: published, source and section both current as of 2026-08-22
+> (`1.0.0-alpha38`).** The alpha38 pass records the contract 1.28 SDK surface —
+> WebAuthn (§24), account lifecycle and MFA enrolment (§25) and PAR (§26) in all
+> eleven SDKs, plus the §22 reactor protocol core in Swift, C and C++ over a
+> caller-supplied transport — as four new mitigated threats on the SDK diagram
+> (T-183…T-186), and notes on T-182 that the passkey `finish` handlers now emit
+> the same cookie triple and CSRF header as the password path (the alpha38
+> server fix). That brings the model to 186 threats, 170 mitigated / 16 open;
+> `npm run gen:threat-model` has been re-run and the SDK bullets below extended
+> in the same change. Before that: the alpha37 pass closed six threats the remediation work
 > shipped — NetworkPolicies applied (T-125), a jobs-health endpoint (T-129), the
 > broker vhost (T-131), the file/Vault secret providers in the manifests (T-132),
 > the MDS staleness bound (T-153) and the default audit-retention window
-> (T-119) — and added T-182 for the usernameless passkey sign-in path, bringing
-> the model to 182 threats, 166 mitigated / 16 open, with `src/security.ts` and
-> the generated model files updated in the same change. Before that, the page
+> (T-119) — and added T-182 for the usernameless passkey sign-in path, with
+> `src/security.ts` and the generated model files updated in the same change. Before that, the page
 > first went live from a version of this document verified against `3ede4d19`
 > (2026-08-04). Both were then brought up to `1.0.0-alpha34`:
 > OPAQUE (RFC 9807) replacing SRP, HashiCorp Vault as the production secret
@@ -111,7 +118,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 182 threats** and a
+The system is verified against a **STRIDE threat model of 186 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -132,8 +139,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 182 |
-| Mitigated / Open | 166 / 16 |
+| Threats identified | 186 |
+| Mitigated / Open | 170 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -154,7 +161,7 @@ optimistic closed one.
 | PKI, certificates & IoT device identity | 18 | 1 |
 | Audit, webhooks, email & notifications | 18 | 3 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
-| Client SDKs & admin-UI integration surface | 17 | 4 |
+| Client SDKs & admin-UI integration surface | 21 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -224,7 +231,10 @@ have to be re-established — nothing is assumed across a boundary.
   the password step would have run: account status and lockout are checked, the
   operator's login-veto hook still fires, and the anonymous start endpoint
   touches no storage — so it cannot be used to probe which workspaces or
-  accounts exist.
+  accounts exist. A completed passkey ceremony also leaves the browser in the
+  same session posture as a password login — the same `HttpOnly` cookie triple
+  and CSRF token — while non-browser clients adopt the token pair from the
+  response body, as the SDK contract has them do.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
   `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
@@ -478,6 +488,39 @@ against the classic federation attacks:
   failing rather than silently passing, multiple `v1` values accepted so secrets can be
   rotated without downtime, and a two-sided freshness window (default 300 seconds) that
   rejects future-dated timestamps as firmly as stale ones.
+- **WebAuthn ceremonies pass through the SDKs unchanged.** Contract §24 gives every
+  SDK the relying-party half of a passkey ceremony — four JSON round trips — while
+  the server keeps all of the crypto and all of the policy. The rules are written for
+  the failure that would be invisible: an SDK must not default, fill in, reorder or
+  re-encode any field of the server's ceremony options, and must not refuse options
+  it parsed — every field is a security parameter, and an assertion produced under
+  locally "improved" options is one the server cannot tell from a correct one. The
+  authenticator's response goes back verbatim, and the required tests pin
+  byte-identical pass-through.
+- **Account-lifecycle helpers keep the server's enumeration safety, and their new
+  secrets are redacted.** Contract §25 brings MFA enrolment, email verification and
+  password reset into every SDK. The credential-bearing fields it introduces — the
+  TOTP secret, the `otpauth://` URI that *contains* it, the forced-enrolment setup
+  token, the single-use reset and verification tokens — are all wrapped in redacting
+  types, with tests that scan serialized output for the secret value rather than the
+  field name. And the deliberately uniform server responses stay uniform in the SDK:
+  no "no such user" state on a reset request, no distinguishing an unknown reset
+  token from an expired one, no displaying the account a token belongs to.
+- **Pushed authorization requests (RFC 9126) take the authorization request out of
+  the browser.** Contract §26 has the SDKs POST the scope, redirect URI, `state` and
+  PKCE challenge over an authenticated back channel and put only an opaque,
+  single-use `request_uri` in the redirect — what travels through the user agent is
+  a random string that cannot be edited into meaning something else. It is required
+  for any SDK claiming the FAPI 2.0 client profile.
+- **The reactor signing protocol is library code in all eleven SDKs.** The eight
+  managed-runtime SDKs already shipped it; contract §22.11 brings the protocol core —
+  v2 HMAC over the canonical serialization, freshness in both directions, nonce and
+  correlation binding, the mutable-field allow-lists — to Swift, C and C++ over a
+  transport the caller supplies, so no integrator re-implements the sharp half from
+  prose. Because that runtime never sees a broker URL, each of the three exposes the
+  §8b transport guard — `amqps://` only, no loopback exception, no plaintext
+  fallback, no verification-skip switch — as a public, tested function and calls it
+  in its own example transport.
 
 ---
 

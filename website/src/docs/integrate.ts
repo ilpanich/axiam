@@ -1,4 +1,18 @@
-import type { DocPage } from "./types";
+import { API_INDEX, API_OPERATION_COUNT, API_PATH_COUNT, API_VERSION } from "../apiIndex";
+import type { DocBlock, DocPage } from "./types";
+
+/**
+ * The endpoint index, expanded from the generated `apiIndex.ts`.
+ *
+ * The REST page used to show a dozen routes out of 177, picked by whoever last
+ * edited it. These blocks are derived from the OpenAPI document instead, so the
+ * page lists what the server actually serves and cannot fall behind it.
+ */
+const API_INDEX_BLOCKS: DocBlock[] = API_INDEX.flatMap((group) => [
+  { type: "h", id: group.id, text: group.label },
+  { type: "p", text: group.blurb },
+  { type: "api", endpoints: group.operations },
+]);
 
 /**
  * "APIs & integration" — the three protocol surfaces, the provisioning and
@@ -27,8 +41,8 @@ export const INTEGRATE_PAGES: DocPage[] = [
         code: "# any Swagger/Redoc viewer works\nnpx @redocly/cli preview-docs docs/api/openapi.json\n\n# or regenerate it after changing the API\ncargo build -p axiam-server --no-default-features\n./target/debug/axiam-server --dump-openapi > sdks/openapi.json",
       },
       {
-        type: "note",
-        text: "AXIAM deliberately does not serve an in-app Swagger UI route. Bundling one pulls a build-time download of the Swagger UI archive, which is a supply-chain and build-fragility cost for something every developer already has a viewer for.",
+        type: "p",
+        text: "The running server serves the document and a browsable Swagger UI itself, at `/api/docs/openapi.json` and `/api/docs/`. Treat that as the authoritative copy for the build you are talking to — the committed spec is the same document, exported.",
       },
       { type: "h", id: "shape", text: "Shape of the API" },
       {
@@ -71,7 +85,21 @@ export const INTEGRATE_PAGES: DocPage[] = [
         caption: "create a user, put them in a group, check access",
         code: "# A machine client gets a bearer token from the OAuth2 token endpoint.\n# (An interactive login sets cookies instead — see the Quickstart.)\nTOKEN=$(curl -sS -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  | jq -r .access_token)\n\nUSER=$(curl -sS -X POST https://iam.acme.dev/api/v1/users \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"email\":\"dana@acme.dev\",\"username\":\"dana\"}' | jq -r .id)\n\ncurl -sS -X POST \"https://iam.acme.dev/api/v1/groups/$GROUP/members\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER\\\"}\"\n\ncurl -sS -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
       },
+      { type: "h", id: "index", text: "Every endpoint" },
+      {
+        type: "p",
+        text: `**${API_OPERATION_COUNT} operations across ${API_PATH_COUNT} paths**, grouped by domain and in path order. This index is generated from \`sdks/openapi.json\` at \`${API_VERSION}\` — it is not a curated selection, so a route that exists appears here, and one that appears here exists. Endpoints marked \`PUBLIC\` are reachable without an access token; everything else needs one, and a permission behind it.`,
+      },
+      {
+        type: "note",
+        text: "Where a row carries no description, the handler has none in the specification beyond its route — the OpenAPI document is the place to fix that, not this page. For request and response schemas, read the document itself or point a viewer at the running server.",
+      },
+      ...API_INDEX_BLOCKS,
       { type: "h", id: "gdpr", text: "GDPR endpoints" },
+      {
+        type: "p",
+        text: "These four are **absent from the OpenAPI document** — the handlers carry their annotations but are not registered in the exported specification, so they do not appear in the index above and no SDK generator will see them. They are listed here by hand until that is fixed.",
+      },
       {
         type: "api",
         endpoints: [

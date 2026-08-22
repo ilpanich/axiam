@@ -65,6 +65,20 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // authorised here is the caller acting on their own behalf.
     "/api/v1/device/verify",
     "/api/v1/device/decide",
+    // GDPR data-subject endpoints (D-12/D-13/D-07). Session-guarded by the
+    // `AuthenticatedUser` extractor and deliberately not route-gated: acting on
+    // your OWN account needs no permission, and the `gdpr:export` / `users:erase`
+    // check fires inside the handler only when `user_id` names somebody else.
+    // A route-level gate would be the wrong shape — it would make exporting your
+    // own data a capability an operator has to grant. Same reasoning, and the
+    // same category, as the authz-check entries above.
+    //
+    // The fourth GDPR path, `/api/v1/auth/account/delete/cancel`, is in
+    // PUBLIC_PATHS instead: it is reached from an emailed single-use token by
+    // someone whose account is already disabled.
+    "/api/v1/account/export",
+    "/api/v1/account/export/{token}",
+    "/api/v1/account/delete",
     // UMA 2.0 Protection API (X2). Authenticated by the `ProtectionApiToken`
     // extractor — a client-credentials token carrying `uma_protection` — and
     // deliberately not permission-gated. The scope IS the gate: it is what an

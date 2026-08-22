@@ -101,7 +101,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "par", text: "Pushed authorization requests" },
       {
         type: "p",
-        text: "With PAR (RFC 9126) the client posts the authorization parameters to AXIAM directly and receives a `request_uri` to put in the browser redirect, instead of placing every parameter in a URL the user agent can see and modify. It can be required per client, and **is** required for any client registered under the FAPI 2.0 profile.",
+        text: "With PAR (RFC 9126) the client posts the authorization parameters to AXIAM directly and receives a `request_uri` to put in the browser redirect, instead of placing every parameter in a URL the user agent can see and modify. It can be required per client, and **is** required for any client registered under the FAPI 2.0 profile. The flow, the four rules that trip implementations up and the SDK helpers are on [Pushed authorization](#/docs/par).",
       },
       { type: "h", id: "clients", text: "Registering clients" },
       {
@@ -364,6 +364,10 @@ export const OAUTH2_PAGES: DocPage[] = [
         code: "400 a fapi2 client must set require_par: FAPI 2.0 §5.3.1.2 requires pushed\n    authorization requests",
       },
       {
+        type: "p",
+        text: "A client carrying `require_par` is then refused at `/oauth2/authorize` if it sends its parameters inline, so the constraint holds at use as well as at registration — see [Pushed authorization](#/docs/par).",
+      },
+      {
         type: "note",
         text: "That refusal is the point. A client satisfying eleven of twelve FAPI constraints is not \"mostly FAPI\" — it is a client with a hole. The bundle cannot be half-applied, so a reviewer can answer *is this client conformant?* by reading one field.",
       },
@@ -401,6 +405,169 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**Any high-value machine-to-machine path** — the mTLS and token-binding halves are worth having on their own, without the full profile.",
           "**Nobody else, yet.** If you are starting out, register ordinary clients. The profile is here for when a compliance obligation or a threat model asks for it.",
         ],
+      },
+    ],
+  },
+
+  {
+    slug: "par",
+    section: "OAuth2 & OIDC",
+    navLabel: "Pushed authorization (PAR)",
+    title: "Pushed authorization requests",
+    intro:
+      "RFC 9126 — send the authorization request over an authenticated back channel and put an opaque handle in the browser, so what travels through the user agent is a random string that cannot be edited into meaning something else.",
+    blocks: [
+      { type: "h", id: "what", text: "What PAR changes" },
+      {
+        type: "p",
+        text: "In a plain authorization code flow, `scope`, `redirect_uri`, `state` and the PKCE challenge all ride through the user agent in a URL. Anything that can see or rewrite that URL — a malicious extension, a referrer leak, a tampered deep link — is party to the request. PAR moves the whole thing: the client `POST`s the parameters straight to AXIAM over an authenticated connection, gets back an opaque `request_uri`, and redirects with that instead.",
+      },
+      {
+        type: "p",
+        text: "This is an **extension of the normal flow, not a replacement**. Discovery, the token exchange, refresh and the whole ID-token validation checklist are unchanged, and a client that never pushes behaves exactly as it did.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          {
+            method: "POST",
+            path: "/oauth2/par?tenant_id={uuid}",
+            summary: "Push an authorization request. Form-encoded, client-authenticated, answers **`201`**.",
+          },
+          {
+            method: "GET",
+            path: "/oauth2/authorize?client_id={id}&request_uri={uri}",
+            summary: "Redeem it — exactly those two parameters and no others.",
+            public: true,
+          },
+        ],
+      },
+      { type: "h", id: "flow", text: "The flow, end to end" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Build the request as you always did",
+            body: "Your SDK's `oidc_begin` produces `state`, `nonce`, the PKCE verifier and its `S256` challenge. PAR does not compute anything of its own — there is no second generator, and the `code_verifier` you keep for the exchange is the one this step already gave you.",
+          },
+          {
+            title: "Push it",
+            body: "`POST /oauth2/par` with the parameters form-encoded, `tenant_id` as a **query** parameter, and client authentication. A `201` returns `request_uri` and `expires_in`.",
+            code: `HTTP/1.1 201 Created
+Content-Type: application/json
+
+{
+  "request_uri": "urn:ietf:params:oauth:request_uri:…",
+  "expires_in": 60
+}`,
+          },
+          {
+            title: "Redirect with the handle",
+            body: "Send the user to `/oauth2/authorize` with **only** `client_id` and `request_uri`. Everything else was pushed, and the server reads it from there.",
+          },
+          {
+            title: "Exchange the code unchanged",
+            body: "The callback and the token exchange are exactly what they were: the same `authorization_code` grant, the same `code_verifier`, and the `redirect_uri` that was pushed. Storing the pushed parameters and the exchange parameters separately just creates two places for them to disagree.",
+          },
+        ],
+      },
+      { type: "h", id: "rules", text: "Four rules worth reading before you implement it" },
+      {
+        type: "warn",
+        text: "**It answers `201`, not `200`.** RFC 9126 §2.2 specifies Created, and the response names a resource that did not exist before the call. A success predicate written as `status == 200` treats every successful push as a failure — this is the single most likely defect in a PAR implementation, which is why it leads the list.",
+      },
+      {
+        type: "list",
+        items: [
+          "**The authorization URL carries exactly two parameters.** Not `response_type`, not `redirect_uri`, not `scope`, not `state`, not the PKCE pair. The server **refuses** a request that mixes a `request_uri` with any inline authorization parameter rather than merging them — and re-adding them “for compatibility” restores the parameter-confusion attack the refusal prevents, where an attacker supplies the inline value they want and lets the pushed copy satisfy whichever check reads the other one.",
+          "**The `request_uri` is single-use and short-lived** — 60 seconds, consumed the moment `/oauth2/authorize` reads it. There is deliberately no configuration knob: the window only has to cover one browser redirect, and a tunable that only trends longer is a tunable that only widens a replay window. A second use is `invalid_request`, not a duplicate-suppressed success.",
+          "**A push is never retried.** It is a `POST` that creates server state, so it sits outside the SDKs' read-only retry eligibility. A transport failure after the request left the client is surfaced rather than retried — the safe recovery is a fresh push, which costs one round trip and cannot double-consume anything.",
+          "**Treat the `request_uri` as opaque.** Do not parse it, do not validate its `urn:` prefix as a precondition, do not reconstruct one. Checking the prefix buys nothing and breaks the moment the format is versioned.",
+        ],
+      },
+      { type: "h", id: "auth", text: "It is authenticated, and that is the point" },
+      {
+        type: "p",
+        text: "Unlike the device authorization endpoint, `/oauth2/par` requires client authentication — the parameters stop travelling through the browser, and the ones that arrive are attributable to a client that proved it holds a credential. Which credential follows the client's registered method: `client_secret` for `client_secret_post`, a `client_assertion` for `private_key_jwt`, and **nothing at all** for the two mTLS methods, whose credential is the TLS connection itself.",
+      },
+      {
+        type: "note",
+        text: "`invalid_client` on a push has three usual causes, and the second is the one that wastes an afternoon: a wrong secret; a secret sent by a client registered for `tls_client_auth`, `private_key_jwt` or `self_signed_tls_client_auth`, which is **refused rather than ignored**; or a client certificate the transport never presented. See [FAPI 2.0 & mTLS](#/docs/fapi2).",
+      },
+      { type: "h", id: "fapi", text: "Required for FAPI 2.0" },
+      {
+        type: "p",
+        text: "Registering a client with `profile: \"fapi2\"` forces `require_par`, and a client with `require_par` set is **refused** at `/oauth2/authorize` when it sends its parameters inline. A FAPI 2.0 client therefore cannot authorize any other way — which is the intent: the profile is a constraint bundle a client cannot half-apply.",
+      },
+      { type: "h", id: "sdks", text: "From an SDK" },
+      {
+        type: "p",
+        text: "All eleven SDKs ship the push as a single operation that extends the existing OIDC helpers rather than introducing a parallel vocabulary. It returns the authorization URL already built, plus the `nonce` and `code_verifier` the begin step produced.",
+      },
+      {
+        type: "codegroup",
+        caption: "push, redirect, exchange",
+        tabs: [
+          {
+            label: "Rust",
+            code: `let configuration = client.oidc_discover().await?;
+let request = client.oidc_begin(&configuration, OidcBeginParams {
+    redirect_uri: redirect_uri.clone(),
+    scope: Some("openid profile".into()),
+    ..Default::default()
+})?;
+
+let pushed = client.oidc_par(OidcParParams {
+    request,
+    redirect_uri: redirect_uri.clone(),
+    scope: Some("openid profile".into()),
+    tenant_id: None,
+    configuration: Some(configuration),
+}).await?;
+
+redirect(&pushed.url);`,
+          },
+          {
+            label: "TypeScript",
+            code: `const configuration = await oidc.oidcDiscover();
+const request = oidc.oidcBegin({ configuration, redirectUri, scope: 'openid profile' });
+
+const pushed = await oidc.oidcPar({ request, redirectUri, scope: 'openid profile', configuration });
+
+redirect(pushed.authorizationUrl);
+
+// …on the callback, unchanged by PAR:
+const tokens = await oidc.oidcExchange({
+  code, redirectUri, nonce: pushed.nonce, codeVerifier: pushed.codeVerifier,
+});`,
+          },
+          {
+            label: "Python",
+            code: `configuration = client.oidc_discover()
+request = client.oidc_begin(configuration=configuration, redirect_uri=uri, scope="openid profile")
+
+pushed = client.oidc_par(
+    request=request,
+    redirect_uri=uri,
+    scope="openid profile",
+    configuration=configuration,
+    tenant_id=tenant_id,
+)
+redirect(pushed.authorization_url)
+
+# …on the callback, unchanged by PAR:
+tokens = client.oidc_exchange(
+    code=code,
+    redirect_uri=uri,
+    nonce=pushed.nonce,
+    code_verifier=pushed.code_verifier,
+)`,
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "`request_uri` is wrapped in each SDK's redacting secret type. It is short-lived and single-use, and both of those are reasons it gets treated as harmless — but between the push and the redirect it is a bearer handle to a fully-formed authorization request, and a log line is the wrong place for it to sit for the length of that window. The normative rules are [CONTRACT §26](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md); the server side is `crates/axiam-oauth2/src/par.rs`.",
       },
     ],
   },

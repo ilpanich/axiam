@@ -34,6 +34,25 @@ const NODE_FONT = 12;
 /** Font size used for flow labels. */
 const EDGE_FONT = 10.5;
 
+/**
+ * Canonical orders for the coverage tables the summary emits.
+ *
+ * Counting is driven by the model, but the *order* of the rows is not — a
+ * severity table sorted by whatever the first diagram happened to contain reads
+ * as noise. Anything the model carries that is not listed here is appended
+ * rather than dropped, so a new category shows up on the page instead of
+ * vanishing from the totals.
+ */
+const CATEGORY_ORDER = [
+  "Spoofing",
+  "Tampering",
+  "Repudiation",
+  "Information disclosure",
+  "Denial of service",
+  "Elevation of privilege",
+];
+const SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"];
+
 /** Rough advance width of a character at `size`, used for greedy wrapping. */
 const charWidth = (size) => size * 0.54;
 
@@ -312,6 +331,60 @@ const body = `export const THREAT_MODEL: ThreatModel = ${JSON.stringify(
 
 writeFileSync(OUT, header + body);
 
+/**
+ * Tally `key(threat)` across every threat in the model, emitting the buckets in
+ * `order` first and any unrecognised bucket after them.
+ */
+function tally(order, key) {
+  const counts = new Map(order.map((name) => [name, { total: 0, open: 0 }]));
+  for (const diagram of diagrams) {
+    for (const el of [...diagram.nodes, ...diagram.edges]) {
+      for (const threat of el.threats) {
+        const name = key(threat);
+        if (!counts.has(name)) counts.set(name, { total: 0, open: 0 });
+        const bucket = counts.get(name);
+        bucket.total += 1;
+        if (threat.status !== "Mitigated") bucket.open += 1;
+      }
+    }
+  }
+  return [...counts].map(([name, bucket]) => ({ name, ...bucket }));
+}
+
+const SEVERITY_RANK = new Map(SEVERITY_ORDER.map((s, i) => [s, i]));
+
+/**
+ * Every threat the model does not record as mitigated, most severe first.
+ *
+ * The Security page renders this as the open risk register. Each entry carries
+ * the element and the diagram it sits on because "who owns it" is only legible
+ * with that context — an open item on the Kubernetes diagram is a deployment
+ * responsibility; the same words against a request-path process would not be.
+ */
+const openRisks = diagrams
+  .flatMap((diagram) =>
+    [...diagram.nodes, ...diagram.edges].flatMap((el) =>
+      el.threats
+        .filter((t) => t.status !== "Mitigated")
+        .map((t) => ({
+          number: t.number,
+          title: t.title,
+          category: t.type,
+          severity: t.severity,
+          diagramId: diagram.id,
+          area: diagram.title,
+          element: el.name.replace(/\n/g, " "),
+          residualRisk: t.mitigation,
+        })),
+    ),
+  )
+  .sort(
+    (a, b) =>
+      (SEVERITY_RANK.get(a.severity) ?? SEVERITY_ORDER.length) -
+        (SEVERITY_RANK.get(b.severity) ?? SEVERITY_ORDER.length) ||
+      a.number - b.number,
+  );
+
 const summary = {
   version: model.version,
   diagramCount: diagrams.length,
@@ -324,6 +397,9 @@ const summary = {
     total: d.total,
     open: d.open,
   })),
+  categories: tally(CATEGORY_ORDER, (t) => t.type),
+  severities: tally(SEVERITY_ORDER, (t) => t.severity),
+  openRisks,
 };
 
 writeFileSync(
@@ -341,6 +417,30 @@ export interface ThreatModelArea {
   open: number;
 }
 
+/** One row of a coverage table — a STRIDE category, or a severity. */
+export interface ThreatModelBucket {
+  name: string;
+  total: number;
+  open: number;
+}
+
+/** One entry of the open risk register. */
+export interface ThreatModelOpenRisk {
+  number: number;
+  title: string;
+  category: string;
+  severity: string;
+  /** Diagram the threat sits on, for deep-linking into the explorer. */
+  diagramId: number;
+  area: string;
+  element: string;
+  /**
+   * The model's mitigation field. For an open item it states the residual risk
+   * and where responsibility for it lands.
+   */
+  residualRisk: string;
+}
+
 export interface ThreatModelSummary {
   /** Threat Dragon model schema version. */
   version: string;
@@ -350,6 +450,12 @@ export interface ThreatModelSummary {
   mitigated: number;
   /** Per-diagram counts, in model order. */
   areas: ThreatModelArea[];
+  /** Counts per STRIDE category, in STRIDE order. */
+  categories: ThreatModelBucket[];
+  /** Counts per severity, most severe first. */
+  severities: ThreatModelBucket[];
+  /** Every threat not recorded as mitigated, most severe first. */
+  openRisks: ThreatModelOpenRisk[];
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = ${JSON.stringify(summary, null, 1)};

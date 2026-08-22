@@ -279,6 +279,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           ["AXIAM__RATE_LIMIT__MFA_PER_MIN", "Max MFA enroll/confirm/verify per minute.", "5"],
           [
+            "AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN",
+            "Max WebAuthn ceremony requests per minute, applied to each of the six `/auth/webauthn/*` routes independently.",
+            "10",
+          ],
+          [
             "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN",
             "Max /oauth2/introspect per minute.",
             "600",

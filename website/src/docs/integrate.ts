@@ -1,4 +1,18 @@
-import type { DocPage } from "./types";
+import { API_INDEX, API_OPERATION_COUNT, API_PATH_COUNT, API_VERSION } from "../apiIndex";
+import type { DocBlock, DocPage } from "./types";
+
+/**
+ * The endpoint index, expanded from the generated `apiIndex.ts`.
+ *
+ * The REST page used to show a dozen routes out of 177, picked by whoever last
+ * edited it. These blocks are derived from the OpenAPI document instead, so the
+ * page lists what the server actually serves and cannot fall behind it.
+ */
+const API_INDEX_BLOCKS: DocBlock[] = API_INDEX.flatMap((group) => [
+  { type: "h", id: group.id, text: group.label },
+  { type: "p", text: group.blurb },
+  { type: "api", endpoints: group.operations },
+]);
 
 /**
  * "APIs & integration" — the three protocol surfaces, the provisioning and
@@ -27,8 +41,8 @@ export const INTEGRATE_PAGES: DocPage[] = [
         code: "# any Swagger/Redoc viewer works\nnpx @redocly/cli preview-docs docs/api/openapi.json\n\n# or regenerate it after changing the API\ncargo build -p axiam-server --no-default-features\n./target/debug/axiam-server --dump-openapi > sdks/openapi.json",
       },
       {
-        type: "note",
-        text: "AXIAM deliberately does not serve an in-app Swagger UI route. Bundling one pulls a build-time download of the Swagger UI archive, which is a supply-chain and build-fragility cost for something every developer already has a viewer for.",
+        type: "p",
+        text: "The running server serves the document and a browsable Swagger UI itself, at `/api/docs/openapi.json` and `/api/docs/`. Treat that as the authoritative copy for the build you are talking to — the committed spec is the same document, exported.",
       },
       { type: "h", id: "shape", text: "Shape of the API" },
       {
@@ -71,15 +85,20 @@ export const INTEGRATE_PAGES: DocPage[] = [
         caption: "create a user, put them in a group, check access",
         code: "# A machine client gets a bearer token from the OAuth2 token endpoint.\n# (An interactive login sets cookies instead — see the Quickstart.)\nTOKEN=$(curl -sS -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  | jq -r .access_token)\n\nUSER=$(curl -sS -X POST https://iam.acme.dev/api/v1/users \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"email\":\"dana@acme.dev\",\"username\":\"dana\"}' | jq -r .id)\n\ncurl -sS -X POST \"https://iam.acme.dev/api/v1/groups/$GROUP/members\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER\\\"}\"\n\ncurl -sS -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
       },
+      { type: "h", id: "index", text: "Every endpoint" },
+      {
+        type: "p",
+        text: `**${API_OPERATION_COUNT} operations across ${API_PATH_COUNT} paths**, grouped by domain and in path order. This index is generated from \`sdks/openapi.json\` at \`${API_VERSION}\` — it is not a curated selection, so a route that exists appears here, and one that appears here exists. Endpoints marked \`PUBLIC\` are reachable **without an access token**; everything else needs one, and a permission behind it. Read that marker precisely on the OAuth2 endpoints: \`/oauth2/token\`, \`/oauth2/par\`, \`/oauth2/introspect\` and \`/oauth2/revoke\` take no bearer token, but they do authenticate the *client* — by secret, assertion or the TLS connection — so “no access token” is not “open”.`,
+      },
+      {
+        type: "note",
+        text: "Where a row carries no description, the handler has none in the specification beyond its route — the OpenAPI document is the place to fix that, not this page. For request and response schemas, read the document itself or point a viewer at the running server.",
+      },
+      ...API_INDEX_BLOCKS,
       { type: "h", id: "gdpr", text: "GDPR endpoints" },
       {
-        type: "api",
-        endpoints: [
-          { method: "POST", path: "/api/v1/account/export", summary: "Request a data export (GDPR Art. 15)." },
-          { method: "GET", path: "/api/v1/account/export/{token}", summary: "Collect it, optionally PGP-encrypted." },
-          { method: "POST", path: "/api/v1/account/delete", summary: "Request erasure (Art. 17)." },
-          { method: "POST", path: "/api/v1/account/delete/cancel", summary: "Cancel a pending erasure inside the grace window." },
-        ],
+        type: "p",
+        text: "The four data-subject endpoints are in the index above, under *Data-subject rights*. Export and erasure act on the caller's own account, or on another's with `users:erase`. The cancel link is the odd one: it arrives by email as a single-use token, so it is a `GET` with the token in the query and is reachable without a session — the person cancelling an erasure may already have lost access to the account they are rescuing.",
       },
       {
         type: "note",
@@ -288,63 +307,252 @@ export const INTEGRATE_PAGES: DocPage[] = [
     navLabel: "Webhooks",
     title: "Webhooks",
     intro:
-      "Fire-and-forget HTTP callbacks on domain events, signed so a receiver can prove they came from AXIAM.",
+      "Fire-and-forget HTTP callbacks on domain events, signed with a timestamped HMAC so a receiver can prove they came from AXIAM and reject a replay.",
     blocks: [
       { type: "h", id: "delivery", text: "Signed delivery" },
       {
         type: "p",
-        text: "A webhook delivers an event notification to an endpoint you configure, as an outbound HTTPS POST. Every payload is signed with HMAC-SHA256 over the raw body, so a receiver can confirm the request genuinely came from AXIAM and was not altered in transit.",
+        text: "A webhook delivers an event notification to an endpoint you configure, as an outbound HTTPS POST. Delivery is **at-least-once**: the server queues each delivery on a durable AMQP topology, retries with exponential backoff, and dead-letters what never succeeds. Your receiver must be idempotent — nothing here promises exactly-once, and a retry replays a validly signed request.",
       },
       {
         type: "p",
-        text: "Delivery is **at-least-once**, over the AMQP bus, with retry and exponential backoff and a dead-letter queue after `max_attempts`. Your receiver must therefore be idempotent — nothing here promises exactly-once, and a broker hiccup is a redelivery.",
+        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. The shared secret is stored AES-256-GCM encrypted under `AXIAM__PKI__ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
       },
-      { type: "h", id: "verify", text: "Verifying a payload" },
+      { type: "h", id: "headers", text: "What arrives" },
+      {
+        type: "table",
+        headers: ["Header", "Value"],
+        rows: [
+          ["X-Axiam-Signature", "`t=<unix_seconds>,v1=<hex_lowercase>`"],
+          ["X-Axiam-Timestamp", "unix seconds, decimal — the same value as `t=`"],
+          ["X-Axiam-Event", "the event type, e.g. `user.created`"],
+          ["X-Axiam-Delivery", "delivery UUID — the at-least-once dedup key"],
+        ],
+      },
       {
         type: "p",
-        text: "Compute the HMAC-SHA256 of the **raw** request body with your endpoint's shared secret and compare it in constant time against the signature header. Parse the body only after the comparison succeeds.",
+        text: "`v1` is `HMAC-SHA256(secret, \"<timestamp>.<raw_body>\")`, hex-encoded lowercase, where `<timestamp>` is byte-identical to the `t=` field. Binding the timestamp into the signed string is what lets a receiver enforce a replay window: a captured delivery replayed an hour later carries a valid MAC over a timestamp that is now stale.",
+      },
+      {
+        type: "code",
+        caption: "a delivery, on the wire",
+        code: `POST /webhooks/axiam HTTP/1.1
+Content-Type: application/json
+X-Axiam-Timestamp: 1785700000
+X-Axiam-Signature: t=1785700000,v1=3f2b…c91d
+X-Axiam-Event: user.created
+X-Axiam-Delivery: 018f3c2a-8f11-7b0e-9a54-2c1f7d3e5b90
+
+{"id":"018f3c2a-…","username":"alice"}`,
+      },
+      {
+        type: "note",
+        text: "The body is the **event payload itself** — there is no envelope around it. The event type and the delivery id travel in headers, so read them there rather than expecting them in the JSON.",
+      },
+      { type: "h", id: "verify", text: "Verifying a delivery" },
+      {
+        type: "p",
+        text: "Every SDK ships the verifier, so this is not a thing to hand-roll: `verify_webhook` in Rust and Python, `verifyWebhook` in TypeScript, `AxiamWebhooks.verify` in Java, Kotlin and Swift, `AxiamWebhooks.Verify` in C#, `AxiamWebhooks::verify` in PHP, `webhook.Verify` in Go, `axiam_webhook_verify` in C and `axiam::webhook::verify` in C++. Each takes the secret, the raw `X-Axiam-Signature` value, the raw body bytes and an optional tolerance defaulting to **300 s**, compares in constant time, and fails closed and quiet — the error never carries the expected signature.",
       },
       {
         type: "codegroup",
-        caption: "signature verification",
+        caption: "verifying a delivery",
         tabs: [
           {
-            label: "Node",
-            code: "import { createHmac, timingSafeEqual } from 'node:crypto';\n\nfunction verify(rawBody, signature, secret) {\n  const expected = createHmac('sha256', secret)\n    .update(rawBody)\n    .digest('hex');\n  return expected.length === signature.length &&\n    timingSafeEqual(Buffer.from(expected), Buffer.from(signature));\n}",
+            label: "Rust",
+            code: `use axiam_sdk::webhook::{WebhookVerifyOptions, verify_webhook};
+
+async fn receive(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    let header = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("");
+
+    let opts = WebhookVerifyOptions::new()
+        .event_type(header("X-Axiam-Event"))
+        .delivery_id(header("X-Axiam-Delivery"))
+        .timestamp_header(header("X-Axiam-Timestamp"));
+
+    // \`body\` is the UNPARSED request body — verify first, parse after.
+    match verify_webhook(&secret, header("X-Axiam-Signature"), &body, &opts) {
+        Ok(event) => {
+            if already_seen(event.delivery_id) {
+                return HttpResponse::Ok().finish();   // at-least-once retry
+            }
+            handle(serde_json::from_slice(event.body).unwrap());
+            HttpResponse::Ok().finish()
+        }
+        // Never echo the reason back to the sender.
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}`,
+          },
+          {
+            label: "TypeScript",
+            code: `import { verifyWebhook, WebhookVerifyError } from 'axiam-sdk';
+
+app.post('/webhooks/axiam', (req, res) => {
+  try {
+    // req.rawBody is the exact bytes off the wire — express.json() alone
+    // discards them; capture them with its verify callback.
+    verifyWebhook(secret, req.header('X-Axiam-Signature'), req.rawBody);
+  } catch (err) {
+    if (err instanceof WebhookVerifyError) return res.status(400).end();
+    throw err;
+  }
+
+  const type = req.header('X-Axiam-Event');
+  const deliveryId = req.header('X-Axiam-Delivery');   // dedup on this
+  res.status(200).end();
+});`,
           },
           {
             label: "Python",
-            code: "import hmac, hashlib\n\ndef verify(raw_body: bytes, signature: str, secret: str) -> bool:\n    expected = hmac.new(\n        secret.encode(), raw_body, hashlib.sha256\n    ).hexdigest()\n    return hmac.compare_digest(expected, signature)",
+            code: `from axiam_sdk.webhook import WebhookVerifyError, verify_webhook
+
+@app.post("/webhooks/axiam")
+def axiam_webhook():
+    try:
+        event = verify_webhook(
+            secret=WEBHOOK_SECRET,
+            signature_header=request.headers["X-Axiam-Signature"],
+            body=request.get_data(),          # raw bytes, NOT re-serialized JSON
+            event_type=request.headers.get("X-Axiam-Event"),
+            delivery_id=request.headers.get("X-Axiam-Delivery"),
+        )
+    except WebhookVerifyError:
+        return "invalid signature", 400
+
+    # event.delivery_id is the at-least-once dedup key.
+    return "", 200`,
           },
           {
             label: "Go",
-            code: "func verify(rawBody []byte, signature, secret string) bool {\n    mac := hmac.New(sha256.New, []byte(secret))\n    mac.Write(rawBody)\n    expected := hex.EncodeToString(mac.Sum(nil))\n    return hmac.Equal([]byte(expected), []byte(signature))\n}",
+            code: `body, err := io.ReadAll(r.Body)
+if err != nil {
+    http.Error(w, "failed to read body", http.StatusBadRequest)
+    return
+}
+
+if _, err := webhook.Verify(
+    axiam.Sensitive(webhookSecret),
+    r.Header.Get("X-Axiam-Signature"),
+    body,
+); err != nil {
+    http.Error(w, "invalid webhook signature", http.StatusUnauthorized)
+    return
+}
+
+deliveryID := r.Header.Get("X-Axiam-Delivery")   // dedup on this
+w.WriteHeader(http.StatusOK)`,
           },
         ],
       },
       {
         type: "warn",
-        text: "Compare in constant time, and compare against the **raw** bytes. Re-serialising the parsed JSON and hashing that will not match — key order and whitespace are part of what was signed.",
+        text: "**Verify the raw bytes.** Re-serialising the parsed JSON and hashing that will not match — key order and whitespace are part of what was signed, and most JSON body parsers discard the original bytes by default. Parse only after the comparison succeeds, take `t=` from the signature header rather than from `X-Axiam-Timestamp` (only the former is covered by the MAC), and treat a header with no `v1` as a failure rather than as nothing to check.",
+      },
+      { type: "h", id: "events", text: "The event catalog" },
+      {
+        type: "p",
+        text: "A webhook subscribes to a list of event-type names. Three are emitted today, from the user-management endpoints and from SCIM provisioning alike, so an IdP-driven provisioning run raises the same events as an API call:",
+      },
+      {
+        type: "table",
+        headers: ["Event", "Raised when", "Payload"],
+        rows: [
+          ["user.created", "A user is created through `POST /api/v1/users` or SCIM provisioning", "`id`, `username`"],
+          ["user.updated", "A user is updated through the API, SCIM `PUT` or SCIM `PATCH`", "`id`, `username`"],
+          ["user.deleted", "A user is deleted through the API or deprovisioned through SCIM", "`id`"],
+        ],
+      },
+      {
+        type: "note",
+        text: "The subscription list is not validated against a catalog — it must be non-empty, and that is all. Subscribing to a name the server does not raise is accepted and simply never fires, so treat a silent webhook as a possible typo before treating it as a delivery failure. The catalog is expected to grow; a delivery you do not recognise should be ignored rather than rejected.",
+      },
+      { type: "h", id: "retry", text: "Retry, backoff and the dead-letter queue" },
+      {
+        type: "p",
+        text: "Retry scheduling belongs to the broker, not to a sleeping task. A delivery is published to `axiam.webhook`; a failed attempt is republished to `axiam.webhook.retry` with a per-message TTL and no consumer attached, so when the TTL expires RabbitMQ dead-letters it back onto `axiam.webhook` for the next attempt. Once the attempts are exhausted the delivery lands on `axiam.webhook.dlq`, where it is real and replayable rather than silently dropped. Every attempt and every terminal outcome is written to the audit log.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__WEBHOOK__MAX_ATTEMPTS",
+            "`5`",
+            "Total delivery attempts before the message is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__WEBHOOK__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry.",
+          ],
+          [
+            "AXIAM__WEBHOOK__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single retry delay — one hour.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "The delay is `base × 2^(attempt − 1)`, clamped to the ceiling — 5 s, 10 s, 20 s, 40 s on the defaults. The multiplier is fixed at 2 and is not configurable.",
+      },
+      {
+        type: "warn",
+        text: "A webhook also carries a per-endpoint `retry_policy` (`max_retries`, `initial_delay_secs`, `backoff_multiplier`), which is validated and stored — `max_retries` at most 10, `initial_delay_secs` between 1 and 3600, `backoff_multiplier` between 0 and 10. The delivery consumer does **not** read it: the schedule that runs is the deployment-wide one above. Treat the field as recorded intent, not as a per-endpoint control.",
       },
       { type: "h", id: "managing", text: "Managing webhooks" },
       {
         type: "api",
         endpoints: [
-          { method: "GET", path: "/api/v1/webhooks", summary: "List configured webhooks." },
+          { method: "GET", path: "/api/v1/webhooks", summary: "List configured webhooks. The secret is never included." },
           { method: "POST", path: "/api/v1/webhooks", summary: "Create one, subscribing to a list of event types." },
           { method: "GET", path: "/api/v1/webhooks/{id}", summary: "Read one." },
-          { method: "PUT", path: "/api/v1/webhooks/{id}", summary: "Update it." },
+          { method: "PUT", path: "/api/v1/webhooks/{id}", summary: "Update the URL, the subscription, the enabled flag or the secret." },
           { method: "DELETE", path: "/api/v1/webhooks/{id}", summary: "Delete it." },
-          { method: "GET", path: "/api/v1/reactors/events", summary: "The event catalog — every event type that can be subscribed to." },
         ],
       },
       {
-        type: "p",
-        text: "A webhook subscribes to a list of event type names — `user.created` and `auth.login` are typical. The catalog is a growing list rather than a fixed enum; query `/api/v1/reactors/events` for what this build actually emits rather than hard-coding a list from documentation.",
+        type: "code",
+        caption: "POST /api/v1/webhooks",
+        code: `{
+  "url": "https://hooks.example.com/axiam",
+  "events": ["user.created", "user.updated", "user.deleted"],
+  "secret": "whsec_…",
+  "retry_policy": { "max_retries": 5, "initial_delay_secs": 10, "backoff_multiplier": 2.0 }
+}`,
       },
       {
-        type: "note",
-        text: "Webhook secrets are encrypted at rest under `AXIAM__PKI__ENCRYPTION_KEY`, alongside the CA signing keys.",
+        type: "p",
+        text: "The URL must be HTTPS and must resolve to a globally routable address — a private, loopback or link-local target is refused at creation as well as at delivery. Every endpoint is permission-gated (`webhooks:create`, `webhooks:list`, `webhooks:get`, `webhooks:update`, `webhooks:delete`).",
+      },
+      { type: "h", id: "rotation", text: "Rotating a secret" },
+      {
+        type: "p",
+        text: "AXIAM signs each delivery with exactly one secret and sends exactly one `v1` value, so there is no overlap window on the server side. The overlap has to live in your receiver, which is why the order below matters: the secret is read fresh on every attempt, so a delivery still being retried when you rotate is re-signed with the new secret.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Generate the new secret",
+            body: "Use a high-entropy random value. It is a MAC key, not a password — length beats memorability, and nothing ever needs to type it.",
+          },
+          {
+            title: "Teach the receiver to accept either",
+            body: "Verify against the new secret and fall back to the old one on failure, using the same SDK helper twice. Deploy this **before** rotating, so no delivery arrives with a secret your receiver has never heard of.",
+          },
+          {
+            title: "Rotate on the server",
+            body: "`PUT` the webhook with the new `secret`. It is encrypted with AES-256-GCM before storage and never returned in a response, so this is also the only way to change it — there is no read-back.",
+            code: `PUT /api/v1/webhooks/{id}
+{ "secret": "whsec_new_…" }`,
+          },
+          {
+            title: "Wait out the retry window, then drop the old secret",
+            body: "Anything still in flight is re-signed with the new secret on its next attempt, so the fallback is only needed for deliveries already accepted by your receiver. Give it the worst-case retry span — `MAX_ATTEMPTS` attempts of backoff, up to the ceiling — before removing the old key, then redeploy with the single new secret.",
+          },
+        ],
       },
       { type: "h", id: "vs", text: "Webhook or Reactor?" },
       {
@@ -371,59 +579,301 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "That boundary is what makes the feature safe to have. A crashing, hanging or malicious Reactor cannot take the authorization server with it — it can, at worst, fail its own hook inside the declared timeout, and the configured failure policy decides what that means.",
       },
-      { type: "h", id: "modes", text: "Two modes" },
+      { type: "h", id: "registry", text: "The five hookable events" },
+      {
+        type: "p",
+        text: "The registry is data, not prose: it lives in [EVENT_REGISTRY](https://github.com/ilpanich/axiam/blob/main/crates/axiam-core/src/models/reactor.rs), in `crates/axiam-core/src/models/reactor.rs`, and is served live at `GET /api/v1/reactors/events`, which is the copy a tool should read — the REST layer validates a registration against it and the dispatcher validates a reply against it, so there is one source and no second list to drift. The table below is that data as of this release.",
+      },
       {
         type: "table",
-        proseFirstCol: true,
-        headers: ["", "Webhook", "Listener Reactor (`mode: \"listen\"`)"],
+        headers: ["Event", "Interceptable", "A patch may set", "Default failure policy", "Purpose"],
         rows: [
-          ["Transport", "Outbound HTTPS POST to a URL", "AMQP consume from a durable, server-declared queue"],
           [
-            "Authenticity",
-            "HMAC-SHA256 over the body",
-            "HMAC over the whole message, replay-protected with a nonce and freshness window",
+            "token.pre_issue",
+            "yes",
+            "the `ext.` namespace only",
+            "`fail_open`",
+            "Enrich or veto token issuance. May add claims under `ext.` only.",
           ],
           [
-            "Delivery",
-            "At-least-once with retry, backoff and a DLQ",
-            "At-least-once — **your consumer must be idempotent**",
+            "login.post_auth",
+            "yes",
+            "nothing — veto, or `require_mfa`",
+            "`fail_closed`",
+            "After credentials verify, before session issuance: veto or require step-up MFA.",
           ],
           [
-            "Event catalog",
-            "Domain events: `user.created`, `role.assigned`, … a fixed, growing list",
-            "Any event in the reactor registry, **including non-interceptable ones**",
+            "user.pre_create",
+            "yes",
+            "`username`, `email`, the `metadata.` namespace",
+            "`fail_closed`",
+            "Validate or normalize a new user's profile fields.",
           ],
           [
-            "Can it affect the operation?",
-            "Never — the change is already committed when it fires",
-            "Never, by construction — the server does not wait for a listener's reply",
+            "user.pre_update",
+            "yes",
+            "`username`, `email`, the `metadata.` namespace",
+            "`fail_closed`",
+            "Validate or normalize a profile update.",
+          ],
+          [
+            "grant.pre_assign",
+            "yes",
+            "nothing — veto only",
+            "`fail_closed`",
+            "Veto a role or permission assignment (four-eyes workflows). Veto-only.",
           ],
         ],
       },
       {
         type: "p",
-        text: "The other mode intercepts: the server waits, within its declared timeout, and the Reactor's validated reply can allow, deny, or apply a mutation limited to an explicitly allow-listed set of fields.",
+        text: "An allow-list entry ending in a dot is a **namespace prefix**, and it matches a field that starts with the entry and has at least one character after the dot. So `ext.` admits `ext.department` and `ext.a.b.c`, and refuses `ext.` itself, `ext`, `extra`, `external_id` and `evil.ext.department`. Everything else follows from that one rule: `token.pre_issue` cannot reach `iss`, `sub`, `aud`, `exp`, `scope` or any other standard claim, because none of them begins with `ext.` — a hook that can rewrite `sub` is a hook that can mint a token for anyone, and a correctly signed reply setting it is refused exactly as a forged one is.",
       },
-      { type: "h", id: "failure", text: "Failure policy is the decision that matters" },
+      {
+        type: "p",
+        text: "**The asymmetry in the last column is the most instructive fact on this page.** `token.pre_issue` defaults to fail-open because its mutation is optional enrichment — an unreachable reactor costs you a claim, and degrading a feature is the right answer. The other four default to fail-closed because they can veto: a fraud check that times out has not passed, and an unreachable approver is not an approval. A registration that names several events inherits the **strictest** default among them, in either array order.",
+      },
+      {
+        type: "note",
+        text: "`login.post_auth` covers every interactive sign-in, not only password login: it fires on password authentication, on SAML ACS, on the OIDC callback and on usernameless passkey sign-in — in each case after the credentials verify and before any session or token is issued. MFA completion and the username-bound WebAuthn ceremony are not separate firings; both continue a login already gated at its first step. The federated and usernameless paths have no step-up branch, so a `require_mfa` answer there fails the sign-in rather than being silently dropped — see [CONTRACT §22.5](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md).",
+      },
+      { type: "h", id: "modes", text: "Intercept and listen" },
+      {
+        type: "p",
+        text: "A registration is `intercept` or `listen`. An interceptor sits in the operation: the server publishes the event to that reactor's queue, waits up to the declared timeout, and applies the validated reply. A listener is fire-and-forget observation — the server never waits and never reads a reply, so it cannot affect any outcome.",
+      },
       {
         type: "warn",
-        text: "An intercepting Reactor sits in the path of a real operation. Its failure policy decides what happens when it times out or answers unintelligibly — fail open (proceed) or fail closed (refuse). Fail-closed turns a Reactor outage into an outage of whatever it hooks; fail-open turns it into a silently unenforced control. Choose deliberately, and monitor either way.",
+        text: "**Listen registrations are refused today.** `POST` and `PUT` answer `503` for `mode: \"listen\"`, because no hook site fans out to listeners yet: the registration would receive nothing, and — being a listener — would produce no outcome in which you could notice. Register with `mode: \"intercept\"`, or create it with `enabled: false` until the fan-out ships.",
+      },
+      {
+        type: "p",
+        text: "All five events above are interceptable, so the registry's `interceptable` flag has no effect today. It is carried because a sixth event may be listen-only, and the rule is already fixed: a listener may subscribe to **every** registered event, including one the registry marks non-interceptable — precisely because it cannot influence it.",
+      },
+      { type: "h", id: "vs", text: "Reactor or webhook?" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["", "Webhook", "Intercepting Reactor"],
+        rows: [
+          ["Transport", "Outbound HTTPS POST to a URL you configure", "AMQP consume from a durable, server-declared queue"],
+          [
+            "Authenticity",
+            "HMAC-SHA256 over `timestamp.body`, in a signed-timestamp header",
+            "HMAC over the whole message, in **both** directions, replay-protected with a nonce and a freshness window",
+          ],
+          ["When it runs", "After the change is committed", "Inside the operation, before it commits"],
+          [
+            "Can it affect the operation?",
+            "Never",
+            "Allow, deny, or a mutation limited to the event's allow-list",
+          ],
+          [
+            "What it hears",
+            "The domain events a webhook can subscribe to — see [Webhooks](#/docs/webhooks)",
+            "The five registry events above, and nothing else",
+          ],
+          [
+            "If it is unreachable",
+            "Retried, then dead-lettered; the operation already happened",
+            "The registration's `failure_policy` decides — and for four of the five events the default is to refuse",
+          ],
+        ],
+      },
+      { type: "h", id: "wire", text: "On the wire" },
+      {
+        type: "p",
+        text: "Both directions carry the same v2 signature: `HMAC-SHA256` with the tenant's HKDF-derived AMQP subkey over the canonical serialization, with `nonce` and `issued_at` **inside** the signed bytes and a ±300 s two-sided freshness window. A reply is an instruction to change a token or refuse a login, so an unsigned reply is not a weak reply — it is not a reply at all. The two shapes below are illustrative; [CONTRACT §22.3–§22.4](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md) is normative.",
+      },
+      {
+        type: "code",
+        caption: "event — server → reactor",
+        code: `{
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "event": "token.pre_issue",
+  "correlation_id": "22222222-2222-2222-2222-222222222222",
+  "payload": { "sub": "alice", "client_id": "portal" },
+  "timeout_ms": 500,
+  "key_version": 2,
+  "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "issued_at": "2026-07-10T12:00:00Z",
+  "hmac_signature": "…"
+}`,
+      },
+      {
+        type: "code",
+        caption: "reply — reactor → server",
+        code: `{
+  "correlation_id": "22222222-2222-2222-2222-222222222222",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "event": "token.pre_issue",
+  "decision": "mutate",
+  "patch": { "ext.cost_center": "42", "ext.department": "eng" },
+  "key_version": 2,
+  "nonce": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "issued_at": "2026-07-10T12:00:00Z",
+  "hmac_signature": "…"
+}`,
+      },
+      {
+        type: "p",
+        text: "`payload` never carries a credential, a token or a signing key: a reactor is told what is being decided, not handed the means to act on it elsewhere. `correlation_id` is the single-use handle for one dispatch and must be echoed **in the reply body** — copying it only into the AMQP property produces a reply the server discards. `timeout_ms` is inside the signed body so it cannot be widened in transit; it is sent so an actor can shed load rather than answer into a closed window.",
+      },
+      {
+        type: "list",
+        items: [
+          "The server validates in a fixed order — identity, freshness, signature, then semantics — so allow-list logic is never spent on bytes nobody authenticated.",
+          "**One forbidden patch key rejects the whole patch**, including the fields that would have been fine. An SDK must not quietly filter a handler's patch down to the allowed subset: that leaves the author believing a field was set when it was dropped.",
+          "**`allow` and `patch` are mutually exclusive** — a mutation must be `decision: \"mutate\"`. `require_mfa` rides on `allow`, on `login.post_auth` only.",
+          "Every rejection is audited and resolves to the registration's failure policy. A rejected reply is not a softer failure than no reply at all.",
+        ],
+      },
+      { type: "h", id: "budget", text: "Timeouts and the budget" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Setting", "Value"],
+        rows: [
+          ["`timeout_ms` default", "500 ms"],
+          ["`timeout_ms` accepted range", "1 … 5 000 ms — `0` and anything larger is refused at registration"],
+          ["Chain wall-clock ceiling", "5 000 ms"],
+          ["Effective per-reactor budget", "`min(timeout_ms, 5000 − elapsed)`"],
+          ["Per-tenant in-flight interceptions", "64 by default"],
+        ],
+      },
+      {
+        type: "p",
+        text: "Interceptors for one event run sequentially in ascending `priority`, and a deny short-circuits the rest. The budget is wall-clock rather than a sum, and running out of it is **not** a way to skip a check: when the ceiling is exhausted the remaining reactors are not contacted and each of their failure policies is applied anyway, so an unreached fail-closed veto still denies. Back-pressure is immediate rather than queued — breaching the in-flight cap fails the interception at once and applies the policy, because queueing behind a concurrency bound just turns it into an unbounded latency bound.",
+      },
+      {
+        type: "note",
+        text: "A fail-open timeout produces `allow` **and** an audit record naming the reactor. That pair is the whole difference between “no reactor was configured” and “the reactor never answered”, so do not infer reactor health from the outcome alone — `GET /api/v1/reactors/{id}` reports `last_seen_at`, `recent_timeout_count` and `recent_veto_count` for exactly this reason.",
+      },
+      { type: "h", id: "hotpath", text: "Never on the check path" },
+      {
+        type: "warn",
+        text: "`authz.check`, `authz.check_batch` and `token.introspect` are **not hookable**, and no SDK may present them as such: they are absent from the registry, a registration naming one is refused as an unknown event, and the dispatcher resolves an unregistered event to `allow` without contacting anything. The reason is arithmetic, not policy — a reactor round trip is milliseconds and the check path's budget is microseconds. An application that needs external input on an authorization decision writes a **deny grant**, which the engine evaluates in the hot path at hot-path cost.",
+      },
+      { type: "h", id: "handlers", text: "Binding handlers" },
+      {
+        type: "p",
+        text: "A reactor registered for three events opens with a dispatch on the event name, and that dispatch is where the expensive defect lives: the catch-all arm that returns *allow* answers on behalf of code that never ran, defeating an operator's fail-closed setting from a file they never read. Every SDK that ships the runtime therefore also ships a declarative binder — one handler per event, composed into the single handler the runtime takes. A name outside the registry is refused **at bind time**, and an event with no handler **abstains**: no reply, and the failure policy decides.",
+      },
+      {
+        type: "codegroup",
+        caption: "declarative handler binding",
+        tabs: [
+          {
+            label: "Rust",
+            code: `use axiam_sdk::amqp::reactor::{ReactorDecision, ReactorRouter, events, reactor_serve};
+
+let handler = ReactorRouter::new()
+    .bind(events::TOKEN_PRE_ISSUE, |event| async move {
+        ReactorDecision::mutate([("ext.cost_center", "42")])
+    })
+    .bind(events::LOGIN_POST_AUTH, |event| async move {
+        ReactorDecision::deny("embargoed region")
+    })
+    .build()?;   // every rejected binding at once, not one per run
+
+reactor_serve(config, handler).await`,
+          },
+          {
+            label: "TypeScript",
+            code: `import { REACTOR_EVENTS, reactorHandlers, reactorServe } from 'axiam-sdk/amqp';
+
+await reactorServe(
+  options,
+  reactorHandlers({
+    [REACTOR_EVENTS.TOKEN_PRE_ISSUE]: (event) => mutate({ 'ext.cost_center': '42' }),
+    [REACTOR_EVENTS.LOGIN_POST_AUTH]: async (event) => deny('embargoed region'),
+  }),
+);`,
+          },
+          {
+            label: "Python",
+            code: `from axiam_sdk.amqp import LOGIN_POST_AUTH, TOKEN_PRE_ISSUE, ReactorRouter, reactor_serve
+
+router = ReactorRouter()
+
+@router.on(TOKEN_PRE_ISSUE)
+def enrich_token(event):            # sync or async, both work
+    return mutate({"ext.cost_center": "42"})
+
+@router.on(LOGIN_POST_AUTH)
+async def screen_login(event):
+    return deny("embargoed region") if await embargoed(event) else allow()
+
+await reactor_serve(dialer, config, router.handler())`,
+          },
+          {
+            label: "Go",
+            code: `handler, err := amqp.NewReactorMux().
+    On(amqp.ReactorEventTokenPreIssue, enrichToken).
+    On(amqp.ReactorEventLoginPostAuth, screenLogin).
+    Handler()
+if err != nil {
+    return err // every rejected binding at once, not one per run
+}
+err = amqp.ReactorServe(ctx, dialer, cfg, handler)`,
+          },
+          {
+            label: "Swift",
+            code: `// The §8b guard is a public, tested function — call it before
+// anything opens a socket.
+let endpoint = try amqpsEndpoint(brokerURL, caPEM: caPEM)
+
+var router = ReactorRouter()
+try router.on(.loginPostAuth) { event in
+    let payload = try event.decodePayload(LoginPayload.self)
+    return suspicious(payload) ? .allowWithStepUp : .allow
+}
+
+let config = ReactorConfig(tenantID: tenantID, reactorID: reactorID, signingKey: subkey)
+try await reactorServe(config: config, transport: yourTransport, handler: router.handler())`,
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "The eight managed runtimes — Rust, TypeScript, Python, Java, Kotlin, C#, PHP and Go — bundle the AMQP client and connect for you. **Swift, C and C++ ship the protocol core over a transport you supply**: the same verification, canonical signing, allow-lists and binder, with no vendored broker client, because there is no maintained AMQP client for those targets this project is willing to put onto embedded and mobile deployments. Their transport interface has exactly two capabilities — take the next delivery, publish a reply to a named destination — and deliberately no declare, bind or queue-name derivation, since a reactor that can bind can bind itself to another tenant's issuance events.",
+      },
+      {
+        type: "note",
+        text: "Because that runtime never sees a broker URL, each of the three exposes the transport guard — `amqps://` only, no loopback exception, no plaintext fallback, no verification-skip switch — as a public, tested function (`amqpsEndpoint`, `axiam_amqps_endpoint`, `axiam::amqps_endpoint`) and calls it in its own example transport. A requirement that reads as enforced and is not is the failure mode that rule exists to stop.",
       },
       { type: "h", id: "registering", text: "Registering one" },
       {
         type: "api",
         endpoints: [
-          { method: "GET", path: "/api/v1/reactors", summary: "List registered Reactors." },
-          { method: "POST", path: "/api/v1/reactors", summary: "Register one." },
-          { method: "GET", path: "/api/v1/reactors/{id}", summary: "Read one." },
+          { method: "GET", path: "/api/v1/reactors", summary: "List registered Reactors, with health counters." },
+          { method: "POST", path: "/api/v1/reactors", summary: "Register one. `400` on an unknown event or an out-of-range timeout." },
+          { method: "GET", path: "/api/v1/reactors/{id}", summary: "Read one, including `last_seen_at` and the 24-hour timeout and veto counts." },
           { method: "PUT", path: "/api/v1/reactors/{id}", summary: "Update it." },
-          { method: "DELETE", path: "/api/v1/reactors/{id}", summary: "Remove it." },
-          { method: "GET", path: "/api/v1/reactors/events", summary: "The event registry — what can be hooked, and which events are interceptable." },
+          { method: "DELETE", path: "/api/v1/reactors/{id}", summary: "Remove it — never refused, so a bad registration can always be undone." },
+          { method: "GET", path: "/api/v1/reactors/events", summary: "The event registry, verbatim — the live copy of the table above." },
         ],
       },
       {
+        type: "code",
+        caption: "POST /api/v1/reactors",
+        code: `{
+  "name": "fraud-screen",
+  "description": "Denies logins from embargoed regions",
+  "events": ["login.post_auth"],
+  "mode": "intercept",
+  "priority": 10,
+  "timeout_ms": 500,
+  "enabled": true
+}`,
+      },
+      {
+        type: "p",
+        text: "Omit `timeout_ms` to take the 500 ms default, and omit `failure_policy` to take the strictest default among the events named. Every endpoint is permission-gated (`reactors:list`, `reactors:create`, `reactors:get`, `reactors:update`, `reactors:delete`), and the server declares the exchange, the queue and the bindings — an actor consumes, and never declares topology of its own.",
+      },
+      {
         type: "note",
-        text: "The wire protocol — message shape, signing, the reply schema and the timeout semantics — is normative in `sdks/CONTRACT.md` §22. The admin console's Reactors page is the same surface with a form on top.",
+        text: "The wire protocol — message shape, signing, the reply schema and the timeout semantics — is normative in [CONTRACT.md §22](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md). The admin console's Reactors page is the same surface with a form on top.",
       },
     ],
   },

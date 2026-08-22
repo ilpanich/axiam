@@ -1,4 +1,48 @@
-import type { DocPage } from "./types";
+import type { Sdk } from "../types";
+import { SDKS } from "../data";
+import type { DocCodeTab, DocPage } from "./types";
+
+/**
+ * Conformance, as each SDK's own README states it.
+ *
+ * Transcribed from the eleven `## Contract conformance` statements and scope
+ * tables at `1.0.0-alpha38` / contract 1.28, in `sdks/CONTRACT.md` section
+ * order. It is a snapshot for orientation: each SDK's README is the source, and
+ * the contract itself is what any of them is measured against.
+ *
+ * `"—"` means the SDK does not ship that section; anything else is shipped, with
+ * the qualification the README gives it.
+ */
+const YES = "✓";
+const NO = "—";
+
+const CONFORMANCE: { id: string; cells: string[] }[] = [
+  { id: "rust", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "typescript", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "python", cells: [YES, YES, YES, YES, YES, NO, YES, YES, YES] },
+  { id: "java", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "csharp", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "php", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "go", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "kotlin", cells: [YES, NO, "reactor exchange only", YES, YES, YES, YES, YES, YES] },
+  { id: "swift", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
+  { id: "c", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
+  { id: "cpp", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
+];
+
+const byId = (id: string): Sdk | undefined => SDKS.find((s) => s.id === id);
+
+/**
+ * The languages the samples below are shown in, in that order.
+ *
+ * Rust leads because the server, the OPAQUE core and the reference SDK are all
+ * Rust — a reader comparing an SDK against the thing it talks to reads it first.
+ */
+const SAMPLE_IDS = ["rust", "typescript", "python", "go", "java"];
+const SAMPLES: Sdk[] = SAMPLE_IDS.map(byId).filter((s): s is Sdk => Boolean(s));
+
+const tabs = (pick: (sdk: Sdk) => string): DocCodeTab[] =>
+  SAMPLES.map((sdk) => ({ label: sdk.name, code: pick(sdk) }));
 
 /**
  * "Reference" — the compliance posture and the SDK overview.
@@ -149,28 +193,77 @@ export const REFERENCE_PAGES: DocPage[] = [
       { type: "h", id: "contract", text: "One contract, many languages" },
       {
         type: "p",
-        text: "AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C and C++. Each lives in its own repository, and each vendors the same `CONTRACT.md`, OpenAPI document and protobuf definitions — so behaviour is identical whichever language you pick, and a difference between two SDKs is a bug in one of them rather than a matter of taste.",
+        text: "AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C and C++. Each lives in its own repository, and each vendors the same [CONTRACT.md](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md), OpenAPI document and protobuf definitions — so behaviour is identical whichever language you pick, and a difference between two SDKs is a bug in one of them rather than a matter of taste.",
       },
       {
         type: "p",
-        text: "The contract is not a style guide. It specifies the error taxonomy, CSRF behaviour, the cookie-jar requirement, tenant and organization context, TLS policy, the redacting secret type, the AMQP HMAC construction, the single-flight refresh guard, route-guard interfaces, declarative authorization helpers, OIDC relying-party helpers, webhook verification, the device grant, token exchange, retry policy, deterministic shutdown, telemetry hooks, UMA, FAPI 2.0, Reactors and OPAQUE.",
+        text: "The contract is not a style guide. It specifies the error taxonomy, CSRF behaviour, the cookie-jar requirement, tenant and organization context, TLS policy, the redacting secret type, the AMQP HMAC construction, the single-flight refresh guard, route-guard interfaces, declarative authorization helpers, OIDC relying-party helpers, webhook verification, the device grant, token exchange, retry policy, deterministic shutdown, telemetry hooks, UMA, FAPI 2.0, Reactors, OPAQUE, WebAuthn, the account-lifecycle and MFA-enrolment operations and pushed authorization requests.",
+      },
+      { type: "h", id: "matrix", text: "What each SDK ships" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: [
+          "SDK",
+          "REST core §1–§7, §9–§13",
+          "gRPC",
+          "AMQP §8",
+          "Device & exchange §14–§15",
+          "Retry, memo, shutdown, telemetry §16–§19",
+          "UMA §20",
+          "Reactors §22",
+          "OPAQUE §23",
+          "WebAuthn, lifecycle, PAR §24–§26",
+        ],
+        rows: CONFORMANCE.map((row) => [byId(row.id)?.name ?? row.id, ...row.cells]),
+      },
+      {
+        type: "p",
+        text: "Read the columns as *what the library gives you*, not as tiers. The REST core is universal — every SDK carries the method-naming map, the three error types, CSRF and cookie handling, required tenant context, strict TLS with mTLS, the redacting secret type, single-flight refresh, route guards, declarative authorization, the OIDC relying-party helpers and the webhook verifier. Reactors reach all eleven: the eight managed runtimes bundle an AMQP client, and Swift, C and C++ ship the same protocol core over a transport you supply.",
+      },
+      {
+        type: "note",
+        text: "Two nuances the table cannot hold. **Kotlin's AMQP is reactor-only** — it implements the v2 HMAC and transport rules for the reactor exchange, but not the async-authz and audit-ingestion message types. And **§21's DPoP posture differs per SDK**: PHP and Swift verify proofs but do not generate them, and C and C++ decline proof verification and reject `jkt`-bound tokens outright, which is what the route-guard rules require of them. CONTRACT §21.9 is the per-SDK index.",
+      },
+      {
+        type: "warn",
+        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-alpha38` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section — and a few of them are currently narrower than the same README's feature documentation, so read the body as well as the statement.",
+      },
+      { type: "h", id: "packages", text: "Canonical package names" },
+      {
+        type: "p",
+        text: "Install under exactly these names. Eleven public registries are eleven chances for a typosquat, so pin versions, commit lockfiles and keep dependency scanning on — the threat model carries this as an open, shared-responsibility item.",
       },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Tier", "Languages", "Coverage"],
-        rows: [
-          [
-            "Full contract",
-            "Rust, TypeScript, Python, Java, C#, PHP, Go",
-            "The complete §1–§11 surface including the gRPC and AMQP transports.",
-          ],
-          [
-            "REST surface",
-            "Kotlin, Swift, C, C++",
-            "§1–§7 and §9–§11, including §6.1 mTLS. gRPC and AMQP are planned follow-ups.",
-          ],
-        ],
+        headers: ["SDK", "Registry", "Package", "Install"],
+        rows: SDKS.map((sdk) => [
+          sdk.name,
+          `[${sdk.registry}](${sdk.registryUrl})`,
+          `\`${sdk.pkg}\``,
+          `\`${sdk.install}\``,
+        ]),
+      },
+      { type: "h", id: "login", text: "Connect and check" },
+      {
+        type: "p",
+        text: "The shape is the same everywhere: construct a client with an explicit tenant and organization, sign in, ask a question about a resource. Tokens land in `HttpOnly` cookies and the SDK forwards the CSRF token — browser code never touches a token.",
+      },
+      {
+        type: "codegroup",
+        caption: "login and an authorization check",
+        tabs: tabs((sdk) => sdk.quickstart),
+      },
+      { type: "h", id: "guards", text: "Guarding a route" },
+      {
+        type: "p",
+        text: "Each SDK expresses the same guard in the idiom of its framework — decorator, dependency, middleware, annotation, attribute or macro. The check runs **before** the handler body, so a denied request never reaches your code, and a guard with no tenant configured fails closed rather than admitting everything.",
+      },
+      {
+        type: "codegroup",
+        caption: "declarative route guards",
+        tabs: tabs((sdk) => sdk.guardExample),
       },
       { type: "h", id: "guarantees", text: "What every SDK guarantees" },
       {
@@ -180,9 +273,10 @@ export const REFERENCE_PAGES: DocPage[] = [
           "**Secrets are wrapped in a redacting type** that cannot be printed, logged or serialised by accident.",
           "**Browser code never touches a token.** Tokens live in `httpOnly` cookies; the SDK forwards the CSRF token for you.",
           "**Concurrent 401s collapse into one refresh**, not N — the single-flight guard is normative, not an optimisation.",
-          "**TLS is strict by default**, with mTLS supported everywhere including the REST-tier SDKs.",
+          "**TLS is strict by default**, with mTLS supported everywhere including the SDKs that ship REST only.",
           "**One OPAQUE implementation** is bound by all of them — compiled in, through WebAssembly, or behind a C ABI. No SDK implements OPAQUE itself.",
           "**Declarative route guards** in the idiom of the language — attribute, annotation, decorator, macro or middleware.",
+          "**A webhook verifier** that takes the raw bytes, compares in constant time and fails closed. See [Webhooks](#/docs/webhooks).",
         ],
       },
       { type: "h", id: "pick", text: "Pick your language" },

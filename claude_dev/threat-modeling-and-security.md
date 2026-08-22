@@ -15,7 +15,23 @@
 > ## Handoff — the website section is in step with this document
 >
 > **Status: published, source and section both current as of 2026-08-22
-> (`1.0.0-alpha38`).** The alpha38 pass records the contract 1.28 SDK surface —
+> (`1.0.0-alpha38`).**
+>
+> The most recent change to the section is presentational and adds no claim: the
+> threat-model explorer now renders each threat's `T-nnn` identifier as a
+> copyable anchor and keeps the diagram, element and threat selection in the URL
+> (`#/security/diagram/8/T-186`), so a threat cited in a commit message, the
+> STRIDE model or the SDK contract can be linked to; it filters by severity,
+> STRIDE category and free text as well as by open-only. Coverage by STRIDE
+> category and by severity, and the open risk register, are now on the page —
+> all three emitted by `scripts/gen-threat-model.mjs` into
+> `src/threatModelSummary.ts` rather than typed in, so they cannot drift from the
+> model. Compliance rows link to the evidence file behind each status, and the
+> release the claims were verified against is stamped on the page from one
+> constant, `website/src/version.ts`. The corresponding tables and the stamp are
+> mirrored in this document.
+>
+> The alpha38 pass records the contract 1.28 SDK surface —
 > WebAuthn (§24), account lifecycle and MFA enrolment (§25) and PAR (§26) in all
 > eleven SDKs, plus the §22 reactor protocol core in Swift, C and C++ over a
 > caller-supplied transport — as four new mitigated threats on the SDK diagram
@@ -66,11 +82,15 @@
 >    Run `npm run gen:threat-model` after changing the Threat Dragon model; the
 >    generator (`website/scripts/gen-threat-model.mjs`) reads
 >    `ThreatDragonModels/Axiam/Axiam.json` and re-emits both.
+> 7. `src/version.ts` — the release and date the claims were last verified
+>    against, quoted by the page's stamp. Hand-maintained on purpose: it records
+>    when someone re-derived the claims, which no version file can tell us.
 >
-> All nine diagrams render from that model, and the threat counts on the page —
-> the headline stats and the coverage-by-area table — are interpolated from the
-> generated summary rather than typed in, so the page cannot drift from the model.
-> Prose numbers quoted in this document are the only ones maintained by hand.
+> All nine diagrams render from that model, and every number on the page — the
+> headline stats, the coverage tables by area, STRIDE category and severity, and
+> the open risk register — is interpolated from the generated summary rather than
+> typed in, so the page cannot drift from the model. Prose numbers quoted in this
+> document are the only ones maintained by hand.
 >
 > **Content mapping.** The structure here maps onto the existing `DocBlock` model
 > in `src/docs.ts`: `##`→`h`, paragraphs→`p`, bullet lists→`list`, tables→`table`,
@@ -168,6 +188,38 @@ and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. AXIAM's own request path —
 authentication, authorization, tokens, PKI, federation — carries **no open
 Critical or High finding**.
+
+### Coverage by STRIDE category
+
+Each element is examined against the STRIDE categories that apply to its type — an
+actor can be spoofed or repudiate an action, a data flow can be tampered with,
+disclosed or flooded, a process can be all six — so the distribution below follows
+the shape of the system rather than a quota. Every threat is counted once, under
+the category recorded against it in the model.
+
+| Category | Threats | Open |
+|---|---|---|
+| Spoofing | 47 | 3 |
+| Tampering | 37 | 2 |
+| Repudiation | 5 | 0 |
+| Information disclosure | 50 | 7 |
+| Denial of service | 18 | 2 |
+| Elevation of privilege | 29 | 2 |
+
+### Coverage by severity
+
+| Severity | Threats | Open |
+|---|---|---|
+| Critical | 25 | 1 |
+| High | 84 | 7 |
+| Medium | 70 | 7 |
+| Low | 7 | 1 |
+
+Severity records the impact if the threat were realised, so it does not change
+when the threat is mitigated: a closed Critical stays Critical, because that is
+the weight the control carries. The 16 still-open items are listed one by one in
+the open risk register under [Shared responsibility](#shared-responsibility), each
+with the element it sits on and where responsibility for it lands.
 
 ---
 
@@ -531,13 +583,17 @@ recognised frameworks. This is a control-family self-assessment appropriate to a
 beta-stage product — **not** a certified ISO 27001 ISMS audit or a formal Cyber
 Resilience Act conformity assessment, and it says so plainly.
 
-| Framework | Scope | Status |
-|---|---|---|
-| **OWASP ASVS v4.0.3 Level 2** | 103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical** |
-| **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass |
-| **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred |
-| **GDPR** | Data-subject export (Art. 15) and erasure (Art. 17), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised |
-| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices | All tracked MUSTs pass; dedicated conformance suites |
+| Framework | Scope | Status | Evidence |
+|---|---|---|---|
+| **OWASP ASVS v4.0.3 Level 2** | 103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
+| **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
+| **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
+| **GDPR** | Data-subject export (Art. 15) and erasure (Art. 17), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
+| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices | All tracked MUSTs pass; dedicated conformance suites | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) |
+
+Each matrix is checked in per control, with the test or source location that
+satisfies it, so a status here can be read back to the line that earns it rather
+than taken on trust.
 
 Dependency and supply-chain security is gated in CI — `cargo audit`, `cargo deny`,
 Trivy filesystem/config scans and `npm audit` at a high threshold, with Dependabot
@@ -551,6 +607,39 @@ Actions, and signed release provenance.
 Some risks cannot be closed from inside the application. AXIAM records them openly
 and tells you what to do about them. Treat the following as a deployment hardening
 checklist — most of the threat model's open items live here.
+
+**The open risk register**
+
+Every threat the model does not record as mitigated, most severe first — 16 of
+186. On the website this table is generated from the Threat Dragon model, so it
+cannot fall behind the diagrams; the full text of each entry, with the element it
+sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
+which also groups them by who owns them and carries the review history behind
+each.
+
+| Threat | Severity | Where it sits |
+|---|---|---|
+| T-148 — Compromised release pipeline publishes a backdoored SDK | Critical | Public package registries · *Client SDKs & admin UI integration surface* |
+| T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
+| T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
+| T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
+| T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
+| T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
+| T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
+| T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
+| T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
+| T-39 — Access token still valid after entitlement revocation | Medium | Token service EdDSA JWT + refresh rotation · *Authentication & session management* |
+| T-110 — Personal data over-collected into an immutable log | Medium | Audit middleware & service · *Audit, webhooks, email & notifications* |
+| T-118 — Audit trail deleted along with the tenant | Medium | `audit_log` (append-only, signed) · *Audit, webhooks, email & notifications* |
+| T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
+| T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
+| T-143 — Local JWT verification misses a revoked entitlement | Medium | SDK token verification (JWKS cache, iss/aud) · *Client SDKs & admin UI integration surface* |
+| T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
+
+None of these is an unhandled defect in AXIAM's own request path: they are
+accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
+or gaps on the SDK and distribution side. The rest of this section is the same
+list read as a checklist — what to do about each, grouped by who does it.
 
 **Platform & operations**
 
@@ -668,6 +757,11 @@ checklist — most of the threat model's open items live here.
   test suite against real SurrealDB and RabbitMQ, dependency and container scans, and
   cross-language SDK contract-drift checks. Security-relevant fixes land with a
   regression or negative test.
+
+Everything in this document was last re-derived from source at
+**`1.0.0-alpha38`** on 2026-08-22; the handoff block at the top of this file says
+what that pass covered and what it changed. The website carries the same stamp,
+from a single constant in `website/src/version.ts`.
 
 **Reporting a vulnerability.** If you find a security issue, please report it
 privately to the maintainers rather than opening a public issue, and give us a

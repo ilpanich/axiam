@@ -56,6 +56,102 @@
         }
       }
     },
+    "/api/v1/account/delete": {
+      "post": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`POST /api/v1/account/delete`",
+        "description": "Initiates Art. 17 erasure: immediately disables the account, revokes all\nsessions, emails a single-use cancel link, and schedules purge at +30 d\n(D-07/D-08/D-09).\n\nSelf-service (own account) or admin with `users:erase` permission.",
+        "operationId": "request_account_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Deletion scheduled"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/export": {
+      "post": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`POST /api/v1/account/export`",
+        "description": "Enqueues an async GDPR Art. 15 data-export job.  Returns immediately with\n`{\"queued\": true}`; the cleanup sweep generates the encrypted JSON, stores\nit, and emails a single-use 24 h download link (D-12).\n\nSelf-service (own account) or admin with `gdpr:export` permission.",
+        "operationId": "request_account_export",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Export job enqueued"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/export/{token}": {
+      "get": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`GET /api/v1/account/export/{token}`",
+        "description": "Single-use download of the GDPR export blob (D-13).  Looks up the job by\nSHA-256(token), verifies it is ready and not expired/used, decrypts the\nblob, marks it as downloaded, and deletes the record.\n\nRequires authentication (self or admin with `gdpr:export`).",
+        "operationId": "download_account_export",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Single-use download token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export JSON"
+          },
+          "404": {
+            "description": "Token not found or expired"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/audit-logs": {
       "get": {
         "tags": [
@@ -461,6 +557,35 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/auth/account/delete/cancel": {
+      "get": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`GET /api/v1/auth/account/delete/cancel?token=<opaque>`",
+        "description": "**Public endpoint** (token-authenticated; listed in `PUBLIC_PATHS`).\n\nValidates the single-use cancel token; if the deletion is still pending\nand within the grace window, aborts it and re-enables the account (D-09).\nA second call with the same token is rejected (single-use).",
+        "operationId": "cancel_account_delete",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "description": "Single-use cancel token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion cancelled"
+          },
+          "400": {
+            "description": "Token invalid or expired"
+          }
+        }
       }
     },
     "/api/v1/auth/device": {
@@ -16235,6 +16360,10 @@
     {
       "name": "mds",
       "description": "FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"
+    },
+    {
+      "name": "gdpr",
+      "description": "Data-subject export (Art. 15) and erasure (Art. 17)"
     }
   ]
 }

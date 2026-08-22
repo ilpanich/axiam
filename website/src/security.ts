@@ -1,5 +1,7 @@
 import type { DocBlock } from "./docs";
 import { THREAT_MODEL_SUMMARY } from "./threatModelSummary";
+import { SECURITY_VERIFIED_DATE, SECURITY_VERIFIED_RELEASE } from "./version";
+import { threatHash } from "./securityLinks";
 
 /**
  * Content model for the Security section.
@@ -28,6 +30,11 @@ const GH_BLOB = `${GH}/blob/main`;
 export const SECURITY_ADVISORY_URL = `${GH}/security/advisories/new`;
 export const SECURITY_POLICY_URL = `${GH_BLOB}/SECURITY.md`;
 
+/** Per-framework compliance evidence, checked in control by control. */
+const COMPLIANCE = `${GH_BLOB}/docs/compliance`;
+/** The compliance self-assessment the ISO 27001 and CRA mappings live in. */
+const AUDIT = `${GH_BLOB}/claude_dev/security-audit.md`;
+
 export interface SecSection {
   id: string;
   /** Sidebar entry. */
@@ -42,7 +49,9 @@ export interface SecSection {
   explorer?: boolean;
 }
 
-const { total, open, mitigated, diagramCount, areas } = THREAT_MODEL_SUMMARY;
+const { total, open, mitigated, diagramCount, areas, categories, severities, openRisks } =
+  THREAT_MODEL_SUMMARY;
+
 
 export const SEC_SECTIONS: SecSection[] = [
   /* ---- Overview --------------------------------------------------------- */
@@ -108,6 +117,28 @@ export const SEC_SECTIONS: SecSection[] = [
       {
         type: "p",
         text: "The concentration of open items in *Deployment* and *Client SDKs* is deliberate and expected: those are the two areas where security is a shared responsibility between AXIAM and the people who run and integrate it. AXIAM's own request path — authentication, authorization, tokens, PKI, federation — carries **no open Critical or High finding**.",
+      },
+      { type: "h", id: "coverage-stride", text: "Coverage by STRIDE category" },
+      {
+        type: "p",
+        text: "Each element is examined against the STRIDE categories that apply to its type — an actor can be spoofed or repudiate an action, a data flow can be tampered with, disclosed or flooded, a process can be all six — so the distribution below follows the shape of the system rather than a quota. Every threat is counted once, under the category recorded against it in the model.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Category", "Threats", "Open"],
+        rows: categories.map((c) => [c.name, String(c.total), String(c.open)]),
+      },
+      { type: "h", id: "coverage-severity", text: "Coverage by severity" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Severity", "Threats", "Open"],
+        rows: severities.map((c) => [c.name, String(c.total), String(c.open)]),
+      },
+      {
+        type: "p",
+        text: `Severity records the impact if the threat were realised, so it does not change when the threat is mitigated: a closed Critical stays Critical, because that is the weight the control carries. The ${open} still-open items are listed one by one in the [open risk register](#open-risks), each with the element it sits on and where responsibility for it lands.`,
       },
     ],
   },
@@ -402,34 +433,43 @@ export const SEC_SECTIONS: SecSection[] = [
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Framework", "Scope", "Status"],
+        headers: ["Framework", "Scope", "Status", "Evidence"],
         rows: [
           [
             "OWASP ASVS v4.0.3 Level 2",
             "103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration",
             "94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical**",
+            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md)`,
           ],
           [
             "ISO/IEC 27001:2022 Annex A",
             "Access control, secure authentication, cryptography, logging, network security, secure development",
             "Interpretive control-family mapping; code-level themes Pass",
+            `[Annex A mapping](${AUDIT}#3-iso-27001-annex-a--control-family-mapping)`,
           ],
           [
             "EU Cyber Resilience Act (Annex I)",
             "Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates",
             "Themes Pass; SBOM deferred",
+            `[Essential-requirement mapping](${AUDIT}#4-cybersecurity-act--essential-requirement-theme-mapping)`,
           ],
           [
             "GDPR",
             "Data-subject export (Art. 15) and erasure (Art. 17), pseudonymisation, data minimisation",
             "Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised",
+            `[GDPR compliance](${COMPLIANCE}/gdpr-compliance.md)`,
           ],
           [
             "OAuth2 / OIDC",
             "RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices",
             "All tracked MUSTs pass; dedicated conformance suites",
+            `[OAuth2 RFC matrix](${COMPLIANCE}/oauth2-rfc-compliance.md) · [OIDC conformance](${COMPLIANCE}/oidc-conformance.md)`,
           ],
         ],
+      },
+      {
+        type: "p",
+        text: "Each matrix is checked in per control, with the test or source location that satisfies it, so a status here can be read back to the line that earns it rather than taken on trust.",
       },
       {
         type: "p",
@@ -447,6 +487,26 @@ export const SEC_SECTIONS: SecSection[] = [
       {
         type: "p",
         text: "Some risks cannot be closed from inside the application. AXIAM records them openly and tells you what to do about them. Treat the following as a deployment hardening checklist — most of the threat model's open items live here.",
+      },
+      { type: "h", id: "open-risks", text: "The open risk register" },
+      {
+        type: "p",
+        text: `Every threat the model does not record as mitigated, most severe first — ${open} of ${total}. The table is generated from the same Threat Dragon model as the diagrams above, so it cannot fall behind them; the last column is the model's own words on why the item is open and where responsibility for it lands. Each identifier links to that threat in the explorer.`,
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Threat", "Severity", "Where it sits", "Why it is open"],
+        rows: openRisks.map((r) => [
+          `[T-${r.number}](${threatHash(r.diagramId, r.number)}) · ${r.title}`,
+          r.severity,
+          `${r.element} — *${r.area}*`,
+          r.residualRisk,
+        ]),
+      },
+      {
+        type: "p",
+        text: `None of these is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The rest of this section is the same list read as a checklist — what to do about each, grouped by who does it. The [STRIDE model](${GH_BLOB}/claude_dev/threat-model-stride.md) groups them the same way, with the review history behind each.`,
       },
       { type: "h", id: "platform-ops", text: "Platform & operations" },
       {
@@ -500,6 +560,10 @@ export const SEC_SECTIONS: SecSection[] = [
           "**The threat model is living.** It is revisited when a new API surface, protocol or integration lands, when a trust boundary moves, when a review raises something with no corresponding threat, or when a deferred item ships. The Threat Dragon JSON is the source of truth and this section is generated from it.",
           "**Gates, not vibes.** Every commit runs formatting, lints (`-D warnings`), the test suite against real SurrealDB and RabbitMQ, dependency and container scans, and cross-language SDK contract-drift checks. Security-relevant fixes land with a regression or negative test.",
         ],
+      },
+      {
+        type: "p",
+        text: `Everything on this page was last re-derived from source at **${SECURITY_VERIFIED_RELEASE}** on ${SECURITY_VERIFIED_DATE}. The [handoff record](${GH_BLOB}/claude_dev/threat-modeling-and-security.md) says what that pass covered and what it changed.`,
       },
     ],
   },
@@ -555,7 +619,12 @@ export const SEC_SECTIONS: SecSection[] = [
           {
             label: "Compliance checklists",
             href: `${GH}/tree/main/docs/compliance`,
-            note: "ASVS L2, GDPR, OAuth2 RFC and OIDC conformance matrices",
+            note: "ASVS L2, GDPR, OAuth2 RFC and OIDC conformance matrices, each control carrying its evidence",
+          },
+          {
+            label: "Test-coverage citation table",
+            href: `${COMPLIANCE}/sc4-coverage.md`,
+            note: "which suite covers each security-sensitive crate area",
           },
           { label: "OWASP Threat Dragon", href: "https://www.threatdragon.com" },
         ],

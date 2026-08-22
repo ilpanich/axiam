@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "gen:threat-model": "node scripts/gen-threat-model.mjs",
+    "gen:api-index": "node scripts/gen-api-index.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

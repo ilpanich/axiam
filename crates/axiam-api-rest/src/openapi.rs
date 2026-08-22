@@ -141,6 +141,15 @@ use crate::handlers;
         // Audit Logs
         handlers::audit::list,
         handlers::audit::list_system,
+        // GDPR — data-subject export (Art. 15) and erasure (Art. 17).
+        // These four carried their `#[utoipa::path]` annotations from the day
+        // they were written but were never listed here, so every export of this
+        // document omitted them: absent from `sdks/openapi.json`, from the
+        // served Swagger UI, and from anything generated off either.
+        handlers::gdpr::request_account_export,
+        handlers::gdpr::download_account_export,
+        handlers::gdpr::request_account_delete,
+        handlers::gdpr::cancel_account_delete,
         handlers::scim_tokens::create,
         handlers::scim_tokens::list,
         handlers::scim_tokens::revoke,
@@ -503,6 +512,7 @@ use crate::handlers;
         (name = "authz", description = "Authorization check (FND-04 REST surface)"),
         (name = "webauthn-policy", description = "Tenant WebAuthn attestation policy and compliance reporting (X3)"),
         (name = "mds", description = "FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"),
+        (name = "gdpr", description = "Data-subject export (Art. 15) and erasure (Art. 17)"),
     ),
     modifiers(&SecurityAddon),
 )]

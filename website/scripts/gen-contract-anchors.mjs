@@ -56,40 +56,33 @@ if (sections.length === 0) {
 }
 
 /**
- * Verify the slug algorithm against the contract's own internal links.
+ * Verify against the contract's own internal links.
  *
- * CONTRACT.md links to its own sections as `[§22.11](#§2211-swift-…)`. Those
- * anchors are known-good — GitHub renders them — so any that this generator
- * cannot reproduce means the algorithm has drifted from GitHub's.
+ * CONTRACT.md links to its own sections as `[§22.11](#§2211-swift-…)`. Every
+ * such link should resolve to a heading this generator produced, so a link
+ * that does not is one of two real defects, and the message says both because
+ * they are fixed in different files:
+ *
+ *   - this slug function has drifted from GitHub's, or
+ *   - CONTRACT.md carries a broken anchor.
+ *
+ * The second is not hypothetical. When this check was first written it found
+ * §14.1's link to `device_login` spelled with one hyphen where the same
+ * heading's two other links used two — a link that rendered fine and went
+ * nowhere.
  */
 const known = new Set(sections.map((s) => s.anchor));
 
-/**
- * Anchors CONTRACT.md links to that no heading produces — i.e. links already
- * broken in the contract itself.
- *
- * Declared explicitly rather than tolerated silently, so the list is auditable
- * and so a *new* broken anchor still fails this generator. Fixing them upstream
- * means re-vendoring CONTRACT.md into all eleven SDK repos, which is a poor
- * trade for a missing hyphen; they are recorded here until the contract is next
- * revised for its own reasons.
- */
-const KNOWN_BROKEN = new Map([
-  [
-    "#§143-device_login-the-composed-helper",
-    "one occurrence (the §14.1 operation table) drops a hyphen the em dash leaves behind; " +
-      "the other two links to the same heading spell it correctly",
-  ],
-]);
-
 const missed = [];
 for (const m of source.matchAll(/\]\((#§[^)]+)\)/g)) {
-  if (!known.has(m[1]) && !KNOWN_BROKEN.has(m[1])) missed.push(m[1]);
+  if (!known.has(m[1])) missed.push(m[1]);
 }
 if (missed.length > 0) {
   throw new Error(
-    `gen-contract-anchors: CONTRACT.md links to anchors this generator does not produce, ` +
-      `so the slug algorithm is wrong:\n  ${[...new Set(missed)].join("\n  ")}`,
+    `gen-contract-anchors: CONTRACT.md links to anchors no heading produces. ` +
+      `Either the slug function below has drifted from GitHub's, or the contract ` +
+      `carries a broken anchor — check whether the target heading exists before ` +
+      `changing this file:\n  ${[...new Set(missed)].join("\n  ")}`,
   );
 }
 

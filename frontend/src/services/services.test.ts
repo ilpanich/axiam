@@ -637,12 +637,22 @@ describe("roleService", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
       permission_id: "p1",
       effect: "allow",
+      // C4: empty is the wildcard the server already defaults to.
+      scope_ids: [],
     });
     apiMock.post.mockClear();
     await roleService.grantPermission("r1", "p1", "deny");
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
       permission_id: "p1",
       effect: "deny",
+      scope_ids: [],
+    });
+    apiMock.post.mockClear();
+    await roleService.grantPermission("r1", "p1", "allow", ["s1", "s2"]);
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
+      permission_id: "p1",
+      effect: "allow",
+      scope_ids: ["s1", "s2"],
     });
     apiMock.delete.mockResolvedValue(res(undefined));
     await roleService.revokePermission("r1", "p1");

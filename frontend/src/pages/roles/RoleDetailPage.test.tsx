@@ -26,6 +26,16 @@ const grants = [
   },
 ];
 
+const resources = [
+  { id: "res1", name: "Billing", created_at: "t" },
+  { id: "res2", name: "Reports", created_at: "t" },
+];
+
+const billingScopes = [
+  { id: "sc1", tenant_id: "t1", resource_id: "res1", name: "invoices", description: "", created_at: "t", updated_at: "t" },
+  { id: "sc2", tenant_id: "t1", resource_id: "res1", name: "refunds", description: "", created_at: "t", updated_at: "t" },
+];
+
 const allPermissions = [
   { id: "p1", action: "read", description: "Read stuff", created_at: "2026-01-01T00:00:00Z" },
   { id: "p2", action: "write", description: "Write stuff", created_at: "2026-01-01T00:00:00Z" },
@@ -57,6 +67,8 @@ const URLS = {
   groups: "/api/v1/roles/r1/groups",
   allPerms: "/api/v1/permissions",
   allGroups: "/api/v1/groups",
+  resources: "/api/v1/resources",
+  billingScopes: "/api/v1/resources/res1/scopes",
 };
 
 function routeGet(map: Record<string, unknown>) {
@@ -76,6 +88,8 @@ function defaultData(overrides: Record<string, unknown> = {}) {
     [URLS.groups]: assignedGroups,
     [URLS.allPerms]: allPermissions,
     [URLS.allGroups]: assignedGroups,
+    [URLS.resources]: resources,
+    [URLS.billingScopes]: billingScopes,
     ...overrides,
   };
 }
@@ -238,8 +252,73 @@ describe("RoleDetailPage", () => {
       expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, {
         permission_id: "p2",
         effect: "allow",
+        scope_ids: [],
       })
     );
+  });
+
+  // ─── C4 — scope-constrained grants ───────────────────────────────────────
+
+  it("grants with the wildcard until a resource's scopes are picked", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Grant Permission/ }));
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Granted");
+
+    // Unscoped is the default and the pre-C4 behaviour.
+    expect(within(dialog).getByLabelText("Limit to scopes (optional)")).toHaveValue("");
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Limit to scopes (optional)"),
+      "res1"
+    );
+    await userEvent.click(await within(dialog).findByLabelText("invoices"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Grant" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, {
+        permission_id: "p2",
+        effect: "allow",
+        scope_ids: ["sc1"],
+      })
+    );
+  });
+
+  it("warns that a scoped deny only masks the scopes it names", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Grant Permission/ }));
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Granted");
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Deny" }));
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Limit to scopes (optional)"),
+      "res1"
+    );
+    await userEvent.click(await within(dialog).findByLabelText("refunds"));
+
+    expect(
+      await within(dialog).findByText(/masks only the scopes you name/)
+    ).toBeInTheDocument();
+  });
+
+  it("badges a granted permission that is constrained to scopes", async () => {
+    routeGet(
+      defaultData({
+        [URLS.perms]: [
+          {
+            permission: allPermissions[0],
+            scope_ids: ["sc1", "sc2"],
+            effect: "allow",
+          },
+        ],
+      })
+    );
+    renderPage();
+    expect(await screen.findByText("2 scopes")).toBeInTheDocument();
   });
 
   // ─── B1/C4 — deny-override in the editor ─────────────────────────────────
@@ -261,6 +340,7 @@ describe("RoleDetailPage", () => {
       expect(apiMock.post).toHaveBeenCalledWith(URLS.perms, {
         permission_id: "p2",
         effect: "deny",
+        scope_ids: [],
       })
     );
   });

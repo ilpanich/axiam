@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   certificateService,
@@ -9,6 +10,7 @@ import {
   type GenerateCertificatePayload,
 } from "@/services/certificates";
 import { useAuthStore } from "@/stores/auth";
+import { orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -64,6 +66,8 @@ interface GenerateFieldsProps {
   onKeyAlgorithmChange: (v: KeyAlgorithm) => void;
   onValidityDaysChange: (v: number) => void;
   onIssuerCaIdChange: (v: string) => void;
+  /** Where to send an operator who has no CA yet; `null` while the org is unknown. */
+  caSetupHref: string | null;
 }
 
 function GenerateFields({
@@ -79,6 +83,7 @@ function GenerateFields({
   onKeyAlgorithmChange,
   onValidityDaysChange,
   onIssuerCaIdChange,
+  caSetupHref,
 }: GenerateFieldsProps) {
   const noCas = !caLoading && caOptions.length === 0;
 
@@ -103,10 +108,38 @@ function GenerateFields({
             ))}
         </select>
         {noCas && (
-          <p className="text-sm text-amber-400">
-            Create an organization CA certificate first — certificates must be
-            signed by an active CA.
-          </p>
+          // A bare "create a CA first" left an operator on a dead end: nothing
+          // on this page says where CAs live, and the section that issues them
+          // is two levels down under a different top-level nav item.
+          <div
+            role="note"
+            className="space-y-1.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-300"
+          >
+            <p>
+              <strong>This organization has no active CA.</strong> Every
+              certificate AXIAM issues is signed by one, so there is nothing to
+              issue against yet.
+            </p>
+            <p className="text-xs">
+              Create one under{" "}
+              {caSetupHref ? (
+                <Link
+                  to={caSetupHref}
+                  className="underline hover:text-amber-200"
+                >
+                  Organizations → your organization → CA Certificates
+                </Link>
+              ) : (
+                <span className="font-medium">
+                  Organizations → your organization → CA Certificates
+                </span>
+              )}
+              . Generating a CA needs <code>ca_certificates:generate</code>; the
+              private key is generated server-side, encrypted at rest and never
+              returned. A revoked or expired CA does not count — this list only
+              offers CAs whose status is Active.
+            </p>
+          </div>
         )}
       </div>
 
@@ -187,6 +220,19 @@ export function CertificatesPage() {
     id: ca.id,
     subject: ca.subject,
   }));
+
+  // Where CAs are issued. The org detail page's CA section is the only place
+  // in the UI that generates one, and nothing on this page pointed at it. The
+  // org id is resolved the same way `listSigningCas` resolves it — from the
+  // caller's own organization, the only one that endpoint returns.
+  const { data: caSetupHref = null } = useQuery({
+    queryKey: ["ca-setup-href", orgSlug],
+    queryFn: async () => {
+      const orgs = await orgService.list();
+      const org = orgSlug ? orgs.find((o) => o.slug === orgSlug) : orgs[0];
+      return org ? `/organizations/${org.id}` : null;
+    },
+  });
 
   // ─── Generate state ────────────────────────────────────────────────────────
   const [generateOpen, setGenerateOpen] = useState(false);
@@ -404,6 +450,7 @@ export function CertificatesPage() {
           onKeyAlgorithmChange={setKeyAlgorithm}
           onValidityDaysChange={setValidityDays}
           onIssuerCaIdChange={setIssuerCaId}
+          caSetupHref={caSetupHref}
         />
       </FormDialog>
 

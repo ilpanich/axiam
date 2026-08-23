@@ -111,7 +111,116 @@ describe("Topbar", () => {
     await userEvent.click(screen.getByText(/Select tenant/).closest("button")!);
     expect(screen.getByRole("menu", { name: "Tenant selector" })).toBeInTheDocument();
     expect(screen.queryByRole("menu", { name: "User menu" })).not.toBeInTheDocument();
-    expect(screen.getByText("Tenant switching coming soon")).toBeInTheDocument();
+  });
+
+  // ─── Tenant switching ───────────────────────────────────────────────────────
+
+  const orgs = [{ id: "o1", name: "AXIAM Corp", slug: "axiam-corp" }];
+  const tenantRows = [
+    { id: "t1", name: "Default", slug: "default", organization_id: "o1" },
+    { id: "t2", name: "Research & Development", slug: "rd", organization_id: "o1" },
+  ];
+
+  /** Route the two GETs the switcher makes; anything else is empty. */
+  function mockTenantLookup() {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/organizations") return res({ items: orgs, total: 1 });
+      if (url === "/api/v1/organizations/o1/tenants")
+        return res({ items: tenantRows, total: tenantRows.length });
+      return res({ items: [], total: 0 });
+    });
+  }
+
+  it("lists the organization's tenants and marks the current one", async () => {
+    useAuthStore.setState({ user, tenantSlug: "default", orgSlug: "axiam-corp" });
+    mockTenantLookup();
+    renderTopbar();
+
+    await userEvent.click(
+      screen.getByText(/axiam-corp \/ default/).closest("button")!
+    );
+
+    const current = await screen.findByRole("menuitem", { name: /Default/ });
+    expect(current).toHaveAttribute("aria-current", "true");
+    expect(
+      screen.getByRole("menuitem", { name: /Research & Development/ })
+    ).not.toHaveAttribute("aria-current");
+  });
+
+  it("signs out and hands the login page the target tenant", async () => {
+    // A session is bound to one tenant and a user record belongs to one tenant,
+    // so switching cannot re-scope the current session — it has to end it and
+    // re-authenticate against the target. The pre-filled slugs are what keep
+    // that from being a dead end.
+    useAuthStore.setState({ user, tenantSlug: "default", orgSlug: "axiam-corp" });
+    mockTenantLookup();
+    apiMock.post.mockResolvedValue(res({}));
+    renderTopbar();
+
+    await userEvent.click(
+      screen.getByText(/axiam-corp \/ default/).closest("button")!
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /Research & Development/ })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/auth/logout")
+    );
+    await waitFor(() =>
+      expect(useAuthStore.getState().isAuthenticated).toBe(false)
+    );
+  });
+
+  it("picking the tenant you are already in just closes the menu", async () => {
+    useAuthStore.setState({ user, tenantSlug: "default", orgSlug: "axiam-corp" });
+    mockTenantLookup();
+    apiMock.post.mockResolvedValue(res({}));
+    renderTopbar();
+
+    await userEvent.click(
+      screen.getByText(/axiam-corp \/ default/).closest("button")!
+    );
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Default/ }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menu", { name: "Tenant selector" })
+      ).not.toBeInTheDocument()
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it("says so plainly when no tenant is visible", async () => {
+    useAuthStore.setState({ user, tenantSlug: "default", orgSlug: "axiam-corp" });
+    apiMock.get.mockResolvedValue(res({ items: [], total: 0 }));
+    renderTopbar();
+
+    await userEvent.click(
+      screen.getByText(/axiam-corp \/ default/).closest("button")!
+    );
+    expect(
+      await screen.findByText(/No other tenant is visible to you/)
+    ).toBeInTheDocument();
+  });
+
+  it("does not query tenants without the permissions to list them", async () => {
+    useAuthStore.setState({
+      user: { ...user, permissions: ["users:list"] },
+      tenantSlug: "default",
+      orgSlug: "axiam-corp",
+    });
+    mockTenantLookup();
+    renderTopbar();
+
+    await userEvent.click(
+      screen.getByText(/axiam-corp \/ default/).closest("button")!
+    );
+    expect(
+      await screen.findByText(/No other tenant is visible to you/)
+    ).toBeInTheDocument();
+    expect(apiMock.get).not.toHaveBeenCalled();
   });
 
   it("opens the user menu showing username/email and a sign-out option", async () => {

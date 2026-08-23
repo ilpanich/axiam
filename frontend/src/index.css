@@ -166,6 +166,30 @@
     }
   }
 
+  /* A floating overlay surface: dropdown menus, popovers — anything that hangs
+     over the page rather than sitting in its flow.
+
+     `.glass-card` is wrong for these. Its 5% white over a 12px blur reads as a
+     panel when it sits *in* the layout, where what shows through is the page
+     gradient; over arbitrary page content it reads as transparent, and the
+     buttons and text underneath stay legible straight through the menu. The
+     topbar's user and tenant menus rendered exactly that way.
+
+     So: an opaque base first, with the same white film layered over it. The
+     base is `--popover`, the token that already exists for exactly this — a
+     surface that floats above the page — so the menu stays in the same visual
+     family without being see-through. */
+  .glass-menu {
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)),
+      hsl(var(--popover));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid hsl(var(--border-strong));
+    border-radius: 0.75rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+  }
+
   .glow-cyan {
     box-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
   }

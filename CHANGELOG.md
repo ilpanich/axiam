@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha39] - 2026-08-23
+
+### Added
+
+- Gate the configuration page against the keys the server reads
+- Rate-limit the WebAuthn ceremony routes
+
+### Changed
+
+- Give federation a setup procedure and service accounts an audience warning
+- Stamp docs pages per page, not per section
+- Walk the code flow, and open the token up
+- Show OPAQUE through an SDK, and how each one binds it
+- Resolve one tree node by node on the authorization engine page
+- Give the operate pages the data they were describing
+- State what the config reference covers, and add the keys it lacked
+- Add the tutorial that bridges quickstart and core concepts
+- Turn SCIM into a walkthrough, and fix what it said about the token
+- Show the AMQP topology and one signed message
+- Deepen the gRPC page to the surface the server actually serves
+- Back the compliance claims with links, and generate contract anchors
+- Follow up on #362 — model carries T-182's clause, site documents the throttle
+- Index the GDPR endpoints, and fix two summary-extraction bugs
+- Say precisely what PUBLIC means on an OAuth2 route
+- Generate the REST endpoint index from the OpenAPI document
+- Add the missing pushed-authorization page
+- Record the rate-limit gate T-182 did not re-establish
+- Lead every code sample with Rust
+- Bring the passkey, MFA and lifecycle pages up to contract 1.28
+- Give the Client SDKs page the matrix and the code it lacked
+- Correct and complete the webhook page
+- Show the reactor registry instead of describing it
+- Put coverage, the open risk register and the evidence on the page
+- Make the threat model citable — IDs, deep links and filters
+- Emit STRIDE, severity and open-risk data from the threat model
+- Plan the docs-section deepening, page by page
+- Record the contract 1.28 SDK surface and the passkey cookie fix
+
+### Fixed
+
+- Repair §14.1's link to the device_login heading
+- Classify the GDPR paths for the route ↔ OpenAPI parity check
+- Register the GDPR endpoints in the OpenAPI document
+- Bring the harness and quick runbook up to alpha38
+
 ## [Unreleased]
 
 ### Security

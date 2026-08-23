@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, RotateCw } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Inbox, RotateCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type SortDirection = "asc" | "desc";
@@ -153,9 +153,14 @@ export function DataTable<T extends object>({
                   className="px-4 py-12 text-center text-muted-foreground"
                 >
                   <div className="flex flex-col items-center gap-2">
-                    <span className="text-4xl opacity-30" aria-hidden="true">
-                      &#9632;
-                    </span>
+                    {/* A lucide glyph rather than the U+25A0 black square this
+                        used to render: at 4xl and 30% opacity that square read
+                        as a failed image on every empty table in the app. */}
+                    <Inbox
+                      size={28}
+                      className="opacity-30"
+                      aria-hidden="true"
+                    />
                     <span>{emptyMessage}</span>
                   </div>
                 </td>

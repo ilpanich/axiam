@@ -6,7 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ChevronRight, ChevronDown } from "lucide-react";
+import { ChevronRight, ChevronDown, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { resourceTypeLabel, type Resource } from "@/services/resources";
 
@@ -369,7 +369,7 @@ export function ResourceTree({
   if (roots.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground text-sm">
-        <span className="text-4xl opacity-20">&#9632;</span>
+        <Inbox size={28} className="opacity-25" aria-hidden="true" />
         <span>No resources defined yet.</span>
       </div>
     );

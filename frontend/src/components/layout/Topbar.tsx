@@ -176,7 +176,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               ref={tenantPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-48",
-                "glass-card py-1 shadow-glass",
+                "glass-card px-0 py-1 shadow-glass",
               )}
               role="menu"
               aria-label="Tenant selector"
@@ -222,7 +222,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               ref={userPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-40",
-                "glass-card py-1 shadow-glass",
+                "glass-card px-0 py-1 shadow-glass",
               )}
               role="menu"
               aria-label="User menu"

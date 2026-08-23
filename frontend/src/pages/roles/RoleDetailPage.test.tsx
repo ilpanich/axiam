@@ -41,7 +41,7 @@ const allPermissions = [
   { id: "p2", action: "write", description: "Write stuff", created_at: "2026-01-01T00:00:00Z" },
 ];
 
-const assignedUsers = [
+const users = [
   {
     id: "u1",
     username: "alice",
@@ -58,7 +58,15 @@ const assignedUsers = [
   },
 ];
 
-const assignedGroups = [{ id: "g1", name: "Admins", created_at: "t" }];
+const groups = [{ id: "g1", name: "Admins", created_at: "t" }];
+
+/**
+ * `GET /roles/{id}/users` and `.../groups` return assignment rows: the subject
+ * plus the resource the grant is scoped to. `resource_id: null` is a global
+ * assignment — what every row was before the scope became visible.
+ */
+const assignedUsers = [{ user: users[0], resource_id: null }];
+const assignedGroups = [{ group: groups[0], resource_id: null }];
 
 const URLS = {
   role: "/api/v1/roles/r1",
@@ -75,7 +83,7 @@ function routeGet(map: Record<string, unknown>) {
   apiMock.get.mockImplementation((url: string) => {
     if (url in map) return Promise.resolve(res(map[url]));
     if (url.startsWith("/api/v1/users?"))
-      return Promise.resolve(res({ items: assignedUsers, total: 1, offset: 0, limit: 20 }));
+      return Promise.resolve(res({ items: users, total: 1, offset: 0, limit: 20 }));
     return Promise.resolve(res([]));
   });
 }
@@ -87,7 +95,7 @@ function defaultData(overrides: Record<string, unknown> = {}) {
     [URLS.users]: assignedUsers,
     [URLS.groups]: assignedGroups,
     [URLS.allPerms]: allPermissions,
-    [URLS.allGroups]: assignedGroups,
+    [URLS.allGroups]: groups,
     [URLS.resources]: resources,
     [URLS.billingScopes]: billingScopes,
     ...overrides,
@@ -201,7 +209,7 @@ describe("RoleDetailPage", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1")
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {})
     );
   });
 
@@ -407,7 +415,7 @@ describe("RoleDetailPage", () => {
     expect(within(dialog).getByText(/Unassign User/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1")
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {})
     );
   });
 
@@ -421,7 +429,7 @@ describe("RoleDetailPage", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1")
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {})
     );
   });
 
@@ -451,6 +459,138 @@ describe("RoleDetailPage", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
     await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.users, { user_id: "u1" })
+    );
+  });
+
+  // ─── Resource-scoped assignments ────────────────────────────────────────────
+  //
+  // Until the server returned `resource_id` on its assignment reads, every row
+  // here rendered as if it were global and the revoke button could not work on
+  // a scoped grant: `DELETE …` without the parameter matches the null-scope
+  // edge, so the request succeeded and removed nothing.
+
+  it("badges a global assignment as global and a scoped one with its resource", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1" }],
+        [URLS.groups]: [{ group: groups[0], resource_id: null }],
+      })
+    );
+    renderPage();
+
+    const userRow = (await screen.findByText("Alice A")).closest("li")!;
+    // The resource name, resolved from /resources — not the raw id.
+    expect(within(userRow).getByText("Billing")).toBeInTheDocument();
+    expect(within(userRow).queryByText("Global")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    const groupRow = (await screen.findByText("Admins")).closest("li")!;
+    expect(within(groupRow).getByText("Global")).toBeInTheDocument();
+  });
+
+  it("falls back to the resource id when the resource is not in the list", async () => {
+    // Deleted, or not visible to this admin. Anything but "Global": claiming a
+    // scoped grant applies everywhere is the one wrong answer.
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res-gone" }],
+      })
+    );
+    renderPage();
+    const row = (await screen.findByText("Alice A")).closest("li")!;
+    expect(within(row).getByText("res-gone")).toBeInTheDocument();
+    expect(within(row).queryByText("Global")).not.toBeInTheDocument();
+  });
+
+  it("sends the resource_id back when unassigning a scoped user assignment", async () => {
+    routeGet(
+      defaultData({ [URLS.users]: [{ user: users[0], resource_id: "res1" }] })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Unassign alice" }));
+    const dialog = screen.getByRole("dialog");
+    // The confirm text names the resource, so an admin is not asked to approve
+    // "remove this role" when only one scope of it is going away.
+    expect(within(dialog).getByText(/Billing/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {
+        params: { resource_id: "res1" },
+      })
+    );
+  });
+
+  it("sends the resource_id back when unassigning a scoped group assignment", async () => {
+    routeGet(
+      defaultData({ [URLS.groups]: [{ group: groups[0], resource_id: "res2" }] })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Unassign group Admins" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {
+        params: { resource_id: "res2" },
+      })
+    );
+  });
+
+  it("assigns a user scoped to the resource picked in the dialog", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.users, {
+        user_id: "u1",
+        resource_id: "res1",
+      })
+    );
+  });
+
+  it("assigns a group scoped to the resource picked in the dialog", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(screen.getByRole("button", { name: /Assign Group/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Group"),
+      "g1"
+    );
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res2");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.groups, {
+        group_id: "g1",
+        resource_id: "res2",
+      })
+    );
+  });
+
+  it("leaves the scope picker on global by default", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+    // An admin who ignores the new field gets exactly the old behaviour.
     await waitFor(() =>
       expect(apiMock.post).toHaveBeenCalledWith(URLS.users, { user_id: "u1" })
     );

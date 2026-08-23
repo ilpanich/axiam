@@ -1,6 +1,7 @@
 //! Security settings endpoints for organizations and tenants.
 
 use actix_web::{HttpResponse, web};
+use axiam_core::models::opaque::OpaqueMode;
 use axiam_core::models::settings::{
     SecuritySettings, SetOrgSettings, TenantSettingsOverride, effective_settings,
     validate_org_settings, validate_tenant_override,
@@ -13,6 +14,33 @@ use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::state::AppState;
+
+/// Refuse an OPAQUE mode the running server has no keys to serve.
+///
+/// `validate_org_settings` cannot make this check: it lives in `axiam-core`,
+/// which the crate layering keeps below `axiam-api-rest`, so it can never see
+/// an `AppState`. The invariant is nonetheless the same one
+/// `POST /api/v1/admin/bootstrap` enforces — writing `opaque_mode` above
+/// `disabled` onto a server holding no OPAQUE keys configures a tenant into a
+/// state where every `/api/v1/auth/opaque/*` route fails at runtime, and the
+/// only way back out is another settings write. Refuse at the write instead,
+/// with the same two env vars named, so the operator learns what is missing
+/// rather than discovering it from a login that stopped working.
+fn reject_opaque_without_keys<C: Connection + Clone>(
+    mode: OpaqueMode,
+    state: &AppState<C>,
+) -> Result<(), AxiamApiError> {
+    if mode != OpaqueMode::Disabled && state.opaque_server.is_none() {
+        return Err(AxiamApiError(axiam_core::error::AxiamError::Validation {
+            message: "opaque_mode is set but AXIAM__AUTH__OPAQUE_SESSION_KEY and \
+                      AXIAM__AUTH__OPAQUE_SETUP_KEY are not configured: saving \
+                      this would enable OPAQUE on a server that cannot serve it, \
+                      and every /api/v1/auth/opaque/* request would fail"
+                .into(),
+        }));
+    }
+    Ok(())
+}
 
 /// `GET /api/v1/organizations/{org_id}/settings`
 #[utoipa::path(
@@ -71,6 +99,9 @@ pub async fn get_org_settings<C: Connection + Clone>(
     responses(
         (status = 200, description = "Organization settings updated",
          body = SecuritySettings),
+        (status = 400,
+         description = "Settings are internally inconsistent, or enable OPAQUE \
+                        on a server holding no OPAQUE keys"),
     ),
     security(("bearer" = []))
 )]
@@ -103,6 +134,7 @@ pub async fn set_org_settings<C: Connection + Clone>(
 
     let input = body.into_inner();
     validate_org_settings(&input)?;
+    reject_opaque_without_keys(input.opaque_mode, &state)?;
     let settings = state.settings_repo.set_org_settings(org_id, input).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
@@ -149,7 +181,9 @@ pub async fn get_tenant_settings<C: Connection + Clone>(
     responses(
         (status = 200, description = "Tenant settings updated",
          body = SecuritySettings),
-        (status = 400, description = "Override violates org baseline"),
+        (status = 400, description = "Override violates org baseline, or \
+                                      enables OPAQUE on a server holding no \
+                                      OPAQUE keys"),
     ),
     security(("bearer" = []))
 )]
@@ -167,6 +201,15 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
 
     // Validate: tenant can only be more restrictive than org
     validate_tenant_override(&org, &overrides)?;
+
+    // The same runtime-serviceability guard as the org write, but keyed on the
+    // override's own value rather than the merged one. A tenant that leaves
+    // `opaque_mode` unset inherits whatever the org baseline says and changes
+    // nothing, so it has no business being refused here — only an override
+    // that itself raises the mode is asking for something the server cannot do.
+    if let Some(mode) = overrides.opaque_mode {
+        reject_opaque_without_keys(mode, &state)?;
+    }
 
     // Merge org baseline + overrides into a complete settings row.
     // The ID passed here is just a placeholder; the underlying

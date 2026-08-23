@@ -84,6 +84,8 @@ use crate::handlers;
         handlers::roles::unassign_from_group,
         handlers::roles::list_users,
         handlers::roles::list_groups,
+        handlers::roles::list_user_roles,
+        handlers::roles::list_group_roles,
         // Permissions
         handlers::permissions::create,
         handlers::permissions::list,
@@ -311,6 +313,8 @@ use crate::handlers;
         handlers::roles::CreateRoleRequest,
         handlers::roles::AssignRoleToUserRequest,
         handlers::roles::AssignRoleToGroupRequest,
+        handlers::roles::RoleUserAssignment,
+        handlers::roles::RoleGroupAssignment,
         // Permissions
         axiam_core::models::permission::Permission,
         axiam_core::models::permission::CreatePermission,

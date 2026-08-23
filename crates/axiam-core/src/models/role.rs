@@ -38,3 +38,20 @@ pub struct RoleAssignment {
     /// `None` means the role was assigned globally (no resource scope).
     pub resource_id: Option<Uuid>,
 }
+
+/// One `has_role` edge seen from the *role's* side: which subject holds the
+/// assignment, and the resource it is scoped to.
+///
+/// `has_role` carries a `UNIQUE(in, out)` index, so a subject holds a given
+/// role at most once — this is one row per subject, same as listing subject
+/// ids. What it adds is `resource_id`, and that field is not decoration: an
+/// unassign that does not name it deletes the edge whose `resource_id` is
+/// `NONE`, so revoking a resource-scoped grant without it silently deletes
+/// nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RoleSubjectAssignment {
+    /// The user or group holding the assignment.
+    pub subject_id: Uuid,
+    /// `None` means the role was assigned globally (no resource scope).
+    pub resource_id: Option<Uuid>,
+}

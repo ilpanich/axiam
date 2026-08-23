@@ -414,3 +414,237 @@ async fn assign_to_user_duplicate_edge_is_rejected() {
         "duplicate has_role edge must be rejected, not silently ignored"
     );
 }
+
+// ---------------------------------------------------------------------------
+// get_role_user_assignments / get_role_group_assignments /
+// get_group_role_assignments — the `resource_id`-carrying counterparts
+// ---------------------------------------------------------------------------
+
+/// A resource to scope an assignment to. The role repository never validates
+/// the target, so an id is enough — but a real row keeps the fixture honest.
+async fn create_resource(db: &Db, tenant_id: Uuid, name: &str) -> Uuid {
+    use axiam_core::models::resource::CreateResource;
+    use axiam_core::repository::ResourceRepository;
+    axiam_db::repository::SurrealResourceRepository::new(db.clone())
+        .create(CreateResource {
+            tenant_id,
+            name: name.into(),
+            resource_type: "service".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn get_role_user_assignments_carries_the_resource_scope() {
+    let (db, tenant_id, user_id, group_id) = setup().await;
+    let repo = SurrealRoleRepository::new(db.clone());
+    let resource_id = create_resource(&db, tenant_id, "scoped-res-users").await;
+
+    let scoped = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "scoped-user-role".into(),
+            description: "d".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let global = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "global-user-role".into(),
+            description: "d".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+
+    repo.assign_to_user(tenant_id, user_id, scoped.id, Some(resource_id))
+        .await
+        .unwrap();
+    repo.assign_to_user(tenant_id, user_id, global.id, None)
+        .await
+        .unwrap();
+    // A group edge on the scoped role must not surface in the *user* listing:
+    // `has_role` holds both kinds of edge and only `in` tells them apart.
+    repo.assign_to_group(tenant_id, group_id, scoped.id, Some(resource_id))
+        .await
+        .unwrap();
+
+    let scoped_rows = repo
+        .get_role_user_assignments(tenant_id, scoped.id)
+        .await
+        .unwrap();
+    assert_eq!(scoped_rows.len(), 1, "{scoped_rows:?}");
+    assert_eq!(scoped_rows[0].subject_id, user_id);
+    assert_eq!(scoped_rows[0].resource_id, Some(resource_id));
+
+    let global_rows = repo
+        .get_role_user_assignments(tenant_id, global.id)
+        .await
+        .unwrap();
+    assert_eq!(global_rows.len(), 1);
+    assert_eq!(global_rows[0].subject_id, user_id);
+    assert_eq!(
+        global_rows[0].resource_id, None,
+        "a global assignment carries no scope"
+    );
+}
+
+#[tokio::test]
+async fn get_role_group_assignments_carries_the_resource_scope() {
+    let (db, tenant_id, user_id, group_id) = setup().await;
+    let repo = SurrealRoleRepository::new(db.clone());
+    let resource_id = create_resource(&db, tenant_id, "scoped-res-groups").await;
+
+    let role = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "scoped-group-role".into(),
+            description: "d".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    repo.assign_to_group(tenant_id, group_id, role.id, Some(resource_id))
+        .await
+        .unwrap();
+    // The mirror of the check above: a user edge must not surface in the
+    // *group* listing.
+    repo.assign_to_user(tenant_id, user_id, role.id, None)
+        .await
+        .unwrap();
+
+    let rows = repo
+        .get_role_group_assignments(tenant_id, role.id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].subject_id, group_id);
+    assert_eq!(rows[0].resource_id, Some(resource_id));
+}
+
+#[tokio::test]
+async fn role_subject_assignments_are_scoped_to_the_tenant() {
+    let (db, tenant_id, user_id, group_id) = setup().await;
+    let repo = SurrealRoleRepository::new(db.clone());
+    let foreign = other_tenant(&db).await;
+
+    let role = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "tenant-scoped-role".into(),
+            description: "d".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    repo.assign_to_user(tenant_id, user_id, role.id, None)
+        .await
+        .unwrap();
+    repo.assign_to_group(tenant_id, group_id, role.id, None)
+        .await
+        .unwrap();
+
+    // Asking as another tenant must return nothing, not the owning tenant's
+    // assignments.
+    assert!(
+        repo.get_role_user_assignments(foreign, role.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.get_role_group_assignments(foreign, role.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn role_subject_assignments_empty_for_an_unassigned_role() {
+    let (db, tenant_id, _user, _group) = setup().await;
+    let repo = SurrealRoleRepository::new(db);
+
+    let role = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "nobody-holds-this".into(),
+            description: "d".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        repo.get_role_user_assignments(tenant_id, role.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.get_role_group_assignments(tenant_id, role.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn get_group_role_assignments_carries_the_resource_scope() {
+    let (db, tenant_id, _user, group_id) = setup().await;
+    let repo = SurrealRoleRepository::new(db.clone());
+    let resource_id = create_resource(&db, tenant_id, "group-roles-res").await;
+
+    let scoped = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "group-scoped".into(),
+            description: "d".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let global = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "group-global".into(),
+            description: "d".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+
+    repo.assign_to_group(tenant_id, group_id, scoped.id, Some(resource_id))
+        .await
+        .unwrap();
+    repo.assign_to_group(tenant_id, group_id, global.id, None)
+        .await
+        .unwrap();
+
+    let rows = repo
+        .get_group_role_assignments(tenant_id, group_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+
+    let scoped_row = rows.iter().find(|r| r.role.id == scoped.id).unwrap();
+    assert_eq!(scoped_row.resource_id, Some(resource_id));
+    let global_row = rows.iter().find(|r| r.role.id == global.id).unwrap();
+    assert_eq!(global_row.resource_id, None);
+
+    // Same tenant confinement as the role-side listings.
+    let foreign = other_tenant(&db).await;
+    assert!(
+        repo.get_group_role_assignments(foreign, group_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

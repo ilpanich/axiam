@@ -36,7 +36,13 @@ const members = [
   },
 ];
 
-const groupRoles = [{ id: "r1", name: "Deploy", description: "Deploy access", is_global: false, created_at: "t" }];
+const deployRole = { id: "r1", name: "Deploy", description: "Deploy access", is_global: false, created_at: "t" };
+
+/**
+ * `GET /groups/{id}/roles` returns assignment rows — the role plus the resource
+ * the grant is scoped to. `resource_id: null` is a global assignment.
+ */
+const groupRoles = [{ role: deployRole, resource_id: null }];
 
 const URLS = {
   group: "/api/v1/groups/g1",
@@ -175,8 +181,53 @@ describe("GroupDetailPage", () => {
     expect(within(dialog).getByText(/Unassign Role/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1")
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {})
     );
+  });
+
+  // The panel this page's role list calls — `GET /groups/{id}/roles` — was
+  // never registered server-side until now, so it 404'd and rendered empty
+  // regardless of what the group actually held.
+
+  it("shows the resource a scoped role assignment applies under", async () => {
+    routeGet(
+      defaults({
+        [URLS.roles]: [{ role: deployRole, resource_id: "res1" }],
+        "/api/v1/resources": [{ id: "res1", name: "Billing", created_at: "t" }],
+      })
+    );
+    renderPage();
+    const row = (await screen.findByText("Deploy")).closest("li")!;
+    expect(within(row).getByText("Billing")).toBeInTheDocument();
+    expect(within(row).queryByText("Global")).not.toBeInTheDocument();
+  });
+
+  it("sends the resource_id back when unassigning a scoped role", async () => {
+    routeGet(
+      defaults({
+        [URLS.roles]: [{ role: deployRole, resource_id: "res1" }],
+        "/api/v1/resources": [{ id: "res1", name: "Billing", created_at: "t" }],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Unassign role Deploy" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {
+        params: { resource_id: "res1" },
+      })
+    );
+  });
+
+  it("badges an unscoped role assignment as global", async () => {
+    routeGet(defaults());
+    renderPage();
+    const row = (await screen.findByText("Deploy")).closest("li")!;
+    expect(within(row).getByText("Global")).toBeInTheDocument();
   });
 
   it("shows empty member/role states when nothing is present", async () => {

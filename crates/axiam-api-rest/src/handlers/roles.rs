@@ -2,13 +2,13 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::group::Group;
-use axiam_core::models::role::{CreateRole, Role, UpdateRole};
+use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{
     GroupRepository, PaginatedResult, Pagination, RoleRepository, UserRepository,
 };
 
 use super::users::UserResponse;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -37,6 +37,35 @@ pub struct AssignRoleToUserRequest {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AssignRoleToGroupRequest {
     pub group_id: Uuid,
+    pub resource_id: Option<Uuid>,
+}
+
+// -----------------------------------------------------------------------
+// Response types
+//
+// The two member listings return assignments, not bare subjects. `resource_id`
+// separates a grant that applies everywhere from one that applies only under a
+// resource, and it is the field `DELETE .../users/{user_id}?resource_id=`
+// needs: an unassign that omits it deletes the edge whose `resource_id` is
+// `NONE`, so a revoke button rendered next to a scoped grant without it
+// silently deletes nothing.
+// -----------------------------------------------------------------------
+
+/// A user together with the resource scope of their assignment of this role.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RoleUserAssignment {
+    /// The assigned user.
+    pub user: UserResponse,
+    /// `None` means the role was assigned globally (no resource scope).
+    pub resource_id: Option<Uuid>,
+}
+
+/// A group together with the resource scope of its assignment of this role.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RoleGroupAssignment {
+    /// The assigned group.
+    pub group: Group,
+    /// `None` means the role was assigned globally (no resource scope).
     pub resource_id: Option<Uuid>,
 }
 
@@ -440,15 +469,21 @@ pub async fn unassign_from_group<C: Connection + Clone>(
 
 /// `GET /api/v1/roles/{role_id}/users`
 ///
-/// Lists the users directly assigned this role (the inverse of
-/// `GET /users/{id}/roles`). Used by the role detail page's members panel.
+/// Lists this role's user assignments (the inverse of
+/// `GET /users/{user_id}/roles`). Used by the role detail page's members panel.
+///
+/// Directly-assigned users only — a user who reaches this role through a group
+/// is not a member of it and has no grant here to revoke. `resource_id` says
+/// whether the grant is global or applies only under one resource; `has_role`
+/// is `UNIQUE(in, out)`, so each user appears at most once.
 #[utoipa::path(
     get,
     path = "/api/v1/roles/{role_id}/users",
     tag = "roles",
     params(("role_id" = Uuid, Path, description = "Role ID")),
     responses(
-        (status = 200, description = "Users assigned this role", body = [UserResponse]),
+        (status = 200, description = "User assignments of this role",
+         body = [RoleUserAssignment]),
     ),
     security(("bearer" = []))
 )]
@@ -462,29 +497,38 @@ pub async fn list_users<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
-    let ids = state
+    let assignments = state
         .role_repo
-        .get_role_user_ids(user.tenant_id, role_id)
+        .get_role_user_assignments(user.tenant_id, role_id)
         .await?;
-    let mut users = Vec::with_capacity(ids.len());
-    for id in ids {
-        users.push(UserResponse::from(
-            state.user_repo.get_by_id(user.tenant_id, id).await?,
-        ));
+    let mut rows = Vec::with_capacity(assignments.len());
+    for a in assignments {
+        rows.push(RoleUserAssignment {
+            user: UserResponse::from(
+                state
+                    .user_repo
+                    .get_by_id(user.tenant_id, a.subject_id)
+                    .await?,
+            ),
+            resource_id: a.resource_id,
+        });
     }
-    Ok(HttpResponse::Ok().json(users))
+    Ok(HttpResponse::Ok().json(rows))
 }
 
 /// `GET /api/v1/roles/{role_id}/groups`
 ///
-/// Lists the groups directly assigned this role.
+/// Lists this role's group assignments (the inverse of
+/// `GET /groups/{group_id}/roles`), each with the resource it is scoped to —
+/// see [`list_users`] for why that field is here.
 #[utoipa::path(
     get,
     path = "/api/v1/roles/{role_id}/groups",
     tag = "roles",
     params(("role_id" = Uuid, Path, description = "Role ID")),
     responses(
-        (status = 200, description = "Groups assigned this role", body = [Group]),
+        (status = 200, description = "Group assignments of this role",
+         body = [RoleGroupAssignment]),
     ),
     security(("bearer" = []))
 )]
@@ -498,13 +542,96 @@ pub async fn list_groups<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
-    let ids = state
+    let assignments = state
         .role_repo
-        .get_role_group_ids(user.tenant_id, role_id)
+        .get_role_group_assignments(user.tenant_id, role_id)
         .await?;
-    let mut groups: Vec<Group> = Vec::with_capacity(ids.len());
-    for id in ids {
-        groups.push(state.group_repo.get_by_id(user.tenant_id, id).await?);
+    let mut rows = Vec::with_capacity(assignments.len());
+    for a in assignments {
+        rows.push(RoleGroupAssignment {
+            group: state
+                .group_repo
+                .get_by_id(user.tenant_id, a.subject_id)
+                .await?,
+            resource_id: a.resource_id,
+        });
     }
-    Ok(HttpResponse::Ok().json(groups))
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+/// `GET /api/v1/users/{user_id}/roles`
+///
+/// Lists a user's role assignments with the resource each is scoped to.
+///
+/// Includes roles reaching the user **through group membership**, not only the
+/// ones assigned to them directly — that is what a user's effective role list
+/// is, and splitting the two would give a caller a list that disagrees with the
+/// authorization decision. Anything the role detail page's members panel shows
+/// as a group assignment therefore also appears here for each member.
+#[utoipa::path(
+    get,
+    path = "/api/v1/users/{user_id}/roles",
+    tag = "roles",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "Role assignments of this user",
+         body = [RoleAssignment]),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_user_roles<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let target = path.into_inner();
+    // Confine the lookup to the caller's tenant before touching the edges: the
+    // repository predicate does the same, but a missing user must read as 404
+    // rather than as an empty role list, which would say "this user has no
+    // roles" about a user of some other tenant.
+    state.user_repo.get_by_id(user.tenant_id, target).await?;
+    let assignments = state
+        .role_repo
+        .get_user_role_assignments(user.tenant_id, target)
+        .await?;
+    Ok(HttpResponse::Ok().json(assignments))
+}
+
+/// `GET /api/v1/groups/{group_id}/roles`
+///
+/// Lists a group's role assignments with the resource each is scoped to. Every
+/// member of the group inherits these.
+#[utoipa::path(
+    get,
+    path = "/api/v1/groups/{group_id}/roles",
+    tag = "roles",
+    params(("group_id" = Uuid, Path, description = "Group ID")),
+    responses(
+        (status = 200, description = "Role assignments of this group",
+         body = [RoleAssignment]),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_group_roles<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let group_id = path.into_inner();
+    // Same reason as `list_user_roles`: 404 for a group of another tenant, not
+    // an empty list.
+    state.group_repo.get_by_id(user.tenant_id, group_id).await?;
+    let assignments = state
+        .role_repo
+        .get_group_role_assignments(user.tenant_id, group_id)
+        .await?;
+    Ok(HttpResponse::Ok().json(assignments))
 }

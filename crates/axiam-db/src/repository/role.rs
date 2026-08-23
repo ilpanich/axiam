@@ -2,7 +2,9 @@
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
-use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
+use axiam_core::models::role::{
+    CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
+};
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -87,6 +89,29 @@ impl RoleAssignmentRow {
     }
 }
 
+/// Row for querying `has_role` edges from the role's side: the subject holding
+/// the assignment plus the resource it is scoped to.
+#[derive(Debug, SurrealValue)]
+struct RoleSubjectAssignmentRow {
+    subject_id: String,
+    resource_id: Option<String>,
+}
+
+impl RoleSubjectAssignmentRow {
+    fn try_into_subject_assignment(self) -> Result<RoleSubjectAssignment, DbError> {
+        let subject_id = parse_uuid(&self.subject_id, "subject_id")?;
+        let resource_id = self
+            .resource_id
+            .as_deref()
+            .map(|s| parse_uuid(s, "resource_id"))
+            .transpose()?;
+        Ok(RoleSubjectAssignment {
+            subject_id,
+            resource_id,
+        })
+    }
+}
+
 /// SurrealDB implementation of the Role repository.
 #[derive(Clone)]
 pub struct SurrealRoleRepository<C: Connection> {
@@ -119,6 +144,63 @@ impl<C: Connection> SurrealRoleRepository<C> {
             .next()
             .map(|row| row.try_into_role().map_err(AxiamError::from))
             .transpose()
+    }
+
+    /// Shared body of `get_role_user_assignments` / `get_role_group_assignments`.
+    ///
+    /// `subject_table` is one of the two literals those methods pass — it is
+    /// never caller input, which is why it can be interpolated into the query
+    /// text. It has to be: a table name is not a bindable value in SurrealQL,
+    /// and `type::table()` cannot appear in a `FROM` clause here.
+    ///
+    /// Anchoring the subject set on its own table is what discriminates a user
+    /// edge from a group edge — `has_role` carries both, and `in` is the only
+    /// thing that tells them apart. That is the same idiom `get_role_user_ids`
+    /// uses; the difference is that the second statement reads `resource_id`
+    /// off the edge instead of throwing it away.
+    ///
+    /// The `LET` matters for the same reason it does in
+    /// `get_user_role_assignments`: evaluated inline, the planner cannot see a
+    /// constant on the right-hand side of `in IN (...)` and walks every
+    /// `has_role` edge in the database. Bound first, the set is a constant and
+    /// the predicate is an index lookup. Note the subject set is bounded by the
+    /// role's own assignees, not by the tenant's whole user table.
+    ///
+    /// Statement indices: 0 = LET, 1 = SELECT.
+    async fn role_subject_assignments(
+        &self,
+        subject_table: &'static str,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<RoleSubjectAssignment>> {
+        let query = format!(
+            "LET $subjects = (\
+                 SELECT VALUE id FROM {subject_table} \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM has_role \
+                     WHERE out = type::record('role', $role_id)\
+                 )\
+             ); \
+             SELECT meta::id(in.id) AS subject_id, resource_id \
+             FROM has_role \
+             WHERE out = type::record('role', $role_id) \
+             AND in IN $subjects;"
+        );
+
+        let mut result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("role_id", role_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RoleSubjectAssignmentRow> = result.take(1).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_subject_assignment().map_err(Into::into))
+            .collect()
     }
 }
 
@@ -798,5 +880,59 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         ids.iter()
             .map(|s| parse_uuid(s, "group_id").map_err(Into::into))
             .collect()
+    }
+
+    async fn get_group_role_assignments(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<Vec<RoleAssignment>> {
+        // The direct half of `get_user_role_assignments`, anchored on a group
+        // instead of a user. A group has no membership graph to walk — a role
+        // reaches a user *through* a group, never the other way round — so this
+        // is a single statement rather than that method's three.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(out.id) AS record_id, \
+                        out.tenant_id AS tenant_id, \
+                        out.name AS name, \
+                        out.description AS description, \
+                        out.is_global AS is_global, \
+                        out.created_at AS created_at, \
+                        out.updated_at AS updated_at, \
+                        resource_id \
+                 FROM has_role \
+                 WHERE in = type::record('group', $group_id) \
+                 AND out.tenant_id = $tenant_id;",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("group_id", group_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RoleAssignmentRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_assignment().map_err(Into::into))
+            .collect()
+    }
+
+    async fn get_role_user_assignments(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<RoleSubjectAssignment>> {
+        self.role_subject_assignments("user", tenant_id, role_id)
+            .await
+    }
+
+    async fn get_role_group_assignments(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<RoleSubjectAssignment>> {
+        self.role_subject_assignments("group", tenant_id, role_id)
+            .await
     }
 }

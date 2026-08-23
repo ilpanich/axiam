@@ -501,7 +501,9 @@ async fn list_role_users_returns_assigned_users() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 204);
 
-    // list_users must return exactly that member.
+    // list_users must return exactly that member. The rows are assignments,
+    // not users, so the subject sits under `user` and the (here absent)
+    // resource scope alongside it.
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/roles/{role_id}/users"))
         .insert_header((h, v))
@@ -511,7 +513,8 @@ async fn list_role_users_returns_assigned_users() {
     let body: Value = test::read_body_json(resp).await;
     let users = body.as_array().unwrap();
     assert_eq!(users.len(), 1);
-    assert_eq!(users[0]["id"], json!(member_id));
+    assert_eq!(users[0]["user"]["id"], json!(member_id));
+    assert_eq!(users[0]["resource_id"], Value::Null);
 }
 
 #[actix_rt::test]
@@ -563,7 +566,8 @@ async fn list_role_groups_returns_assigned_groups() {
     let body: Value = test::read_body_json(resp).await;
     let groups = body.as_array().unwrap();
     assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0]["id"], json!(group_id));
+    assert_eq!(groups[0]["group"]["id"], json!(group_id));
+    assert_eq!(groups[0]["resource_id"], Value::Null);
 }
 
 #[actix_rt::test]

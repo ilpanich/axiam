@@ -741,6 +741,18 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/groups/{group_id}/members/{user_id}")
                     .route(web::delete().to(handlers::groups::remove_member::<C>)),
             )
+            // The group's and the user's side of the role-assignment edge. They
+            // live in `handlers::roles` with the rest of that edge's endpoints,
+            // and are the read surface that carries `resource_id` — without
+            // which a scoped assignment is indistinguishable from a global one.
+            .service(
+                web::resource("/groups/{group_id}/roles")
+                    .route(web::get().to(handlers::roles::list_group_roles::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}/roles")
+                    .route(web::get().to(handlers::roles::list_user_roles::<C>)),
+            )
             // --- Roles ---
             .service(
                 web::resource("/roles")

@@ -2828,6 +2828,48 @@
         ]
       }
     },
+    "/api/v1/groups/{group_id}/roles": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`GET /api/v1/groups/{group_id}/roles`",
+        "description": "Lists a group's role assignments with the resource each is scoped to. Every\nmember of the group inherits these.",
+        "operationId": "list_group_roles",
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "description": "Group ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role assignments of this group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/mds/refresh": {
       "post": {
         "tags": [
@@ -4252,6 +4294,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Settings are internally inconsistent, or enable OPAQUE on a server holding no OPAQUE keys"
           }
         },
         "security": [
@@ -6396,7 +6441,7 @@
           "roles"
         ],
         "summary": "`GET /api/v1/roles/{role_id}/groups`",
-        "description": "Lists the groups directly assigned this role.",
+        "description": "Lists this role's group assignments (the inverse of\n`GET /groups/{group_id}/roles`), each with the resource it is scoped to —\nsee [`list_users`] for why that field is here.",
         "operationId": "list_groups",
         "parameters": [
           {
@@ -6412,13 +6457,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Groups assigned this role",
+            "description": "Group assignments of this role",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Group"
+                    "$ref": "#/components/schemas/RoleGroupAssignment"
                   }
                 }
               }
@@ -6652,7 +6697,7 @@
           "roles"
         ],
         "summary": "`GET /api/v1/roles/{role_id}/users`",
-        "description": "Lists the users directly assigned this role (the inverse of\n`GET /users/{id}/roles`). Used by the role detail page's members panel.",
+        "description": "Lists this role's user assignments (the inverse of\n`GET /users/{user_id}/roles`). Used by the role detail page's members panel.\n\nDirectly-assigned users only — a user who reaches this role through a group\nis not a member of it and has no grant here to revoke. `resource_id` says\nwhether the grant is global or applies only under one resource; `has_role`\nis `UNIQUE(in, out)`, so each user appears at most once.",
         "operationId": "list_users",
         "parameters": [
           {
@@ -6668,13 +6713,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Users assigned this role",
+            "description": "User assignments of this role",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/UserResponse"
+                    "$ref": "#/components/schemas/RoleUserAssignment"
                   }
                 }
               }
@@ -7293,7 +7338,7 @@
             }
           },
           "400": {
-            "description": "Override violates org baseline"
+            "description": "Override violates org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
           }
         },
         "security": [
@@ -7989,6 +8034,48 @@
           },
           "404": {
             "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/roles": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`GET /api/v1/users/{user_id}/roles`",
+        "description": "Lists a user's role assignments with the resource each is scoped to.\n\nIncludes roles reaching the user **through group membership**, not only the\nones assigned to them directly — that is what a user's effective role list\nis, and splitting the two would give a caller a list that disagrees with the\nauthorization decision. Anything the role detail page's members panel shows\nas a group assignment therefore also appears here for each member.",
+        "operationId": "list_user_roles",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role assignments of this user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                }
+              }
+            }
           }
         },
         "security": [
@@ -13734,6 +13821,48 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "RoleGroupAssignment": {
+        "type": "object",
+        "description": "A group together with the resource scope of its assignment of this role.",
+        "required": [
+          "group"
+        ],
+        "properties": {
+          "group": {
+            "$ref": "#/components/schemas/Group",
+            "description": "The assigned group."
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` means the role was assigned globally (no resource scope)."
+          }
+        }
+      },
+      "RoleUserAssignment": {
+        "type": "object",
+        "description": "A user together with the resource scope of their assignment of this role.",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` means the role was assigned globally (no resource scope)."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserResponse",
+            "description": "The assigned user."
           }
         }
       },

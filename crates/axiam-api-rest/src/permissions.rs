@@ -498,6 +498,10 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/roles/{role_id}", "roles:get"),
     ("PUT", "/api/v1/roles/{role_id}", "roles:update"),
     ("DELETE", "/api/v1/roles/{role_id}", "roles:delete"),
+    // Reading which roles a subject holds is role data, so it takes the same
+    // permission as reading a role's members from the other side.
+    ("GET", "/api/v1/users/{user_id}/roles", "roles:get"),
+    ("GET", "/api/v1/groups/{group_id}/roles", "roles:get"),
     ("GET", "/api/v1/roles/{role_id}/users", "roles:get"),
     ("POST", "/api/v1/roles/{role_id}/users", "roles:assign"),
     (

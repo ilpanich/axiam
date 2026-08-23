@@ -172,7 +172,7 @@ pub async fn opaque_login_start<C: Connection + Clone>(
         None => None,
     };
 
-    let started = match credential {
+    let mut started = match credential {
         Some(cred) => opaque
             .login_start(&setup, &cred, org_id, &b.ke1)
             .map_err(AxiamError::from)?,
@@ -187,6 +187,12 @@ pub async fn opaque_login_start<C: Connection + Clone>(
             )
             .map_err(AxiamError::from)?,
     };
+
+    // Stamped here rather than in `axiam-auth`, which holds no settings. It is
+    // the same value for both branches above — a property of the tenant, not
+    // of whether this particular identity has a record — so it cannot be used
+    // to tell the decoy exchange from a real one.
+    started.mode = policy.opaque_mode;
 
     Ok(HttpResponse::Ok().json(started))
 }

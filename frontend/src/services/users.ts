@@ -1,5 +1,6 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
+import type { OpaqueEnrollment } from "@/services/opaque";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -60,6 +61,17 @@ export interface CreateUserPayload {
   password: string;
   /** UI-only convenience; routed into `metadata.display_name` by the service. */
   display_name?: string;
+  /**
+   * A client-built OPAQUE registration record for the password above.
+   *
+   * User creation is one of the four moments a plaintext password legitimately
+   * exists on a client, and therefore one of the four places a record can be
+   * built. Omitting it is accepted under `disabled` and `optional` and
+   * **refused** under `required` — an account created with no record there is
+   * an account that cannot authenticate at all, which the server rejects at
+   * creation rather than letting the operator discover later.
+   */
+  opaque?: OpaqueEnrollment;
 }
 
 export interface UpdateUserPayload {
@@ -129,6 +141,7 @@ export const userService = {
 
   create: (payload: CreateUserPayload): Promise<User> => {
     const { display_name, ...rest } = payload;
+    // `opaque` stays in `rest` — it is a real request field, not a UI-only one.
     const body = {
       ...rest,
       ...(display_name ? { metadata: { display_name } } : {}),

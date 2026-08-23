@@ -661,6 +661,29 @@ pub struct OpaqueLoginStartResponse {
     /// scrypt parallelism; absent for Argon2id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p: Option<u32>,
+    /// The tenant's OPAQUE mode — `optional` or `required`, never `disabled`
+    /// (that path answers `404` instead of reaching here).
+    ///
+    /// This is what lets a client know whether falling back to
+    /// `POST /auth/login` after a failed exchange is legitimate. Under
+    /// `optional` a client whose envelope did not open — the ordinary case for
+    /// a user who has not enrolled yet, which is every user the moment an
+    /// operator turns OPAQUE on — must be able to try the password endpoint,
+    /// or `optional` is not a migration mode but a lockout. Under `required`
+    /// it must not, and an honest client never transmits the plaintext at all.
+    ///
+    /// It discloses a property of the tenant, not of any user, and the same
+    /// property the `404`-vs-`200` split on this endpoint already reveals
+    /// half of, so it does not weaken the enumeration guarantee.
+    ///
+    /// Note what it is *not*: downgrade protection against a hostile server.
+    /// A server that wanted the plaintext could always answer `404` and get
+    /// the fallback regardless of what it puts here. Only `required` — which
+    /// makes `/auth/login` refuse before examining any credential — closes
+    /// that, and it closes it server-side where it belongs.
+    #[serde(default)]
+    #[schema(value_type = String, example = "optional")]
+    pub mode: OpaqueMode,
 }
 
 /// Client request to `POST /api/v1/auth/opaque/login/finish`.

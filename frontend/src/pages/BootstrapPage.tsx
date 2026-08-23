@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
+import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
 import { PublicLayout } from "@/components/layout/PublicLayout";
+import { DEFAULT_OPAQUE_POLICY, type OpaquePolicy } from "@/services/opaquePolicy";
 import { slugify } from "@/lib/utils";
 import api from "@/lib/api";
 import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
@@ -32,6 +34,15 @@ export function BootstrapPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [setupToken, setSetupToken] = useState("");
+  // `POST /api/v1/admin/bootstrap` has accepted these three since OPAQUE
+  // shipped, and enrols the administrator itself — it is the one enrolment path
+  // where the server holds the plaintext and can build the record without a
+  // client. Not offering them here meant the only way to start a deployment
+  // with OPAQUE on was to bootstrap over the API by hand, and every
+  // browser-bootstrapped deployment began with it off.
+  const [opaquePolicy, setOpaquePolicy] = useState<OpaquePolicy>(
+    DEFAULT_OPAQUE_POLICY,
+  );
 
   const [orgSlugTouched, setOrgSlugTouched] = useState(false);
   const [tenantSlugTouched, setTenantSlugTouched] = useState(false);
@@ -94,6 +105,7 @@ export function BootstrapPage() {
         username: username.trim(),
         password,
         ...(setupToken.trim() ? { setup_token: setupToken.trim() } : {}),
+        ...opaquePolicy,
       });
       const params = new URLSearchParams({
         bootstrapped: "1",
@@ -284,6 +296,31 @@ export function BootstrapPage() {
               </div>
             )}
           </div>
+
+          <details className="rounded-md border border-primary/15 bg-white/2 p-3">
+            <summary className="cursor-pointer text-sm text-foreground/80">
+              OPAQUE sign-in{" "}
+              <span className="text-muted-foreground">
+                (optional — off by default)
+              </span>
+            </summary>
+            <div className="mt-4">
+              <p className="mb-4 text-xs text-muted-foreground">
+                RFC 9807 augmented PAKE: the password never reaches the server,
+                on any request. Bootstrap enrols this administrator directly, so
+                turning it on here is the one moment a deployment can start with
+                OPAQUE already working. The server must be started with
+                AXIAM__AUTH__OPAQUE_SESSION_KEY and
+                AXIAM__AUTH__OPAQUE_SETUP_KEY, or bootstrap refuses anything but
+                Disabled.
+              </p>
+              <OpaquePolicyFields
+                idPrefix="bootstrap"
+                value={opaquePolicy}
+                onChange={setOpaquePolicy}
+              />
+            </div>
+          </details>
 
           <div className="space-y-2">
             <Label htmlFor="bootstrap-setup-token">

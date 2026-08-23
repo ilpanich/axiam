@@ -124,8 +124,8 @@ use opaque_ke::{
 };
 
 use axiam_core::models::opaque::{
-    OpaqueCredential, OpaqueKsfParams, OpaqueLoginStartResponse, OpaqueRegisterStartResponse,
-    OpaqueServerSetup, OpaqueSuite, ksf_wire_fields, normalize_hex,
+    OpaqueCredential, OpaqueKsfParams, OpaqueLoginStartResponse, OpaqueMode,
+    OpaqueRegisterStartResponse, OpaqueServerSetup, OpaqueSuite, ksf_wire_fields, normalize_hex,
 };
 
 use crate::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
@@ -640,6 +640,10 @@ impl OpaqueServer {
             log_n,
             r,
             p,
+            // The mode is a settings question and this crate holds no
+            // settings. The REST handler, which read the policy to get here in
+            // the first place, stamps it before the response goes out.
+            mode: OpaqueMode::default(),
         })
     }
 

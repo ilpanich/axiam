@@ -593,3 +593,144 @@ async fn set_tenant_settings_accepts_opaque_when_the_server_keys_are_configured(
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["opaque"]["opaque_mode"], "optional");
 }
+
+// -----------------------------------------------------------------------
+// Enabling OPAQUE provisions the tenant's key material there and then
+// -----------------------------------------------------------------------
+//
+// `opaque_server_setup` used to appear only when somebody first hit
+// `/auth/opaque/*`, so "I turned OPAQUE on and nothing happened" was a correct
+// observation with no way to tell it from a misconfiguration. Provisioning at
+// the settings write puts the one step that can fail server-side — the seal,
+// the row — in the request the operator is watching.
+
+/// Count the tenant's `opaque_server_setup` rows directly. The repository
+/// exposes only `get`/`get_or_create`, and `get_or_create` would create the
+/// row this test is asking about.
+async fn opaque_setup_count(db: &Surreal<TestDb>, tenant_id: Uuid) -> usize {
+    let mut result = db
+        .query(
+            "SELECT VALUE tenant_id FROM opaque_server_setup \
+             WHERE tenant_id = $tenant_id",
+        )
+        .bind(("tenant_id", tenant_id.to_string()))
+        .await
+        .unwrap();
+    let rows: Vec<String> = result.take(0).unwrap();
+    rows.len()
+}
+
+#[actix_rt::test]
+async fn enabling_opaque_on_the_org_provisions_every_tenant() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config_with_opaque_keys();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    assert_eq!(opaque_setup_count(&db, tenant_id).await, 0);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(org_settings_body(Some("optional")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    assert_eq!(
+        opaque_setup_count(&db, tenant_id).await,
+        1,
+        "enabling OPAQUE must leave the tenant with key material, not wait for a login"
+    );
+}
+
+#[actix_rt::test]
+async fn provisioning_is_idempotent_across_repeated_writes() {
+    // `get_or_create` addresses a record id derived from (tenant, suite), so a
+    // second write must find the first row rather than mint a second seed. A
+    // tenant with two seeds has records that only sometimes open.
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config_with_opaque_keys();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for _ in 0..3 {
+        let req = test::TestRequest::put()
+            .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(org_settings_body(Some("optional")))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+    }
+
+    assert_eq!(opaque_setup_count(&db, tenant_id).await, 1);
+}
+
+#[actix_rt::test]
+async fn leaving_opaque_disabled_provisions_nothing() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config_with_opaque_keys();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(org_settings_body(Some("disabled")))
+        .to_request();
+
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+    assert_eq!(opaque_setup_count(&db, tenant_id).await, 0);
+}
+
+#[actix_rt::test]
+async fn a_tenant_override_that_raises_the_mode_provisions_that_tenant() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config_with_opaque_keys();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri("/api/v1/settings")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "opaque_mode": "optional" }))
+        .to_request();
+
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+    assert_eq!(opaque_setup_count(&db, tenant_id).await, 1);
+}
+
+#[actix_rt::test]
+async fn provisioning_failure_does_not_refuse_the_settings_write() {
+    // No OPAQUE keys, and `opaque_mode` left alone: the write inherits the
+    // org's `disabled` baseline, so the guard does not fire and provisioning
+    // has nothing to do. The point is that an unrelated tenant edit still
+    // succeeds on a server that could not provision even if asked.
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri("/api/v1/settings")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "min_length": 16 }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["password"]["min_length"], 16);
+    assert_eq!(opaque_setup_count(&db, tenant_id).await, 0);
+}

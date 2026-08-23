@@ -1,12 +1,12 @@
 //! Security settings endpoints for organizations and tenants.
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::opaque::OpaqueMode;
+use axiam_core::models::opaque::{OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     SecuritySettings, SetOrgSettings, TenantSettingsOverride, effective_settings,
     validate_org_settings, validate_tenant_override,
 };
-use axiam_core::repository::SettingsRepository;
+use axiam_core::repository::{Pagination, SettingsRepository, TenantRepository};
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -40,6 +40,40 @@ fn reject_opaque_without_keys<C: Connection + Clone>(
         }));
     }
     Ok(())
+}
+
+/// Mint a tenant's OPAQUE key material now that OPAQUE is switched on.
+///
+/// `opaque_server_setup` was created lazily, on the first `/auth/opaque/*`
+/// request. That is correct — `get_or_create` is idempotent and is still the
+/// only way key material comes into existence — but it made "did enabling
+/// OPAQUE do anything?" unanswerable: the table stayed empty until somebody
+/// tried to sign in, which is exactly when an operator wants to have already
+/// found out whether the configuration works.
+///
+/// Provisioning at the write moves the one operation that can fail for
+/// server-side reasons — the AES-GCM seal, a database write — to the request
+/// the operator is watching. It stays best-effort: a tenant whose row could
+/// not be written here gets it on first use as before, so a transient failure
+/// delays visibility rather than refusing a settings change.
+async fn provision_opaque_setup<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    suite: OpaqueSuite,
+) {
+    match crate::handlers::opaque::server_setup(state, tenant_id, suite).await {
+        Ok(_) => tracing::info!(
+            %tenant_id,
+            %suite,
+            "provisioned OPAQUE server setup for tenant"
+        ),
+        Err(e) => tracing::warn!(
+            %tenant_id,
+            %suite,
+            error = %e.0,
+            "could not provision OPAQUE server setup; it will be minted on first use"
+        ),
+    }
 }
 
 /// `GET /api/v1/organizations/{org_id}/settings`
@@ -135,7 +169,33 @@ pub async fn set_org_settings<C: Connection + Clone>(
     let input = body.into_inner();
     validate_org_settings(&input)?;
     reject_opaque_without_keys(input.opaque_mode, &state)?;
+    let opaque_mode = input.opaque_mode;
+    let opaque_suite = input.opaque_suite;
     let settings = state.settings_repo.set_org_settings(org_id, input).await?;
+
+    // Switching OPAQUE on at the organization switches it on for every tenant
+    // that has not tightened past it, so every one of them needs key material.
+    // Paged to the end rather than taking the default first page: a partial
+    // sweep would leave later tenants looking un-provisioned for no reason
+    // anybody could see.
+    if opaque_mode != OpaqueMode::Disabled {
+        let mut offset = 0u64;
+        loop {
+            let page = state
+                .tenant_repo
+                .list_by_organization(org_id, Pagination { offset, limit: 200 })
+                .await?;
+            let count = page.items.len() as u64;
+            for tenant in page.items {
+                provision_opaque_setup(&state, tenant.id, opaque_suite).await;
+            }
+            offset += count;
+            if count == 0 || offset >= page.total {
+                break;
+            }
+        }
+    }
+
     Ok(HttpResponse::Ok().json(settings))
 }
 
@@ -221,5 +281,10 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
         .settings_repo
         .store_effective_tenant_settings(user.tenant_id, merged)
         .await?;
+
+    if result.opaque.opaque_mode != OpaqueMode::Disabled {
+        provision_opaque_setup(&state, user.tenant_id, result.opaque.opaque_suite).await;
+    }
+
     Ok(HttpResponse::Ok().json(result))
 }

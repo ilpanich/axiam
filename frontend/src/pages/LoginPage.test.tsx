@@ -770,7 +770,7 @@ describe("LoginPage — OPAQUE", () => {
   });
 
   /** A `login/start` response shaped the way the server sends one. */
-  const loginStarted = () =>
+  const loginStarted = (mode?: "optional" | "required") =>
     res({
       opaque_session: "sealed-session-token",
       ke2: "12".repeat(320),
@@ -779,6 +779,7 @@ describe("LoginPage — OPAQUE", () => {
       memory_kib: 19456,
       iterations: 2,
       parallelism: 1,
+      ...(mode ? { mode } : {}),
     });
 
   it("signs in over OPAQUE without ever posting the password", async () => {
@@ -826,11 +827,30 @@ describe("LoginPage — OPAQUE", () => {
     });
   });
 
-  it("does not retry over the password endpoint when the exchange fails", async () => {
-    // The security property that replaced SRP's server-proof branch: a failed
-    // OPAQUE exchange is a failed login. Retrying it with the plaintext would
-    // hand the password to a server that just failed to prove it holds the
-    // record.
+  it("does not retry over the password endpoint under opaque_mode: required", async () => {
+    // Under `required` a failed exchange is the end of the attempt. `/auth/login`
+    // refuses for the whole tenant before examining any credential, so there is
+    // nothing to fall back to and an honest client puts no plaintext on the wire.
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === OPAQUE_LOGIN_START) return loginStarted("required");
+      return res({});
+    });
+
+    await goToCredentials();
+    await submitCredentials("alice", "wrong-password-entirely");
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+    });
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/login",
+      expect.anything()
+    );
+  });
+
+  it("treats a server that reports no mode as required", async () => {
+    // Older server, no `mode` field. Read it the conservative way: the reading
+    // that never transmits the plaintext.
     apiMock.post.mockImplementation((url: string) => {
       if (url === OPAQUE_LOGIN_START) return loginStarted();
       return res({});
@@ -846,6 +866,32 @@ describe("LoginPage — OPAQUE", () => {
       "/api/v1/auth/login",
       expect.anything()
     );
+  });
+
+  it("falls back to password login under opaque_mode: optional when the exchange fails", async () => {
+    // The regression this exists for. Every account has no registration record
+    // the moment an operator turns OPAQUE on, so under `optional` the decoy
+    // exchange — indistinguishable from a wrong password, by design — is the
+    // ordinary case for every existing user. Ending the attempt there locked
+    // the whole tenant out of an admin UI that tries OPAQUE first.
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === OPAQUE_LOGIN_START) return loginStarted("optional");
+      if (url === "/api/v1/auth/login") return res({ user: { id: "u1" } });
+      return res({});
+    });
+
+    await goToCredentials();
+    // The right password: the exchange fails because there is no record, not
+    // because the password is wrong. The mock's `finish` cannot tell the two
+    // apart either, which is the point — nor can the real client.
+    await submitCredentials("alice", "not-the-mocked-password");
+
+    await waitFor(() => {
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/login",
+        expect.objectContaining({ password: "not-the-mocked-password" })
+      );
+    });
   });
 
   it("reports opaque_required as a protocol refusal, not a wrong password", async () => {

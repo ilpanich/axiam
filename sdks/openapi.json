@@ -12789,6 +12789,11 @@
             "description": "Argon2id memory cost in KiB; absent for scrypt.",
             "minimum": 0
           },
+          "mode": {
+            "type": "string",
+            "description": "The tenant's OPAQUE mode — `optional` or `required`, never `disabled`\n(that path answers `404` instead of reaching here).\n\nThis is what lets a client know whether falling back to\n`POST /auth/login` after a failed exchange is legitimate. Under\n`optional` a client whose envelope did not open — the ordinary case for\na user who has not enrolled yet, which is every user the moment an\noperator turns OPAQUE on — must be able to try the password endpoint,\nor `optional` is not a migration mode but a lockout. Under `required`\nit must not, and an honest client never transmits the plaintext at all.\n\nIt discloses a property of the tenant, not of any user, and the same\nproperty the `404`-vs-`200` split on this endpoint already reveals\nhalf of, so it does not weaken the enumeration guarantee.\n\nNote what it is *not*: downgrade protection against a hostile server.\nA server that wanted the plaintext could always answer `404` and get\nthe fallback regardless of what it puts here. Only `required` — which\nmakes `/auth/login` refuse before examining any credential — closes\nthat, and it closes it server-side where it belongs.",
+            "example": "optional"
+          },
           "opaque_session": {
             "type": "string",
             "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/opaque/login/finish`; the client cannot read or forge it."

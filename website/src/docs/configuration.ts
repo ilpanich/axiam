@@ -570,6 +570,59 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "p",
         text: "The bound applies to attestation only. A ceremony that requests no attestation consults no metadata, so stale metadata cannot have misled it.",
       },
+      { type: "h", id: "ca-key-custody", text: "CA signing key custody" },
+      {
+        type: "p",
+        text: "An organization's CA signing key is the one private key AXIAM persists. By default it is AES-256-GCM ciphertext in the CA record, sealed under `AXIAM__PKI__ENCRYPTION_KEY` — a real control with a bound worth stating: the key and the thing that opens it are in the same blast radius, and nothing anywhere records a read. Pointing the variables below at a HashiCorp Vault moves it somewhere access is a policy that can be scoped and revoked, every read is audited by something that is not AXIAM, and a database dump on its own is inert.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__PKI__VAULT_ADDR",
+            "Vault base address. Setting this and the token turns Vault custody on.",
+            "https://vault.internal:8200",
+          ],
+          [
+            "AXIAM__PKI__VAULT_TOKEN",
+            "A token with `create`/`read`/`update` on `<mount>/data/<prefix>/*` and `delete` on `<mount>/metadata/<prefix>/*`.",
+            "hvs.…",
+          ],
+          [
+            "AXIAM__PKI__VAULT_MOUNT",
+            "KV v2 mount point. Default `secret`, Vault's own default.",
+            "secret",
+          ],
+          [
+            "AXIAM__PKI__VAULT_PREFIX",
+            "Path prefix under the mount. One secret per CA is written beneath it, at `<prefix>/<org_id>/<ca_id>`. Default `axiam/ca-keys`.",
+            "axiam/ca-keys",
+          ],
+          [
+            "AXIAM__PKI__VAULT_CA_CERT_PATH",
+            "Trust anchor for Vault's listener certificate. Required whenever that certificate comes from an internal PKI: the HTTP client is built with rustls, whose roots are compiled in, so there is no `SSL_CERT_FILE` to fall back on. An unreadable file is a startup failure, never a silent fallback to the built-in roots.",
+            "/etc/ssl/certs/vault-ca.pem",
+          ],
+          [
+            "AXIAM__PKI__CA_KEY_STORE",
+            "Which custodian **new** CAs are created with: `database` or `vault`. Rarely needed — an address and a token together already imply `vault`. Naming `vault` without them is a startup failure rather than a fallback.",
+            "vault",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "Custody is recorded per CA, not read from this configuration, and that is the point: a deployment that adopts Vault does not thereby move the CAs it already has. Those records still say `database`, their keys are still sealed into them, and the signing path asks the record rather than the environment — so `AXIAM__PKI__ENCRYPTION_KEY` stays required for as long as any such CA exists. Switching custodian is a decision about new CAs.",
+      },
+      {
+        type: "p",
+        text: "One secret per CA rather than one secret with a field per CA, because Vault policy paths are the unit of access control: “read this organization's CAs and not that one's” is a path glob, and would be unwritable if every key shared one secret. Revocation deletes the *metadata* path — a KV v2 delete on the data path soft-deletes the latest version and leaves it readable by version number, which for a signing key is not deletion.",
+      },
+      {
+        type: "warn",
+        text: "This is custody, not a key that never leaves the custodian. Vault holds the key and audits access to it; the key still reaches AXIAM's memory to sign with. The stronger property needs certificate *issuance* to move there too — Vault's PKI secrets engine, or a KMS, performing the signature rather than storing the key. That is the next step, and nothing on the wire changes when it arrives.",
+      },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {
         type: "p",

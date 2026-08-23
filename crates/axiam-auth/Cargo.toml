@@ -42,7 +42,7 @@ url = { workspace = true }
 webauthn-rs = { workspace = true }
 opaque-ke = { version = "4.0.1", default-features = false, features = ["ristretto255", "std"] }
 sha2_v10 = { version = "0.10", package = "sha2" }
-axiam-opaque = { version = "1.0.0-alpha39", path = "../axiam-opaque" }
+axiam-opaque = { version = "1.0.0-alpha40", path = "../axiam-opaque" }
 # webauthn-rs-proto: was removed once, on the grounds that every type needed
 # here came through a webauthn-rs re-export. That stopped being true with
 # usernameless sign-in: `ResidentKeyRequirement` is the one type

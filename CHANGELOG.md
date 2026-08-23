@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha40] - 2026-08-23
+
+### Added
+
+- Resource-scoped role assignment in the admin UI
+- Expose role assignments with the resource they are scoped to
+- Close the request-shape gaps an OpenAPI sweep found
+- Make the OPAQUE policy settable from the admin UI
+
+### Fixed
+
+- Refuse a settings write that enables OPAQUE without server keys
+- Give .glass-card the padding it never had
+- Exempt the WebAuthn authentication ceremonies from CSRF
+
 ## [1.0.0-alpha39] - 2026-08-23
 
 ### Added

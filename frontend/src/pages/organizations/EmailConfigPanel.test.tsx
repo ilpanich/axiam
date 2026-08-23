@@ -195,6 +195,34 @@ describe("OrgEmailConfigPanel", () => {
       )
     );
   });
+
+  it("surfaces the provider's own rejection from a delivery self-test", async () => {
+    // The regression this exists for: an unverified sender domain produced a
+    // 403 that only ever reached the mail consumer's dead-letter log, so the
+    // admin UI reported the configuration saved and nothing else.
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 400,
+        data: {
+          message:
+            "Email delivery failed: Resend returned 403 Forbidden: the example.com domain is not verified",
+        },
+      },
+    });
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Send test email/ })
+    );
+
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/organizations/o1/email-config/test"
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /domain is not verified/
+    );
+  });
 });
 
 describe("TenantEmailConfigPanel", () => {
@@ -213,30 +241,69 @@ describe("TenantEmailConfigPanel", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
 
-    // No provider key at all — an absent field inherits the org baseline,
-    // which is the entire point of the override endpoint.
+    // No `enabled` and no provider key — an absent field inherits the org
+    // baseline, which is the entire point of the override endpoint. `reply_to`
+    // is `null` rather than absent because the sender group is being
+    // overridden and the box was left empty, which means "clear it".
     await waitFor(() =>
       expect(apiMock.put).toHaveBeenCalledWith(
         "/api/v1/tenants/t1/email-config",
         {
           from_name: "Tenant Co",
           from_email: "hello@tenant.example",
+          reply_to: null,
         }
       )
     );
   });
 
-  it("offers no reply-to override, which the tenant schema cannot store", async () => {
+  it("overrides reply-to along with the rest of the sender identity", async () => {
     apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.put.mockResolvedValue(res({}));
     renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
 
     await userEvent.click(
       await screen.findByRole("checkbox", { name: /Override sender identity/ })
     );
-    // get_tenant_override hard-codes reply_to to None, so a field here would
-    // take a value, appear to save, and silently drop it.
-    expect(screen.getByLabelText("From Name *")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Reply-To")).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("From Name *"), "Tenant Co");
+    await userEvent.type(
+      screen.getByLabelText("From Address *"),
+      "hello@tenant.example"
+    );
+    await userEvent.type(
+      screen.getByLabelText("Reply-To"),
+      "support@tenant.example"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/tenants/t1/email-config",
+        {
+          from_name: "Tenant Co",
+          from_email: "hello@tenant.example",
+          reply_to: "support@tenant.example",
+        }
+      )
+    );
+  });
+
+  it("leaves the delivery switch un-overridden unless the operator asks", async () => {
+    // The regression: the tenant row stored `enabled` unconditionally and read
+    // it back as an override, so every tenant that touched this panel also
+    // took over the organization's delivery switch.
+    apiMock.get.mockResolvedValue(
+      res({ from_name: "Tenant Co", from_email: "hello@tenant.example" })
+    );
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    const deliveryToggle = await screen.findByRole("checkbox", {
+      name: /Override delivery on\/off/,
+    });
+    expect(deliveryToggle).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: /Override sender identity/ })
+    ).toBeChecked();
   });
 
   it("surfaces a failed load rather than showing empty toggles", async () => {
@@ -294,5 +361,24 @@ describe("TenantEmailConfigPanel", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/From name/);
     expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends a delivery self-test through the tenant's effective config", async () => {
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.post.mockResolvedValue(
+      res({ provider: "resend", to: "admin@example.com", message_id: "m-1" })
+    );
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Send test email/ })
+    );
+
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/tenants/t1/email-config/test"
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /resend accepted a message to admin@example.com/
+    );
   });
 });

@@ -4219,6 +4219,47 @@
         ]
       }
     },
+    "/api/v1/organizations/{org_id}/email-config/test": {
+      "post": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/email-config/test`",
+        "operationId": "test_org_email_config",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The provider accepted the message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provider rejected it, or no configuration applies"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/organizations/{org_id}/settings": {
       "get": {
         "tags": [
@@ -7458,6 +7499,47 @@
         "responses": {
           "204": {
             "description": "Tenant email configuration override deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/email-config/test": {
+      "post": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/email-config/test`",
+        "operationId": "test_tenant_email_config",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The provider accepted the message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provider rejected it, or no configuration applies"
           }
         },
         "security": [
@@ -10955,6 +11037,31 @@
           "resend",
           "brevo"
         ]
+      },
+      "EmailTestResult": {
+        "type": "object",
+        "description": "What a test send did.",
+        "required": [
+          "provider",
+          "to"
+        ],
+        "properties": {
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's message id, when it returns one."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Which provider the effective configuration resolved to."
+          },
+          "to": {
+            "type": "string",
+            "description": "Where the message went — always the caller's own address."
+          }
+        }
       },
       "EmailVerificationPolicy": {
         "type": "object",

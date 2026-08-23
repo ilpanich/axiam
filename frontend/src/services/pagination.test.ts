@@ -25,9 +25,7 @@ describe("unwrapList", () => {
   });
 
   it("takes items out of a paginated envelope", () => {
-    expect(unwrapList({ items: [{ id: "a" }], total: 1 })).toEqual([
-      { id: "a" },
-    ]);
+    expect(unwrapList({ items: [{ id: "a" }] })).toEqual([{ id: "a" }]);
   });
 
   it("treats null, undefined and a missing items key as empty", () => {

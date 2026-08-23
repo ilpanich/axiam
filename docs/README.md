@@ -48,6 +48,10 @@ Task-oriented guides for operators and integrators.
   webhook vs. listener Reactor, failure-policy implications, the listener
   idempotency note, and how to register one; the wire protocol itself is
   normative in [`sdks/CONTRACT.md` §22](../sdks/CONTRACT.md)
+- [`admin/email-delivery.md`](./admin/email-delivery.md) — how an email
+  configuration resolves through the org→tenant cascade, which fields are
+  tri-state, the delivery self-test endpoint, and what each provider requires
+  of the sender domain before it will accept a message
 - [`pki/README.md`](./pki/README.md) — certificate lifecycle: CA issuance,
   leaf cert issuance, mTLS binding, revocation
 

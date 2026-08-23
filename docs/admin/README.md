@@ -10,7 +10,9 @@ and permissions, and assigning roles. See also:
 [PKI Guide](../pki/README.md) (certificates),
 [Authenticator policies](authenticator-policies.md) (WebAuthn attestation
 policy, MDS3 operations), [Reactors](reactors.md) (external hook actors —
-webhook vs. listener Reactor, failure-policy implications), [API
+webhook vs. listener Reactor, failure-policy implications),
+[Email delivery](email-delivery.md) (org/tenant inheritance, the delivery
+self-test, per-provider sender-domain requirements), [API
 docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,

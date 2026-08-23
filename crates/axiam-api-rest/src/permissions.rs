@@ -772,6 +772,20 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/tenants/{tenant_id}/email-config",
         "email_config:write",
     ),
+    // The delivery self-test sends real mail through the configured provider.
+    // Gated on `email_config:write` rather than `:read`: it is the permission
+    // that could change the sender identity anyway, and a read-only viewer
+    // should not be able to make the system emit traffic.
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/email-config/test",
+        "email_config:write",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/email-config/test",
+        "email_config:write",
+    ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (
         "GET",

@@ -96,9 +96,14 @@ struct EmailConfigRowWithId {
     scope: String,
     scope_id: String,
     enabled: bool,
+    /// Schema v43, tenant rows only: `None` inherits the org's delivery switch.
+    enabled_override: Option<bool>,
     from_name: String,
     from_email: String,
     reply_to: Option<String>,
+    /// Schema v43, tenant rows only: when true this row's `reply_to` is
+    /// authoritative, including a `None` that clears the org's reply-to.
+    reply_to_overridden: Option<bool>,
     provider_kind: String,
     smtp_host: Option<String>,
     smtp_port: Option<i64>,
@@ -271,10 +276,17 @@ impl EmailConfigRowWithId {
 // Bind helpers — encrypt provider secrets for DB write
 // ---------------------------------------------------------------------------
 
-/// Existing secret ciphertext/nonce columns for an org's email_config row,
-/// used by `set_org_config`'s D-02 preserve-on-omit merge.
+/// Existing secret ciphertext/nonce columns for an `email_config` row, used by
+/// the D-02 preserve-on-omit merge on both the org and tenant write paths.
+///
+/// `provider_kind` comes along because a stored secret only belongs to the
+/// provider it was entered for. Carrying a SendGrid API key over to a Resend
+/// row because the operator left the key field blank while switching providers
+/// would store a credential that authenticates nowhere, behind a UI that says
+/// a secret is kept.
 #[derive(Debug, SurrealValue)]
 struct ExistingSecretColumns {
+    provider_kind: String,
     smtp_password_ciphertext: Option<String>,
     smtp_password_nonce: Option<String>,
     api_key_ciphertext: Option<String>,
@@ -437,24 +449,26 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
     }
 
     /// Fetch the currently-stored secret ciphertext/nonce columns for an
-    /// org's email_config row, if one exists. Used by `set_org_config`'s
-    /// D-02 preserve-on-omit merge to keep the stored secret unchanged when
-    /// a write omits it, instead of overwriting it with ciphertext of an
-    /// empty value.
-    async fn fetch_org_secret_columns(
+    /// `email_config` row at `scope`/`scope_id`, if one exists. Used by the
+    /// D-02 preserve-on-omit merge to keep the stored secret unchanged when a
+    /// write omits it, instead of overwriting it with ciphertext of an empty
+    /// value.
+    async fn fetch_secret_columns(
         &self,
-        org_id: Uuid,
+        scope: &str,
+        scope_id: Uuid,
     ) -> AxiamResult<Option<ExistingSecretColumns>> {
         let result = self
             .db
             .current()
             .query(
-                "SELECT smtp_password_ciphertext, smtp_password_nonce, \
-                        api_key_ciphertext, api_key_nonce \
+                "SELECT provider_kind, smtp_password_ciphertext, \
+                        smtp_password_nonce, api_key_ciphertext, api_key_nonce \
                  FROM email_config \
-                 WHERE scope = 'org' AND scope_id = $scope_id",
+                 WHERE scope = $scope AND scope_id = $scope_id",
             )
-            .bind(("scope_id", org_id.to_string()))
+            .bind(("scope", scope.to_string()))
+            .bind(("scope_id", scope_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
@@ -463,6 +477,62 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<ExistingSecretColumns> = result.take(0).map_err(DbError::from)?;
         Ok(rows.into_iter().next())
+    }
+
+    /// Apply the D-02 preserve-on-omit rule to an about-to-be-written row.
+    ///
+    /// An empty secret on the write path means "no new secret supplied". The
+    /// stored ciphertext is carried forward — but only when the row already
+    /// holds a secret *for the same provider kind*, because a secret entered
+    /// for one provider is not a credential for another.
+    ///
+    /// Shared by both scopes. The tenant path went without it for its whole
+    /// life, so saving a tenant provider override without re-typing the API key
+    /// stored the ciphertext of an empty string; every send then failed
+    /// provider authentication while the panel reported the override saved.
+    async fn preserve_omitted_secret(
+        &self,
+        scope: &str,
+        scope_id: Uuid,
+        provider: &ProviderConfig,
+        encrypted: &mut EncryptedProviderBinds,
+    ) -> AxiamResult<()> {
+        let secret_omitted = match provider {
+            ProviderConfig::Smtp(smtp) => smtp.password.is_empty(),
+            ProviderConfig::SendGrid(api)
+            | ProviderConfig::Postmark(api)
+            | ProviderConfig::Resend(api)
+            | ProviderConfig::Brevo(api) => api.api_key.is_empty(),
+        };
+        if !secret_omitted {
+            return Ok(());
+        }
+
+        let Some(existing) = self.fetch_secret_columns(scope, scope_id).await? else {
+            return Ok(());
+        };
+        if existing.provider_kind != encrypted.provider_kind {
+            return Ok(());
+        }
+
+        match provider {
+            ProviderConfig::Smtp(_) => {
+                if existing.smtp_password_ciphertext.is_some() {
+                    encrypted.smtp_password_ciphertext = existing.smtp_password_ciphertext;
+                    encrypted.smtp_password_nonce = existing.smtp_password_nonce;
+                }
+            }
+            ProviderConfig::SendGrid(_)
+            | ProviderConfig::Postmark(_)
+            | ProviderConfig::Resend(_)
+            | ProviderConfig::Brevo(_) => {
+                if existing.api_key_ciphertext.is_some() {
+                    encrypted.api_key_ciphertext = existing.api_key_ciphertext;
+                    encrypted.api_key_nonce = existing.api_key_nonce;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -498,35 +568,9 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         // D-02: an empty secret on the write path means "no new secret
         // supplied" — preserve whatever ciphertext is already stored rather
         // than persisting ciphertext of an empty value.
-        let secret_omitted = match &input.provider {
-            ProviderConfig::Smtp(smtp) => smtp.password.is_empty(),
-            ProviderConfig::SendGrid(api)
-            | ProviderConfig::Postmark(api)
-            | ProviderConfig::Resend(api)
-            | ProviderConfig::Brevo(api) => api.api_key.is_empty(),
-        };
-
         let mut encrypted = encrypt_provider(&input.provider, &self.key)?;
-
-        if secret_omitted && let Some(existing) = self.fetch_org_secret_columns(org_id).await? {
-            match &input.provider {
-                ProviderConfig::Smtp(_) => {
-                    if existing.smtp_password_ciphertext.is_some() {
-                        encrypted.smtp_password_ciphertext = existing.smtp_password_ciphertext;
-                        encrypted.smtp_password_nonce = existing.smtp_password_nonce;
-                    }
-                }
-                ProviderConfig::SendGrid(_)
-                | ProviderConfig::Postmark(_)
-                | ProviderConfig::Resend(_)
-                | ProviderConfig::Brevo(_) => {
-                    if existing.api_key_ciphertext.is_some() {
-                        encrypted.api_key_ciphertext = existing.api_key_ciphertext;
-                        encrypted.api_key_nonce = existing.api_key_nonce;
-                    }
-                }
-            }
-        }
+        self.preserve_omitted_secret("org", org_id, &input.provider, &mut encrypted)
+            .await?;
 
         // Clone fields we need post-move for the domain object reconstruction.
         let enabled = input.enabled;
@@ -676,10 +720,20 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         };
 
         Ok(Some(EmailConfigOverride {
-            enabled: Some(row.enabled),
+            // Schema v43: `enabled_override` is the tri-state. `enabled` is
+            // still written for schema compatibility but says nothing about
+            // intent, which is why reading it here used to report every tenant
+            // as overriding the org's delivery switch.
+            enabled: row.enabled_override,
             from_name: Some(row.from_name).filter(|s| !s.is_empty()),
             from_email: Some(row.from_email).filter(|s| !s.is_empty()),
-            reply_to: None, // not stored per-tenant in current schema
+            // `Some(None)` clears the org's reply-to; plain `None` inherits it.
+            // Only the flag distinguishes them.
+            reply_to: if row.reply_to_overridden.unwrap_or(false) {
+                Some(row.reply_to)
+            } else {
+                None
+            },
             provider,
         }))
     }
@@ -689,31 +743,34 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         tenant_id: Uuid,
         input: SetTenantEmailOverride,
     ) -> AxiamResult<EmailConfigOverride> {
-        let provider_kind;
-        let encrypted;
-
-        if let Some(ref p) = input.provider {
-            let enc = encrypt_provider(p, &self.key)?;
-            provider_kind = enc.provider_kind.clone();
-            encrypted = Some(enc);
-        } else {
-            provider_kind = String::new();
-            encrypted = None;
-        }
-
-        let enc = encrypted.unwrap_or_else(|| EncryptedProviderBinds {
-            provider_kind: String::new(),
-            smtp_host: None,
-            smtp_port: None,
-            smtp_username: None,
-            smtp_starttls: None,
-            smtp_password_ciphertext: None,
-            smtp_password_nonce: None,
-            api_url: None,
-            api_key_ciphertext: None,
-            api_key_nonce: None,
-            secret_key_version: 0,
-        });
+        let enc = match input.provider {
+            Some(ref p) => {
+                let mut enc = encrypt_provider(p, &self.key)?;
+                // D-02, same contract the org path has always honoured: an
+                // empty secret means "keep the stored one". Without this a
+                // tenant override saved from the admin panel — which sends a
+                // blank secret whenever the operator does not re-type it —
+                // replaced the stored API key with the ciphertext of an empty
+                // string, and every send then failed provider authentication.
+                self.preserve_omitted_secret("tenant", tenant_id, p, &mut enc)
+                    .await?;
+                enc
+            }
+            None => EncryptedProviderBinds {
+                provider_kind: String::new(),
+                smtp_host: None,
+                smtp_port: None,
+                smtp_username: None,
+                smtp_starttls: None,
+                smtp_password_ciphertext: None,
+                smtp_password_nonce: None,
+                api_url: None,
+                api_key_ciphertext: None,
+                api_key_nonce: None,
+                secret_key_version: 0,
+            },
+        };
+        let provider_kind = enc.provider_kind.clone();
 
         // CQ-B41: UPSERT keyed on (scope, scope_id) — idempotent whether or
         // not a tenant override row already exists for this tenant.
@@ -732,9 +789,11 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
                  scope = 'tenant', \
                  scope_id = $scope_id, \
                  enabled = $enabled, \
+                 enabled_override = $enabled_override, \
                  from_name = $from_name, \
                  from_email = $from_email, \
-                 reply_to = NONE, \
+                 reply_to = $reply_to, \
+                 reply_to_overridden = $reply_to_overridden, \
                  provider_kind = $provider_kind, \
                  smtp_host = $smtp_host, \
                  smtp_port = $smtp_port, \
@@ -751,9 +810,14 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
             )
             .bind(("record_id", tenant_record_id))
             .bind(("scope_id", tenant_id.to_string()))
+            // `enabled` keeps the schema's non-null column populated; only
+            // `enabled_override` carries intent.
             .bind(("enabled", input.enabled.unwrap_or(true)))
+            .bind(("enabled_override", input.enabled))
             .bind(("from_name", input.from_name.clone().unwrap_or_default()))
             .bind(("from_email", input.from_email.clone().unwrap_or_default()))
+            .bind(("reply_to", input.reply_to.clone().flatten()))
+            .bind(("reply_to_overridden", input.reply_to.is_some()))
             .bind(("provider_kind", provider_kind))
             .bind(("smtp_host", enc.smtp_host))
             .bind(("smtp_port", enc.smtp_port))
@@ -1299,6 +1363,307 @@ mod tests {
 
         repo.delete_tenant_override(tenant_id).await.unwrap();
         assert!(repo.get_tenant_override(tenant_id).await.unwrap().is_none());
+    }
+
+    // --- Tenant tri-state overrides (schema v43) ---
+
+    #[tokio::test]
+    async fn tenant_override_that_omits_enabled_inherits_the_org_switch() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: false,
+                from_name: "Org".into(),
+                from_email: "org@example.com".into(),
+                reply_to: None,
+                provider: ProviderConfig::Resend(ApiProviderConfig {
+                    api_key: "org_key".into(),
+                    api_url: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The operator overrode only the sender. Before v43 the write stored
+        // `enabled = true` regardless, and the read reported it as an
+        // override — silently switching delivery on for a tenant under an
+        // organization that had it off.
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                enabled: None,
+                from_name: Some("Tenant".into()),
+                from_email: Some("tenant@example.com".into()),
+                reply_to: None,
+                provider: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        assert_eq!(fetched.enabled, None, "an untouched switch must inherit");
+
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!effective.enabled);
+        assert_eq!(effective.from_name, "Tenant");
+    }
+
+    #[tokio::test]
+    async fn tenant_override_can_still_set_the_switch_explicitly() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+
+        for want in [Some(true), Some(false)] {
+            repo.set_tenant_override(
+                tenant_id,
+                SetTenantEmailOverride {
+                    enabled: want,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+            assert_eq!(fetched.enabled, want);
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_override_can_set_and_clear_reply_to() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: true,
+                from_name: "Org".into(),
+                from_email: "org@example.com".into(),
+                reply_to: Some("org-support@example.com".into()),
+                provider: ProviderConfig::Resend(ApiProviderConfig {
+                    api_key: "org_key".into(),
+                    api_url: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Inherit: no tenant row at all.
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            effective.reply_to.as_deref(),
+            Some("org-support@example.com")
+        );
+
+        // Override with the tenant's own address.
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                reply_to: Some(Some("tenant-support@example.com".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.reply_to,
+            Some(Some("tenant-support@example.com".into()))
+        );
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            effective.reply_to.as_deref(),
+            Some("tenant-support@example.com")
+        );
+
+        // Clear it: `Some(None)` is distinct from `None`, and only the
+        // v43 flag column can tell them apart once stored.
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                reply_to: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        assert_eq!(fetched.reply_to, Some(None));
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effective.reply_to, None);
+
+        // Back to inheriting.
+        repo.set_tenant_override(tenant_id, SetTenantEmailOverride::default())
+            .await
+            .unwrap();
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        assert_eq!(fetched.reply_to, None);
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            effective.reply_to.as_deref(),
+            Some("org-support@example.com")
+        );
+    }
+
+    // --- D-02 on the tenant write path ---
+
+    #[tokio::test]
+    async fn set_tenant_override_omitted_api_key_preserves_the_stored_one() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+        let secret = fixture_secret();
+
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                provider: Some(ProviderConfig::Resend(ApiProviderConfig {
+                    api_key: secret.clone(),
+                    api_url: None,
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The admin panel sends a blank secret whenever the operator does not
+        // re-type it. Before this fix that stored the ciphertext of "" and
+        // every send failed provider authentication.
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                from_name: Some("Renamed".into()),
+                provider: Some(ProviderConfig::Resend(ApiProviderConfig {
+                    api_key: String::new(),
+                    api_url: Some("https://api.resend.com/emails".into()),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        match fetched.provider {
+            Some(ProviderConfig::Resend(api)) => {
+                assert_eq!(api.api_key, secret, "the stored key must survive");
+                assert_eq!(
+                    api.api_url.as_deref(),
+                    Some("https://api.resend.com/emails")
+                );
+            }
+            other => panic!("expected a Resend override, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_tenant_override_supplied_api_key_replaces_the_stored_one() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+
+        for key in ["first-key", "second-key"] {
+            repo.set_tenant_override(
+                tenant_id,
+                SetTenantEmailOverride {
+                    provider: Some(ProviderConfig::Brevo(ApiProviderConfig {
+                        api_key: key.into(),
+                        api_url: None,
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let fetched = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+        match fetched.provider {
+            Some(ProviderConfig::Brevo(api)) => assert_eq!(api.api_key, "second-key"),
+            other => panic!("expected a Brevo override, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_provider_kind_does_not_inherit_the_previous_secret() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: true,
+                from_name: "Org".into(),
+                from_email: "org@example.com".into(),
+                reply_to: None,
+                provider: ProviderConfig::SendGrid(ApiProviderConfig {
+                    api_key: "sendgrid-key".into(),
+                    api_url: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Switching SendGrid → Resend with a blank key must not carry the
+        // SendGrid key across: it is not a Resend credential, and preserving
+        // it would authenticate nowhere while the panel claimed a secret was
+        // kept. The row is then unreadable, which is the honest outcome — the
+        // provider has no credential.
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: true,
+                from_name: "Org".into(),
+                from_email: "org@example.com".into(),
+                reply_to: None,
+                provider: ProviderConfig::Resend(ApiProviderConfig {
+                    api_key: String::new(),
+                    api_url: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let fetched = repo.get_org_config(org_id).await.unwrap().unwrap();
+        match fetched.provider {
+            ProviderConfig::Resend(api) => assert_ne!(api.api_key, "sendgrid-key"),
+            other => panic!("expected a Resend config, got {other:?}"),
+        }
     }
 
     #[tokio::test]

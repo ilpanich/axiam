@@ -634,6 +634,12 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                web::resource("/organizations/{org_id}/email-config/test")
+                    .route(web::post().to(
+                        handlers::email_config::test_org_email_config::<C>,
+                    )),
+            )
+            .service(
                 web::resource("/organizations/{org_id}/tenants")
                     .route(web::post().to(handlers::tenants::create::<C>))
                     .route(web::get().to(handlers::tenants::list::<C>)),
@@ -1042,6 +1048,12 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::delete().to(
                         handlers::email_config::delete_tenant_email_config::<C>,
+                    )),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/email-config/test")
+                    .route(web::post().to(
+                        handlers::email_config::test_tenant_email_config::<C>,
                     )),
             )
             // --- Tenant WebAuthn Attestation Policy (X3 wave 3, explicit

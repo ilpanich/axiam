@@ -252,6 +252,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "opaque_replaces_srp",
         sql: SCHEMA_V42,
     },
+    Migration {
+        version: 43,
+        name: "email_config_tenant_override_tristate",
+        sql: SCHEMA_V43,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2447,6 +2452,37 @@ UPDATE security_settings SET opaque_mode = 'disabled' WHERE opaque_mode = NONE;
 UPDATE security_settings SET opaque_suite = 'ristretto255_sha512' \
     WHERE opaque_suite = NONE;
 UPDATE security_settings SET opaque_ksf = 'argon2id' WHERE opaque_ksf = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v43 — a tenant email override says *which* fields it overrides
+// -----------------------------------------------------------------------
+//
+// The tenant row reused the org row's columns, which have no way to say
+// "inherit this one". `enabled` is the clearest case: every tenant write
+// stored a bool, so the read path handed back `Some(..)` for a field the
+// operator never touched and the merge treated it as a deliberate override.
+// `reply_to` had the opposite problem — no tenant column at all, so a tenant
+// could not override it even deliberately.
+//
+// Two columns, both meaningful only on `scope = 'tenant'` rows:
+//
+//   * `enabled_override` — NONE inherits the org's delivery switch.
+//   * `reply_to_overridden` — when true, this row's `reply_to` is
+//     authoritative, *including* a NONE that clears the org's reply-to.
+//     Without the flag those two states are the same value.
+
+const SCHEMA_V43: &str = "\
+DEFINE FIELD IF NOT EXISTS enabled_override ON TABLE email_config \
+    TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS reply_to_overridden ON TABLE email_config \
+    TYPE bool DEFAULT false;
+-- Existing tenant rows stored `enabled` from `input.enabled.unwrap_or(true)`,
+-- so an explicit override and an untouched field are indistinguishable now.
+-- Carry the stored value forward as explicit: reading it as \"inherit\" would
+-- silently switch delivery off for a tenant that had deliberately turned it on
+-- while the organization's own switch was off.
+UPDATE email_config SET enabled_override = enabled WHERE scope = 'tenant';
 ";
 
 #[cfg(test)]

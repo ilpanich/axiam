@@ -25,6 +25,10 @@ futures-lite = { workspace = true }
 # `saml` feature below re-enables it (on by default via this crate's `default`).
 axiam-federation = { workspace = true }
 axiam-pki = { workspace = true }
+# `POST /{scope}/email-config/test` builds the configured provider and sends
+# one message inline, so the operator sees the provider's own rejection at
+# save time instead of finding it hours later in the AMQP dead-letter log.
+axiam-email = { workspace = true }
 actix-web = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -70,10 +74,6 @@ surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 totp-rs = { workspace = true }
 jsonwebtoken = { workspace = true }
-# 23-06: real template rendering in the action_url substitution test — proves
-# the emailed link is fully substituted, not a source-file grep (23-RESEARCH
-# Pitfall 3).
-axiam-email = { workspace = true }
 # 24-06: captures the structured tracing audit DLQ event as a plain writer in
 # gdpr_audit_dlq_test.rs, asserting the "audit syslog" sink fires (SECHRD-12).
 tracing-subscriber = { workspace = true }

@@ -205,6 +205,8 @@ use crate::handlers;
         handlers::email_config::get_tenant_email_config,
         handlers::email_config::set_tenant_email_config,
         handlers::email_config::delete_tenant_email_config,
+        handlers::email_config::test_org_email_config,
+        handlers::email_config::test_tenant_email_config,
         // Federation
         handlers::federation::create,
         handlers::federation::list,
@@ -447,6 +449,7 @@ use crate::handlers;
         axiam_core::models::email::EmailConfig,
         axiam_core::models::email::EmailConfigOverride,
         axiam_core::models::email::SetOrgEmailConfig,
+        handlers::email_config::EmailTestResult,
         axiam_core::models::email::ProviderConfig,
         axiam_core::models::email::SmtpConfig,
         axiam_core::models::email::ApiProviderConfig,

@@ -20,8 +20,11 @@ use axiam_core::models::email::{
     EmailConfig, EmailConfigOverride, ProviderConfig, SetOrgEmailConfig, SetTenantEmailOverride,
     validate_email_config,
 };
-use axiam_core::repository::EmailConfigRepository;
+use axiam_core::repository::{EmailConfigRepository, UserRepository};
 use axiam_db::SurrealEmailConfigRepository;
+use axiam_email::message::EmailMessage;
+use axiam_email::service::EmailService;
+use serde::Serialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -348,6 +351,157 @@ pub async fn delete_tenant_email_config<C: Connection + Clone>(
     let repo = require_email_config_repo(&state)?;
     repo.delete_tenant_override(tenant_id).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// ---------------------------------------------------------------------------
+// Delivery self-test
+// ---------------------------------------------------------------------------
+
+/// What a test send did.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EmailTestResult {
+    /// Which provider the effective configuration resolved to.
+    pub provider: String,
+    /// Where the message went — always the caller's own address.
+    pub to: String,
+    /// The provider's message id, when it returns one.
+    pub message_id: Option<String>,
+}
+
+/// Send one message through the effective configuration and report what happened.
+///
+/// Everything about a mail misconfiguration is otherwise invisible from the
+/// admin UI. `PUT` validates structure only (D-15), delivery happens on an AMQP
+/// consumer in another process, and a rejection — an unverified sender domain,
+/// a revoked API key — surfaces only as a dead-letter three retries later, in a
+/// log the operator configuring email is not watching. This runs the same
+/// resolve → build → send path inline and hands back the provider's own words.
+///
+/// Two things keep it from being an open relay. The recipient is read from the
+/// authenticated caller's own user record and is not a request parameter, so
+/// the endpoint can only mail the person invoking it; and it is gated on
+/// `email_config:write`, the permission that could change the sender identity
+/// anyway.
+async fn run_email_test<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let repo = require_email_config_repo(state)?;
+    let config = repo
+        .get_effective_config(user.org_id, user.tenant_id)
+        .await?
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::EmailConfig(
+                "no email configuration applies to this tenant: set one on the \
+                 organization, or override it on the tenant"
+                    .into(),
+            ))
+        })?;
+
+    // The recipient is the caller's own address, from the database — never
+    // anything the request supplied.
+    let recipient = state
+        .user_repo
+        .get_by_id(user.tenant_id, user.user_id)
+        .await?
+        .email;
+
+    let service = EmailService::from_config(&config).map_err(AxiamApiError)?;
+    let provider = service.provider_name().to_string();
+
+    let sender = format!("{} <{}>", config.from_name, config.from_email);
+    let message = EmailMessage {
+        to: recipient.clone(),
+        subject: "AXIAM email configuration test".into(),
+        text_body: Some(format!(
+            "This is a test message from AXIAM.\n\n\
+             If you are reading it, the {provider} configuration works and mail \
+             sent from {sender} reaches you.\n"
+        )),
+        html_body: None,
+    };
+
+    let result = service.send(&message).await.map_err(AxiamApiError)?;
+
+    Ok(HttpResponse::Ok().json(EmailTestResult {
+        provider,
+        to: recipient,
+        message_id: result.message_id,
+    }))
+}
+
+/// `POST /api/v1/organizations/{org_id}/email-config/test`
+#[utoipa::path(
+    post,
+    path = "/api/v1/organizations/{org_id}/email-config/test",
+    tag = "email-config",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+    ),
+    responses(
+        (status = 200, description = "The provider accepted the message",
+         body = EmailTestResult),
+        (status = 400, description = "The provider rejected it, or no configuration applies"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn test_org_email_config<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("email_config:write", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let org_id = path.into_inner();
+
+    if org_id != user.org_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot test email configuration for a different organization".into(),
+            action: None,
+            resource_id: None,
+        }));
+    }
+
+    run_email_test(&user, &state).await
+}
+
+/// `POST /api/v1/tenants/{tenant_id}/email-config/test`
+#[utoipa::path(
+    post,
+    path = "/api/v1/tenants/{tenant_id}/email-config/test",
+    tag = "email-config",
+    params(
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    responses(
+        (status = 200, description = "The provider accepted the message",
+         body = EmailTestResult),
+        (status = 400, description = "The provider rejected it, or no configuration applies"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn test_tenant_email_config<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("email_config:write", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let tenant_id = path.into_inner();
+
+    if tenant_id != user.tenant_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot test email configuration for a different tenant".into(),
+            action: None,
+            resource_id: None,
+        }));
+    }
+
+    run_email_test(&user, &state).await
 }
 
 #[cfg(test)]

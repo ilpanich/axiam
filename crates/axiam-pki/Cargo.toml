@@ -47,6 +47,12 @@ axiam-db = { workspace = true }
 # `pgp`, so this adds a dependency edge, not a new crate.
 rsa = "0.9"
 
+# Test-only: a real HTTP server for the Vault CA key store's request paths, so
+# the URL, headers, body shape and status handling are exercised rather than
+# only the string that builds the URL. Already a dev-dependency of five other
+# crates in this workspace.
+wiremock = "0.6"
+
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 uuid = { workspace = true }

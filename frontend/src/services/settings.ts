@@ -1,4 +1,12 @@
 import api from "@/lib/api";
+import type {
+  OpaqueKsf,
+  OpaqueMode,
+  OpaquePolicy,
+  OpaqueSuite,
+} from "@/services/opaquePolicy";
+
+export type { OpaqueKsf, OpaqueMode, OpaquePolicy, OpaqueSuite };
 
 // ─── Backend-aligned nested READ shape ─────────────────────────────────────────
 // GET /api/v1/settings returns the effective (merged) `SecuritySettings`.
@@ -57,6 +65,11 @@ export interface SecuritySettings {
   email: EmailVerificationPolicy;
   certificate: CertificatePolicy;
   notification: NotificationPolicy;
+  /**
+   * OPAQUE (RFC 9807) policy. Always present on a current server; see
+   * `readOpaquePolicy` for why the write paths never read it directly.
+   */
+  opaque: OpaquePolicy;
   created_at: string;
   updated_at: string;
 }
@@ -94,6 +107,11 @@ export interface TenantSettingsOverride {
   max_cert_validity_days?: number;
   // Notification
   admin_notifications_enabled?: boolean;
+  // OPAQUE — tighten-only, like every other field here: the server refuses a
+  // mode below the org baseline, or a weaker suite/KSF.
+  opaque_mode?: OpaqueMode;
+  opaque_suite?: OpaqueSuite;
+  opaque_ksf?: OpaqueKsf;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────

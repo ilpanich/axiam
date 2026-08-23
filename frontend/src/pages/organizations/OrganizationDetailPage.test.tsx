@@ -29,6 +29,9 @@ const baseSettings: SetOrgSettings = {
   default_cert_validity_days: 365,
   max_cert_validity_days: 730,
   admin_notifications_enabled: true,
+  opaque_mode: "optional",
+  opaque_suite: "ristretto255_sha512",
+  opaque_ksf: "argon2id",
 };
 
 describe("shouldSeedForm (init-once guard)", () => {

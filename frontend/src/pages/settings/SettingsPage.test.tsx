@@ -47,6 +47,11 @@ const settings: SecuritySettings = {
   notification: {
     admin_notifications_enabled: true,
   },
+  opaque: {
+    opaque_mode: "optional",
+    opaque_suite: "ristretto255_sha512",
+    opaque_ksf: "argon2id",
+  },
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
 };
@@ -167,6 +172,72 @@ describe("SettingsPage", () => {
       admin_notifications_enabled: true,
     });
     expect(apiMock.put).toHaveBeenCalledWith("/api/v1/settings", body);
+  });
+
+  it("renders the effective OPAQUE policy in view mode", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    expect(await screen.findByText("Optional")).toBeInTheDocument();
+    expect(
+      screen.getByText("ristretto255 / SHA-512 (RFC 9807 recommended)")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Argon2id (stronger)")).toBeInTheDocument();
+  });
+
+  it("sends the OPAQUE policy as part of the tenant override", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      opaque_mode: "required",
+      opaque_suite: "ristretto255_sha512",
+      opaque_ksf: "argon2id",
+    });
+  });
+
+  // A tenant may only tighten. This page sees just the merged result, so the
+  // advisory is a warning rather than a block — relaxing a tenant override back
+  // towards a lower org baseline is legal, and the server has the last word.
+  it("warns when a selection relaxes the effective policy, without blocking it", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "disabled");
+
+    expect(
+      await screen.findByText(/relaxes the tenant's current effective OPAQUE policy/)
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeEnabled();
+  });
+
+  it("surfaces the server's tighten-only rejection verbatim", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 400",
+      response: {
+        status: 400,
+        data: {
+          error: "validation_error",
+          message:
+            "Tenant override violates org baseline: opaque_mode: tenant value disabled is less restrictive than org baseline optional",
+        },
+      },
+    });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "disabled");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText(/is less restrictive than org baseline optional/)
+    ).toBeInTheDocument();
   });
 
   it("shows a success message and returns to view mode after a successful save", async () => {

@@ -100,6 +100,11 @@ const settings: SecuritySettings = {
   },
   certificate: { default_cert_validity_days: 365, max_cert_validity_days: 730 },
   notification: { admin_notifications_enabled: true },
+  opaque: {
+    opaque_mode: "optional",
+    opaque_suite: "ristretto255_sha512",
+    opaque_ksf: "argon2id",
+  },
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
 };
@@ -424,6 +429,79 @@ describe("OrganizationDetailPage — settings tab", () => {
     await waitFor(() =>
       expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument()
     );
+  });
+
+  // The bug this guards: the frontend's SetOrgSettings had no opaque_* keys, so
+  // every save from this form omitted them — and the backend defaults them to
+  // `disabled` — silently turning OPAQUE off org-wide whenever an admin edited
+  // an unrelated field.
+  it("carries the loaded OPAQUE policy through a save that never touches it", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    const minLen = await screen.findByLabelText("Minimum length");
+    fireEvent.change(minLen, { target: { value: "10" } });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith(
+      URLS.settings,
+      expect.objectContaining({
+        opaque_mode: "optional",
+        opaque_suite: "ristretto255_sha512",
+        opaque_ksf: "argon2id",
+      })
+    );
+  });
+
+  it("seeds the OPAQUE selects from the loaded baseline", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    await goToSettings();
+    expect(await screen.findByLabelText("Mode")).toHaveValue("optional");
+    expect(screen.getByLabelText("Key-stretching function")).toHaveValue("argon2id");
+  });
+
+  it("saves a changed OPAQUE mode and warns before requiring it", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    const mode = await screen.findByLabelText("Mode");
+    await userEvent.selectOptions(mode, "required");
+
+    expect(
+      await screen.findByText(/locks out anyone without a registration/)
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Unsaved changes")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        URLS.settings,
+        expect.objectContaining({ opaque_mode: "required" })
+      )
+    );
+  });
+
+  it("prefers the server's rejection reason over the transport message", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 400",
+      response: {
+        status: 400,
+        data: {
+          error: "validation_error",
+          message: "opaque_mode is set but no OPAQUE keys are configured",
+        },
+      },
+    });
+    await goToSettings();
+    const mode = await screen.findByLabelText("Mode");
+    await userEvent.selectOptions(mode, "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText("opaque_mode is set but no OPAQUE keys are configured")
+    ).toBeInTheDocument();
   });
 
   it("toggles a checkbox to mark the form dirty", async () => {

@@ -14,6 +14,8 @@ import {
   type GenerateCaCertPayload,
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
+import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -747,8 +749,14 @@ function SettingsTab({
       setTimeout(() => setSaveSuccess(false), 3000);
     },
     onError: (err: unknown) => {
+      // Prefer the server's own text: a rejected settings write explains which
+      // field it refused and why, which "Request failed with status code 400"
+      // does not. The Error branch stays as the fallback for transport errors.
       setSaveError(
-        err instanceof Error ? err.message : "Failed to save settings."
+        getApiErrorMessage(
+          err,
+          err instanceof Error ? err.message : "Failed to save settings."
+        )
       );
     },
   });
@@ -1064,6 +1072,31 @@ function SettingsTab({
               }
             />
           </div>
+        </div>
+
+        {/* OPAQUE (RFC 9807) */}
+        <div className="glass-card space-y-4">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">
+              OPAQUE (RFC 9807)
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              The augmented PAKE baseline for every tenant in this organization.
+              A tenant may tighten it — never relax it. Off by default.
+            </p>
+          </div>
+
+          <OpaquePolicyFields
+            idPrefix="org"
+            value={{
+              opaque_mode: merged.opaque_mode,
+              opaque_suite: merged.opaque_suite,
+              opaque_ksf: merged.opaque_ksf,
+            }}
+            onChange={(next) =>
+              setForm((prev) => (prev ? { ...prev, ...next } : prev))
+            }
+          />
         </div>
 
         {/* Notifications */}

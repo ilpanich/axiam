@@ -1,5 +1,12 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
+import {
+  readOpaquePolicy,
+  type OpaqueKsf,
+  type OpaqueMode,
+  type OpaquePolicy,
+  type OpaqueSuite,
+} from "@/services/opaquePolicy";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -98,6 +105,8 @@ export interface SecuritySettings {
   email: EmailVerificationPolicy;
   certificate: CertificatePolicy;
   notification: NotificationPolicy;
+  /** OPAQUE (RFC 9807) policy — the baseline every tenant inherits. */
+  opaque: OpaquePolicy;
   created_at: string;
   updated_at: string;
 }
@@ -131,6 +140,12 @@ export interface SetOrgSettings {
   max_cert_validity_days: number;
   // Notification
   admin_notifications_enabled: boolean;
+  // OPAQUE. Required here like every other field, because this PUT replaces the
+  // whole row: the backend defaults these to `disabled` when they are absent,
+  // so omitting them from a save turns OPAQUE off org-wide.
+  opaque_mode: OpaqueMode;
+  opaque_suite: OpaqueSuite;
+  opaque_ksf: OpaqueKsf;
 }
 
 /** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
@@ -157,6 +172,10 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
     default_cert_validity_days: s.certificate.default_cert_validity_days,
     max_cert_validity_days: s.certificate.max_cert_validity_days,
     admin_notifications_enabled: s.notification.admin_notifications_enabled,
+    // Read through the guard rather than `s.opaque.*`: a settings row written
+    // before the OPAQUE migration carries no such block, and an `undefined`
+    // here would be dropped from the JSON body and land back as `disabled`.
+    ...readOpaquePolicy(s),
   };
 }
 

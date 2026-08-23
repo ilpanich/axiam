@@ -1,7 +1,7 @@
 //! SurrealDB implementation of [`CaCertificateRepository`].
 
+use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::AxiamResult;
-use axiam_core::id::new_id;
 use axiam_core::models::certificate::{
     CaCertificate, CertificateStatus, KeyAlgorithm, StoreCaCertificate,
 };
@@ -30,6 +30,10 @@ struct CaCertificateRow {
     not_after: DateTime<Utc>,
     status: String,
     encrypted_private_key: Option<surrealdb_types::Bytes>,
+    /// Schema v45. `Option` so a row written before the migration still
+    /// deserializes; `decode_custody` resolves it the way the backfill does.
+    key_custody: Option<String>,
+    key_locator: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -45,12 +49,34 @@ struct CaCertificateRowWithId {
     not_after: DateTime<Utc>,
     status: String,
     encrypted_private_key: Option<surrealdb_types::Bytes>,
+    /// Schema v45. `Option` so a row written before the migration still
+    /// deserializes; `decode_custody` resolves it the way the backfill does.
+    key_custody: Option<String>,
+    key_locator: Option<String>,
     created_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
 // Enum helpers
 // ---------------------------------------------------------------------------
+
+/// Resolve a row's custodian, tolerating one written before schema v45.
+///
+/// Same rule as the migration's backfill, and here for the same reason it is
+/// there: a row holding ciphertext has its key in itself, and one holding none
+/// never had a key here at all. Reading the second as `Database` would produce
+/// a CA that claims a key it does not have and fails at issuance with a
+/// decryption error rather than a sentence.
+///
+/// An unparseable value falls back the same way rather than failing the read: a
+/// cosmetic column must not take CA listing down for the whole organization.
+fn decode_custody(stored: Option<&str>, has_ciphertext: bool) -> CaKeyCustody {
+    match stored.and_then(|v| v.parse::<CaKeyCustody>().ok()) {
+        Some(custody) => custody,
+        None if has_ciphertext => CaKeyCustody::Database,
+        None => CaKeyCustody::External,
+    }
+}
 
 fn parse_status(s: &str) -> Result<CertificateStatus, DbError> {
     match s {
@@ -106,6 +132,11 @@ impl CaCertificateRow {
             not_before: self.not_before,
             not_after: self.not_after,
             status: parse_status(&self.status)?,
+            key_custody: decode_custody(
+                self.key_custody.as_deref(),
+                self.encrypted_private_key.is_some(),
+            ),
+            key_locator: self.key_locator,
             encrypted_private_key: self.encrypted_private_key.map(|b| b.into_inner().to_vec()),
             created_at: self.created_at,
         })
@@ -128,6 +159,11 @@ impl CaCertificateRowWithId {
             not_before: self.not_before,
             not_after: self.not_after,
             status: parse_status(&self.status)?,
+            key_custody: decode_custody(
+                self.key_custody.as_deref(),
+                self.encrypted_private_key.is_some(),
+            ),
+            key_locator: self.key_locator,
             encrypted_private_key: self.encrypted_private_key.map(|b| b.into_inner().to_vec()),
             created_at: self.created_at,
         })
@@ -152,7 +188,11 @@ impl<C: Connection> SurrealCaCertificateRepository<C> {
 
 impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C> {
     async fn create(&self, input: StoreCaCertificate) -> AxiamResult<CaCertificate> {
-        let id = new_id();
+        // The id comes from the caller, not from `new_id()` here: a custodian
+        // outside the database addresses the key by CA id, so the id has to
+        // exist before the key is stored, and the key has to be stored before
+        // the row.
+        let id = input.id;
         let id_str = id.to_string();
 
         let result = self
@@ -168,7 +208,9 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                  not_before = $not_before, \
                  not_after = $not_after, \
                  status = $status, \
-                 encrypted_private_key = $encrypted_private_key",
+                 encrypted_private_key = $encrypted_private_key, \
+                 key_custody = $key_custody, \
+                 key_locator = $key_locator",
             )
             .bind(("id", id_str))
             .bind(("org_id", input.organization_id.to_string()))
@@ -185,6 +227,8 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                     .encrypted_private_key
                     .map(surrealdb_types::Bytes::from),
             ))
+            .bind(("key_custody", input.key_custody.to_string()))
+            .bind(("key_locator", input.key_locator))
             .await
             .map_err(DbError::from)?;
 

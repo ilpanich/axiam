@@ -111,6 +111,7 @@ use crate::handlers;
         handlers::scopes::delete,
         // CA Certificates
         handlers::ca_certificates::generate,
+        handlers::ca_certificates::import,
         handlers::ca_certificates::list,
         handlers::ca_certificates::get,
         handlers::ca_certificates::revoke,
@@ -347,6 +348,7 @@ use crate::handlers;
         handlers::service_accounts::RotateSecretResponse,
         // CA Certificates
         axiam_core::models::certificate::CaCertificate,
+        axiam_core::models::certificate::ImportCaCertificate,
         axiam_core::models::certificate::CreateCaCertificate,
         axiam_core::models::certificate::GeneratedCaCertificate,
         axiam_core::models::certificate::CertificateStatus,

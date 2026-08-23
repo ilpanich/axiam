@@ -262,6 +262,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "configurable_deletion_grace_period",
         sql: SCHEMA_V44,
     },
+    Migration {
+        version: 45,
+        name: "ca_key_custody",
+        sql: SCHEMA_V45,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2511,6 +2516,39 @@ DEFINE FIELD IF NOT EXISTS privacy_deletion_grace_days ON TABLE \
 -- the value put there explicitly.
 UPDATE security_settings SET privacy_deletion_grace_days = 30 \
     WHERE privacy_deletion_grace_days = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v45 — a CA row records who holds its key
+// -----------------------------------------------------------------------
+//
+// Until now there was one answer: AES-256-GCM ciphertext in the row itself,
+// under the process-wide `pki_encryption_key`. That is a real control with a
+// bounded reach — the key and what opens it are in the same blast radius, and
+// nothing records a read.
+//
+// `key_custody` names the custodian per CA rather than letting configuration
+// imply it, which is what lets a deployment adopt Vault without stranding the
+// CAs it already has: those rows still say `database`, and the signing path
+// asks the row, not the environment.
+//
+// The backfill distinguishes the two states an existing row can be in. One
+// holding ciphertext is `database`; one holding none never had a key here at
+// all and is `external` — a trust anchor AXIAM cannot issue against. Calling
+// the second `database` would produce a CA that claims a key it does not have,
+// failing at issuance with a decryption error instead of a sentence saying it
+// has no key.
+
+const SCHEMA_V45: &str = "\
+DEFINE FIELD IF NOT EXISTS key_custody ON TABLE ca_certificate TYPE string \
+    DEFAULT 'database' ASSERT $value IN ['database', 'vault', 'external'];
+DEFINE FIELD IF NOT EXISTS key_locator ON TABLE ca_certificate \
+    TYPE option<string>;
+-- DEFAULT only applies on write, so pre-existing rows need this explicitly.
+UPDATE ca_certificate SET key_custody = 'database' \
+    WHERE key_custody = NONE AND encrypted_private_key != NONE;
+UPDATE ca_certificate SET key_custody = 'external' \
+    WHERE key_custody = NONE AND encrypted_private_key = NONE;
 ";
 
 #[cfg(test)]

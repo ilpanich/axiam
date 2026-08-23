@@ -4,6 +4,8 @@
 //! sign tenant-level certificates for users, services, and IoT devices.
 
 use chrono::{DateTime, Utc};
+
+use crate::ca_keys::CaKeyCustody;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -56,12 +58,34 @@ pub struct CaCertificate {
     /// Validity end.
     pub not_after: DateTime<Utc>,
     pub status: CertificateStatus,
-    /// AES-256-GCM encrypted private key (only for signing CAs).
-    /// `None` for uploaded CAs where the private key is not stored.
+    /// AES-256-GCM encrypted private key — only for CAs under
+    /// [`CaKeyCustody::Database`]. `None` under every other custodian, and for
+    /// an imported CA whose key AXIAM never held.
     #[serde(skip_serializing)]
     #[schema(read_only)]
     pub encrypted_private_key: Option<Vec<u8>>,
+    /// Which custodian holds this CA's signing key.
+    ///
+    /// Recorded per CA rather than read from configuration, so adopting a new
+    /// custodian does not strand the CAs that already exist. Not secret — an
+    /// operator needs to see it, and it discloses only where a key is kept.
+    #[serde(default = "default_key_custody")]
+    #[schema(value_type = String, example = "database")]
+    pub key_custody: CaKeyCustody,
+    /// Where the custodian put the key. A Vault path under its mount; `None`
+    /// for database custody, whose locator is the row itself.
+    pub key_locator: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// What a CA row with no recorded custodian means.
+///
+/// Every row written before custody was a concept holds its key sealed into
+/// itself, so `Database` is the only reading that finds those keys. A row that
+/// genuinely has no key is `External`, and the v45 migration distinguishes the
+/// two by whether `encrypted_private_key` is present.
+fn default_key_custody() -> CaKeyCustody {
+    CaKeyCustody::Database
 }
 
 /// Manual `Debug` impl (SECHRD-09 / D-06): `#[serde(skip_serializing)]` only
@@ -83,6 +107,8 @@ impl std::fmt::Debug for CaCertificate {
                 "encrypted_private_key",
                 &self.encrypted_private_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("key_custody", &self.key_custody)
+            .field("key_locator", &self.key_locator)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -104,6 +130,14 @@ pub struct CreateCaCertificate {
 /// Produced by the PKI service after generating the keypair and cert.
 #[derive(Debug, Clone)]
 pub struct StoreCaCertificate {
+    /// Chosen by the service, not the repository.
+    ///
+    /// A custodian outside the database addresses the key *by CA id*, so the id
+    /// has to exist before the key is stored — and the key has to be stored
+    /// before the row, or a failed write leaves a CA certificate whose key is
+    /// nowhere. Letting the repository mint the id made that ordering
+    /// impossible to express.
+    pub id: Uuid,
     pub organization_id: Uuid,
     pub subject: String,
     pub public_cert_pem: String,
@@ -112,6 +146,53 @@ pub struct StoreCaCertificate {
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub encrypted_private_key: Option<Vec<u8>>,
+    pub key_custody: CaKeyCustody,
+    pub key_locator: Option<String>,
+}
+
+/// Import an externally-generated CA (BYOK).
+///
+/// The other way a CA comes to exist. Generation makes a key AXIAM chose;
+/// this takes one an organization already has — from an offline root, an
+/// existing internal PKI, or an HSM ceremony — and puts AXIAM in the chain
+/// rather than at the top of it.
+///
+/// `private_key_pem` is optional, and the two cases are genuinely different
+/// rather than one being a degraded form of the other:
+///
+/// * **With a key**, AXIAM takes custody of it (Vault, or sealed into the row)
+///   and can issue certificates against this CA.
+/// * **Without one**, the certificate is a trust anchor and nothing more.
+///   `/api/v1/certificates` cannot sign against it, and says so rather than
+///   failing at the point of use.
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ImportCaCertificate {
+    #[serde(default)]
+    pub organization_id: Uuid,
+    /// PEM-encoded CA certificate.
+    pub public_cert_pem: String,
+    /// PEM-encoded private key, if AXIAM is to hold it.
+    ///
+    /// Write-only: it goes to the configured custodian on the way in and is
+    /// never returned by any endpoint.
+    #[serde(default, skip_serializing)]
+    pub private_key_pem: Option<String>,
+}
+
+/// Manual `Debug` (SECHRD-09 / D-06): `#[serde(skip_serializing)]` governs
+/// `Serialize` only, and this struct reaches a `{:?}` in any handler-level
+/// tracing span.
+impl std::fmt::Debug for ImportCaCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportCaCertificate")
+            .field("organization_id", &self.organization_id)
+            .field("public_cert_pem", &self.public_cert_pem)
+            .field(
+                "private_key_pem",
+                &self.private_key_pem.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Response returned when a CA certificate is generated.

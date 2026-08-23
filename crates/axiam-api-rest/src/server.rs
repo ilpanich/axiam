@@ -657,6 +657,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::get().to(handlers::ca_certificates::list::<C>)),
             )
             .service(
+                web::resource("/organizations/{org_id}/ca-certificates/import")
+                    .route(web::post().to(handlers::ca_certificates::import::<C>)),
+            )
+            .service(
                 web::resource("/organizations/{org_id}/ca-certificates/{id}")
                     .route(web::get().to(handlers::ca_certificates::get::<C>)),
             )

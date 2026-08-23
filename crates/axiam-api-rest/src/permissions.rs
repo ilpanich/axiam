@@ -447,6 +447,14 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/organizations/{org_id}/ca-certificates",
         "ca_certificates:generate",
     ),
+    // Importing a CA is the same act as generating one from every relying
+    // party's point of view: both decide what this organization's certificates
+    // chain to. Same permission.
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/ca-certificates/import",
+        "ca_certificates:generate",
+    ),
     (
         "GET",
         "/api/v1/organizations/{org_id}/ca-certificates/{id}",

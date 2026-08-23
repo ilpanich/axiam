@@ -34,6 +34,20 @@ export interface Tenant {
   updated_at?: string;
 }
 
+/**
+ * Who holds a CA's signing key.
+ *
+ * Recorded per CA rather than read from configuration, so a deployment that
+ * adopts Vault does not strand the CAs it already has.
+ *
+ * - `database` — AES-256-GCM ciphertext in the CA row, under the server's
+ *   `pki_encryption_key`.
+ * - `vault` — a HashiCorp Vault KV v2 secret; the row holds only a path.
+ * - `external` — AXIAM holds no key. An imported trust anchor: certificates it
+ *   signed are trusted, and AXIAM cannot issue new ones against it.
+ */
+export type CaKeyCustody = "database" | "vault" | "external";
+
 export interface CaCertificate {
   id: string;
   organization_id: string;
@@ -44,6 +58,8 @@ export interface CaCertificate {
   status: "Active" | "Revoked" | "Expired";
   not_before: string;
   not_after: string;
+  /** Optional so a server older than the field does not fail the type. */
+  key_custody?: CaKeyCustody;
 }
 
 // ─── Security settings ─────────────────────────────────────────────────────────
@@ -233,6 +249,17 @@ export interface GenerateCaCertPayload {
   validity_days: number;
 }
 
+/**
+ * Body of the import endpoint (BYOK).
+ *
+ * No subject, validity or algorithm: all three come from the certificate.
+ */
+export interface ImportCaCertPayload {
+  public_cert_pem: string;
+  /** Omit to register the certificate as a trust anchor only. Write-only. */
+  private_key_pem?: string;
+}
+
 /// Generation response flattens the CA certificate and adds the one-time
 /// PEM-encoded private key (never retrievable again).
 export interface GeneratedCaCertificate extends CaCertificate {
@@ -312,6 +339,31 @@ export const caCertService = {
     api
       .post<GeneratedCaCertificate>(
         `/api/v1/organizations/${orgId}/ca-certificates`,
+        payload
+      )
+      .then((r) => r.data),
+
+  /**
+   * Register a CA the organization already has, instead of generating one.
+   *
+   * For an organization whose root lives offline, in an HSM, or in an existing
+   * internal PKI and which wants AXIAM in the chain rather than at the top of
+   * it. Subject, validity window and key algorithm are read from the
+   * certificate server-side and are not part of the request — a caller that
+   * could name them separately could name a subject the certificate does not
+   * have.
+   *
+   * With `private_key_pem`, the server takes custody of the key (Vault when
+   * configured, otherwise sealed into the row) and can issue against the CA.
+   * Without it, the certificate is a trust anchor only.
+   */
+  import: (
+    orgId: string,
+    payload: ImportCaCertPayload
+  ): Promise<CaCertificate> =>
+    api
+      .post<CaCertificate>(
+        `/api/v1/organizations/${orgId}/ca-certificates/import`,
         payload
       )
       .then((r) => r.data),

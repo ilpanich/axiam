@@ -28,7 +28,7 @@ else here.
 |---|---|---|
 | `opaque_setup_key` | 32-byte hex | **A password reset for every user in every tenant.** It encrypts each tenant's OPRF seed; without it no OPAQUE record can be opened. |
 | `jwt_private_key_pem` | Ed25519 PEM | **Total compromise.** Whoever holds it can mint a token for any principal in any tenant. |
-| `pki_encryption_key` | 32-byte hex | **CA compromise.** It encrypts CA private keys at rest; a leak lets an attacker issue certificates every mTLS client trusts. |
+| `pki_encryption_key` | 32-byte hex | **CA compromise.** It encrypts CA private keys at rest *under database custody*; a leak lets an attacker issue certificates every mTLS client trusts. CAs whose keys are in Vault do not depend on it — see [CA key custody](../pki/README.md#ca-key-custody). Still needed to open any CA created before you switched. |
 | `auth_pepper` | text | Every stored password hash is invalidated if it *changes*; a leak makes offline attack on stolen hashes cheaper. |
 | `opaque_session_key` | 32-byte hex | In-flight OPAQUE exchanges (120 s) are invalidated. Cheap to rotate — deliberately separate from the setup key for exactly this reason. |
 | `mfa_encryption_key` | 32-byte hex | Stored TOTP secrets become undecryptable. |
@@ -70,10 +70,16 @@ which is how `just prod-up` moves the pair it generated on disk into Vault.
 AMQPS certificate reaches the server as a *file path*
 (`AXIAM__AMQP__TLS__CA_CERT_PATH`), mounted into a container that cannot read
 Vault; and Vault cannot hold the certificate that fronts Vault. `just tls-certs`
-generates both, idempotently. Tenant CA certificates are different again — they
-are issued at runtime through the API and owned by `axiam-pki`, so putting them
-in Vault would create a second source of truth for something the database
-already owns.
+generates both, idempotently.
+
+Organization **CA signing keys** are a third case, and they *can* live in Vault
+— but not seeded here, because there is nothing to seed. They are created at
+runtime, one per CA, and AXIAM writes them itself under a prefix you configure.
+Nothing about them is known at deployment time, so the seeder has no work to do.
+See [CA key custody](../pki/README.md#ca-key-custody) for how to turn it on and
+what policy the token needs. The certificates themselves stay in the database:
+they are public, and a second copy in Vault would be a second source of truth
+for something the database already owns.
 
 ---
 

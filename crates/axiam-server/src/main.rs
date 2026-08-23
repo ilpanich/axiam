@@ -868,11 +868,25 @@ async fn main() -> std::io::Result<()> {
         },
         "FIDO MDS3 ingestion config resolved (D10)"
     );
+    // Who holds the CA signing keys. `database` unless an operator configured
+    // Vault, which is what every existing deployment already had — and a
+    // deliberate `vault` that is not actually reachable stops startup here,
+    // rather than being quietly served from the database instead.
+    let ca_custodians = Arc::new(
+        axiam_pki::custodians_from_env(pki_config.encryption_key)
+            .map_err(|e| std::io::Error::other(format!("CA key custody: {e}")))?,
+    );
+    tracing::info!(
+        custody = %ca_custodians.default_custody(),
+        "CA signing key custody resolved"
+    );
+
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
+        Arc::clone(&ca_custodians),
     );
     let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo());
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
@@ -884,6 +898,7 @@ async fn main() -> std::io::Result<()> {
         // it used to be.
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
+        Arc::clone(&ca_custodians),
     );
     // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.

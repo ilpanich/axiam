@@ -3911,6 +3911,18 @@
                           "key_algorithm": {
                             "$ref": "#/components/schemas/KeyAlgorithm"
                           },
+                          "key_custody": {
+                            "type": "string",
+                            "description": "Which custodian holds this CA's signing key.\n\nRecorded per CA rather than read from configuration, so adopting a new\ncustodian does not strand the CAs that already exist. Not secret — an\noperator needs to see it, and it discloses only where a key is kept.",
+                            "example": "database"
+                          },
+                          "key_locator": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+                          },
                           "not_after": {
                             "type": "string",
                             "format": "date-time",
@@ -4005,6 +4017,58 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/ca-certificates/import": {
+      "post": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates/import`",
+        "description": "Register a CA an organization already has, instead of generating one.\n\nThe case this exists for: an organization whose root lives offline, in an\nHSM, or in an existing internal PKI, and which wants AXIAM in the chain\nrather than at the top of it. Without it, the only CA AXIAM could use was\none it generated, which means every AXIAM-issued certificate chains to a\nroot nothing else in the estate trusts.\n\nWith a private key, AXIAM takes custody of it — Vault when configured,\notherwise sealed into the row — and can issue against the CA. Without one,\nthe certificate is a trust anchor and `/api/v1/certificates` says so rather\nthan failing at the point of use.\n\nGated on `ca_certificates:generate`: importing a CA is the same act as\ngenerating one from every relying party's point of view — it decides what\nthis organization's certificates chain to.",
+        "operationId": "import",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportCaCertificateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "CA certificate imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaCertificate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a CA certificate, already expired, or the supplied key does not match it"
           }
         },
         "security": [
@@ -9659,6 +9723,18 @@
           "key_algorithm": {
             "$ref": "#/components/schemas/KeyAlgorithm"
           },
+          "key_custody": {
+            "type": "string",
+            "description": "Which custodian holds this CA's signing key.\n\nRecorded per CA rather than read from configuration, so adopting a new\ncustodian does not strand the CAs that already exist. Not secret — an\noperator needs to see it, and it discloses only where a key is kept.",
+            "example": "database"
+          },
+          "key_locator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+          },
           "not_after": {
             "type": "string",
             "format": "date-time",
@@ -11513,6 +11589,43 @@
         "properties": {
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ImportCaCertificate": {
+        "type": "object",
+        "description": "Import an externally-generated CA (BYOK).\n\nThe other way a CA comes to exist. Generation makes a key AXIAM chose;\nthis takes one an organization already has — from an offline root, an\nexisting internal PKI, or an HSM ceremony — and puts AXIAM in the chain\nrather than at the top of it.\n\n`private_key_pem` is optional, and the two cases are genuinely different\nrather than one being a degraded form of the other:\n\n* **With a key**, AXIAM takes custody of it (Vault, or sealed into the row)\n  and can issue certificates against this CA.\n* **Without one**, the certificate is a trust anchor and nothing more.\n  `/api/v1/certificates` cannot sign against it, and says so rather than\n  failing at the point of use.",
+        "required": [
+          "public_cert_pem"
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "public_cert_pem": {
+            "type": "string",
+            "description": "PEM-encoded CA certificate."
+          }
+        }
+      },
+      "ImportCaCertificateRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/organizations/{org_id}/ca-certificates/import`.\n\nDeliberately carries no subject, validity window or key algorithm: all\nthree are read out of the certificate itself. A caller that could name them\nseparately could name a subject the certificate does not have, and AXIAM\nwould enforce the claim while every relying party read the certificate.",
+        "required": [
+          "public_cert_pem"
+        ],
+        "properties": {
+          "private_key_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PEM-encoded private key, if AXIAM is to take custody of it.\n\nOmit it to register the certificate as a trust anchor only. Write-only:\nit goes to the configured custodian on the way in and no endpoint\nreturns it."
+          },
+          "public_cert_pem": {
+            "type": "string",
+            "description": "PEM-encoded CA certificate."
           }
         }
       },

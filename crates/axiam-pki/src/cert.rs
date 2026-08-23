@@ -15,7 +15,9 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 use crate::PkiConfig;
-use crate::crypto::{compute_fingerprint, decrypt_secret, generate_keypair};
+use crate::ca::CaService;
+use crate::ca_key_store::CaKeyCustodians;
+use crate::crypto::{compute_fingerprint, generate_keypair};
 
 /// Hard cap for leaf certificate validity: 825 days (~27 months).
 ///
@@ -33,9 +35,12 @@ pub const DEFAULT_LEAF_CERT_VALIDITY_DAYS: u32 = 365;
 pub struct CertService<CA, CR> {
     ca_repo: CA,
     cert_repo: CR,
+    #[allow(dead_code)]
     config: PkiConfig,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
+    /// Who holds the CA signing keys. See [`crate::ca_key_store`].
+    custodians: Arc<CaKeyCustodians>,
 }
 
 impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR> {
@@ -44,12 +49,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         cert_repo: CR,
         config: PkiConfig,
         crypto_semaphore: Arc<Semaphore>,
+        custodians: Arc<CaKeyCustodians>,
     ) -> Self {
         Self {
             ca_repo,
             cert_repo,
             config,
             crypto_semaphore,
+            custodians,
         }
     }
 
@@ -98,17 +105,22 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             ));
         }
 
-        let encrypted_key = ca_cert.encrypted_private_key.ok_or_else(|| {
-            AxiamError::Certificate("CA certificate has no stored private key".into())
-        })?;
-
-        // Decrypt the CA private key — encryption key must be present (SEC-012).
-        let enc_key = self.config.encryption_key.ok_or_else(|| {
-            AxiamError::Internal(
-                "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
-            )
-        })?;
-        let mut ca_private_key_pem = decrypt_ca_key_pem(&encrypted_key, &enc_key)?;
+        // Fetch the signing key from whichever custodian this CA's row names —
+        // not from whichever is currently configured. A deployment that adopted
+        // Vault still has CAs whose keys are sealed into their rows, and asking
+        // the current setting about them would fail to find a key that is
+        // perfectly present.
+        //
+        // An imported CA with no key at all resolves to the `External`
+        // custodian, whose error says it has no private key and therefore
+        // cannot issue — rather than the bare "no stored private key" this used
+        // to produce for both that case and a genuine decryption failure.
+        let key_ref = CaService::<CA>::key_ref(&ca_cert);
+        let store = self.custodians.store_for(ca_cert.key_custody)?;
+        let mut ca_private_key_pem = store
+            .load(&key_ref, ca_cert.encrypted_private_key.as_deref())
+            .await?
+            .to_string();
 
         let not_before = now;
         let requested_not_after = now
@@ -227,66 +239,9 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     }
 }
 
-/// Decrypt an AES-256-GCM encrypted private key PEM and validate it is UTF-8.
-///
-/// X.509-specific wrapper around the shared [`decrypt_secret`] — the CA/leaf
-/// private key material is always stored as UTF-8 PEM text.
-fn decrypt_ca_key_pem(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<String> {
-    let plaintext = decrypt_secret(data, key_bytes)?;
-    String::from_utf8(plaintext)
-        .map_err(|e| AxiamError::Crypto(format!("decrypted key is not valid UTF-8: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::encrypt_secret;
-
-    #[test]
-    fn decrypt_ca_key_pem_round_trips_valid_utf8() {
-        let key = [9u8; 32];
-        // Assembled from fragments (not a literal "BEGIN PRIVATE KEY" line) —
-        // this is arbitrary round-trip payload text, not real key material.
-        let label = "PRIVATE KEY";
-        let pem = format!("-----BEGIN {label}-----\nfakekeydata\n-----END {label}-----\n");
-        let encrypted = encrypt_secret(pem.as_bytes(), &key).expect("encrypt must succeed");
-
-        let decrypted = decrypt_ca_key_pem(&encrypted, &key).expect("decrypt must succeed");
-        assert_eq!(decrypted, pem);
-    }
-
-    #[test]
-    fn decrypt_ca_key_pem_rejects_non_utf8_plaintext() {
-        let key = [10u8; 32];
-        // 0x80 is not a valid single-byte UTF-8 sequence starter.
-        let invalid_utf8: &[u8] = &[0xFF, 0xFE, 0x80];
-        let encrypted = encrypt_secret(invalid_utf8, &key).expect("encrypt must succeed");
-
-        let err = decrypt_ca_key_pem(&encrypted, &key).unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("not valid UTF-8"), "got: {msg}");
-    }
-
-    #[test]
-    fn decrypt_ca_key_pem_propagates_underlying_decrypt_error() {
-        let key = [11u8; 32];
-        // Too short to contain a 12-byte nonce — decrypt_secret's own error
-        // path, which decrypt_ca_key_pem must propagate unchanged.
-        let err = decrypt_ca_key_pem(&[1, 2, 3], &key).unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("missing nonce"), "got: {msg}");
-    }
-
-    #[test]
-    fn decrypt_ca_key_pem_rejects_wrong_key() {
-        let key_a = [12u8; 32];
-        let key_b = [13u8; 32];
-        let encrypted = encrypt_secret(b"pem-bytes", &key_a).expect("encrypt must succeed");
-
-        let err = decrypt_ca_key_pem(&encrypted, &key_b).unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("decryption failed"), "got: {msg}");
-    }
 
     #[test]
     fn leaf_cert_validity_constants_are_sane() {

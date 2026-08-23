@@ -6,6 +6,7 @@
 //! for audit signing and encrypted data exports.
 
 pub mod ca;
+pub mod ca_key_store;
 pub mod cert;
 pub mod config;
 mod crypto;
@@ -15,6 +16,10 @@ pub mod pgp;
 pub mod ssrf;
 
 pub use ca::{CaService, MAX_CA_VALIDITY_DAYS};
+pub use ca_key_store::{
+    CaKeyCustodians, DatabaseCaKeyStore, ExternalCaKeyStore, VaultCaKeyConfig, VaultCaKeyStore,
+    custodians_from_env,
+};
 pub use cert::{CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, MAX_LEAF_CERT_VALIDITY_DAYS};
 pub use config::PkiConfig;
 pub use mtls::DeviceAuthService;

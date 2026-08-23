@@ -871,15 +871,20 @@ async fn main() -> std::io::Result<()> {
     // Who holds the CA signing keys. `database` unless an operator configured
     // Vault, which is what every existing deployment already had — and a
     // deliberate `vault` that is not actually reachable stops startup here,
-    // rather than being quietly served from the database instead.
+    // rather than being quietly served from the database instead. A deployment
+    // that configured neither issues no certificates and boots without either;
+    // it learns what to set when it first tries to generate a CA.
     let ca_custodians = Arc::new(
         axiam_pki::custodians_from_env(pki_config.encryption_key)
             .map_err(|e| std::io::Error::other(format!("CA key custody: {e}")))?,
     );
-    tracing::info!(
-        custody = %ca_custodians.default_custody(),
-        "CA signing key custody resolved"
-    );
+    match ca_custodians.default_custody() {
+        Some(custody) => tracing::info!(%custody, "CA signing key custody resolved"),
+        None => tracing::info!(
+            "no CA signing key custodian configured; CA generation and import will be \
+             refused until AXIAM__PKI__ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
+        ),
+    }
 
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
     let ca_service = CaService::new(

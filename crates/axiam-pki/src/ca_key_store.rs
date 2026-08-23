@@ -694,7 +694,14 @@ pub struct CaKeyCustodians {
     database: Option<DatabaseCaKeyStore>,
     vault: Option<VaultCaKeyStore>,
     external: ExternalCaKeyStore,
-    default_custody: CaKeyCustody,
+    /// `None` when a deployment has configured no custodian at all.
+    ///
+    /// That is a legitimate state, not a misconfiguration: a deployment that
+    /// issues no certificates — no CAs, no mTLS — has no reason to hold a PKI
+    /// key, and refusing to start would break it for a feature it does not
+    /// use. Generating a CA is then what fails, with a message naming what to
+    /// set, which is where the operator actually is when they need it.
+    default_custody: Option<CaKeyCustody>,
 }
 
 impl std::fmt::Debug for CaKeyCustodians {
@@ -710,28 +717,38 @@ impl std::fmt::Debug for CaKeyCustodians {
 impl CaKeyCustodians {
     /// Build the set, choosing `default_custody` for new CAs.
     ///
-    /// Fails when the chosen default is not actually available, rather than
-    /// quietly falling back to another: an operator who configured Vault and
-    /// got database custody would have exactly the property they were trying to
-    /// stop having, and nothing would say so.
+    /// `None` means nothing is configured, which is allowed and is what a
+    /// deployment that issues no certificates has. `Some(..)` is an operator
+    /// asking for a specific custodian, and *that* fails here when the
+    /// custodian is not actually available — an operator who configured Vault
+    /// and silently got database custody would have exactly the property they
+    /// were trying to stop having.
+    ///
+    /// The distinction matters more than it looks. Making "nothing configured"
+    /// a startup failure refuses to boot every deployment that has no CAs at
+    /// all, for a feature it never touches; making an *explicit* choice fail
+    /// silently is how a security control quietly stops applying. Only the
+    /// second is worth stopping the process for.
     pub fn new(
         database: Option<DatabaseCaKeyStore>,
         vault: Option<VaultCaKeyStore>,
-        default_custody: CaKeyCustody,
+        default_custody: Option<CaKeyCustody>,
     ) -> AxiamResult<Self> {
-        let available = match default_custody {
-            CaKeyCustody::Database => database.is_some(),
-            CaKeyCustody::Vault => vault.is_some(),
-            // Never a default: it would mean generating CAs whose keys are
-            // discarded, which is a CA that can sign nothing.
-            CaKeyCustody::External => false,
-        };
-        if !available {
-            return Err(AxiamError::Internal(format!(
-                "CA key custody is set to `{default_custody}` but that custodian is not \
-                 configured: database custody needs AXIAM__PKI__ENCRYPTION_KEY, vault \
-                 custody needs AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN"
-            )));
+        if let Some(requested) = default_custody {
+            let available = match requested {
+                CaKeyCustody::Database => database.is_some(),
+                CaKeyCustody::Vault => vault.is_some(),
+                // Never a default: it would mean generating CAs whose keys are
+                // discarded, which is a CA that can sign nothing.
+                CaKeyCustody::External => false,
+            };
+            if !available {
+                return Err(AxiamError::Internal(format!(
+                    "CA key custody is set to `{requested}` but that custodian is not \
+                     configured: database custody needs AXIAM__PKI__ENCRYPTION_KEY, vault \
+                     custody needs AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN"
+                )));
+            }
         }
         Ok(Self {
             database,
@@ -741,14 +758,28 @@ impl CaKeyCustodians {
         })
     }
 
-    /// Which custodian new CAs are created with.
-    pub fn default_custody(&self) -> CaKeyCustody {
+    /// Which custodian new CAs are created with, or `None` if none is configured.
+    pub fn default_custody(&self) -> Option<CaKeyCustody> {
         self.default_custody
     }
 
     /// The custodian for a new CA.
+    ///
+    /// The failure an operator meets when they generate their first CA on a
+    /// deployment that never configured PKI — which is where the message about
+    /// what to set is most use, and long after the process would have refused
+    /// to start.
     pub fn default_store(&self) -> AxiamResult<&dyn CaKeyStore> {
-        self.store_for(self.default_custody)
+        let custody = self.default_custody.ok_or_else(|| {
+            AxiamError::Internal(
+                "no CA key custodian is configured, so a CA signing key cannot be \
+                 stored: set AXIAM__PKI__ENCRYPTION_KEY to keep it encrypted in the \
+                 database, or AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN to \
+                 keep it in Vault"
+                    .into(),
+            )
+        })?;
+        self.store_for(custody)
     }
 
     /// The custodian a given CA row names.
@@ -810,10 +841,14 @@ mod registry_tests {
         let err = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             None,
-            CaKeyCustody::Vault,
+            Some(CaKeyCustody::Vault),
         )
         .unwrap_err();
         assert!(err.to_string().contains("VAULT_ADDR"), "{err}");
+
+        let err =
+            CaKeyCustodians::new(None, Some(vault()), Some(CaKeyCustody::Database)).unwrap_err();
+        assert!(err.to_string().contains("ENCRYPTION_KEY"), "{err}");
     }
 
     #[test]
@@ -823,13 +858,32 @@ mod registry_tests {
             CaKeyCustodians::new(
                 Some(DatabaseCaKeyStore::new([0u8; 32])),
                 Some(vault()),
-                CaKeyCustody::External,
+                Some(CaKeyCustody::External),
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn no_custodian_at_all_builds_and_fails_only_at_use() {
+        // The regression this exists for: making "nothing configured" a startup
+        // failure refuses to boot every deployment that issues no certificates,
+        // for a feature it never touches — which is exactly what the e2e stack
+        // is. The failure belongs where the operator is when they need the
+        // message: generating their first CA.
+        let custodians = CaKeyCustodians::new(None, None, None)
+            .expect("a deployment with no PKI key must still start");
+        assert_eq!(custodians.default_custody(), None);
+
+        let err = match custodians.default_store() {
+            Ok(_) => panic!("there is no custodian to hand back"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("ENCRYPTION_KEY"), "{msg}");
         assert!(
-            CaKeyCustodians::new(None, None, CaKeyCustody::Database).is_err(),
-            "no custodian at all is also not a working default"
+            msg.contains("VAULT_ADDR"),
+            "both ways out, not just one: {msg}"
         );
     }
 
@@ -840,7 +894,7 @@ mod registry_tests {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             Some(vault()),
-            CaKeyCustody::Vault,
+            Some(CaKeyCustody::Vault),
         )
         .unwrap();
 
@@ -864,7 +918,7 @@ mod registry_tests {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             None,
-            CaKeyCustody::Database,
+            Some(CaKeyCustody::Database),
         )
         .unwrap();
         let err = match custodians.store_for(CaKeyCustody::Vault) {
@@ -879,7 +933,7 @@ mod registry_tests {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             None,
-            CaKeyCustody::Database,
+            Some(CaKeyCustody::Database),
         )
         .unwrap();
         assert_eq!(
@@ -971,17 +1025,26 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
     };
 
     let default_custody = match std::env::var(CA_KEY_STORE_ENV) {
-        Ok(raw) if !raw.trim().is_empty() => raw.trim().parse::<CaKeyCustody>().map_err(|e| {
-            AxiamError::Internal(format!(
-                "{CA_KEY_STORE_ENV}: {e} — expected `database` or `vault`"
-            ))
-        })?,
+        // An explicit request. `CaKeyCustodians::new` refuses it when the named
+        // custodian is not actually configured — the one case worth stopping
+        // the process for.
+        Ok(raw) if !raw.trim().is_empty() => {
+            Some(raw.trim().parse::<CaKeyCustody>().map_err(|e| {
+                AxiamError::Internal(format!(
+                    "{CA_KEY_STORE_ENV}: {e} — expected `database` or `vault`"
+                ))
+            })?)
+        }
         // Vault configured and no explicit choice means Vault: an operator who
         // wired up an address and a token did so in order to use it, and
         // making them also set a third variable is a step whose only outcome is
         // being forgotten.
-        _ if vault.is_some() => CaKeyCustody::Vault,
-        _ => CaKeyCustody::Database,
+        _ if vault.is_some() => Some(CaKeyCustody::Vault),
+        _ if database.is_some() => Some(CaKeyCustody::Database),
+        // Nothing configured at all. Not an error: a deployment that issues no
+        // certificates has no reason to hold a PKI key, and refusing to start
+        // would break it for a feature it never uses.
+        _ => None,
     };
 
     CaKeyCustodians::new(database, vault, default_custody)

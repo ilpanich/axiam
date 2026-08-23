@@ -706,7 +706,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
                     ca_cert_path: None,
                 },
             )),
-            axiam_core::ca_keys::CaKeyCustody::Vault,
+            Some(axiam_core::ca_keys::CaKeyCustody::Vault),
         )
         .expect("a vault-default custodian set"),
     );

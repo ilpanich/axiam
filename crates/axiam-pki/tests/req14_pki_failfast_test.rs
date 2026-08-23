@@ -1,8 +1,8 @@
 //! REQ-14 AC-5 — PKI fail-fast tests (SEC-012).
 //!
-//! Verifies that CA generation refuses to operate when no encryption key is
-//! configured, instead of silently encrypting CA private keys with an all-zero
-//! key (the previous insecure fallback).
+//! Verifies that taking custody of a CA private key refuses to operate when no
+//! key source is configured, instead of silently encrypting CA private keys
+//! with an all-zero key (the previous insecure fallback).
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{CreateCaCertificate, KeyAlgorithm};
@@ -35,21 +35,35 @@ async fn setup_db() -> Surreal<TestDb> {
     db
 }
 
-/// SEC-012: a deployment with no key for CA private keys must not start.
+/// SEC-012: a deployment with no key source refuses to *store* a CA key.
 ///
-/// The guarantee moved earlier and got stronger. It used to be enforced at
-/// generate time — a running server that would accept a CA generation request
-/// and fail it — and is now enforced when the custodian set is assembled, which
-/// the composition root does before it serves anything. A deployment that can
-/// take custody of no CA key at all does not boot.
+/// The guarantee moved earlier than it used to be — it is no longer generate
+/// time, but the moment custody is asked for — while deliberately stopping
+/// short of startup. Refusing to boot would take down every deployment that
+/// issues no certificates at all, for a subsystem it never touches; the e2e
+/// stack is one of those, and made that concrete. So assembling the custodian
+/// set with nothing configured succeeds, and the refusal lands on the first
+/// request that needs somewhere to put a private key.
 ///
-/// The error still names the environment variable, which is the part an
-/// operator needs: `custodians_from_env` returning "not configured" without
-/// saying what configures it is the failure mode this asserts against.
+/// The error still names the environment variables, which is the part an
+/// operator needs: "not configured" without saying what configures it is the
+/// failure mode this asserts against.
 #[tokio::test]
-async fn ca_custody_without_any_key_source_refuses_to_build() {
-    let err = axiam_pki::custodians_from_env(None)
-        .expect_err("a custodian set with no custodian at all must not build");
+async fn ca_custody_without_any_key_source_defers_its_refusal_to_first_use() {
+    let custodians = axiam_pki::custodians_from_env(None)
+        .expect("a deployment that issues no certificates must still boot");
+    assert_eq!(
+        custodians.default_custody(),
+        None,
+        "nothing configured must not be silently substituted with a custodian"
+    );
+
+    // `.expect_err` is unavailable here: the Ok side is `&dyn CaKeyStore`,
+    // which is not `Debug`.
+    let err = match custodians.default_store() {
+        Ok(_) => panic!("storing a CA key with no custodian must be refused"),
+        Err(e) => e,
+    };
     match err {
         AxiamError::Internal(msg) => {
             assert!(
@@ -75,7 +89,7 @@ async fn an_encryption_key_alone_yields_database_custody() {
         .expect("an encryption key is enough on its own");
     assert_eq!(
         custodians.default_custody(),
-        axiam_core::ca_keys::CaKeyCustody::Database
+        Some(axiam_core::ca_keys::CaKeyCustody::Database)
     );
 }
 

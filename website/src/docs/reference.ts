@@ -1,6 +1,8 @@
 import type { Sdk } from "../types";
 import { SDKS } from "../data";
+import { contractLink } from "../contractAnchors";
 import type { DocCodeTab, DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * Conformance, as each SDK's own README states it.
@@ -16,10 +18,23 @@ import type { DocCodeTab, DocPage } from "./types";
 const YES = "✓";
 const NO = "—";
 
+/**
+ * Evidence links for the compliance page.
+ *
+ * The Security section links its claims to the file that backs them; this page
+ * asserted the same claims with a bare path in prose, which a reader cannot
+ * click and cannot check. Same base as `security.ts` uses, kept local because
+ * `reference.ts` has no other reason to import it.
+ */
+const GH_BLOB = "https://github.com/ilpanich/axiam/blob/main";
+const COMPLIANCE = `${GH_BLOB}/docs/compliance`;
+const API_DOCS = `${GH_BLOB}/docs/api`;
+const ADMIN_DOCS = `${GH_BLOB}/docs/admin`;
+
 const CONFORMANCE: { id: string; cells: string[] }[] = [
   { id: "rust", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
   { id: "typescript", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "python", cells: [YES, YES, YES, YES, YES, NO, YES, YES, YES] },
+  { id: "python", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
   { id: "java", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
   { id: "csharp", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
   { id: "php", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
@@ -60,6 +75,7 @@ export const REFERENCE_PAGES: DocPage[] = [
     title: "Standards & compliance",
     intro:
       "Which specifications AXIAM implements, how conformance is evidenced, and — just as importantly — what the evidence is not.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "honesty", text: "What these claims mean" },
       {
@@ -75,40 +91,72 @@ export const REFERENCE_PAGES: DocPage[] = [
           [
             "RFC 6749 — OAuth 2.0",
             "Authorization code, client credentials and refresh grants, with the error semantics.",
-            "`docs/compliance/oauth2-rfc-compliance.md` — a MUST-by-MUST matrix naming the test for each row.",
+            `[OAuth2 RFC compliance matrix](${COMPLIANCE}/oauth2-rfc-compliance.md) — MUST by MUST, naming the test for each row.`,
           ],
-          ["RFC 7636 — PKCE", "S256 challenge on the authorization code grant.", "Same matrix."],
-          ["RFC 7009 — Token revocation", "`/oauth2/revoke`.", "Same matrix."],
-          ["RFC 7662 — Token introspection", "`/oauth2/introspect`.", "Same matrix."],
-          ["RFC 8628 — Device authorization grant", "The full non-interactive path.", "`docs/api/device-flow.md`."],
-          ["RFC 8693 — Token exchange", "Delegation and impersonation, narrowing-only.", "`docs/api/token-exchange.md`."],
-          ["RFC 9126 — Pushed authorization requests", "`/oauth2/par`, requirable per client.", "OAuth2 test suite."],
+          [
+            "RFC 7636 — PKCE",
+            "S256 challenge on the authorization code grant.",
+            `[Same matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
+          ],
+          [
+            "RFC 7009 — Token revocation",
+            "`/oauth2/revoke`.",
+            `[Same matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
+          ],
+          [
+            "RFC 7662 — Token introspection",
+            "`/oauth2/introspect`.",
+            `[Same matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
+          ],
+          [
+            "RFC 8628 — Device authorization grant",
+            "The full non-interactive path.",
+            `[Device flow reference](${API_DOCS}/device-flow.md).`,
+          ],
+          [
+            "RFC 8693 — Token exchange",
+            "Delegation and impersonation, narrowing-only.",
+            `[Token exchange reference](${API_DOCS}/token-exchange.md).`,
+          ],
+          [
+            "RFC 9126 — Pushed authorization requests",
+            "`/oauth2/par`, requirable per client.",
+            `[Integration test suite](${GH_BLOB}/crates/axiam-api-rest/tests/par_test.rs), over [the PAR implementation](${GH_BLOB}/crates/axiam-oauth2/src/par.rs).`,
+          ],
           [
             "OpenID Connect Core 1.0 & Discovery 1.0",
             "ID tokens, userinfo, discovery. `alg: none` is excluded from the discovery document and rejected at verification.",
-            "`docs/compliance/oidc-conformance.md`.",
+            `[OIDC Core conformance matrix](${COMPLIANCE}/oidc-conformance.md).`,
           ],
           [
             "OIDC RP-Initiated & Back-Channel Logout 1.0",
             "Session-scoped logout in both directions.",
-            "`docs/api/logout.md`.",
+            `[Logout reference](${API_DOCS}/logout.md).`,
           ],
-          ["UMA 2.0", "Protection API and the ticket grant.", "`docs/api/uma.md`, CONTRACT §20."],
+          [
+            "UMA 2.0",
+            "Protection API and the ticket grant.",
+            `[UMA reference](${API_DOCS}/uma.md), and [CONTRACT §20](${contractLink("20")}).`,
+          ],
           [
             "FAPI 2.0 Security Profile (Final)",
             "An opt-in constraint bundle that a client cannot half-apply.",
-            "`docs/admin/fapi2-profile.md`.",
+            `[FAPI 2.0 profile guide](${ADMIN_DOCS}/fapi2-profile.md).`,
           ],
           [
             "SCIM 2.0 — RFC 7643 / 7644",
             "Users and Groups CRUD plus PATCH; bulk and complex filters deliberately unsupported.",
-            "`docs/api/scim-provisioning.md`.",
+            `[SCIM provisioning reference](${API_DOCS}/scim-provisioning.md).`,
           ],
-          ["WebAuthn / FIDO2", "Registration and authentication, with MDS3-backed attestation policy.", "`docs/admin/authenticator-policies.md`."],
+          [
+            "WebAuthn / FIDO2",
+            "Registration and authentication, with MDS3-backed attestation policy.",
+            `[Authenticator policy guide](${ADMIN_DOCS}/authenticator-policies.md).`,
+          ],
           [
             "RFC 9807 — OPAQUE",
             "One audited implementation bound by every SDK, tested against shared vectors.",
-            "`sdks/opaque-test-vectors.json`, CONTRACT §23.",
+            `[Shared test vectors](${GH_BLOB}/sdks/opaque-test-vectors.json), and [CONTRACT §23](${contractLink("23")}).`,
           ],
         ],
       },
@@ -116,23 +164,27 @@ export const REFERENCE_PAGES: DocPage[] = [
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Standard", "Posture"],
+        headers: ["Standard", "Posture", "Evidence"],
         rows: [
           [
             "OWASP ASVS 4.0.3 Level 2",
             "Control-by-control checklist over V2, V3, V4, V6, V7, V8, V9, V10 and V14. Every in-scope control carries an explicit status — Pass, N/A or Deferred — with the deferrals tracked by finding id rather than left blank.",
+            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md), with the deferrals in the [findings register](${COMPLIANCE}/FINDINGS.md).`,
           ],
           [
             "GDPR",
             "Data export (Art. 15) and erasure (Art. 17) endpoints, with audit-actor pseudonymisation so an append-only trail can coexist with a right to erasure. Exports can be PGP-encrypted.",
+            `[GDPR compliance record](${COMPLIANCE}/gdpr-compliance.md) — export completeness, erasure durability and consent, article by article.`,
           ],
           [
             "ISO 27001",
             "Targeted through access control, cryptography and audit logging — the technical controls, not the management system, which is an organizational matter AXIAM cannot supply.",
+            `[Security audit](${GH_BLOB}/claude_dev/security-audit.md) — which also states the ISMS certification scope it deliberately excludes.`,
           ],
           [
             "EU Cyber Resilience Act",
             "Secure-by-default posture and a private vulnerability-disclosure process.",
+            `[Security audit](${GH_BLOB}/claude_dev/security-audit.md) for the essential-requirements mapping; [SECURITY.md](${GH_BLOB}/SECURITY.md) for the disclosure process.`,
           ],
         ],
       },
@@ -189,6 +241,7 @@ export const REFERENCE_PAGES: DocPage[] = [
     title: "Client SDKs",
     intro:
       "Eleven official client libraries, all conforming to one cross-language behavioral contract — so an integration ported between languages keeps the same semantics.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "contract", text: "One contract, many languages" },
       {
@@ -227,7 +280,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-alpha38` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section — and a few of them are currently narrower than the same README's feature documentation, so read the body as well as the statement.",
+        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-alpha38` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
       },
       { type: "h", id: "packages", text: "Canonical package names" },
       {

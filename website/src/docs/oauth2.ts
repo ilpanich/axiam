@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "OAuth2 & OIDC" — the authorization-server surface.
@@ -18,6 +19,7 @@ export const OAUTH2_PAGES: DocPage[] = [
     title: "OAuth2 & OpenID Connect",
     intro:
       "AXIAM is a complete OAuth2 authorization server and OpenID Connect provider — discovery, JWKS, five grant types, introspection, revocation and userinfo.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "grants", text: "Supported grants" },
       {
@@ -89,6 +91,62 @@ export const OAUTH2_PAGES: DocPage[] = [
         caption: "discovery",
         code: "curl -s https://iam.acme.dev/.well-known/openid-configuration | jq .\n\n# and the keys a relying party verifies tokens with\ncurl -s https://iam.acme.dev/oauth2/jwks | jq .",
       },
+      { type: "h", id: "code-flow", text: "Authorization Code + PKCE, end to end" },
+      {
+        type: "p",
+        text: "The grant to use for anything with a browser or a mobile front end. PKCE binds the eventual token request to the party that started the flow, so an authorization code intercepted on the redirect is worthless without the verifier that never left the client.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Generate a verifier and its challenge",
+            body: "The verifier is a high-entropy random string the client keeps. The challenge is its SHA-256, base64url-encoded. Only `S256` is accepted — `plain` would defeat the purpose, since the value on the wire would be the secret itself.",
+            code: "code_verifier  = <43-128 chars, base64url, random>\ncode_challenge = BASE64URL(SHA256(code_verifier))",
+          },
+          {
+            title: "Send the user to the authorization endpoint",
+            body: "The tenant is derived from `client_id` here — an OAuth2 client belongs to exactly one tenant — so no `tenant_id` parameter is needed on this call. `state` is yours to check on the way back.",
+            code: "GET /oauth2/authorize\n  ?response_type=code\n  &client_id=<client-id>\n  &redirect_uri=https://app.acme.dev/callback\n  &scope=openid%20profile%20email\n  &state=<opaque-to-the-server>\n  &code_challenge=<challenge>\n  &code_challenge_method=S256",
+          },
+          {
+            title: "The user authenticates and consents",
+            body: "AXIAM runs whatever the tenant requires — password or OPAQUE, then MFA or a passkey. None of that is the client's concern; the client sees only the redirect that follows.",
+          },
+          {
+            title: "Handle the redirect",
+            body: "Check `state` against what you sent, and check `iss` names the server you started with. The code is single-use and short-lived.",
+            code: "GET https://app.acme.dev/callback\n  ?code=<authorization-code>\n  &state=<what-you-sent>\n  &iss=https://iam.acme.dev",
+          },
+          {
+            title: "Redeem the code for tokens",
+            body: "`tenant_id` **is** required here, as a query parameter, because the token endpoint does not derive it. Send the verifier, not the challenge — the server recomputes the hash and compares.",
+            code: "POST /oauth2/token?tenant_id=<uuid>\nContent-Type: application/x-www-form-urlencoded\n\ngrant_type=authorization_code\n&code=<authorization-code>\n&redirect_uri=https://app.acme.dev/callback\n&client_id=<client-id>\n&code_verifier=<verifier>",
+          },
+        ],
+      },
+      {
+        type: "warn",
+        text: "The `tenant_id` asymmetry between the two endpoints is the single most common integration mistake here. `/oauth2/authorize` derives the tenant from `client_id`; `/oauth2/token`, `/oauth2/par` and `/oauth2/end_session` all require it as a query parameter. An off-the-shelf OIDC client that cannot add one needs a shim or a per-tenant gateway route.",
+      },
+      { type: "h", id: "iss", text: "Checking who answered — RFC 9207" },
+      {
+        type: "p",
+        text: "Every authorization response carries an `iss` parameter naming the server that sent it, and AXIAM emits it for **every** client rather than only FAPI ones. It defends against the mix-up attack: a client that talks to more than one authorization server on a shared redirect URI cannot otherwise tell which one answered, so an attacker controlling one of them can have a code minted by an honest server delivered to their own token endpoint.",
+      },
+      {
+        type: "note",
+        text: "It is on the **error** redirect too, and validating it there is not a formality — one variant of the mix-up attack works by injecting an error response, so a client that checks `iss` on success and skips it on failure has left the door it just closed ajar. Making emission conditional was rejected for the matching reason: mix-up is precisely the attack a client does not know it is under, so protection that depends on somebody remembering to switch it on is not protection.",
+      },
+      { type: "h", id: "dpop", text: "DPoP — binding a token to a key" },
+      {
+        type: "p",
+        text: "A bearer token is usable by whoever holds it. DPoP (RFC 9449) binds one to a key pair the client generates: the token carries a `cnf` claim naming the key's thumbprint, and each request carries a proof signed with it. A stolen token alone is then not enough.",
+      },
+      {
+        type: "warn",
+        text: "A token carrying `cnf` is **not** a bearer token, and a resource server that accepts one without verifying possession has silently converted it back into one. The SDK contract makes the check mandatory rather than optional, and phrases it as *reject when you cannot verify* rather than *verify when you can*: middleware that does not understand `cnf` must refuse the token, not ignore the claim. See [FAPI 2.0 & mTLS clients](#/docs/fapi2).",
+      },
       { type: "h", id: "tokens", text: "The tokens you get back" },
       {
         type: "p",
@@ -97,6 +155,55 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "p",
         text: "Introspection exists for the cases offline verification cannot answer: whether a token has been revoked since it was issued, and what an opaque token refers to. A resource server that introspects on every request should expect to make roughly ten to twenty introspection calls per token issued — the shipped rate limits are sized for that ratio.",
+      },
+      { type: "h", id: "anatomy", text: "What is inside an access token" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Claim", "Meaning", "When present"],
+        rows: [
+          ["`sub`", "The subject's id.", "Always."],
+          ["`tenant_id`, `org_id`", "The tenant and organization the token is scoped to.", "Always — there is no default tenant."],
+          ["`iss`", "The issuing origin.", "Always."],
+          ["`iat`, `exp`", "Issued-at and expiry, as Unix timestamps.", "Always."],
+          [
+            "`jti`",
+            "Token id. For a user flow this is the issuing session's id, which is what makes session revocation able to find it; for machine-to-machine it is a random UUID.",
+            "Always.",
+          ],
+          ["`aud`", "`axiam:user` or `axiam:m2m`.", "Always on a current token."],
+          ["`scope`", "Space-separated OAuth2 scopes.", "When non-empty scopes were granted."],
+          ["`sub_kind`", "Whether the subject is a user, a service account or an OAuth2 client. Informational — it does not affect validation or authorization.", "Always."],
+          [
+            "`cnf`",
+            "The confirmation key this token is bound to, by certificate thumbprint or JWK thumbprint.",
+            "Only on a sender-constrained token.",
+          ],
+          [
+            "`act`",
+            "RFC 8693 actor claim — who is acting for the subject. Nested for chained delegation and depth-capped.",
+            "Only on a **delegation** exchange. Deliberately absent on impersonation.",
+          ],
+          [
+            "`permissions`",
+            "The UMA resource and scope pairs allowed at issue time. Its presence is what makes a token an RPT; there is no separate token type.",
+            "Only on an RPT.",
+          ],
+        ],
+      },
+      {
+        type: "table",
+        headers: ["Token", "Lifetime", "Shape"],
+        rows: [
+          ["Access token", "15 minutes", "EdDSA (Ed25519) JWT, verifiable offline against the JWKS."],
+          ["Authorization code", "10 minutes", "Single-use."],
+          ["Refresh token", "30 days", "Opaque, server-stored, single-use, rotating on every refresh."],
+          ["MFA challenge", "5 minutes", "Single-use."],
+        ],
+      },
+      {
+        type: "note",
+        text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that the result is indistinguishable from a token the subject obtained directly, which is why it is off by default, gated per client, and visible only in the audit record. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
       },
       { type: "h", id: "par", text: "Pushed authorization requests" },
       {

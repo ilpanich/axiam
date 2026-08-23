@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * The configuration reference.
@@ -15,6 +16,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
     title: "Configuration & environment variables",
     intro:
       "Every setting on the AXIAM server image is an environment variable. This is the reference: what each variable means, its default, and an example value.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "naming", text: "The naming convention" },
       {
@@ -24,6 +26,19 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "Secrets (database password, JWT keys, the AES-256-GCM encryption keys, the peppers) must come from a secret manager or mounted secret — never bake real key material into an image, a compose file or git. Use a placeholder like `<set-in-secret-manager>` in any template, and never reuse a value across environments.",
+      },
+      { type: "h", id: "scope", text: "What this page covers" },
+      {
+        type: "p",
+        text: "This is a **curated reference, not an exhaustive one.** It documents the settings a deployment normally has to make a decision about — connectivity, secrets, token and hashing policy, rate limits, caches and TLS. The keys it leaves out are transport and pool tuning, debug-build fallbacks, and switches for features that are not shipped yet: things with working defaults and no deployment-specific right answer.",
+      },
+      {
+        type: "note",
+        text: "The complete list is the configuration structs themselves, and it is worth knowing that they are the authority in two ways. Many keys never appear as a literal string in the source: the config layer derives `AXIAM__SERVER__HOST` from the `host` field of the server config struct, so grepping for the variable name finds nothing while the variable works perfectly. If a setting you need is not on this page, look for the field rather than for the key.",
+      },
+      {
+        type: "note",
+        text: "That scope is enforced rather than asserted. `scripts/check-config-key-coverage.py` compares every key literally present in the server against this page, and fails on one that is neither documented here nor carrying a written exemption saying why a deployment never needs to set it — so the gap between the two can be argued with, but it cannot quietly grow.",
       },
       { type: "h", id: "connectivity", text: "Connectivity & bind addresses" },
       {
@@ -43,6 +58,21 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "amqps://user:pass@rabbitmq:5671",
           ],
           [
+            "AXIAM__AMQP__TLS__CA_CERT_PATH",
+            "CA bundle for the broker's certificate. rustls compiles its roots in, so an in-cluster broker issued by a private CA is unverifiable without this — and that is the common case rather than the exception.",
+            "/etc/axiam/amqp/ca.pem",
+          ],
+          [
+            "AXIAM__AMQP__TLS__CLIENT_CERT_PATH",
+            "Client certificate chain for mutual TLS toward the broker. Optional.",
+            "/etc/axiam/amqp/client.pem",
+          ],
+          [
+            "AXIAM__AMQP__TLS__CLIENT_KEY_PATH",
+            "Its private key. Required together with the certificate — setting one without the other is refused at startup rather than connecting without the mutual half.",
+            "/etc/axiam/amqp/client.key",
+          ],
+          [
             "AXIAM__SERVER__HOST",
             "REST bind address (default 127.0.0.1). Set 0.0.0.0 in a container.",
             "0.0.0.0",
@@ -54,6 +84,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "0.0.0.0",
           ],
           ["AXIAM__GRPC__PORT", "gRPC bind port (default 50051).", "50051"],
+          [
+            "AXIAM__GRPC_TLS_CERT_PATH",
+            "PEM certificate for the gRPC listener. **Both this and the key must be set or gRPC serves plaintext** — acceptable in a mesh that provides its own transport security, and not otherwise. Note the single underscore after the prefix: these two are read directly rather than through the layered config.",
+            "/etc/axiam/grpc/server.pem",
+          ],
+          [
+            "AXIAM__GRPC_TLS_KEY_PATH",
+            "Its private key. Set together with the certificate; the server logs a warning at startup whenever TLS is off.",
+            "/etc/axiam/grpc/server.key",
+          ],
           [
             "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC",
             "Max gRPC authz requests per second per IP (default 100).",
@@ -162,6 +202,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__AUTH__VAULT_PATH",
             "Path within the mount holding AXIAM's keys as fields (default `axiam`).",
             "axiam",
+          ],
+          [
+            "AXIAM__AUTH__VAULT_CA_CERT_PATH",
+            "Trust anchor for a Vault fronted by a private CA. rustls compiles its roots in, so a Vault certificate issued by an internal PKI — cert-manager, or the repository's own dev certificates — is otherwise unverifiable and the server fails at startup with a bare transport error.",
+            "/etc/axiam/vault/ca.pem",
           ],
         ],
       },
@@ -289,6 +334,37 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "600",
           ],
           ["AXIAM__RATE_LIMIT__REVOKE_PER_MIN", "Max /oauth2/revoke per minute.", "60"],
+          [
+            "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN",
+            "Max RFC 8693 token exchanges per minute.",
+            "120",
+          ],
+          ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
+          [
+            "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
+            "Max /oauth2/end_session per minute. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN",
+            "Max device-grant starts per minute. Sized as a state-allocation guard rather than from capacity — each call reserves a user code — and never moved by a preset.",
+            "12",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN",
+            "Max device-code verifications per minute. Human-driven, so sized for a person at a keyboard; never moved by a preset.",
+            "10",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN",
+            "Max UMA permission-ticket requests per minute.",
+            "120",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN",
+            "Max UMA ticket redemptions per minute.",
+            "120",
+          ],
           [
             "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN",
             "Max authz-check requests per minute.",
@@ -448,6 +524,51 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database first (those paths gained ~90% from a second pair of DB cores), then try the decision cache and measure its logged hit rate — it is transformative on gRPC checks and marginal on REST ones; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
+      },
+      { type: "h", id: "mds", text: "WebAuthn attestation metadata (FIDO MDS3)" },
+      {
+        type: "p",
+        text: "Attestation policy checks an authenticator model against the FIDO Alliance's metadata service. Ingestion is **off by default** — `false` means zero outbound calls, no background job, and an admin-triggered refresh that refuses to run — so a deployment that does not verify attestation carries no dependency on the FIDO Alliance at all.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          ["AXIAM__PKI__MDS_ENABLED", "Master switch. Default `false`.", "true"],
+          [
+            "AXIAM__PKI__MDS_BLOB_URL",
+            "Fetch source (default `https://mds3.fidoalliance.org/`).",
+            "https://mds3.fidoalliance.org/",
+          ],
+          [
+            "AXIAM__PKI__MDS_BLOB_PATH",
+            "Local BLOB file for an air-gapped deployment. When set it wins over the URL and no network fetch happens at all.",
+            "/etc/axiam/mds/blob.jwt",
+          ],
+          [
+            "AXIAM__PKI__MDS_REFRESH_INTERVAL_SECS",
+            "Background refresh interval; default 604800 (weekly). `0` disables the background job while leaving the admin-triggered refresh working.",
+            "604800",
+          ],
+          [
+            "AXIAM__PKI__MDS_LEAF_DNS",
+            "Expected DNS SAN on the BLOB's leaf signing certificate (default `mds.fidoalliance.org`). Configurable so a legitimate FIDO hostname change is an operations action rather than a code release.",
+            "mds.fidoalliance.org",
+          ],
+          [
+            "AXIAM__PKI__MDS_MAX_STALE_DAYS",
+            "Refuse **attested** registration once the ingested BLOB is this many days past its own `nextUpdate`. Default `0`, which disables the check.",
+            "30",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "The staleness bound is opt-in rather than defaulted, and that is a deliberate trade rather than an oversight. Ingestion never hard-fails on staleness — a transient outage at the FIDO Alliance must not brick WebAuthn registration for everyone — and the cost of that choice is a window in which an authenticator model revoked since the last successful refresh still passes policy, because the revocation is in a BLOB this deployment has not seen. The right bound is a property of the deployment: a high-assurance tenant may want days, while an air-gapped one with no automatic refresh path would be taken offline by anything short of months. Silently inventing a number would pick for you.",
+      },
+      {
+        type: "p",
+        text: "The bound applies to attestation only. A ceremony that requests no attestation consults no metadata, so stale metadata cannot have misled it.",
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {

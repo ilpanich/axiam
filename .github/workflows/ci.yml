@@ -84,6 +84,16 @@ jobs:
       - name: Advisory ignore-lists agree
         run: python3 scripts/check-audit-ignore-sync.py
 
+      # The configuration page reads as a complete env-var reference and is a
+      # curated subset. That is a fine scope; what was not fine is that nobody
+      # could tell which keys were in it, so it could drift further from the
+      # server every release. A key must now be documented or carry a written
+      # exemption -- the gap is arguable, but it cannot grow silently.
+      - name: Config-coverage gate self-test (fixtures)
+        run: python3 scripts/check-config-key-coverage.py --self-test
+      - name: Every config key is documented or exempt
+        run: python3 scripts/check-config-key-coverage.py
+
   build:
     name: Build
     runs-on: ubuntu-latest

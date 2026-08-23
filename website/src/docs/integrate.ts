@@ -1,5 +1,6 @@
 import { API_INDEX, API_OPERATION_COUNT, API_PATH_COUNT, API_VERSION } from "../apiIndex";
 import type { DocBlock, DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * The endpoint index, expanded from the generated `apiIndex.ts`.
@@ -114,57 +115,120 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "gRPC API",
     intro:
       "A low-latency surface for service-mesh authorization checks, token validation and user lookups — Tonic on the server, one protobuf contract shared by every SDK.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Why gRPC" },
       {
         type: "p",
         text: "REST is the general-purpose surface; gRPC exists for the hot path. Inside a service mesh, sidecars and backends make authorization checks on nearly every request, and connection reuse plus binary framing is what keeps tail latency down. In the benchmark run, a single gRPC `CheckAccess` held a p99 of 90 ms at database saturation, and TLS 1.3 cost nothing measurable against plaintext.",
       },
-      { type: "h", id: "services", text: "Services" },
+      { type: "h", id: "services", text: "Services and RPCs" },
       {
         type: "p",
-        text: "Defined in `proto/axiam/v1/`. Every request message is tenant-scoped — `tenant_id` is a field on every RPC, because there is no default tenant.",
+        text: "Five services, defined in `proto/axiam/v1/` and all registered by the same listener. Every request message is tenant-scoped — `tenant_id` is a field on the request, not a header, because there is no default tenant.",
       },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Service", "RPCs", "Purpose"],
+        headers: ["Service", "RPC", "What it does"],
         rows: [
           [
             "AuthorizationService",
-            "CheckAccess, BatchCheckAccess",
-            "A single access check, or several in one round trip.",
+            "`CheckAccess`",
+            "One access check. The hot-path RPC this service exists for.",
           ],
+          [
+            "AuthorizationService",
+            "`BatchCheckAccess`",
+            "Several checks in one round trip; results preserve input order.",
+          ],
+          ["TokenService", "`ValidateToken`", "Signature, expiry and tenant. Returns `cnf` and `token_type`."],
           [
             "TokenService",
-            "ValidateToken, IntrospectToken",
-            "Signature and expiry validation, or full RFC 7662-style claims.",
+            "`IntrospectToken`",
+            "Full RFC 7662 claims, plus `scope`, `client_id`, UMA `permissions` and `ext_exchange_iss`.",
           ],
+          ["UserInfoService", "`GetUserInfo`", "The OIDC identity read — the gRPC-only counterpart of REST's userinfo endpoint (§1.1)."],
+          ["UserService", "`GetUser`", "Lookup by id."],
           [
             "UserService",
-            "GetUser, ValidateCredentials",
-            "Lookup by id, or a username/password check that issues no token.",
+            "`ValidateCredentials`",
+            "A username/password check that issues no token. An Argon2id verification, and rate-limited as a CPU guard rather than a read ceiling.",
+          ],
+          [
+            "ReactorAdminService",
+            "`ListReactorEvents`, `CreateReactor`, `ListReactors`, `GetReactor`, `UpdateReactor`, `DeleteReactor`",
+            "Reactor registration and lifecycle — the administrative surface behind the [reactors page](#/docs/reactors).",
           ],
         ],
       },
-      { type: "h", id: "server", text: "The server" },
+      { type: "h", id: "checkaccess", text: "One CheckAccess call" },
       {
         type: "p",
-        text: "The gRPC listener starts inside `axiam-server` alongside REST and the AMQP consumer. It binds `127.0.0.1:50051` by default — loopback only — and is meant to be reached in-cluster over an internal network or mTLS, never through a public ingress. Bind address, port and the per-IP rate limit are the `AXIAM__GRPC__*` variables.",
+        text: "The request names the tenant, the subject, an action and a resource. `subject_id` may be left empty to mean *the subject carried by the verified token* — over gRPC it can only ever restate the caller, since there is no cross-subject form of the check on this transport.",
+      },
+      {
+        type: "codegroup",
+        caption: "CheckAccess",
+        tabs: [
+          {
+            label: "Rust",
+            code: 'use axiam_sdk::grpc::{AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig, build_channel};\n\n// `connect_lazy` performs no network I/O — the TCP and TLS handshake\n// happens on the first RPC.\nlet channel = build_channel("https://iam.acme.dev:50051", &GrpcChannelConfig::default())?;\nlet client = AuthzGrpcClient::new(channel, token_manager, refresh_fn);\n\nlet decision = client\n    .check_access(CheckAccessRequest {\n        tenant_id,\n        subject_id,\n        action: "resource:read".to_string(),\n        resource_id,\n        scope: None,\n    })\n    .await?;\n\nprintln!("allowed: {}, reason: {:?}", decision.allowed, decision.reason);',
+          },
+          {
+            label: "Go",
+            code: '// arg 1 is an optional custom CA PEM for a dev server (§6).\ncreds, err := axiamgrpc.NewTLSCredentials(nil, nil, nil)\nconn, err := axiamgrpc.NewGRPCClient(target, creds, interceptor)\nauthzClient := axiamgrpc.NewAuthzClient(conn, refreshFn)\n\nallowed, denyReason, err := authzClient.CheckAccess(ctx, axiamgrpc.CheckAccessRequest{\n\tTenantID:   tenantID,\n\tSubjectID:  subjectID,\n\tAction:     "resource:read",\n\tResourceID: resourceID,\n})',
+          },
+          {
+            label: "Python",
+            code: 'from axiam_sdk.grpc import AuthzGrpcClient\n\nclient = AuthzGrpcClient(\n    "iam.acme.dev:50051",\n    token_fn=lambda: current_access_token,  # non-blocking cache read\n    tenant_id=tenant_id,\n    refresh_fn=refresh_fn,  # invoked once on UNAUTHENTICATED, then one retry\n)\n\ndecision = client.check_access(subject_id, "resource:read", resource_id)',
+          },
+          {
+            label: "grpcurl",
+            code: '# The server registers no reflection service, so point grpcurl at the\n# protos directly.\ngrpcurl \\\n  -import-path proto -proto axiam/v1/authorization.proto \\\n  -H "authorization: Bearer $ACCESS_TOKEN" \\\n  -d \'{"tenant_id":"<uuid>","action":"resource:read","resource_id":"<uuid>"}\' \\\n  iam.acme.dev:50051 axiam.v1.AuthorizationService/CheckAccess',
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "The response carries `allowed` plus a machine-readable `reason_code`: `allowed`, `no_grant` when nothing matched, or `denied_by_rule` when an explicit deny overrode an allow. The distinction is the one worth surfacing to a user — `no_grant` means ask an administrator, `denied_by_rule` means one has already decided.",
+      },
+      {
+        type: "warn",
+        text: "`deny_reason` is deprecated. It carries the same string as `reason` until AXIAM 2.0 removes it; new code reads `reason` and must not depend on the older field surviving.",
+      },
+      { type: "h", id: "deadlines", text: "Deadlines and retries" },
+      {
+        type: "p",
+        text: "The retry policy is contract-level and identical across transports, so a gRPC check retries exactly as a REST one does. Every value below is binding on an SDK claiming conformance.",
+      },
+      {
+        type: "table",
+        headers: ["Parameter", "Value"],
+        rows: [
+          ["Attempt cap", "3 total — one initial call and two retries"],
+          ["Base delay", "200 ms"],
+          ["Delay cap", "5 s on any single wait"],
+          ["Backoff", "`min(cap, base × 2^(attempt−1))` — 200 ms, then 400 ms"],
+          ["`Retry-After`", "A floor on the computed backoff, never a ceiling"],
+        ],
+      },
+      {
+        type: "p",
+        text: "Only side-effect-free operations are eligible, and that is not the same as *reads a GET*: `CheckAccess` and `BatchCheckAccess` both qualify, and they are the reason the policy exists. Token minting, credential validation and every mutation are excluded — a transient failure after the server committed is indistinguishable at the client from one before it committed.",
       },
       {
         type: "note",
-        text: "In the shipped Kubernetes manifests, port 50051 is intentionally *not* routed through the Ingress — it is reachable only via the in-cluster ClusterIP service.",
+        text: "A caller who needs more than three attempts should retry at their own layer, where the deadline is known. An SDK may lower the cap or switch retry off; it may never raise it, because a caller who can raise it turns one client into the herd a backoff exists to prevent.",
       },
-      { type: "h", id: "consume", text: "Consuming it" },
+      { type: "h", id: "sender-constrained", text: "Sender-constrained tokens" },
+      {
+        type: "note",
+        text: "`ValidateToken` and `IntrospectToken` return a `cnf` claim, and a token that carries one is **not** a bearer token whichever wire it arrived on. `valid: true` means the signature, expiry and tenant check out — not that the token is usable as presented. When `cnf` is present the caller must verify possession against its **own** connection, because AXIAM cannot: the proof is bound to the caller's connection, not to the one carrying the introspection call. A `cnf` whose members are all empty must be refused rather than read as unbound — proto3 cannot tell an absent string from an empty one.",
+      },
       {
         type: "p",
-        text: "The seven SDKs implementing the full contract — Rust, TypeScript, Python, Java, C#, PHP and Go — ship pre-generated stubs, so you consume gRPC without running codegen yourself. gRPC is a **separate client** rather than a flag on the REST one — it is a different transport, with its own channel, TLS settings and connection lifetime — but it shares the session and the single-flight refresh guard, and the decisions it returns are the same ones REST returns.",
-      },
-      {
-        type: "code",
-        caption: "building a gRPC channel · Rust",
-        code: "use axiam_sdk::grpc::{build_channel, GrpcChannelConfig};\n\n// gRPC is a separate channel rather than a flag on the REST client: it is a\n// different transport with its own TLS and connection settings.\nlet channel = build_channel(\n    \"https://iam.acme.dev:50051\",\n    &GrpcChannelConfig::default(),\n)?;\n\n// The channel then backs `AuthzGrpcClient`, which shares the REST client's\n// single-flight refresh guard. See the SDK's `grpc_check_access` example.",
+        text: "AXIAM's own gRPC interceptor refuses `jkt`-bound tokens, because a Tonic interceptor sees neither the HTTP method nor the URI a DPoP proof is bound to. That is the server's limitation and should not be copied: an SDK guarding a real endpoint knows both, so it can and should verify the proof.",
       },
       { type: "h", id: "codegen", text: "Generating your own stubs" },
       {
@@ -174,7 +238,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "code", code: "buf generate   # from the vendored proto/ tree" },
       {
         type: "note",
-        text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface today; gRPC is a planned follow-up for them. Until it lands, use the REST transport or generate stubs directly from `proto/`.",
+        text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface. gRPC is deferred rather than scheduled for them — the contract sets no §-level gRPC requirement for those four — so use the REST transport, or generate stubs straight from `proto/` if you need this surface. The one thing REST cannot substitute for is `GetUserInfo`, which has no REST form in the SDK vocabulary.",
       },
     ],
   },
@@ -186,6 +250,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "AMQP — asynchronous authorization & events",
     intro:
       "The message bus behind deferred authorization decisions, audit ingestion, mail, webhook delivery and Reactor hooks — specified as AsyncAPI 2.6.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "What runs over the bus" },
       {
@@ -195,28 +260,91 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Channel", "Purpose"],
+        headers: ["Queue", "Purpose", "Dead-letters to"],
         rows: [
-          ["axiam.authz.request", "Deferred authorization requests."],
-          ["axiam.authz.response", "The decisions, correlated back to the requester."],
-          ["axiam.audit.events", "Audit ingestion, off the request hot path."],
-          ["axiam.notifications", "Notification-rule delivery."],
-          ["axiam.mail.outbound", "Outbound mail — verification, reset, alerts."],
-          ["axiam.webhook", "Webhook delivery, with `axiam.webhook.retry` for backoff."],
+          ["axiam.authz.request", "Deferred authorization requests.", "`axiam.authz.request.dlq`"],
+          ["axiam.authz.response", "The decisions, correlated back to the requester.", "—"],
+          ["axiam.audit.events", "Audit ingestion, off the request hot path.", "`axiam.audit.events.dlq`"],
+          ["axiam.notifications", "Notification-rule delivery.", "—"],
+          ["axiam.mail.outbound", "Outbound mail — verification, reset, alerts.", "`axiam.mail.outbound.dlq`"],
+          ["axiam.webhook", "Webhook delivery.", "`axiam.webhook.dlq`"],
+          [
+            "axiam.webhook.retry",
+            "Delay queue for webhook backoff. Nothing consumes it — a message published here with a per-message TTL dead-letters back to `axiam.webhook` when the TTL expires, which is how the retry delay happens without a consumer sleeping.",
+            "`axiam.webhook` (by design)",
+          ],
         ],
       },
       {
-        type: "p",
-        text: "Each has a dead-letter queue (`*.dlq`) for messages that exhaust their retries, so a permanently-failing consumer produces an inspectable backlog rather than silent loss.",
+        type: "note",
+        text: "Dead-lettering is per queue, not universal. Four queues have a DLQ; `axiam.authz.response` and `axiam.notifications` do not, and `axiam.webhook.retry` dead-letters *forward* into the primary queue as its delay mechanism rather than as a failure path. Messages that reach a `.dlq` are real and replayable — they are not dropped.",
       },
-      { type: "h", id: "security", text: "Transport security & authenticity" },
+      { type: "h", id: "exchanges", text: "Exchanges" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Exchange", "Kind", "Purpose"],
+        rows: [
+          [
+            "axiam.authz.cache.invalidate",
+            "fanout",
+            "Cross-replica authorization decision-cache invalidations. Fanout rather than a work queue for a load-bearing reason: every replica binds its own exclusive auto-delete queue, so every replica sees every invalidation. A shared queue would hand each message to exactly one consumer and leave the rest serving stale allows.",
+          ],
+          [
+            "axiam.reactor.events",
+            "reactor hook events",
+            "The Reactor bus — see [Reactors](#/docs/reactors) for the request/reply contract.",
+          ],
+        ],
+      },
+      { type: "h", id: "envelope", text: "One signed message" },
+      {
+        type: "p",
+        text: "Every message carries an HMAC-SHA256 over its own body, and since `key_version` 2 that body must also carry a `nonce` and an `issued_at`. Both are always emitted — never omitted — so they fall inside the signed bytes.",
+      },
+      {
+        type: "code",
+        caption: "an authz request as it travels · the reference vector",
+        code: '{\n  "correlation_id": "22222222-2222-2222-2222-222222222222",\n  "tenant_id":      "11111111-1111-1111-1111-111111111111",\n  "subject_id":     "33333333-3333-3333-3333-333333333333",\n  "action":         "documents:read",\n  "resource_id":    "44444444-4444-4444-4444-444444444444",\n  "scope":          "confidential",\n  "key_version":    2,\n  "nonce":          "55555555-5555-5555-5555-555555555555",\n  "issued_at":      "2026-07-10T12:00:00Z",\n  "hmac_signature": "13d73b3aa8a400fc3f64dbc20b36952d8584142feb822b5f77495b0f587049ed"\n}',
+      },
+      {
+        type: "p",
+        text: "The signature is computed over the same object with `hmac_signature` **absent**, serialized in exactly the field order above — `correlation_id`, `tenant_id`, `subject_id`, `action`, `resource_id`, `scope` (omitted when null), `key_version`, `nonce`, `issued_at`. Order is part of the construction, not a formatting detail: a verifier that re-serializes in a different order computes a different digest and rejects a valid message.",
+      },
+      {
+        type: "p",
+        text: "The key is not the master secret. It is a per-tenant subkey derived with HKDF-SHA256, domain-separated and versioned by `key_version`, then scoped to the tenant — so a signature made with one tenant's subkey never verifies under another's, and rotating the master key yields entirely different subkeys without breaking messages already in flight under the previous version.",
+      },
+      {
+        type: "table",
+        headers: ["Check", "Rule"],
+        rows: [
+          ["Signature", "Recompute and compare in constant time. A mismatch is nacked **without** requeue and logged as a security event — never the digest itself."],
+          ["Version", "`key_version` below 2 is rejected outright. The v2 cutover is hard; there is no grace path."],
+          ["Freshness", "`issued_at` must lie within ±5 minutes of the consumer's clock (`AXIAM__AMQP__REPLAY_SKEW_SECS`)."],
+          ["Replay", "`(tenant_id, nonce)` is recorded durably; a repeat inside the freshness window is a replay and is rejected."],
+        ],
+      },
+      {
+        type: "note",
+        text: "Vectors every SDK must reproduce byte-for-byte live in `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` — the sample above is one of them. Reproducing the canonical JSON and recomputing the digest is the conformance test, which is why the fixture is shared rather than each SDK inventing its own.",
+      },
+      { type: "h", id: "security", text: "Transport security" },
       {
         type: "warn",
-        text: "AMQP is **TLS-only**. `AXIAM__AMQP__URL` must use the `amqps://` scheme — every other scheme is refused at startup rather than downgraded.",
+        text: "AMQP is **TLS-only**. `AXIAM__AMQP__URL` must be `amqps://`; every other scheme is refused before a socket opens, in a debug build exactly as in a release one. There is no environment variable, build profile or flag that changes the answer — the `ALLOW_PLAINTEXT` escape hatch that once permitted `amqp://` has been removed.",
       },
       {
         type: "p",
-        text: "Message authenticity is an HMAC over the whole message with replay protection — a nonce plus a freshness window — not merely a signature over the body. This matters because a bus consumer cannot rely on TLS peer identity the way an HTTP caller can: the broker is in between.",
+        text: "That removal has a history worth repeating, because it is the usual shape of this failure. The flag existed for a year, and four of the project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument. None was wrong on its own. The aggregate was that \"AMQP is TLS-only\" described the production compose file and the Kubernetes manifests, and nothing else the repository actually ran.",
+      },
+      {
+        type: "p",
+        text: "An in-cluster broker's certificate is usually privately issued, so **supplying a custom CA bundle is the common case, not the exception** — every SDK that speaks AMQP must support it. Client certificates toward the broker are supported where an SDK offers them, and the certificate and key are required together: half a client identity fails closed rather than connecting without the mutual half.",
+      },
+      {
+        type: "note",
+        text: "TLS and the HMAC are not alternatives. TLS gives confidentiality but terminates at the broker, which then re-sends; the HMAC gives authenticity and replay protection end-to-end **across** that hop. Production needs both, and an SDK offering either as a substitute for the other is not conformant.",
       },
       { type: "h", id: "spec", text: "The specification" },
       {
@@ -237,6 +365,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "SCIM 2.0 provisioning",
     intro:
       "Let Okta, Microsoft Entra ID or any SCIM-compliant IdP create, update and deactivate AXIAM users and groups directly, instead of an administrator doing it by hand.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Federation is not provisioning" },
       {
@@ -277,10 +406,39 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "code",
         code: "GET    /scim/v2/ServiceProviderConfig\nGET    /scim/v2/ResourceTypes\nGET    /scim/v2/Schemas\n\nGET    /scim/v2/Users?filter=...&startIndex=1&count=50\nPOST   /scim/v2/Users\nGET    /scim/v2/Users/{id}\nPUT    /scim/v2/Users/{id}\nPATCH  /scim/v2/Users/{id}\nDELETE /scim/v2/Users/{id}\n\nGET    /scim/v2/Groups?filter=...&startIndex=1&count=50\nPOST   /scim/v2/Groups\nGET    /scim/v2/Groups/{id}\nPUT    /scim/v2/Groups/{id}\nPATCH  /scim/v2/Groups/{id}\nDELETE /scim/v2/Groups/{id}",
       },
-      { type: "h", id: "tokens", text: "Authentication & tenant scoping" },
+      { type: "h", id: "tokens", text: "Minting a provisioning token" },
       {
         type: "p",
-        text: "A SCIM client authenticates with a dedicated provisioning token, bound to one tenant and carrying a dedicated permission — not a super-admin session, and not an OAuth2 client secret reused for something else. An IdP integration that is compromised should be able to manage users in one tenant and nothing else.",
+        text: "A SCIM client authenticates with a **provisioning token** — a long-lived, revocable bearer handle meant to be pasted into an IdP once and forgotten. It is not an access token, and it is not a separate token *type* on the SCIM endpoints: `/scim/v2/*` uses the same bearer authentication as the rest of the REST API.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create a dedicated provisioning user",
+            body: "Non-interactive, used for nothing else. A shared administrator account here makes the audit trail useless and the blast radius unnecessary.",
+            code: 'POST /api/v1/users\n{ "username": "scim-provisioner", "...": "..." }',
+          },
+          {
+            title: "Create a role holding only scim:provision",
+            body: "Least privilege, and specifically not the `admin` role — the default-role seeder grants admin every permission except `admin:bootstrap`, so it carries `scim:provision` along with everything else.",
+            code: 'POST /api/v1/roles\nPOST /api/v1/roles/{role_id}/permissions   { "permission": "scim:provision" }',
+          },
+          {
+            title: "Assign the role to that user",
+            body: "The token you mint next inherits its authority from here, so this is the step that decides what the IdP can do.",
+            code: "POST /api/v1/roles/{role_id}/users",
+          },
+          {
+            title: "Mint the provisioning token",
+            body: "Requires `scim_tokens:create`. The value is returned exactly once and stored only as a SHA-256 hash — there is no way to read it back.",
+            code: "POST /api/v1/scim-tokens",
+          },
+          {
+            title: "Paste it into the IdP",
+            body: "Okta calls this HTTP Header authentication; Entra calls it the Secret Token. Nothing else needs to be configured on the AXIAM side.",
+          },
+        ],
       },
       {
         type: "api",
@@ -290,13 +448,141 @@ export const INTEGRATE_PAGES: DocPage[] = [
           { method: "DELETE", path: "/api/v1/scim-tokens/{id}", summary: "Revoke one." },
         ],
       },
+      { type: "h", id: "token-limits", text: "What the token can and cannot do" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Property", "Behaviour"],
+        rows: [
+          [
+            "Scope",
+            "Accepted on `/scim/v2/*` and **nowhere else** — not `/api/v1/*`, not `/oauth2/*`. That containment is what makes a year-long credential defensible in a system whose access tokens live 15 minutes.",
+          ],
+          [
+            "Permissions",
+            "**None of its own.** It authenticates *as* the tenant user it was minted for, and that user's `scim:provision` grant decides everything. Unassign the role or deactivate the user and every token bound to them stops working — no separate revocation needed.",
+          ],
+          ["Storage", "Only a SHA-256 hash is kept. The value is shown once, at creation."],
+          [
+            "Recognisability",
+            "Fixed prefix `axiam_scim_`, so a secret scanner or a grep finds it if it is ever pasted somewhere it should not be.",
+          ],
+          [
+            "Lifetime",
+            "Always expires — there is no never-expires option. The ceiling is `AXIAM__SCIM_TOKEN_MAX_LIFETIME_DAYS`, default 365.",
+          ],
+          [
+            "Tenant reach",
+            "One tenant, enforced by construction rather than by a check: every repository call takes its tenant id from the token's own claim, never from the request path or body. A token for tenant A cannot even name tenant B's users in a query.",
+          ],
+        ],
+      },
       {
         type: "warn",
-        text: "Deactivation, not deletion, is what you usually want from an IdP. A SCIM `DELETE` removes the account; setting `active: false` disables sign-in while leaving the identity intact for the audit trail. Configure your IdP's deprovisioning action deliberately.",
+        text: "**Treat this as an administrator credential, not an integration credential.** RFC 7643 makes `password` a writable User attribute and `PATCH /scim/v2/Users/{id}` honours it — so a holder of `scim:provision` can set any user's password in the tenant, including a tenant administrator's, and then sign in as them. That makes the one permission strictly more powerful than `users:create` and `users:update` combined; the native admin API has no equivalent, because `PUT /api/v1/users/{id}` never writes a password hash. Rotate and store it the way you would an admin password.",
       },
       {
         type: "note",
-        text: "Step-by-step walkthroughs for wiring up Okta and Microsoft Entra ID are in `docs/api/scim-provisioning.md` in the repository.",
+        text: "Most Okta and Entra deployments federate and never push a password, so nothing is lost by the IdP never exercising that capability. AXIAM cannot yet take it away, though — `password` writes are not behind a second permission. Worth knowing before you grant it rather than after.",
+      },
+      { type: "h", id: "deprovision", text: "What deprovisioning actually does" },
+      {
+        type: "p",
+        text: "Deactivation is immediate and complete. A SCIM `password` write, an `active: false` (by `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every live session **and** every OAuth2 refresh token the target holds, on top of flushing the authorization decision cache.",
+      },
+      {
+        type: "note",
+        text: "That last part is the fix for a real gap: before it, only the decision cache was flushed, so an account an offboarding job had just deactivated still held a spendable refresh token. If you are reasoning about offboarding latency, this is the behaviour to rely on.",
+      },
+      {
+        type: "warn",
+        text: "Deactivation, not deletion, is usually what you want from an IdP. A SCIM `DELETE` removes the account; `active: false` disables sign-in while leaving the identity intact for the audit trail. Configure your IdP's deprovisioning action deliberately — both are wired, and they are not the same decision.",
+      },
+      { type: "h", id: "okta", text: "Okta" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create or edit an app integration with SCIM provisioning",
+            body: "In the Okta Admin Console, under the app's Provisioning tab.",
+          },
+          {
+            title: "Set the SCIM connector base URL",
+            body: "The whole SCIM surface hangs off this prefix.",
+            code: "https://<your-axiam-host>/scim/v2",
+          },
+          {
+            title: "Set the unique identifier field to userName",
+            body: "This is the attribute AXIAM filters on, and the only User filter supported besides `externalId`.",
+          },
+          {
+            title: "Enable the provisioning actions you want",
+            body: "Push New Users, Push Profile Updates and Push Groups are all supported — standard CRUD plus PATCH.",
+          },
+          {
+            title: "Set authentication mode to HTTP Header and paste the token",
+            body: "The provisioning token from the steps above. Okta's own Test API Credentials button then exercises the real request shapes: a filtered user lookup, a create, and a deactivating PATCH.",
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "Okta deactivates with `{\"op\": \"replace\", \"path\": \"active\", \"value\": false}`. Group push sends a `displayName` and, once members are assigned, a `members` array, then patches membership with a `members[value eq \"<uuid>\"]` remove when one user leaves the group.",
+      },
+      { type: "h", id: "entra", text: "Microsoft Entra ID" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Set provisioning mode to Automatic",
+            body: "Entra admin center → Enterprise applications → your app → Provisioning.",
+          },
+          {
+            title: "Set the Tenant URL",
+            body: "Entra's name for the same SCIM base URL.",
+            code: "https://<your-axiam-host>/scim/v2",
+          },
+          {
+            title: "Paste the provisioning token as the Secret Token",
+            body: "Same credential as Okta's HTTP Header value.",
+          },
+          {
+            title: "Test the connection",
+            body: "Entra probes a single-user page as its validity check, so a green result means auth and paging both work.",
+            code: "GET /scim/v2/Users?startIndex=1&count=1",
+          },
+          {
+            title: "Leave the default attribute mappings alone",
+            body: "Entra's defaults already match the supported subset: `userPrincipalName` to `userName`, `mail` and `otherMails` to `emails`, `givenName` and `surname` to the `name` sub-attributes, and `accountEnabled` to `active`.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Entra deactivates with a path-less operation — `{\"op\": \"replace\", \"value\": {\"active\": false}}` — where Okta names the path. Both shapes are handled, which is the kind of divergence that otherwise shows up as an IdP that can create users but never disable them.",
+      },
+      { type: "h", id: "limits", text: "Rate limiting" },
+      {
+        type: "p",
+        text: "The whole `/scim/v2` scope shares **one** bucket, `AXIAM__RATE_LIMIT__SCIM_PER_MIN`, defaulting to 600 per minute per IP — Users, Groups and discovery, reads and writes alike. Past it, requests get the standard `429` with `Retry-After: 60`, which a well-behaved SCIM client honours.",
+      },
+      {
+        type: "note",
+        text: "That ceiling is a CPU guard rather than a throughput number: creating a SCIM user generates and Argon2id-hashes an initial password, and a `password` patch re-hashes one. No rate-limit profile preset moves it — a service-mesh capacity decision must not silently widen an administrative surface. For scale, at a typical IdP page size of 200 a full import of a 100,000-user directory is roughly 500 list calls, well inside one minute's budget.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "SCIM provisioning reference",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/scim-provisioning.md",
+            note: "Field mappings, the PATCH shapes each IdP sends, and the contract fixtures.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The Okta and Entra contract fixtures are hand-constructed from each vendor's published SCIM notes and RFC 7644's examples, not captured from live traffic. Read them as the request shapes those vendors are documented to send, rather than as a captured-traffic compatibility guarantee.",
       },
     ],
   },

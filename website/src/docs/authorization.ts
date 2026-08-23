@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Authorization" — the RBAC engine and the entities it evaluates over.
@@ -15,6 +16,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     title: "The authorization engine",
     intro:
       "Role-based, default-deny, evaluated over a cascading resource hierarchy — and reachable over REST, gRPC or AMQP with the same answer from each.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "model", text: "The evaluation model" },
       {
@@ -53,6 +55,50 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           { method: "GET", path: "/api/v1/resources/{resource_id}/ancestors", summary: "The chain a grant can cascade down from." },
           { method: "GET", path: "/api/v1/resources/{resource_id}/children", summary: "The subtree a grant here would reach." },
         ],
+      },
+      { type: "h", id: "worked", text: "A worked resolution" },
+      {
+        type: "p",
+        text: "One tree, one allow at the top, one deny partway down — and the answer at every node. This is the whole cascade in one example.",
+      },
+      {
+        type: "code",
+        caption: "the resource tree",
+        code: "/fleet                              <- allow read  (role assigned here)\n├── /fleet/active\n│   └── /fleet/active/unit-3\n└── /fleet/decommissioned           <- deny read\n    └── /fleet/decommissioned/unit-7",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check `read` on", "Answer", "Reason code", "Why"],
+        rows: [
+          ["/fleet", "allow", "`allowed`", "The grant is here."],
+          ["/fleet/active", "allow", "`allowed`", "The allow cascades to a descendant."],
+          ["/fleet/active/unit-3", "allow", "`allowed`", "Depth does not weaken a cascade."],
+          [
+            "/fleet/decommissioned",
+            "deny",
+            "`denied_by_rule`",
+            "The deny is here, and it beats the allow it inherited from the parent.",
+          ],
+          [
+            "/fleet/decommissioned/unit-7",
+            "deny",
+            "`denied_by_rule`",
+            "The deny cascades too. A deny reaches every descendant exactly as an allow does.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "Now add one more rule — an explicit allow of `read` on `/fleet/decommissioned/unit-7`, the deepest and most specific node — and ask again.",
+      },
+      {
+        type: "warn",
+        text: "The answer on that leaf is still **deny**. A child allow does not override an inherited deny, however specific the child is. This is the rule to internalise: **adding an allow can never re-open something a deny closed.** It is the property the design is built to guarantee, and it is asserted as a property test rather than left to convention.",
+      },
+      {
+        type: "p",
+        text: "The consequence for a role model is direct: you cannot express *deny the subtree except this one leaf*. The answer is to narrow the deny rather than to widen the allow — move it to the nodes you actually mean, or split the subtree. Full precedence, including how denies behave through groups and across global versus resource-scoped roles, is on [Deny grants](#/docs/deny).",
       },
       { type: "h", id: "scopes", text: "Scopes" },
       {
@@ -269,6 +315,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     title: "Deny grants & precedence",
     intro:
       "An explicit deny refuses regardless of what else allows it — at any depth of the hierarchy and at equal specificity. This page is the precedence table, and the reasoning behind choosing that rule.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "rule", text: "The rule" },
       {
@@ -378,6 +425,16 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           "**Keep each deny as narrow as the thing you are actually excluding** — the right action, the right scope, the lowest node that covers it.",
           "**Denies are excellent for incident response.** One deny on a compromised principal's role closes access across the whole tree immediately, and no allow anywhere can reopen it.",
           "**Expect surprise on row 4.** Somebody will eventually add an allow below a deny and file a bug. It is working correctly; that is the property.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Deny-override design note",
+            href: "https://github.com/ilpanich/axiam/blob/main/claude_dev/deny-override-design.md",
+            note: "The full precedence table, the scope interaction, and why most-specific-wins was rejected.",
+          },
         ],
       },
     ],

@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Operate" — running AXIAM rather than integrating with it.
@@ -15,6 +16,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Docker & Kubernetes",
     intro:
       "Package AXIAM as a container and run it on Kubernetes with the shipped manifests.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "docker", text: "Docker" },
       {
@@ -74,6 +76,60 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "By default the server binds plaintext and expects an ingress or proxy to terminate TLS 1.3 in front of it. To terminate inside the process instead, set `AXIAM__SERVER__TLS__ENABLED` with a certificate and key path; the listener then binds with rustls restricted to TLS 1.3 only, and fails fast at startup on a missing, unreadable or mismatched pair rather than falling back to plaintext.",
+      },
+      { type: "h", id: "sizing-guides", text: "Sizing, measured" },
+      {
+        type: "p",
+        text: "Two deployment guides in the repository answer the questions this page raises and does not settle — both are derived from benchmark runs and query plans rather than from estimates.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Sizing your rate limits",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/deployment/rate-limit-sizing.md",
+            note: "Which of the three postures fits your topology, what the presets are worth, and the measured envelope behind them.",
+          },
+          {
+            label: "The authorization read path",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/deployment/authz-read-path.md",
+            note: "What one uncached check costs in database round-trips, and which cache removes which one.",
+          },
+        ],
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["You are", "Rate-limit posture", "Why"],
+        rows: [
+          [
+            "A small internet-facing deployment where humans log in from many addresses",
+            "the shipped defaults",
+            "Sized to stop single-source credential stuffing and token probing.",
+          ],
+          [
+            "A machine-to-machine, microservice or IoT fleet arriving through a shared NAT or egress gateway",
+            "`gateway`",
+            "Many distinct OAuth2 clients share one source address, so per-IP buckets collide and the fleet throttles itself.",
+          ],
+          [
+            "Reachable only on a private network or service mesh",
+            "`mesh`",
+            "Ceilings become runaway-loop guards; abuse control belongs at the network edge.",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "Presets are opt-in — setting no profile keeps the shipped defaults byte for byte — and **no profile ever changes the human endpoints**. Login, registration, password reset and MFA stay strict and per-IP in every posture, because a service-mesh capacity decision must not silently widen the surface an attacker actually attacks.",
+      },
+      {
+        type: "p",
+        text: "On the read path, the thing worth knowing before tuning: an uncached authorization check is a short sequence of *sequential* database round-trips, and the REST surface carries one the gRPC surface does not — a session-revocation lookup, because the gRPC interceptor validates the token signature and stops. Enabling only the decision cache therefore helps gRPC considerably more than REST; the session-validation cache is what closes the gap.",
+      },
+      {
+        type: "warn",
+        text: "Both caches are process-local by default, and both carry the same multi-replica caveat: a revocation handled by one replica is not seen by the others until their entries expire. Enable them at the same TTL — a deployment that has accepted a five-second decision-staleness window gains nothing from a zero-second session-staleness window, and the reverse leaves the looser of the two setting your actual revocation latency.",
       },
       {
         type: "warn",
@@ -332,6 +388,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "PKI & certificates",
     intro:
       "Per-tenant X.509 issuance under an organization CA, for users, services and IoT devices — plus the OpenPGP keys that sign the audit trail.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "hierarchy", text: "Certificate hierarchy" },
       {
@@ -371,10 +428,45 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "p",
         text: "`optional` requests a certificate and verifies it if presented, while still accepting anonymous clients. `required` rejects the handshake outright without a verifying certificate. A misconfigured client-auth setup **fails fast at startup** rather than serving without verification.",
       },
-      { type: "h", id: "iot", text: "IoT commissioning" },
+      { type: "h", id: "iot", text: "Enrolling an IoT device, end to end" },
       {
         type: "p",
-        text: "This is the shape AXIAM was built for on the device side: a device is issued a certificate at commissioning, presents it for mTLS, and is authorized by the same RBAC engine as everything else. Where a device cannot show a browser to enrol, the [device authorization grant](#/docs/device-flow) covers the human-approval half.",
+        text: "This is the shape AXIAM was built for on the device side: a device is issued a certificate at commissioning, presents it for mTLS, and is then authorized by the same RBAC engine as everything else. Four steps, and one of them is the one people expect to need and do not.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Have an organization CA",
+            body: "CA certificates are organization-scoped and are the trust root every leaf in that organization chains to. The response carries the CA's signing private key **once** — AXIAM never persists the plaintext — so store it in your secret manager before you do anything else.",
+            code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "CN=Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
+          },
+          {
+            title: "Issue the device certificate",
+            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored.",
+            code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "CN=sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
+          },
+          {
+            title: "Commission the device with the key pair",
+            body: "Write the certificate and its private key into the device at manufacture or first provisioning. This is the only moment the private key exists outside the device, which is why the issuing response is the one call whose output you must capture.",
+          },
+          {
+            title: "Let it connect over mTLS",
+            body: "The device presents its client certificate on the TLS handshake. Nothing further needs registering — the binding step that service accounts require does not apply here.",
+          },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Device certificates are not bound to anything.** A `Service` certificate must be attached to a service account explicitly, and it is natural to assume a device needs the same. It does not: on connection AXIAM computes the certificate's SHA-256 fingerprint, looks a `Device` certificate up directly by it, checks the certificate is active and unexpired, and **verifies the full chain** to the issuing organization's CA. Looking for a bind endpoint for a device is looking for something that does not exist.",
+      },
+      {
+        type: "note",
+        text: "A fingerprint match alone never authenticates a device. If the organization has no active CA certificate, the chain check has nothing to verify against and the attempt fails closed — which is the behaviour you want, and also the first thing to check when a correctly-commissioned device is refused.",
+      },
+      {
+        type: "p",
+        text: "Two limits worth knowing before you commission a fleet. A tenant can cap certificate lifetime through its `max_certificate_validity_days` setting, and a request exceeding that cap is rejected rather than silently shortened. And where a device cannot show a browser to enrol a *user*, the [device authorization grant](#/docs/device-flow) covers the human-approval half — that is a different mechanism from this one, and the two are often confused.",
       },
       { type: "h", id: "gnupg", text: "OpenPGP keys" },
       {
@@ -452,6 +544,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Health & observability",
     intro:
       "Probes, structured logs, telemetry hooks and the audit trail — what AXIAM tells you about itself, and what it deliberately does not.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "probes", text: "Probes" },
       {
@@ -464,6 +557,48 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "Wire these to the right probes and the difference matters operationally: a database blip should remove a replica from the load-balancer rotation, not restart it. Pointing liveness at `/ready` converts a transient dependency failure into a restart loop that makes the outage worse.",
+      },
+      { type: "h", id: "jobs", text: "Scheduled-job liveness" },
+      {
+        type: "p",
+        text: "A background sweep that stops running is invisible. Nothing errors and nothing returns a 500 — the work simply stops happening, and for the two jobs where that matters most, GDPR erasure and certificate expiry, the first symptom can be a regulator's question months later. A failure was always logged, but a log line nobody greps for is not a control.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          {
+            method: "GET",
+            path: "/health/jobs",
+            summary: "Last-known outcome of every registered sweep. Always 200.",
+          },
+        ],
+      },
+      {
+        type: "code",
+        caption: "a degraded response",
+        code: '{\n  "status": "degraded",\n  "jobs": [\n    {\n      "name": "gdpr_purge",\n      "last_success_at": "2026-08-21T02:00:04Z",\n      "last_failure_at": "2026-08-23T02:00:01Z",\n      "last_error": "database unreachable",\n      "consecutive_failures": 3,\n      "stalled": true\n    },\n    {\n      "name": "audit_retention",\n      "last_success_at": "2026-08-23T02:00:07Z",\n      "last_failure_at": null,\n      "last_error": null,\n      "consecutive_failures": 0,\n      "stalled": false\n    }\n  ]\n}',
+      },
+      {
+        type: "p",
+        text: "Six sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+      },
+      {
+        type: "table",
+        headers: ["Field", "What it tells you"],
+        rows: [
+          ["`stalled`", "The job has missed three consecutive expected runs. **This is the field to alert on.**"],
+          ["`consecutive_failures`", "Failures since the last success; reset to zero on success."],
+          ["`last_error`", "The last error text, for whoever is now looking at this wondering what broke."],
+          ["`last_success_at`", "When it last completed cleanly. `null` means never."],
+        ],
+      },
+      {
+        type: "note",
+        text: "`stalled` is computed server-side rather than left to the caller, because the sweep interval is configuration a dashboard does not have — and \"how long is too long\" is not a judgement worth re-deriving from timestamps in three places. The threshold is three missed intervals rather than one: a sweep that overruns, or a tick skipped under load, is normal and must not page anyone.",
+      },
+      {
+        type: "warn",
+        text: "The endpoint returns **200 even when degraded**, and that is deliberate. It is not a readiness gate: a stuck cleanup sweep is an operational problem, not a reason to pull a healthy server out of the load balancer and send its traffic to replicas running the same stuck code. Alert on `status` being `degraded`, or on a specific job's `stalled` — never wire this to a liveness probe.",
       },
       { type: "h", id: "logs", text: "Logs" },
       {
@@ -527,61 +662,195 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Production hardening checklist",
     intro:
       "Work through this before a deployment carries real identity traffic. Every item is something AXIAM leaves to you on purpose, because it cannot be decided from inside the process.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
+      {
+        type: "p",
+        text: "Each row is one check, the setting or action it turns on, and what goes wrong if you skip it. The last column is the point: an item whose consequence you cannot state is an item nobody will prioritise.",
+      },
       { type: "h", id: "secrets", text: "Secrets" },
       {
-        type: "list",
-        items: [
-          "Set `AXIAM__AUTH__SECRET_PROVIDER` to `vault` or `file`. `env` is a development default, not a production one.",
-          "**Back up `opaque_setup_key`** if any tenant uses OPAQUE. Losing it is a password reset for every user in every tenant.",
-          "Back up `jwt_private_key_pem` and confirm the public key is its actual pair — a mismatch is a confusing outage rather than a clear error.",
-          "Configure Vault auto-unseal *before* going live. Without it, any restart leaves AXIAM unable to start until three keyholders are woken up.",
-          "Distribute unseal shares to different people, and revoke the root token once the policy and seeding are done.",
-          "Confirm no real key material is in a compose file, a manifest, a CI variable or git history.",
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check", "Setting or action", "If you skip it"],
+        rows: [
+          [
+            "Secrets come from a manager, not the environment",
+            "`AXIAM__AUTH__SECRET_PROVIDER` = `vault` or `file`",
+            "`env` is a development default. Key material ends up in a process listing, a compose file and a CI log.",
+          ],
+          [
+            "OPAQUE setup key is backed up",
+            "Back up `opaque_setup_key`",
+            "Losing it is a forced password reset for every user in every tenant. There is no recovery path.",
+          ],
+          [
+            "JWT key pair is backed up and actually a pair",
+            "Back up `jwt_private_key_pem`; verify the public key matches",
+            "A mismatch presents as a confusing outage — tokens are minted and then rejected — rather than as a clear error.",
+          ],
+          [
+            "Vault auto-unseal is configured before go-live",
+            "Vault auto-unseal",
+            "Any restart leaves AXIAM unable to start until enough keyholders are woken up.",
+          ],
+          [
+            "Vault trust anchor is set if it uses a private CA",
+            "`AXIAM__AUTH__VAULT_CA_CERT_PATH`",
+            "rustls does not trust an internal PKI, and the server dies at startup with a bare transport error that names nothing.",
+          ],
+          [
+            "Unseal shares are distributed and the root token revoked",
+            "Split shares across people; revoke root after seeding",
+            "One person holding every share is the failure mode the threshold exists to prevent.",
+          ],
+          [
+            "No key material in git, images, manifests or CI variables",
+            "Audit history, not just the working tree",
+            "A rotated secret that is still in git history is still a leaked secret.",
+          ],
         ],
       },
       { type: "h", id: "network", text: "Network & TLS" },
       {
-        type: "list",
-        items: [
-          "TLS 1.3 on every external listener — terminated at the ingress, or in-process with `AXIAM__SERVER__TLS__ENABLED`.",
-          "**gRPC (50051) must not be publicly routed.** It is an internal service surface; the shipped manifests deliberately keep it off the Ingress.",
-          "AMQP must be `amqps://`. Any other scheme is refused at startup, so a failure here is a configuration error, not a silent downgrade.",
-          "Set `AXIAM__SERVER__CORS_ALLOWED_ORIGINS` to your actual admin origins. Empty disables cross-origin requests, which is the safe default.",
-          "Set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the number of reverse proxies in front of you — otherwise every client shares one apparent IP and per-IP limits become meaningless.",
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check", "Setting or action", "If you skip it"],
+        rows: [
+          [
+            "TLS 1.3 on every external listener",
+            "Terminate at the ingress, or `AXIAM__SERVER__TLS__ENABLED` in-process",
+            "The default binds plaintext and assumes something in front of it terminates TLS. If nothing does, nothing warns you.",
+          ],
+          [
+            "gRPC is not publicly routed",
+            "Keep 50051 off the Ingress",
+            "It is an internal service surface. The shipped manifests deliberately keep it on the ClusterIP service only.",
+          ],
+          [
+            "AMQP uses amqps://",
+            "`AXIAM__AMQP__URL`",
+            "Nothing — this one cannot be skipped. Any other scheme is refused at startup, so a mistake here is a visible configuration error rather than a silent downgrade.",
+          ],
+          [
+            "CORS names your actual admin origins",
+            "`AXIAM__SERVER__CORS_ALLOWED_ORIGINS`",
+            "Empty disables cross-origin requests, which is the safe default — so the risk is over-broadening it, not forgetting it.",
+          ],
+          [
+            "Proxy hop count is accurate",
+            "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`",
+            "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody.",
+          ],
         ],
       },
       { type: "h", id: "identity", text: "Identity" },
       {
-        type: "list",
-        items: [
-          "Enforce MFA on administrative accounts. Prefer passkeys over TOTP where the browsers in use support them.",
-          "Create a second super-admin. Bootstrap cannot be run again to rescue you from losing the first.",
-          "Unset `AXIAM_BOOTSTRAP_ADMIN_EMAIL` after bootstrap completes — it is inert afterwards, and leaving it implies otherwise.",
-          "Turn on `hibp_check_enabled` and set a sensible `min_length` on the organization baseline.",
-          "Review the seeded roles. `super-admin` should have very few holders; most administrators want `admin`, and most humans want neither.",
-          "Prefer service accounts with bound certificates over shared secrets for machine access.",
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check", "Setting or action", "If you skip it"],
+        rows: [
+          [
+            "MFA enforced on administrative accounts",
+            "Tenant MFA policy; prefer passkeys over TOTP where browsers allow",
+            "The accounts that can grant every other permission are protected by a password alone.",
+          ],
+          [
+            "A second super-admin exists",
+            "Create one deliberately",
+            "Bootstrap cannot be run again to rescue you from losing the first.",
+          ],
+          [
+            "Bootstrap variable unset after bootstrap",
+            "Unset `AXIAM_BOOTSTRAP_ADMIN_EMAIL`",
+            "It is inert afterwards, so this is hygiene rather than exposure — leaving it implies a live gate that is not there.",
+          ],
+          [
+            "Password policy is set on the organization baseline",
+            "`hibp_check_enabled`, plus a sensible `min_length`",
+            "Known-breached passwords are accepted, and the strongest hash in the world does not help against a password already in a wordlist.",
+          ],
+          [
+            "Seeded roles reviewed",
+            "Audit who holds `super-admin`",
+            "`super-admin` should have very few holders. Most administrators want `admin`; most humans want neither.",
+          ],
+          [
+            "Machine access uses bound certificates",
+            "Service accounts with certificates over shared secrets",
+            "A shared secret is copyable, does not expire on its own, and leaves no evidence of which copy was used.",
+          ],
+          [
+            "SCIM provisioning tokens treated as admin credentials",
+            "Rotate and store like an admin password",
+            "`scim:provision` can set any user's password in the tenant, including an administrator's. See [SCIM provisioning](#/docs/scim).",
+          ],
         ],
       },
       { type: "h", id: "limits", text: "Rate limits & capacity" },
       {
-        type: "list",
-        items: [
-          "Pick a rate-limit profile that matches your topology: `internet` for a public deployment, `gateway` behind a NAT or API gateway, `mesh` on a private network.",
-          "Leave the key mode at `ip` unless something already authenticates callers at the edge. `client_id` is minted by the caller, so it is a fairness control, not an abuse control.",
-          "Size database CPU first if your traffic is authorization-check-heavy; size limits first if it is token-heavy.",
-          "Measure before enabling the decision cache, and check its logged hit rate afterwards — it is transformative on gRPC checks and marginal on REST ones.",
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check", "Setting or action", "If you skip it"],
+        rows: [
+          [
+            "Rate-limit posture matches the topology",
+            "`AXIAM__RATE_LIMIT__PROFILE` — `internet`, `gateway` or `mesh`",
+            "A NAT-fronted fleet throttles itself on per-IP buckets; a public deployment on mesh ceilings has effectively none.",
+          ],
+          [
+            "Bucket key left at ip unless the edge authenticates",
+            "`AXIAM__RATE_LIMIT__KEY`",
+            "`client_id` is minted by the caller, which makes it a fairness control and not an abuse control.",
+          ],
+          [
+            "Capacity sized against the right bottleneck",
+            "Database CPU for check-heavy traffic; limits for token-heavy traffic",
+            "Tuning the wrong one moves no numbers and costs a maintenance window.",
+          ],
+          [
+            "Caches measured, not assumed",
+            "Enable, then read the logged hit rate",
+            "The decision cache is transformative on gRPC checks and marginal on REST ones, because REST carries a session lookup gRPC does not.",
+          ],
         ],
       },
       { type: "h", id: "ops", text: "Operations" },
       {
-        type: "list",
-        items: [
-          "Liveness on `/health`, readiness on `/ready`. Not the other way round.",
-          "Keep `RUST_LOG` at `info` and ship logs somewhere they survive the pod.",
-          "Decide audit retention deliberately — the log only grows, and nothing prunes it for you.",
-          "Register relying parties for back-channel logout **before** you need to revoke an account in an incident.",
-          "If you run intercepting Reactors, decide their failure policy explicitly and monitor it. Fail-closed makes a Reactor outage your outage; fail-open makes it a silently unenforced control.",
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Check", "Setting or action", "If you skip it"],
+        rows: [
+          [
+            "Probes wired the right way round",
+            "Liveness on `/health`, readiness on `/ready`",
+            "Pointing liveness at `/ready` turns a database blip into a restart loop that makes the outage worse.",
+          ],
+          [
+            "Scheduled jobs are alerted on",
+            "Alert on `stalled` from `/health/jobs`",
+            "A sweep that stops running raises nothing. For GDPR erasure the first symptom can be a regulator's question.",
+          ],
+          [
+            "Logs survive the pod",
+            "`RUST_LOG=info`, shipped off-host",
+            "The audit trail persists; your diagnostic context does not.",
+          ],
+          [
+            "Audit retention decided deliberately",
+            "Set a retention policy",
+            "The log only grows. Nothing prunes it for you, and it is append-only by design.",
+          ],
+          [
+            "Back-channel logout relying parties registered in advance",
+            "Register before you need them",
+            "An incident is the wrong time to discover that revoking an account does not sign it out anywhere else.",
+          ],
+          [
+            "Reactor failure policy chosen explicitly",
+            "Decide fail-open versus fail-closed per hook, and monitor it",
+            "Fail-closed makes a reactor outage your outage; fail-open makes it a silently unenforced control. Not choosing picks one anyway.",
+          ],
         ],
       },
       {
@@ -614,6 +883,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Troubleshooting",
     intro:
       "The failures that come up most often, what they actually mean, and the fix.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "startup", text: "The server will not start" },
       {
@@ -652,6 +922,73 @@ export const OPERATE_PAGES: DocPage[] = [
             "Configure auto-unseal. Until then, unseal manually with the key threshold.",
           ],
         ],
+      },
+      { type: "h", id: "vault", text: "Vault will not come up" },
+      {
+        type: "p",
+        text: "Vault is the production secret provider, and the failures below are the ones actually hit while getting the shipped production stack running — each one presents as something other than what it is.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Symptom", "Cause", "Fix"],
+        rows: [
+          [
+            "The server panics at startup with a bare transport error to Vault",
+            "Vault's certificate is issued by an internal PKI. rustls compiles its roots in, so a private CA is not trusted and the failure surfaces as an unhelpful transport error rather than as a certificate problem.",
+            "Point `AXIAM__AUTH__VAULT_CA_CERT_PATH` at the issuing CA.",
+          ],
+          [
+            "Vault restart-loops on `error loading TLS cert`",
+            "The listener key file is mode 0600 and unreadable to the uid the container runs as.",
+            "Make the key readable by the container's user, not only by the host user that generated it.",
+          ],
+          [
+            "Every run after a failed initialisation wedges",
+            "An initialisation that failed mid-write left an empty state file behind, which later runs then treated as real.",
+            "Drive initialisation from Vault's own `sys/init` status rather than from the presence of a state file, and validate before writing it.",
+          ],
+          [
+            "Vault cannot be reached from the host to initialise or unseal it",
+            "Its port is published on loopback only.",
+            "Run the initialise, unseal and seed steps from the host, or publish the port where the tooling can reach it.",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "A compose stack that will not start at all, with no service logs to read, is worth checking for shell-style interpolation that Compose does not implement: `${VAR:default}` is not valid Compose syntax, and a file using it fails before anything runs.",
+      },
+      { type: "h", id: "database", text: "Database" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Symptom", "Cause", "Fix"],
+        rows: [
+          [
+            "Data vanishes on restart",
+            "SurrealDB is running its in-memory datastore. AXIAM requires a persistent engine.",
+            "Use a persistent engine; the shipped compose files and the Kubernetes StatefulSet already do.",
+          ],
+          [
+            "A startup WARN saying the storage engine could not be attested",
+            "Expected, and not a misconfiguration. SurrealDB publishes no datastore identity over the wire, so the attestation cannot confirm the engine either way.",
+            "Nothing. The hard guard exists and refuses a memory datastore as soon as a SurrealDB release exposes the engine name.",
+          ],
+        ],
+      },
+      { type: "h", id: "jobs-stopped", text: "Cleanup work has silently stopped" },
+      {
+        type: "p",
+        text: "Erasure requests that never complete, certificates that never expire, replay tables that grow without bound — these share a cause and a check. A scheduled sweep that stops running raises nothing, so the symptom is always downstream and always late.",
+      },
+      {
+        type: "code",
+        code: "curl -s localhost:8090/health/jobs | jq '.status, .jobs[] | select(.stalled)'",
+      },
+      {
+        type: "p",
+        text: "See [scheduled-job liveness](#/docs/observability) for the response shape and what `stalled` means. If a job shows `consecutive_failures` climbing, `last_error` is the reason.",
       },
       { type: "h", id: "config", text: "A setting has no effect" },
       {

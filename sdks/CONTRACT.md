@@ -2104,7 +2104,7 @@ Server documentation: [`docs/api/device-flow.md`](../docs/api/device-flow.md).
 |---|---|---|---|
 | `device_authorize` | `POST /oauth2/device_authorization?tenant_id=<uuid>` | `application/x-www-form-urlencoded` / `DeviceAuthorizationRequest` | `200` `DeviceAuthorizationResponse` |
 | `device_poll` | `POST /oauth2/token?tenant_id=<uuid>` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` | `application/x-www-form-urlencoded` / `TokenRequest` | `200` `TokenResponse` |
-| `device_login` | the two above, composed — see [§14.3](#§143-device_login-the-composed-helper) | — | `200` `TokenResponse` |
+| `device_login` | the two above, composed — see [§14.3](#§143-device_login--the-composed-helper) | — | `200` `TokenResponse` |
 
 `device_authorize` is **unauthenticated**: a device that cannot show a browser also cannot
 hold a client secret. SDKs MUST NOT send `client_secret` on it, and MUST NOT refuse to call

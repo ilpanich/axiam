@@ -25,6 +25,15 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "warn",
         text: "Secrets (database password, JWT keys, the AES-256-GCM encryption keys, the peppers) must come from a secret manager or mounted secret — never bake real key material into an image, a compose file or git. Use a placeholder like `<set-in-secret-manager>` in any template, and never reuse a value across environments.",
       },
+      { type: "h", id: "scope", text: "What this page covers" },
+      {
+        type: "p",
+        text: "This is a **curated reference, not an exhaustive one.** It documents the settings a deployment normally has to make a decision about — connectivity, secrets, token and hashing policy, rate limits, caches and TLS — which is roughly two thirds of the keys the server reads. The remainder are internal tuning values that have working defaults and no deployment-specific right answer.",
+      },
+      {
+        type: "note",
+        text: "The complete list is the configuration structs themselves, and it is worth knowing that they are the authority in two ways. Many keys never appear as a literal string in the source: the config layer derives `AXIAM__SERVER__HOST` from the `host` field of the server config struct, so grepping for the variable name finds nothing while the variable works perfectly. If a setting you need is not on this page, look for the field rather than for the key.",
+      },
       { type: "h", id: "connectivity", text: "Connectivity & bind addresses" },
       {
         type: "table",
@@ -162,6 +171,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__AUTH__VAULT_PATH",
             "Path within the mount holding AXIAM's keys as fields (default `axiam`).",
             "axiam",
+          ],
+          [
+            "AXIAM__AUTH__VAULT_CA_CERT_PATH",
+            "Trust anchor for a Vault fronted by a private CA. rustls compiles its roots in, so a Vault certificate issued by an internal PKI — cert-manager, or the repository's own dev certificates — is otherwise unverifiable and the server fails at startup with a bare transport error.",
+            "/etc/axiam/vault/ca.pem",
           ],
         ],
       },
@@ -448,6 +462,51 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database first (those paths gained ~90% from a second pair of DB cores), then try the decision cache and measure its logged hit rate — it is transformative on gRPC checks and marginal on REST ones; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
+      },
+      { type: "h", id: "mds", text: "WebAuthn attestation metadata (FIDO MDS3)" },
+      {
+        type: "p",
+        text: "Attestation policy checks an authenticator model against the FIDO Alliance's metadata service. Ingestion is **off by default** — `false` means zero outbound calls, no background job, and an admin-triggered refresh that refuses to run — so a deployment that does not verify attestation carries no dependency on the FIDO Alliance at all.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          ["AXIAM__PKI__MDS_ENABLED", "Master switch. Default `false`.", "true"],
+          [
+            "AXIAM__PKI__MDS_BLOB_URL",
+            "Fetch source (default `https://mds3.fidoalliance.org/`).",
+            "https://mds3.fidoalliance.org/",
+          ],
+          [
+            "AXIAM__PKI__MDS_BLOB_PATH",
+            "Local BLOB file for an air-gapped deployment. When set it wins over the URL and no network fetch happens at all.",
+            "/etc/axiam/mds/blob.jwt",
+          ],
+          [
+            "AXIAM__PKI__MDS_REFRESH_INTERVAL_SECS",
+            "Background refresh interval; default 604800 (weekly). `0` disables the background job while leaving the admin-triggered refresh working.",
+            "604800",
+          ],
+          [
+            "AXIAM__PKI__MDS_LEAF_DNS",
+            "Expected DNS SAN on the BLOB's leaf signing certificate (default `mds.fidoalliance.org`). Configurable so a legitimate FIDO hostname change is an operations action rather than a code release.",
+            "mds.fidoalliance.org",
+          ],
+          [
+            "AXIAM__PKI__MDS_MAX_STALE_DAYS",
+            "Refuse **attested** registration once the ingested BLOB is this many days past its own `nextUpdate`. Default `0`, which disables the check.",
+            "30",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "The staleness bound is opt-in rather than defaulted, and that is a deliberate trade rather than an oversight. Ingestion never hard-fails on staleness — a transient outage at the FIDO Alliance must not brick WebAuthn registration for everyone — and the cost of that choice is a window in which an authenticator model revoked since the last successful refresh still passes policy, because the revocation is in a BLOB this deployment has not seen. The right bound is a property of the deployment: a high-assurance tenant may want days, while an air-gapped one with no automatic refresh path would be taken offline by anything short of months. Silently inventing a number would pick for you.",
+      },
+      {
+        type: "p",
+        text: "The bound applies to attestation only. A ceremony that requests no attestation consults no metadata, so stale metadata cannot have misled it.",
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {

@@ -4252,6 +4252,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Settings are internally inconsistent, or enable OPAQUE on a server holding no OPAQUE keys"
           }
         },
         "security": [
@@ -7293,7 +7296,7 @@
             }
           },
           "400": {
-            "description": "Override violates org baseline"
+            "description": "Override violates org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
           }
         },
         "security": [

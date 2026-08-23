@@ -6,9 +6,9 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
-    OpaquePolicy, PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride,
-    SettingsScope, TenantSettingsOverride, TokenPolicy, diff_against_org, effective_settings,
-    settings_from_org_input, system_defaults,
+    OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
+    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, diff_against_org,
+    effective_settings, settings_from_org_input, system_defaults,
 };
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
@@ -59,6 +59,10 @@ struct SettingsRow {
     opaque_mode: Option<String>,
     opaque_suite: Option<String>,
     opaque_ksf: Option<String>,
+    // Privacy (V44). `Option` for the same reason as the OPAQUE columns: a row
+    // written before the migration has no such column and must still
+    // deserialize. It resolves to the 30 days the erasure handler hard-coded.
+    privacy_deletion_grace_days: Option<u32>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -107,6 +111,10 @@ struct SettingsRowWithId {
     opaque_mode: Option<String>,
     opaque_suite: Option<String>,
     opaque_ksf: Option<String>,
+    // Privacy (V44). `Option` for the same reason as the OPAQUE columns: a row
+    // written before the migration has no such column and must still
+    // deserialize. It resolves to the 30 days the erasure handler hard-coded.
+    privacy_deletion_grace_days: Option<u32>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -122,6 +130,14 @@ struct SettingsRowWithId {
 /// would take authentication down over a cosmetic column. The resulting
 /// `disabled` is the safe direction — it can only turn OPAQUE *off*, never
 /// silently weaken a tenant that had it on.
+/// The erasure grace window, defaulting a pre-V44 row to the 30 days the
+/// handler used before it was configurable.
+fn decode_privacy(days: Option<u32>) -> PrivacyPolicy {
+    PrivacyPolicy {
+        deletion_grace_period_days: days.unwrap_or(30),
+    }
+}
+
 fn decode_opaque(mode: Option<&str>, suite: Option<&str>, ksf: Option<&str>) -> OpaquePolicy {
     OpaquePolicy {
         opaque_mode: mode
@@ -190,6 +206,7 @@ impl SettingsRowWithId {
                 self.opaque_suite.as_deref(),
                 self.opaque_ksf.as_deref(),
             ),
+            privacy: decode_privacy(self.privacy_deletion_grace_days),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -225,6 +242,7 @@ notif_admin_enabled = $notif_admin_enabled, \
 opaque_mode = $opaque_mode, \
 opaque_suite = $opaque_suite, \
 opaque_ksf = $opaque_ksf, \
+privacy_deletion_grace_days = $privacy_deletion_grace_days, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -349,6 +367,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "opaque_ksf",
             BindValue::Str(settings.opaque.opaque_ksf.to_string()),
+        ));
+        bindings.push((
+            "privacy_deletion_grace_days",
+            BindValue::U32(settings.privacy.deletion_grace_period_days),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -527,6 +549,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 row.opaque_suite.as_deref(),
                 row.opaque_ksf.as_deref(),
             ),
+            privacy: decode_privacy(row.privacy_deletion_grace_days),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

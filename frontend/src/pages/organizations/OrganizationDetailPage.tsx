@@ -12,6 +12,7 @@ import {
   type SetOrgSettings,
   type CreateTenantPayload,
   type GenerateCaCertPayload,
+  MAX_DELETION_GRACE_PERIOD_DAYS,
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
@@ -1121,6 +1122,37 @@ function SettingsTab({
               Enable admin notifications
             </span>
           </label>
+        </div>
+
+        {/* Privacy & data retention */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Privacy &amp; data retention
+          </h3>
+          <div className="space-y-2">
+            <Label htmlFor="deletion-grace-period-days">
+              Pending-deletion window (days)
+            </Label>
+            <Input
+              id="deletion-grace-period-days"
+              type="number"
+              min={1}
+              max={MAX_DELETION_GRACE_PERIOD_DAYS}
+              value={merged.deletion_grace_period_days}
+              onChange={(e) =>
+                setField("deletion_grace_period_days", Number(e.target.value))
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              How long a requested account erasure stays cancellable before the
+              purge runs — the window the &ldquo;Cancel pending deletion&rdquo;
+              control in Privacy &amp; Data acts within. A tenant may shorten
+              this and not lengthen it. The {MAX_DELETION_GRACE_PERIOD_DAYS}-day
+              ceiling is where GDPR Art. 12(3)&rsquo;s one-month deadline plus
+              its two-month extension runs out; anything past 30 wants a reason
+              recorded.
+            </p>
+          </div>
         </div>
 
         {saveError && <p className="text-sm text-destructive">{saveError}</p>}

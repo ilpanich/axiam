@@ -53,6 +53,11 @@ export interface NotificationPolicy {
   admin_notifications_enabled: boolean;
 }
 
+export interface PrivacyPolicy {
+  /** How long a requested account erasure stays cancellable, in days. */
+  deletion_grace_period_days: number;
+}
+
 /** Fully-resolved security settings (nested) — GET /api/v1/settings. */
 export interface SecuritySettings {
   id: string;
@@ -70,6 +75,12 @@ export interface SecuritySettings {
    * `readOpaquePolicy` for why the write paths never read it directly.
    */
   opaque: OpaquePolicy;
+  /**
+   * Retention rules after an erasure request. Optional so a server older than
+   * the field does not fail the type; callers fall back to the server's own
+   * 30-day default.
+   */
+  privacy?: PrivacyPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -112,11 +123,55 @@ export interface TenantSettingsOverride {
   opaque_mode?: OpaqueMode;
   opaque_suite?: OpaqueSuite;
   opaque_ksf?: OpaqueKsf;
+  // Privacy — tighten-only means *shorter*: it is time spent holding data the
+  // subject has already asked to have erased.
+  deletion_grace_period_days?: number;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const settingsService = {
+  /**
+   * GET /api/v1/tenants/{id}/settings — the tenant's **own** overrides, sparse.
+   *
+   * Distinct from `getSettings`, which returns the merged view. The tenant
+   * detail page needs to tell an overridden field from an inherited one, and a
+   * merged view cannot express that. `404` (this tenant overrides nothing) maps
+   * to `null` so "inherits everything" is a value the caller can render.
+   */
+  async getTenantOverride(
+    tenantId: string
+  ): Promise<TenantSettingsOverride | null> {
+    try {
+      const res = await api.get<TenantSettingsOverride>(
+        `/api/v1/tenants/${tenantId}/settings`
+      );
+      return res.data;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response
+        ?.status;
+      if (status === 404) return null;
+      throw err;
+    }
+  },
+
+  /** PUT /api/v1/tenants/{id}/settings — replace the sparse override set. */
+  async setTenantOverride(
+    tenantId: string,
+    data: TenantSettingsOverride
+  ): Promise<TenantSettingsOverride> {
+    const res = await api.put<TenantSettingsOverride>(
+      `/api/v1/tenants/${tenantId}/settings`,
+      data
+    );
+    return res.data;
+  },
+
+  /** DELETE /api/v1/tenants/{id}/settings — inherit the org baseline entirely. */
+  async deleteTenantOverride(tenantId: string): Promise<void> {
+    await api.delete(`/api/v1/tenants/${tenantId}/settings`);
+  },
+
   /** GET /api/v1/settings — effective (merged) tenant security settings. */
   async getSettings(): Promise<SecuritySettings> {
     const res = await api.get<SecuritySettings>("/api/v1/settings");

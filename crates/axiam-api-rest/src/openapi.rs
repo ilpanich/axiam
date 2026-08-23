@@ -198,6 +198,9 @@ use crate::handlers;
         handlers::settings::set_org_settings,
         handlers::settings::get_tenant_settings,
         handlers::settings::set_tenant_settings,
+        handlers::settings::get_tenant_override,
+        handlers::settings::set_tenant_override,
+        handlers::settings::delete_tenant_override,
         // Email Config (FUNC-03 / D-13)
         handlers::email_config::get_org_email_config,
         handlers::email_config::set_org_email_config,

@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Download, KeyRound, Loader2, ShieldAlert, Undo2 } from "lucide-react";
 import { gdprService, saveExportBlob } from "@/services/gdpr";
+import { settingsService } from "@/services/settings";
+import { DEFAULT_DELETION_GRACE_PERIOD_DAYS } from "@/services/organizations";
 import { usePermissions } from "@/hooks/usePermissions";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
@@ -22,12 +24,28 @@ import { Label } from "@/components/ui/label";
 // only when the caller holds the matching permission, so the UI doesn't
 // dangle a control that will just 403.
 //
-// Deadlines: export is a 24h single-use download link; erasure has a 30-day
+// Deadlines: export is a 24h single-use download link; erasure has a
 // cancellable grace window (D-07/D-08/D-09) — both are why the coverage
-// matrix calls this the highest-value existing gap.
+// matrix calls this the highest-value existing gap. That window is the
+// tenant's effective `privacy.deletion_grace_period_days`, which is read here
+// rather than written as "30 days" in prose: it used to be hard-coded on both
+// sides, so this page promised a duration nothing could change and an operator
+// had no way to find out what it actually was.
 
 export function PrivacyPage() {
   const { can } = usePermissions();
+
+  // `/api/v1/settings` is the caller's own effective settings and needs no
+  // special permission beyond `settings:get`. A failed read falls back to the
+  // server's own default rather than blanking the sentence — the number is
+  // context for a decision, not the thing being decided.
+  const { data: settings } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => settingsService.getSettings(),
+  });
+  const graceDays =
+    settings?.privacy?.deletion_grace_period_days ??
+    DEFAULT_DELETION_GRACE_PERIOD_DAYS;
   const { toast } = useToast();
   const canActForOthers = can("gdpr:export");
   const canEraseForOthers = can("users:erase");
@@ -169,8 +187,9 @@ export function PrivacyPage() {
       <SectionCard title="Delete your account">
         <p className="text-sm text-muted-foreground mb-4">
           Requests immediate account disablement, revokes all sessions, and
-          schedules permanent erasure in 30 days. You can cancel within that
-          window using the link emailed to you.
+          schedules permanent erasure in {graceDays}{" "}
+          {graceDays === 1 ? "day" : "days"}. You can cancel within that window
+          using the link emailed to you.
         </p>
         {canEraseForOthers && (
           <div className="space-y-2 mb-4">
@@ -199,7 +218,11 @@ export function PrivacyPage() {
       <SectionCard title="Cancel a pending deletion">
         <p className="text-sm text-muted-foreground mb-4">
           Paste the cancellation token from the erasure confirmation email to
-          abort the scheduled deletion and re-enable the account.
+          abort the scheduled deletion and re-enable the account. This works for{" "}
+          {graceDays} {graceDays === 1 ? "day" : "days"} after the request;
+          after that the purge has run and there is nothing left to restore.
+          Administrators set the window on the organization, and a tenant may
+          shorten it.
         </p>
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="flex-1 space-y-2">

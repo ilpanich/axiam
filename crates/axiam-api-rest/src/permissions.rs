@@ -740,6 +740,24 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Settings
     ("GET", "/api/v1/settings", "settings:get"),
     ("PUT", "/api/v1/settings", "settings:update"),
+    // The same overrides addressed by tenant id, for the organization's tenant
+    // detail page. Same permissions: it is the same tenant-scoped policy, and
+    // the handler additionally refuses a tenant that is not the caller's own.
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:update",
+    ),
     // Email Config (FUNC-03 / D-13) — single email_config:read/write permission
     // shared across org and tenant scopes (D-03), NOT per-verb-per-scope.
     (

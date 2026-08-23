@@ -1,6 +1,7 @@
 //! Security settings endpoints for organizations and tenants.
 
 use actix_web::{HttpResponse, web};
+use axiam_core::error::AxiamError;
 use axiam_core::models::opaque::{OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     SecuritySettings, SetOrgSettings, TenantSettingsOverride, effective_settings,
@@ -287,4 +288,161 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
     }
 
     Ok(HttpResponse::Ok().json(result))
+}
+
+// -----------------------------------------------------------------------
+// Tenant-scoped settings — the same overrides, addressed by tenant id
+// -----------------------------------------------------------------------
+//
+// `GET`/`PUT /api/v1/settings` act on the caller's own tenant implicitly and
+// exchange *merged* settings, which is what a tenant administrator editing
+// their own policy wants. It is not what the organization's tenant detail page
+// needs: that page shows one named tenant and has to distinguish an overridden
+// field from an inherited one, which a merged view cannot express.
+//
+// These three mirror the email-config trio exactly — same `{tenant_id}` path
+// segment, same `tenant_id == user.tenant_id` check on top of the permission,
+// same "raw own-scope row, never the merged view" rule — so a sibling tenant
+// answers `403` here for the same reason and in the same shape it does there.
+
+/// `GET /api/v1/tenants/{tenant_id}/settings`
+#[utoipa::path(
+    get,
+    path = "/api/v1/tenants/{tenant_id}/settings",
+    tag = "settings",
+    params(
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    responses(
+        (status = 200, description = "The tenant's own overrides, sparse — an absent \
+                                      field is inherited from the org baseline",
+         body = TenantSettingsOverride),
+        (status = 404, description = "This tenant overrides nothing"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_tenant_override<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let tenant_id = path.into_inner();
+
+    if tenant_id != user.tenant_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot read security settings for a different tenant".into(),
+            action: None,
+            resource_id: None,
+        }));
+    }
+
+    match state.settings_repo.get_tenant_override(tenant_id).await? {
+        Some(overrides) => Ok(HttpResponse::Ok().json(overrides)),
+        None => Err(AxiamApiError(AxiamError::NotFound {
+            entity: "tenant_settings_override".into(),
+            id: tenant_id.to_string(),
+        })),
+    }
+}
+
+/// `PUT /api/v1/tenants/{tenant_id}/settings`
+#[utoipa::path(
+    put,
+    path = "/api/v1/tenants/{tenant_id}/settings",
+    tag = "settings",
+    params(
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    request_body = TenantSettingsOverride,
+    responses(
+        (status = 200, description = "The stored overrides, sparse",
+         body = TenantSettingsOverride),
+        (status = 400, description = "An override is less restrictive than the org \
+                                      baseline, or enables OPAQUE on a server holding \
+                                      no OPAQUE keys"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn set_tenant_override<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+    body: web::Json<TenantSettingsOverride>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let tenant_id = path.into_inner();
+
+    if tenant_id != user.tenant_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot modify security settings for a different tenant".into(),
+            action: None,
+            resource_id: None,
+        }));
+    }
+
+    let overrides = body.into_inner();
+    let org = state.settings_repo.get_org_settings(user.org_id).await?;
+    validate_tenant_override(&org, &overrides)?;
+    if let Some(mode) = overrides.opaque_mode {
+        reject_opaque_without_keys(mode, &state)?;
+    }
+
+    let stored = state
+        .settings_repo
+        .set_tenant_override(tenant_id, overrides)
+        .await?;
+
+    let merged = effective_settings(&org, &stored, tenant_id, Uuid::nil());
+    if merged.opaque.opaque_mode != OpaqueMode::Disabled {
+        provision_opaque_setup(&state, tenant_id, merged.opaque.opaque_suite).await;
+    }
+
+    Ok(HttpResponse::Ok().json(stored))
+}
+
+/// `DELETE /api/v1/tenants/{tenant_id}/settings`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/tenants/{tenant_id}/settings",
+    tag = "settings",
+    params(
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    responses(
+        (status = 204, description = "Overrides cleared; the tenant inherits the \
+                                      org baseline entirely"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn delete_tenant_override<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let tenant_id = path.into_inner();
+
+    if tenant_id != user.tenant_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot modify security settings for a different tenant".into(),
+            action: None,
+            resource_id: None,
+        }));
+    }
+
+    state
+        .settings_repo
+        .delete_tenant_override(tenant_id)
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
 }

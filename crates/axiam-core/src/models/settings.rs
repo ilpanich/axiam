@@ -73,6 +73,27 @@ pub struct NotificationPolicy {
     pub admin_notifications_enabled: bool,
 }
 
+/// Data-retention rules that apply after a subject asks to be erased.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PrivacyPolicy {
+    /// How long a requested account erasure stays cancellable before the purge
+    /// runs, in days.
+    ///
+    /// The window exists so an erasure triggered by mistake, or under
+    /// coercion, can be undone — `POST /api/v1/auth/account/delete/cancel`
+    /// works for exactly this long. It was fixed at 30 days in the handler,
+    /// which meant the "cancel a pending deletion" control in the admin UI
+    /// referred to a duration no operator could see or change.
+    ///
+    /// Shorter is the more restrictive direction, so a tenant may lower it and
+    /// not raise it: it is time spent holding data the subject has already
+    /// asked to have erased, and GDPR Art. 17(1) asks for that to be
+    /// "without undue delay". The upper bound of 90 days is where Art. 12(3)'s
+    /// one-month response deadline plus its two-month extension for complex
+    /// cases runs out; anything past 30 wants a reason recorded.
+    pub deletion_grace_period_days: u32,
+}
+
 /// Secure Remote Password policy.
 ///
 /// `suite` and `ksf` are the parameters a *new* registration record is enrolled
@@ -145,6 +166,7 @@ pub struct SecuritySettings {
     pub certificate: CertificatePolicy,
     pub notification: NotificationPolicy,
     pub opaque: OpaquePolicy,
+    pub privacy: PrivacyPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -190,6 +212,8 @@ pub struct TenantSettingsOverride {
     pub opaque_suite: Option<OpaqueSuite>,
     #[schema(value_type = Option<String>)]
     pub opaque_ksf: Option<OpaqueKsf>,
+    // Privacy
+    pub deletion_grace_period_days: Option<u32>,
 }
 
 impl TenantSettingsOverride {
@@ -244,7 +268,27 @@ pub struct SetOrgSettings {
     #[serde(default)]
     #[schema(value_type = String, example = "argon2id")]
     pub opaque_ksf: OpaqueKsf,
+    // Privacy — defaulted so a client written before the field keeps the
+    // 30 days the erasure handler used to hard-code.
+    #[serde(default = "default_deletion_grace_period_days")]
+    #[schema(example = 30)]
+    pub deletion_grace_period_days: u32,
 }
+
+/// The erasure grace window a deployment gets when nothing says otherwise.
+///
+/// 30 days is what `POST /api/v1/auth/account/delete` used before the window
+/// was configurable, so an upgrade changes nothing for anybody.
+fn default_deletion_grace_period_days() -> u32 {
+    30
+}
+
+/// The longest erasure grace window the server will accept, in days.
+///
+/// GDPR Art. 12(3) gives one month to respond, extensible by two further
+/// months for complex cases; a window past that is retention dressed as a
+/// safety net.
+pub const MAX_DELETION_GRACE_PERIOD_DAYS: u32 = 90;
 
 /// Input for setting tenant-level overrides (partial).
 pub type SetTenantOverride = TenantSettingsOverride;
@@ -289,6 +333,8 @@ pub fn system_defaults() -> SetOrgSettings {
         opaque_mode: OpaqueMode::Disabled,
         opaque_suite: OpaqueSuite::Ristretto255Sha512,
         opaque_ksf: OpaqueKsf::Argon2id,
+        // Privacy — the value the erasure handler used to hard-code.
+        deletion_grace_period_days: default_deletion_grace_period_days(),
     }
 }
 
@@ -336,6 +382,19 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
 
     if input.mfa_challenge_lifetime_secs == 0 {
         violations.push("mfa_challenge_lifetime_secs must be > 0".into());
+    }
+
+    // A zero-day window would purge on the same request that scheduled the
+    // erasure, leaving the cancel link in the confirmation email pointing at
+    // an account that is already gone.
+    if input.deletion_grace_period_days == 0 {
+        violations.push("deletion_grace_period_days must be >= 1".into());
+    } else if input.deletion_grace_period_days > MAX_DELETION_GRACE_PERIOD_DAYS {
+        violations.push(format!(
+            "deletion_grace_period_days ({}) must be <= {} \
+             (GDPR Art. 12(3): one month, extensible by two)",
+            input.deletion_grace_period_days, MAX_DELETION_GRACE_PERIOD_DAYS,
+        ));
     }
 
     if violations.is_empty() {
@@ -445,6 +504,11 @@ pub fn effective_settings(
                 .opaque_suite
                 .unwrap_or(org.opaque.opaque_suite),
             opaque_ksf: tenant_override.opaque_ksf.unwrap_or(org.opaque.opaque_ksf),
+        },
+        privacy: PrivacyPolicy {
+            deletion_grace_period_days: tenant_override
+                .deletion_grace_period_days
+                .unwrap_or(org.privacy.deletion_grace_period_days),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -565,6 +629,13 @@ pub fn validate_tenant_override(
         org.email.email_verification_grace_period_hours,
         "email_verification_grace_period_hours"
     );
+    // Shorter is more restrictive: it is time spent holding data the subject
+    // has already asked to have erased.
+    check_max!(
+        deletion_grace_period_days,
+        org.privacy.deletion_grace_period_days,
+        "deletion_grace_period_days"
+    );
 
     // --- enable-only (false->true OK, true->false NOT OK) ---
     macro_rules! check_enable_only {
@@ -673,6 +744,11 @@ pub fn validate_tenant_override(
     }
     if merged.mfa.mfa_challenge_lifetime_secs == 0 {
         cross.push("effective mfa_challenge_lifetime_secs must be > 0".into());
+    }
+    // 0 passes "more restrictive" and produces an erasure that cannot be
+    // cancelled at all, including by the link in its own confirmation email.
+    if merged.privacy.deletion_grace_period_days == 0 {
+        cross.push("effective deletion_grace_period_days must be >= 1".into());
     }
 
     if merged.lockout.max_lockout_duration_secs < merged.lockout.lockout_duration_secs {
@@ -828,6 +904,11 @@ pub fn diff_against_org(
             tenant.opaque.opaque_suite
         ),
         opaque_ksf: diff!(opaque_ksf, org.opaque.opaque_ksf, tenant.opaque.opaque_ksf),
+        deletion_grace_period_days: diff!(
+            deletion_grace_period_days,
+            org.privacy.deletion_grace_period_days,
+            tenant.privacy.deletion_grace_period_days
+        ),
     }
 }
 
@@ -876,6 +957,9 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             opaque_mode: input.opaque_mode,
             opaque_suite: input.opaque_suite,
             opaque_ksf: input.opaque_ksf,
+        },
+        privacy: PrivacyPolicy {
+            deletion_grace_period_days: input.deletion_grace_period_days,
         },
         created_at: now,
         updated_at: now,
@@ -1440,5 +1524,102 @@ mod tests {
         let org = org_settings();
         let same = settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &system_defaults());
         assert!(diff_against_org(&org, &same).is_empty());
+    }
+
+    // --- Privacy: the erasure grace window ---
+
+    #[test]
+    fn the_default_grace_window_is_the_thirty_days_the_handler_hard_coded() {
+        assert_eq!(system_defaults().deletion_grace_period_days, 30);
+    }
+
+    #[test]
+    fn a_zero_day_grace_window_is_refused() {
+        // It would purge on the same request that scheduled the erasure,
+        // leaving the cancel link in the confirmation email pointing at an
+        // account that is already gone.
+        let mut input = system_defaults();
+        input.deletion_grace_period_days = 0;
+        let err = validate_org_settings(&input).unwrap_err();
+        assert!(err.to_string().contains("deletion_grace_period_days"));
+    }
+
+    #[test]
+    fn a_grace_window_past_the_gdpr_ceiling_is_refused() {
+        let mut input = system_defaults();
+        input.deletion_grace_period_days = MAX_DELETION_GRACE_PERIOD_DAYS + 1;
+        let err = validate_org_settings(&input).unwrap_err();
+        assert!(err.to_string().contains("Art. 12(3)"), "{err}");
+
+        input.deletion_grace_period_days = MAX_DELETION_GRACE_PERIOD_DAYS;
+        assert!(validate_org_settings(&input).is_ok());
+    }
+
+    #[test]
+    fn a_tenant_may_shorten_the_grace_window_but_not_lengthen_it() {
+        // Shorter is more restrictive: less time holding data the subject has
+        // already asked to have erased.
+        let org = org_settings();
+
+        let shorter = TenantSettingsOverride {
+            deletion_grace_period_days: Some(7),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &shorter).is_ok());
+
+        let longer = TenantSettingsOverride {
+            deletion_grace_period_days: Some(60),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &longer).unwrap_err();
+        assert!(
+            err.to_string().contains("deletion_grace_period_days"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_zero_day_tenant_override_is_refused_by_the_cross_field_check() {
+        // 0 passes the "more restrictive" comparison on its own, and produces
+        // an erasure nothing can cancel.
+        let org = org_settings();
+        let zero = TenantSettingsOverride {
+            deletion_grace_period_days: Some(0),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &zero).unwrap_err();
+        assert!(
+            err.to_string().contains("deletion_grace_period_days"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_omitted_grace_window_inherits_the_org_baseline() {
+        let mut input = system_defaults();
+        input.deletion_grace_period_days = 14;
+        let org = settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &input);
+
+        let merged = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        assert_eq!(merged.privacy.deletion_grace_period_days, 14);
+    }
+
+    #[test]
+    fn the_grace_window_round_trips_through_the_sparse_diff() {
+        let org = org_settings();
+        let overrides = TenantSettingsOverride {
+            deletion_grace_period_days: Some(3),
+            ..Default::default()
+        };
+        let merged = effective_settings(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            diff_against_org(&org, &merged).deletion_grace_period_days,
+            Some(3)
+        );
     }
 }

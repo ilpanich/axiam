@@ -93,6 +93,23 @@ export interface NotificationPolicy {
   admin_notifications_enabled: boolean;
 }
 
+export interface PrivacyPolicy {
+  /**
+   * How long a requested account erasure stays cancellable, in days.
+   *
+   * The window the "Cancel pending deletion" control in Privacy & Data acts
+   * within. It was fixed at 30 days server-side, so the control referred to a
+   * duration nobody could see or change.
+   */
+  deletion_grace_period_days: number;
+}
+
+/** The longest erasure grace window the server accepts (GDPR Art. 12(3)). */
+export const MAX_DELETION_GRACE_PERIOD_DAYS = 90;
+
+/** The default the server applies, and what every deployment had before it was settable. */
+export const DEFAULT_DELETION_GRACE_PERIOD_DAYS = 30;
+
 /** Nested, fully-resolved org security settings (READ shape). */
 export interface SecuritySettings {
   id: string;
@@ -107,6 +124,8 @@ export interface SecuritySettings {
   notification: NotificationPolicy;
   /** OPAQUE (RFC 9807) policy — the baseline every tenant inherits. */
   opaque: OpaquePolicy;
+  /** Retention rules that apply after a subject asks to be erased. */
+  privacy?: PrivacyPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -146,6 +165,9 @@ export interface SetOrgSettings {
   opaque_mode: OpaqueMode;
   opaque_suite: OpaqueSuite;
   opaque_ksf: OpaqueKsf;
+  // Privacy. Required here for the same reason: the PUT replaces the whole
+  // row, and the server's default for an absent value is 30 days.
+  deletion_grace_period_days: number;
 }
 
 /** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
@@ -176,6 +198,12 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
     // before the OPAQUE migration carries no such block, and an `undefined`
     // here would be dropped from the JSON body and land back as `disabled`.
     ...readOpaquePolicy(s),
+    // Same guard, same reason: a server older than the privacy block sends no
+    // `privacy`, and an `undefined` would be dropped from the body and land
+    // back as the server's own 30-day default anyway — but going through the
+    // constant keeps the form control from rendering an empty number input.
+    deletion_grace_period_days:
+      s.privacy?.deletion_grace_period_days ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
   };
 }
 

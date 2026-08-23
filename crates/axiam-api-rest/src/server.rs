@@ -1056,6 +1056,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         handlers::email_config::test_tenant_email_config::<C>,
                     )),
             )
+            // --- Tenant security overrides (explicit {tenant_id} path segment,
+            // same convention as the email-config trio above) ---
+            .service(
+                web::resource("/tenants/{tenant_id}/settings")
+                    .route(web::get().to(
+                        handlers::settings::get_tenant_override::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::settings::set_tenant_override::<C>,
+                    ))
+                    .route(web::delete().to(
+                        handlers::settings::delete_tenant_override::<C>,
+                    )),
+            )
             // --- Tenant WebAuthn Attestation Policy (X3 wave 3, explicit
             // {tenant_id} path segment, same convention as email-config above) ---
             .service(

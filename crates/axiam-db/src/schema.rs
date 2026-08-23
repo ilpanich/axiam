@@ -257,6 +257,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "email_config_tenant_override_tristate",
         sql: SCHEMA_V43,
     },
+    Migration {
+        version: 44,
+        name: "configurable_deletion_grace_period",
+        sql: SCHEMA_V44,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2483,6 +2488,29 @@ DEFINE FIELD IF NOT EXISTS reply_to_overridden ON TABLE email_config \
 -- silently switch delivery off for a tenant that had deliberately turned it on
 -- while the organization's own switch was off.
 UPDATE email_config SET enabled_override = enabled WHERE scope = 'tenant';
+";
+
+// -----------------------------------------------------------------------
+// Schema v44 — the erasure grace window becomes a setting
+// -----------------------------------------------------------------------
+//
+// `POST /api/v1/auth/account/delete` hard-coded 30 days, which made the admin
+// UI's "cancel a pending deletion" control refer to a duration no operator
+// could see, let alone change. It is now an org baseline a tenant may only
+// lower — shorter is more restrictive, being less time holding data the
+// subject has already asked to have erased.
+//
+// The DEFAULT is the same 30 days the handler used, and the backfill applies
+// it to rows that predate the column, so an upgrade changes nothing anywhere.
+
+const SCHEMA_V44: &str = "\
+DEFINE FIELD IF NOT EXISTS privacy_deletion_grace_days ON TABLE \
+    security_settings TYPE int DEFAULT 30 \
+    ASSERT $value >= 1 AND $value <= 90;
+-- DEFAULT only applies on write, so rows written before this migration need
+-- the value put there explicitly.
+UPDATE security_settings SET privacy_deletion_grace_days = 30 \
+    WHERE privacy_deletion_grace_days = NONE;
 ";
 
 #[cfg(test)]

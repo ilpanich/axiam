@@ -257,28 +257,91 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Channel", "Purpose"],
+        headers: ["Queue", "Purpose", "Dead-letters to"],
         rows: [
-          ["axiam.authz.request", "Deferred authorization requests."],
-          ["axiam.authz.response", "The decisions, correlated back to the requester."],
-          ["axiam.audit.events", "Audit ingestion, off the request hot path."],
-          ["axiam.notifications", "Notification-rule delivery."],
-          ["axiam.mail.outbound", "Outbound mail — verification, reset, alerts."],
-          ["axiam.webhook", "Webhook delivery, with `axiam.webhook.retry` for backoff."],
+          ["axiam.authz.request", "Deferred authorization requests.", "`axiam.authz.request.dlq`"],
+          ["axiam.authz.response", "The decisions, correlated back to the requester.", "—"],
+          ["axiam.audit.events", "Audit ingestion, off the request hot path.", "`axiam.audit.events.dlq`"],
+          ["axiam.notifications", "Notification-rule delivery.", "—"],
+          ["axiam.mail.outbound", "Outbound mail — verification, reset, alerts.", "`axiam.mail.outbound.dlq`"],
+          ["axiam.webhook", "Webhook delivery.", "`axiam.webhook.dlq`"],
+          [
+            "axiam.webhook.retry",
+            "Delay queue for webhook backoff. Nothing consumes it — a message published here with a per-message TTL dead-letters back to `axiam.webhook` when the TTL expires, which is how the retry delay happens without a consumer sleeping.",
+            "`axiam.webhook` (by design)",
+          ],
         ],
       },
       {
-        type: "p",
-        text: "Each has a dead-letter queue (`*.dlq`) for messages that exhaust their retries, so a permanently-failing consumer produces an inspectable backlog rather than silent loss.",
+        type: "note",
+        text: "Dead-lettering is per queue, not universal. Four queues have a DLQ; `axiam.authz.response` and `axiam.notifications` do not, and `axiam.webhook.retry` dead-letters *forward* into the primary queue as its delay mechanism rather than as a failure path. Messages that reach a `.dlq` are real and replayable — they are not dropped.",
       },
-      { type: "h", id: "security", text: "Transport security & authenticity" },
+      { type: "h", id: "exchanges", text: "Exchanges" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Exchange", "Kind", "Purpose"],
+        rows: [
+          [
+            "axiam.authz.cache.invalidate",
+            "fanout",
+            "Cross-replica authorization decision-cache invalidations. Fanout rather than a work queue for a load-bearing reason: every replica binds its own exclusive auto-delete queue, so every replica sees every invalidation. A shared queue would hand each message to exactly one consumer and leave the rest serving stale allows.",
+          ],
+          [
+            "axiam.reactor.events",
+            "reactor hook events",
+            "The Reactor bus — see [Reactors](#/docs/reactors) for the request/reply contract.",
+          ],
+        ],
+      },
+      { type: "h", id: "envelope", text: "One signed message" },
+      {
+        type: "p",
+        text: "Every message carries an HMAC-SHA256 over its own body, and since `key_version` 2 that body must also carry a `nonce` and an `issued_at`. Both are always emitted — never omitted — so they fall inside the signed bytes.",
+      },
+      {
+        type: "code",
+        caption: "an authz request as it travels · the reference vector",
+        code: '{\n  "correlation_id": "22222222-2222-2222-2222-222222222222",\n  "tenant_id":      "11111111-1111-1111-1111-111111111111",\n  "subject_id":     "33333333-3333-3333-3333-333333333333",\n  "action":         "documents:read",\n  "resource_id":    "44444444-4444-4444-4444-444444444444",\n  "scope":          "confidential",\n  "key_version":    2,\n  "nonce":          "55555555-5555-5555-5555-555555555555",\n  "issued_at":      "2026-07-10T12:00:00Z",\n  "hmac_signature": "13d73b3aa8a400fc3f64dbc20b36952d8584142feb822b5f77495b0f587049ed"\n}',
+      },
+      {
+        type: "p",
+        text: "The signature is computed over the same object with `hmac_signature` **absent**, serialized in exactly the field order above — `correlation_id`, `tenant_id`, `subject_id`, `action`, `resource_id`, `scope` (omitted when null), `key_version`, `nonce`, `issued_at`. Order is part of the construction, not a formatting detail: a verifier that re-serializes in a different order computes a different digest and rejects a valid message.",
+      },
+      {
+        type: "p",
+        text: "The key is not the master secret. It is a per-tenant subkey derived with HKDF-SHA256, domain-separated and versioned by `key_version`, then scoped to the tenant — so a signature made with one tenant's subkey never verifies under another's, and rotating the master key yields entirely different subkeys without breaking messages already in flight under the previous version.",
+      },
+      {
+        type: "table",
+        headers: ["Check", "Rule"],
+        rows: [
+          ["Signature", "Recompute and compare in constant time. A mismatch is nacked **without** requeue and logged as a security event — never the digest itself."],
+          ["Version", "`key_version` below 2 is rejected outright. The v2 cutover is hard; there is no grace path."],
+          ["Freshness", "`issued_at` must lie within ±5 minutes of the consumer's clock (`AXIAM__AMQP__REPLAY_SKEW_SECS`)."],
+          ["Replay", "`(tenant_id, nonce)` is recorded durably; a repeat inside the freshness window is a replay and is rejected."],
+        ],
+      },
+      {
+        type: "note",
+        text: "Vectors every SDK must reproduce byte-for-byte live in `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` — the sample above is one of them. Reproducing the canonical JSON and recomputing the digest is the conformance test, which is why the fixture is shared rather than each SDK inventing its own.",
+      },
+      { type: "h", id: "security", text: "Transport security" },
       {
         type: "warn",
-        text: "AMQP is **TLS-only**. `AXIAM__AMQP__URL` must use the `amqps://` scheme — every other scheme is refused at startup rather than downgraded.",
+        text: "AMQP is **TLS-only**. `AXIAM__AMQP__URL` must be `amqps://`; every other scheme is refused before a socket opens, in a debug build exactly as in a release one. There is no environment variable, build profile or flag that changes the answer — the `ALLOW_PLAINTEXT` escape hatch that once permitted `amqp://` has been removed.",
       },
       {
         type: "p",
-        text: "Message authenticity is an HMAC over the whole message with replay protection — a nonce plus a freshness window — not merely a signature over the body. This matters because a bus consumer cannot rely on TLS peer identity the way an HTTP caller can: the broker is in between.",
+        text: "That removal has a history worth repeating, because it is the usual shape of this failure. The flag existed for a year, and four of the project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument. None was wrong on its own. The aggregate was that \"AMQP is TLS-only\" described the production compose file and the Kubernetes manifests, and nothing else the repository actually ran.",
+      },
+      {
+        type: "p",
+        text: "An in-cluster broker's certificate is usually privately issued, so **supplying a custom CA bundle is the common case, not the exception** — every SDK that speaks AMQP must support it. Client certificates toward the broker are supported where an SDK offers them, and the certificate and key are required together: half a client identity fails closed rather than connecting without the mutual half.",
+      },
+      {
+        type: "note",
+        text: "TLS and the HMAC are not alternatives. TLS gives confidentiality but terminates at the broker, which then re-sends; the HMAC gives authenticity and replay protection end-to-end **across** that hop. Production needs both, and an SDK offering either as a substitute for the other is not conformant.",
       },
       { type: "h", id: "spec", text: "The specification" },
       {

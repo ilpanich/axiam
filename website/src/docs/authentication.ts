@@ -798,6 +798,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
     title: "Federation — SAML & OIDC",
     intro:
       "Delegate authentication to an external identity provider, and map what it asserts onto tenant identities, groups and roles.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Why federate" },
       {
@@ -835,6 +836,40 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
           { method: "DELETE", path: "/api/v1/federation-links/{id}", summary: "Unlink one." },
         ],
       },
+      { type: "h", id: "setup", text: "Registering a provider" },
+      {
+        type: "p",
+        text: "Both protocols are configured through the same endpoint and the same record — what differs is which fields matter.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Register the configuration",
+            body: "`provider` is the display name. `metadata_url` is the OIDC discovery URL or the SAML metadata URL. The client secret is stored as AES-256-GCM ciphertext, never in plaintext.",
+            code: 'POST /api/v1/federation-configs\n{\n  "provider": "Okta",\n  "protocol": "OidcConnect",\n  "metadata_url": "https://acme.okta.com/.well-known/openid-configuration",\n  "client_id": "<upstream-client-id>",\n  "client_secret": "<upstream-client-secret>",\n  "attribute_map": { "email": "email", "name": "name" },\n  "enabled": true\n}',
+          },
+          {
+            title: "Pin the signature algorithms you accept",
+            body: "`allowed_algorithms` defaults to `RS256` for OIDC and is empty for SAML, where the certificate does the work instead. Narrow it to what the provider actually signs with rather than leaving it open.",
+            code: '"allowed_algorithms": ["RS256"]',
+          },
+          {
+            title: "For SAML, supply the IdP signing certificate",
+            body: "`idp_signing_cert_pem` is the X.509 certificate assertions are verified against. Without it there is nothing to check a signature with.",
+            code: '"idp_signing_cert_pem": "-----BEGIN CERTIFICATE-----\\n..."',
+          },
+          {
+            title: "Map the attributes onto AXIAM fields",
+            body: "`attribute_map` maps AXIAM field names to the provider's attribute names — not the other way round, which is the direction people write first.",
+            code: '{ "email": "mail", "name": "displayName" }',
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The mapping resolves two fields: `email`, and a display name taken from `name` with `displayName` as a fallback. A provider that calls its address attribute `mail` needs `{\"email\": \"mail\"}` — with the AXIAM name as the key.",
+      },
       { type: "h", id: "links", text: "Linking and unlinking" },
       {
         type: "p",
@@ -844,6 +879,29 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "p",
         text: "Federation answers *who is this person* at sign-in time. It does not create, update or deactivate accounts ahead of time, and it does not remove one when someone leaves. For that, use **SCIM 2.0** — Okta, Entra ID and any other SCIM-compliant IdP can drive user and group lifecycle directly. See [SCIM provisioning](#/docs/scim).",
+      },
+      {
+        type: "p",
+        text: "There is one adjacent place where an external identity *can* create a local user, and it is worth knowing it is a different mechanism: cross-domain token exchange, where a partner's IdP presents a subject token. That trust configuration carries a subject-mapping setting with two values.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Subject mapping", "Behaviour"],
+        rows: [
+          [
+            "`linked_only`",
+            "**The default.** Refuse an external subject with no existing link. The user must already have signed in through that provider, or been linked by an administrator, before a partner token buys anything.",
+          ],
+          [
+            "`jit_provision`",
+            "Provision an AXIAM user on first sight. Audited as such — that record is the only place a partner IdP's creation of a local user is visible.",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "An unrecognised value is refused rather than defaulted. That matters more than it looks: the default is the stricter of the two, so a silently-tolerated typo would fail closed today and open on any future revision that flips which value is the default.",
       },
     ],
   },
@@ -855,6 +913,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
     title: "Service accounts & machine identity",
     intro:
       "Non-human principals for service-to-service access — authenticated by a client secret or by a bound X.509 certificate, and subject to exactly the same authorization engine as a user.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "what", text: "What a service account is" },
       {
@@ -904,6 +963,56 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "note",
         text: "Client-certificate verification is native: `AXIAM__SERVER__TLS__CLIENT_AUTH` (`off` | `optional` | `required`) with a trust bundle at `AXIAM__SERVER__TLS__CLIENT_CA_PATH`. No proxy-asserted identity header is in the trusted path, and a misconfigured mTLS server fails fast at startup rather than serving without verification.",
+      },
+      { type: "h", id: "auth-methods", text: "How a client proves who it is" },
+      {
+        type: "p",
+        text: "Four client-authentication methods are registrable, and the choice is recorded on the client rather than negotiated per request.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Method", "The credential", "Register with"],
+        rows: [
+          [
+            "`client_secret_post`",
+            "A shared secret in the request body. The default, and bearer material.",
+            "The secret returned once at creation.",
+          ],
+          [
+            "`tls_client_auth`",
+            "A certificate issued by a CA the mTLS listener trusts. AXIAM matches the registered expected subject DN or SAN against the certificate rustls already verified during the handshake.",
+            "`tls_client_auth_subject_dn`, or the expected SAN.",
+          ],
+          [
+            "`self_signed_tls_client_auth`",
+            "A certificate that chains to nothing, so the certificate itself is the credential — matched by SHA-256 thumbprint.",
+            "The thumbprint.",
+          ],
+          [
+            "`private_key_jwt`",
+            "A short-lived JWT the client signs with a private key whose public half AXIAM holds. Needs no transport-level cooperation at all.",
+            "A `jwks` inline, or a `jwks_uri` to publish at.",
+          ],
+        ],
+      },
+      {
+        type: "code",
+        caption: "registering a private_key_jwt client",
+        code: 'POST /api/v1/oauth2-clients\n{\n  "client_name": "orders-batch",\n  "token_endpoint_auth_method": "private_key_jwt",\n  "jwks_uri": "https://orders.acme.dev/.well-known/jwks.json",\n  "grant_types": ["client_credentials"]\n}',
+      },
+      {
+        type: "note",
+        text: "`private_key_jwt` is the method to reach for behind a TLS-terminating load balancer you do not control — which is exactly why FAPI 2.0 permits it alongside the mTLS methods. There is deliberately **no** `none` method: every AXIAM client is confidential, and a public-client value would let an operator register a client whose authentication is silently skipped.",
+      },
+      { type: "h", id: "audience", text: "Machine tokens are a different audience" },
+      {
+        type: "warn",
+        text: "A service-account token carries `aud` of **`axiam:m2m`**, where a user token carries `axiam:user`. A route guard configured to expect the user audience will reject a perfectly valid machine token with a bare `401`, and nothing in that response says why — this is the single most confusing failure on this page. If a service account authenticates cleanly and is then refused by your own middleware, check the audience your verifier expects before checking anything else.",
+      },
+      {
+        type: "p",
+        text: "The split is deliberate rather than incidental: it lets a resource server decide that an endpoint is for humans, or for machines, without inspecting roles. Pin whichever audience the endpoint is actually for, and pin it explicitly — a verifier that checks no audience accepts both.",
       },
     ],
   },

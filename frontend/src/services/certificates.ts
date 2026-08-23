@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 import { orgService } from "@/services/organizations";
 
 // ─── Backend enums (PascalCase — serde default, no rename) ──────────────────────
@@ -80,9 +80,7 @@ export interface GenerateCertificateResponse extends Certificate {
 
 export const certificateService = {
   list: (): Promise<Certificate[]> =>
-    api
-      .get<Certificate[] | { items: Certificate[] }>("/api/v1/certificates")
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Certificate>("/api/v1/certificates"),
 
   generate: (
     payload: GenerateCertificatePayload
@@ -132,9 +130,9 @@ export const certificateService = {
       ? orgs.find((o) => o.slug === orgSlug)
       : orgs[0];
     if (!org) return [];
-    const res = await api.get<
-      CaCertificateOption[] | { items: CaCertificateOption[] }
-    >(`/api/v1/organizations/${org.id}/ca-certificates`);
-    return unwrapList(res.data).filter((ca) => ca.status === "Active");
+    const cas = await fetchAllPages<CaCertificateOption>(
+      `/api/v1/organizations/${org.id}/ca-certificates`
+    );
+    return cas.filter((ca) => ca.status === "Active");
   },
 };

@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 import {
   readOpaquePolicy,
   type OpaqueKsf,
@@ -215,9 +215,7 @@ export interface GeneratedCaCertificate extends CaCertificate {
 
 export const orgService = {
   list: (): Promise<Organization[]> =>
-    api
-      .get<Organization[] | { items: Organization[] }>("/api/v1/organizations")
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Organization>("/api/v1/organizations"),
 
   get: (orgId: string): Promise<Organization> =>
     api.get<Organization>(`/api/v1/organizations/${orgId}`).then((r) => r.data),
@@ -243,9 +241,7 @@ export const orgService = {
 
 export const tenantService = {
   list: (orgId: string): Promise<Tenant[]> =>
-    api
-      .get<Tenant[] | { items: Tenant[] }>(`/api/v1/organizations/${orgId}/tenants`)
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Tenant>(`/api/v1/organizations/${orgId}/tenants`),
 
   get: (orgId: string, tenantId: string): Promise<Tenant> =>
     api
@@ -279,11 +275,7 @@ export const tenantService = {
 
 export const caCertService = {
   list: (orgId: string): Promise<CaCertificate[]> =>
-    api
-      .get<CaCertificate[] | { items: CaCertificate[] }>(
-        `/api/v1/organizations/${orgId}/ca-certificates`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<CaCertificate>(`/api/v1/organizations/${orgId}/ca-certificates`),
 
   generate: (
     orgId: string,

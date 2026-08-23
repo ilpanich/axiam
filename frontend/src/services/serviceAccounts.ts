@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -51,10 +51,7 @@ export interface RotateSecretResponse {
 const BASE = "/api/v1/service-accounts";
 
 export const serviceAccountService = {
-  getAll: (): Promise<ServiceAccount[]> =>
-    api
-      .get<ServiceAccount[] | { items: ServiceAccount[] }>(BASE)
-      .then((r) => unwrapList(r.data)),
+  getAll: (): Promise<ServiceAccount[]> => fetchAllPages<ServiceAccount>(BASE),
 
   create: (
     data: CreateServiceAccountRequest,

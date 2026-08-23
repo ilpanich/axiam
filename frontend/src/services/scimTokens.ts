@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Domain models ────────────────────────────────────────────────────────────
 
@@ -65,10 +65,7 @@ export const SCIM_PROVISION_PERMISSION = "scim:provision";
 const BASE = "/api/v1/scim-tokens";
 
 export const scimTokenService = {
-  list: (): Promise<ScimToken[]> =>
-    api
-      .get<ScimToken[] | { items: ScimToken[] }>(BASE)
-      .then((r) => unwrapList(r.data)),
+  list: (): Promise<ScimToken[]> => fetchAllPages<ScimToken>(BASE),
 
   create: (payload: CreateScimTokenPayload): Promise<CreateScimTokenResponse> =>
     api.post<CreateScimTokenResponse>(BASE, payload).then((r) => r.data),

@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Scopes (nested under resources) ───────────────────────────────────────────
 //
@@ -30,9 +30,7 @@ export interface UpdateScopePayload {
 
 export const scopeService = {
   list: (resourceId: string): Promise<Scope[]> =>
-    api
-      .get<Scope[] | { items: Scope[] }>(`/api/v1/resources/${resourceId}/scopes`)
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Scope>(`/api/v1/resources/${resourceId}/scopes`),
 
   create: (resourceId: string, payload: CreateScopePayload): Promise<Scope> =>
     api

@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Resource types ───────────────────────────────────────────────────────────
 
@@ -96,10 +96,7 @@ function toWritePayload(
 }
 
 export const resourceService = {
-  list: (): Promise<Resource[]> =>
-    api
-      .get<Resource[] | { items: Resource[] }>("/api/v1/resources")
-      .then((r) => unwrapList(r.data)),
+  list: (): Promise<Resource[]> => fetchAllPages<Resource>("/api/v1/resources"),
 
   get: (resourceId: string): Promise<Resource> =>
     api
@@ -123,7 +120,5 @@ export const resourceService = {
     api.delete(`/api/v1/resources/${resourceId}`).then(() => undefined),
 
   listChildren: (resourceId: string): Promise<Resource[]> =>
-    api
-      .get<Resource[] | { items: Resource[] }>(`/api/v1/resources/${resourceId}/children`)
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Resource>(`/api/v1/resources/${resourceId}/children`),
 };

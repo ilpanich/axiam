@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Notification event ids ───────────────────────────────────────────────────
 
@@ -75,9 +75,7 @@ export interface UpdateNotificationRulePayload {
 
 export const notificationRuleService = {
   list: (): Promise<NotificationRule[]> =>
-    api
-      .get<NotificationRule[] | { items: NotificationRule[] }>("/api/v1/notification-rules")
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<NotificationRule>("/api/v1/notification-rules"),
 
   create: (payload: CreateNotificationRulePayload): Promise<NotificationRule> =>
     api

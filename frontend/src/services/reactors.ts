@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages, unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -148,10 +148,7 @@ export const reactorService = {
       >("/api/v1/reactors/events")
       .then((r) => unwrapList(r.data)),
 
-  list: (): Promise<Reactor[]> =>
-    api
-      .get<Reactor[] | { items: Reactor[] }>("/api/v1/reactors")
-      .then((r) => unwrapList(r.data)),
+  list: (): Promise<Reactor[]> => fetchAllPages<Reactor>("/api/v1/reactors"),
 
   create: (payload: CreateReactorPayload): Promise<Reactor> =>
     api.post<Reactor>("/api/v1/reactors", payload).then((r) => r.data),

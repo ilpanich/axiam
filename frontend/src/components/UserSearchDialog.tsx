@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { userService, type User } from "@/services/users";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,14 @@ export interface UserSearchDialogProps {
   /** Label shown for users that are already in existingIds */
   existingLabel?: string;
   tenantId?: string;
+  /**
+   * Extra controls rendered above the search field, for callers whose action
+   * needs a parameter beyond "which user" — the role detail page picks the
+   * resource an assignment is scoped to here. Rendered before the search input
+   * on purpose: it applies to whichever result the admin then clicks, so
+   * showing it afterwards would read as a filter on the results.
+   */
+  header?: ReactNode;
 }
 
 export function UserSearchDialog({
@@ -28,6 +36,7 @@ export function UserSearchDialog({
   onAction,
   existingIds,
   existingLabel = "Added",
+  header,
 }: UserSearchDialogProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [actingId, setActingId] = useState<string | null>(null);
@@ -92,6 +101,7 @@ export function UserSearchDialog({
         </div>
 
         <div className="py-4 flex flex-col gap-3 overflow-hidden">
+          {header}
           <div className="relative">
             <Search
               size={15}

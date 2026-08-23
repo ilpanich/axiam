@@ -667,16 +667,58 @@ describe("roleService", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/users", { user_id: "u1" });
     apiMock.delete.mockResolvedValue(res(undefined));
     await roleService.unassignFromUser("r1", "u1");
-    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {});
     apiMock.get.mockResolvedValue(res({ items: [{ id: "g1" }] }));
     await roleService.listGroups("r1");
     expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/groups");
     await roleService.listByGroup("g1");
     expect(apiMock.get).toHaveBeenCalledWith("/api/v1/groups/g1/roles");
+    await roleService.listByUser("u1");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/users/u1/roles");
     await roleService.assignToGroup("r1", "g1");
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", { group_id: "g1" });
     await roleService.unassignFromGroup("r1", "g1");
-    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {});
+  });
+
+  it("carries the resource scope on assign and unassign", async () => {
+    apiMock.post.mockResolvedValue(res(undefined));
+    apiMock.delete.mockResolvedValue(res(undefined));
+
+    await roleService.assignToUser("r1", "u1", "res1");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/users", {
+      user_id: "u1",
+      resource_id: "res1",
+    });
+    await roleService.assignToGroup("r1", "g1", "res1");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", {
+      group_id: "g1",
+      resource_id: "res1",
+    });
+
+    // The scope has to reach the revoke too: without it the server matches the
+    // null-scope edge, so a scoped grant survives a 204.
+    await roleService.unassignFromUser("r1", "u1", "res1");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {
+      params: { resource_id: "res1" },
+    });
+    await roleService.unassignFromGroup("r1", "g1", "res1");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {
+      params: { resource_id: "res1" },
+    });
+  });
+
+  it("treats an empty scope as a global assignment, not an empty filter", async () => {
+    apiMock.post.mockResolvedValue(res(undefined));
+    apiMock.delete.mockResolvedValue(res(undefined));
+
+    // "" is what the scope picker holds when the admin leaves it on Global.
+    await roleService.assignToUser("r1", "u1", "");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/users", {
+      user_id: "u1",
+    });
+    await roleService.unassignFromUser("r1", "u1", null);
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {});
   });
 });
 

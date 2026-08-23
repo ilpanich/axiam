@@ -17,7 +17,9 @@ import { Label } from "@/components/ui/label";
 import { Loader2, Plus, Trash2, Unlink } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
-import { roleService, type Role } from "@/services/roles";
+import { roleService, type RoleAssignment } from "@/services/roles";
+import { AssignmentScopeBadge } from "@/components/AssignmentScope";
+import { useResourceNames } from "@/hooks/useResourceNames";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { SectionCard, InfoRow } from "@/components/shared";
@@ -165,10 +167,14 @@ export function GroupDetailPage() {
     enabled: !!groupId,
   });
 
-  const [unassignRole, setUnassignRole] = useState<Role | null>(null);
+  // The target is the assignment, not the role: dropping its scope would ask
+  // the server to remove a global grant this group may not even hold.
+  const [unassignRole, setUnassignRole] = useState<RoleAssignment | null>(null);
+  const { nameFor } = useResourceNames();
 
   const unassignRoleMutation = useMutation({
-    mutationFn: (rId: string) => roleService.unassignFromGroup(rId, groupId!),
+    mutationFn: (a: RoleAssignment) =>
+      roleService.unassignFromGroup(a.role.id, groupId!, a.resource_id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["group-roles", groupId] });
       setUnassignRole(null);
@@ -284,17 +290,26 @@ export function GroupDetailPage() {
           </p>
         ) : (
           <ul className="divide-y divide-white/5">
-            {groupRoles.map((role) => (
-              <li key={role.id} className="flex items-center justify-between py-2.5 px-1">
+            {groupRoles.map((a) => (
+              <li
+                key={`${a.role.id}:${a.resource_id ?? "global"}`}
+                className="flex items-center justify-between py-2.5 px-1"
+              >
                 <div>
-                  <p className="text-sm font-medium text-foreground/90">{role.name}</p>
-                  {role.description && (
-                    <p className="text-xs text-muted-foreground">{role.description}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-foreground/90">{a.role.name}</p>
+                    <AssignmentScopeBadge
+                      resourceId={a.resource_id}
+                      nameFor={nameFor}
+                    />
+                  </div>
+                  {a.role.description && (
+                    <p className="text-xs text-muted-foreground">{a.role.description}</p>
                   )}
                 </div>
                 <button
-                  aria-label={`Unassign role ${role.name}`}
-                  onClick={() => setUnassignRole(role)}
+                  aria-label={`Unassign role ${a.role.name}`}
+                  onClick={() => setUnassignRole(a)}
                   className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
                 >
                   <Unlink size={14} />
@@ -354,9 +369,13 @@ export function GroupDetailPage() {
       <ConfirmDialog
         open={unassignRole !== null}
         onClose={() => setUnassignRole(null)}
-        onConfirm={() => unassignRole && unassignRoleMutation.mutate(unassignRole.id)}
+        onConfirm={() => unassignRole && unassignRoleMutation.mutate(unassignRole)}
         title="Unassign Role"
-        description={`Remove role "${unassignRole?.name}" from this group?`}
+        description={
+          unassignRole?.resource_id
+            ? `Remove role "${unassignRole.role.name}" from this group under "${nameFor(unassignRole.resource_id)}"?`
+            : `Remove role "${unassignRole?.role.name}" from this group?`
+        }
         isLoading={unassignRoleMutation.isPending}
       />
     </div>

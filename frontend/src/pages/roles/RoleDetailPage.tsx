@@ -3,6 +3,8 @@ import { useParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   roleService,
+  type RoleGroupAssignment,
+  type RoleUserAssignment,
   type UpdateRolePayload,
 } from "@/services/roles";
 import {
@@ -11,7 +13,7 @@ import {
   type Permission,
   type PermissionEffect,
 } from "@/services/permissions";
-import { groupService, type Group, type User } from "@/services/users";
+import { groupService, type Group } from "@/services/users";
 import { resourceService } from "@/services/resources";
 import { scopeService } from "@/services/scopes";
 import { useToast } from "@/hooks/useToast";
@@ -37,6 +39,11 @@ import {
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { SectionCard, InfoRow, ActionBadge } from "@/components/shared";
+import {
+  AssignmentScopeBadge,
+  ResourceScopePicker,
+} from "@/components/AssignmentScope";
+import { useResourceNames } from "@/hooks/useResourceNames";
 
 // ─── Grant Permission dialog ──────────────────────────────────────────────────
 
@@ -359,6 +366,8 @@ function AssignGroupDialog({
   onAssigned,
 }: AssignGroupDialogProps) {
   const [selectedGroupId, setSelectedGroupId] = useState("");
+  // "" is a global assignment — the only kind this dialog could make before.
+  const [scopeResourceId, setScopeResourceId] = useState("");
   const [assigning, setAssigning] = useState(false);
   const [error, setError] = useState("");
 
@@ -377,12 +386,16 @@ function AssignGroupDialog({
     setAssigning(true);
     setError("");
     try {
-      await roleService.assignToGroup(roleId, selectedGroupId);
+      await roleService.assignToGroup(roleId, selectedGroupId, scopeResourceId);
       onAssigned();
       setSelectedGroupId("");
+      setScopeResourceId("");
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to assign group.");
+      // Surfaced verbatim: the server refuses a second assignment of the same
+      // role to the same group with 409 whatever scope is asked for, and
+      // "Failed to assign group" would hide which of the two it was.
+      setError(getApiErrorMessage(err));
     } finally {
       setAssigning(false);
     }
@@ -390,6 +403,7 @@ function AssignGroupDialog({
 
   function handleClose() {
     setSelectedGroupId("");
+    setScopeResourceId("");
     setError("");
     onClose();
   }
@@ -432,6 +446,14 @@ function AssignGroupDialog({
             ))}
           </select>
         )}
+      </div>
+      <div className="mt-4">
+        <ResourceScopePicker
+          id="assign-group-scope"
+          value={scopeResourceId}
+          onChange={setScopeResourceId}
+          subject="group"
+        />
       </div>
     </FormDialog>
   );
@@ -634,11 +656,21 @@ export function RoleDetailPage() {
     enabled: !!roleId,
   });
 
-  const [unassignUser, setUnassignUser] = useState<User | null>(null);
-  const [unassignGroup, setUnassignGroup] = useState<Group | null>(null);
+  // The unassign targets are *assignments*, not subjects: the scope has to
+  // travel with the confirm dialog, because an unassign that drops it removes
+  // the global grant instead — and against a scoped assignment removes nothing
+  // while still answering 204.
+  const [unassignUser, setUnassignUser] =
+    useState<RoleUserAssignment | null>(null);
+  const [unassignGroup, setUnassignGroup] =
+    useState<RoleGroupAssignment | null>(null);
+
+  // Resource names for the scope badges on both member lists.
+  const { nameFor } = useResourceNames();
 
   const unassignUserMutation = useMutation({
-    mutationFn: (userId: string) => roleService.unassignFromUser(roleId!, userId),
+    mutationFn: (a: RoleUserAssignment) =>
+      roleService.unassignFromUser(roleId!, a.user.id, a.resource_id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
       setUnassignUser(null);
@@ -649,7 +681,8 @@ export function RoleDetailPage() {
   });
 
   const unassignGroupMutation = useMutation({
-    mutationFn: (gId: string) => roleService.unassignFromGroup(roleId!, gId),
+    mutationFn: (a: RoleGroupAssignment) =>
+      roleService.unassignFromGroup(roleId!, a.group.id, a.resource_id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
       setUnassignGroup(null);
@@ -658,6 +691,9 @@ export function RoleDetailPage() {
       toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
+
+  // Scope of the next user assignment. "" is global — the old behaviour.
+  const [assignUserScope, setAssignUserScope] = useState("");
 
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
@@ -839,15 +875,24 @@ export function RoleDetailPage() {
             </div>
           ) : (
             <ul className="divide-y divide-white/5">
-              {assignedUsers.map((u) => (
-                <li key={u.id} className="flex items-center justify-between py-2.5 px-1">
+              {assignedUsers.map((a) => (
+                <li
+                  key={`${a.user.id}:${a.resource_id ?? "global"}`}
+                  className="flex items-center justify-between py-2.5 px-1"
+                >
                   <div>
-                    <p className="text-sm font-medium text-foreground/90">{u.display_name ?? u.username}</p>
-                    <p className="text-xs text-muted-foreground">{u.email}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-foreground/90">{a.user.display_name ?? a.user.username}</p>
+                      <AssignmentScopeBadge
+                        resourceId={a.resource_id}
+                        nameFor={nameFor}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">{a.user.email}</p>
                   </div>
                   <button
-                    aria-label={`Unassign ${u.username}`}
-                    onClick={() => setUnassignUser(u)}
+                    aria-label={`Unassign ${a.user.username}`}
+                    onClick={() => setUnassignUser(a)}
                     className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
                   >
                     <Unlink size={14} />
@@ -869,12 +914,21 @@ export function RoleDetailPage() {
             </div>
           ) : (
             <ul className="divide-y divide-white/5">
-              {assignedGroups.map((g) => (
-                <li key={g.id} className="flex items-center justify-between py-2.5 px-1">
-                  <p className="text-sm font-medium text-foreground/90">{g.name}</p>
+              {assignedGroups.map((a) => (
+                <li
+                  key={`${a.group.id}:${a.resource_id ?? "global"}`}
+                  className="flex items-center justify-between py-2.5 px-1"
+                >
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-foreground/90">{a.group.name}</p>
+                    <AssignmentScopeBadge
+                      resourceId={a.resource_id}
+                      nameFor={nameFor}
+                    />
+                  </div>
                   <button
-                    aria-label={`Unassign group ${g.name}`}
-                    onClick={() => setUnassignGroup(g)}
+                    aria-label={`Unassign group ${a.group.name}`}
+                    onClick={() => setUnassignGroup(a)}
                     className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
                   >
                     <Unlink size={14} />
@@ -931,12 +985,30 @@ export function RoleDetailPage() {
       {/* Assign user dialog */}
       <UserSearchDialog
         open={assignUserOpen}
-        onClose={() => setAssignUserOpen(false)}
+        onClose={() => {
+          setAssignUserOpen(false);
+          setAssignUserScope("");
+        }}
         title="Assign User"
         actionLabel="Assign"
+        header={
+          <ResourceScopePicker
+            id="assign-user-scope"
+            value={assignUserScope}
+            onChange={setAssignUserScope}
+            subject="user"
+          />
+        }
         onAction={async (user) => {
-          await roleService.assignToUser(roleId!, user.id);
-          void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+          try {
+            await roleService.assignToUser(roleId!, user.id, assignUserScope);
+            void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+          } catch (err) {
+            // The dialog swallows the rejection, so the 409 an already-assigned
+            // user produces would otherwise look like a click that did nothing.
+            toast({ description: getApiErrorMessage(err), variant: "destructive" });
+            throw err;
+          }
         }}
       />
 
@@ -955,9 +1027,13 @@ export function RoleDetailPage() {
       <ConfirmDialog
         open={unassignUser !== null}
         onClose={() => setUnassignUser(null)}
-        onConfirm={() => unassignUser && unassignUserMutation.mutate(unassignUser.id)}
+        onConfirm={() => unassignUser && unassignUserMutation.mutate(unassignUser)}
         title="Unassign User"
-        description={`Remove this role from "${unassignUser?.display_name ?? unassignUser?.username}"?`}
+        description={
+          unassignUser?.resource_id
+            ? `Remove this role from "${unassignUser.user.display_name ?? unassignUser.user.username}" under "${nameFor(unassignUser.resource_id)}"? Any global assignment of the same role is left alone.`
+            : `Remove this role from "${unassignUser?.user.display_name ?? unassignUser?.user.username}"?`
+        }
         isLoading={unassignUserMutation.isPending}
       />
 
@@ -965,9 +1041,13 @@ export function RoleDetailPage() {
       <ConfirmDialog
         open={unassignGroup !== null}
         onClose={() => setUnassignGroup(null)}
-        onConfirm={() => unassignGroup && unassignGroupMutation.mutate(unassignGroup.id)}
+        onConfirm={() => unassignGroup && unassignGroupMutation.mutate(unassignGroup)}
         title="Unassign Group"
-        description={`Remove this role from group "${unassignGroup?.name}"?`}
+        description={
+          unassignGroup?.resource_id
+            ? `Remove this role from group "${unassignGroup.group.name}" under "${nameFor(unassignGroup.resource_id)}"? Any global assignment of the same role is left alone.`
+            : `Remove this role from group "${unassignGroup?.group.name}"?`
+        }
         isLoading={unassignGroupMutation.isPending}
       />
     </div>

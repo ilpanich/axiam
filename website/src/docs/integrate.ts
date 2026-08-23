@@ -120,51 +120,113 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "REST is the general-purpose surface; gRPC exists for the hot path. Inside a service mesh, sidecars and backends make authorization checks on nearly every request, and connection reuse plus binary framing is what keeps tail latency down. In the benchmark run, a single gRPC `CheckAccess` held a p99 of 90 ms at database saturation, and TLS 1.3 cost nothing measurable against plaintext.",
       },
-      { type: "h", id: "services", text: "Services" },
+      { type: "h", id: "services", text: "Services and RPCs" },
       {
         type: "p",
-        text: "Defined in `proto/axiam/v1/`. Every request message is tenant-scoped — `tenant_id` is a field on every RPC, because there is no default tenant.",
+        text: "Five services, defined in `proto/axiam/v1/` and all registered by the same listener. Every request message is tenant-scoped — `tenant_id` is a field on the request, not a header, because there is no default tenant.",
       },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Service", "RPCs", "Purpose"],
+        headers: ["Service", "RPC", "What it does"],
         rows: [
           [
             "AuthorizationService",
-            "CheckAccess, BatchCheckAccess",
-            "A single access check, or several in one round trip.",
+            "`CheckAccess`",
+            "One access check. The hot-path RPC this service exists for.",
           ],
+          [
+            "AuthorizationService",
+            "`BatchCheckAccess`",
+            "Several checks in one round trip; results preserve input order.",
+          ],
+          ["TokenService", "`ValidateToken`", "Signature, expiry and tenant. Returns `cnf` and `token_type`."],
           [
             "TokenService",
-            "ValidateToken, IntrospectToken",
-            "Signature and expiry validation, or full RFC 7662-style claims.",
+            "`IntrospectToken`",
+            "Full RFC 7662 claims, plus `scope`, `client_id`, UMA `permissions` and `ext_exchange_iss`.",
           ],
+          ["UserInfoService", "`GetUserInfo`", "The OIDC identity read — the gRPC-only counterpart of REST's userinfo endpoint (§1.1)."],
+          ["UserService", "`GetUser`", "Lookup by id."],
           [
             "UserService",
-            "GetUser, ValidateCredentials",
-            "Lookup by id, or a username/password check that issues no token.",
+            "`ValidateCredentials`",
+            "A username/password check that issues no token. An Argon2id verification, and rate-limited as a CPU guard rather than a read ceiling.",
+          ],
+          [
+            "ReactorAdminService",
+            "`ListReactorEvents`, `CreateReactor`, `ListReactors`, `GetReactor`, `UpdateReactor`, `DeleteReactor`",
+            "Reactor registration and lifecycle — the administrative surface behind the [reactors page](#/docs/reactors).",
           ],
         ],
       },
-      { type: "h", id: "server", text: "The server" },
+      { type: "h", id: "checkaccess", text: "One CheckAccess call" },
       {
         type: "p",
-        text: "The gRPC listener starts inside `axiam-server` alongside REST and the AMQP consumer. It binds `127.0.0.1:50051` by default — loopback only — and is meant to be reached in-cluster over an internal network or mTLS, never through a public ingress. Bind address, port and the per-IP rate limit are the `AXIAM__GRPC__*` variables.",
+        text: "The request names the tenant, the subject, an action and a resource. `subject_id` may be left empty to mean *the subject carried by the verified token* — over gRPC it can only ever restate the caller, since there is no cross-subject form of the check on this transport.",
+      },
+      {
+        type: "codegroup",
+        caption: "CheckAccess",
+        tabs: [
+          {
+            label: "Rust",
+            code: 'use axiam_sdk::grpc::{AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig, build_channel};\n\n// `connect_lazy` performs no network I/O — the TCP and TLS handshake\n// happens on the first RPC.\nlet channel = build_channel("https://iam.acme.dev:50051", &GrpcChannelConfig::default())?;\nlet client = AuthzGrpcClient::new(channel, token_manager, refresh_fn);\n\nlet decision = client\n    .check_access(CheckAccessRequest {\n        tenant_id,\n        subject_id,\n        action: "resource:read".to_string(),\n        resource_id,\n        scope: None,\n    })\n    .await?;\n\nprintln!("allowed: {}, reason: {:?}", decision.allowed, decision.reason);',
+          },
+          {
+            label: "Go",
+            code: '// arg 1 is an optional custom CA PEM for a dev server (§6).\ncreds, err := axiamgrpc.NewTLSCredentials(nil, nil, nil)\nconn, err := axiamgrpc.NewGRPCClient(target, creds, interceptor)\nauthzClient := axiamgrpc.NewAuthzClient(conn, refreshFn)\n\nallowed, denyReason, err := authzClient.CheckAccess(ctx, axiamgrpc.CheckAccessRequest{\n\tTenantID:   tenantID,\n\tSubjectID:  subjectID,\n\tAction:     "resource:read",\n\tResourceID: resourceID,\n})',
+          },
+          {
+            label: "Python",
+            code: 'from axiam_sdk.grpc import AuthzGrpcClient\n\nclient = AuthzGrpcClient(\n    "iam.acme.dev:50051",\n    token_fn=lambda: current_access_token,  # non-blocking cache read\n    tenant_id=tenant_id,\n    refresh_fn=refresh_fn,  # invoked once on UNAUTHENTICATED, then one retry\n)\n\ndecision = client.check_access(subject_id, "resource:read", resource_id)',
+          },
+          {
+            label: "grpcurl",
+            code: '# The server registers no reflection service, so point grpcurl at the\n# protos directly.\ngrpcurl \\\n  -import-path proto -proto axiam/v1/authorization.proto \\\n  -H "authorization: Bearer $ACCESS_TOKEN" \\\n  -d \'{"tenant_id":"<uuid>","action":"resource:read","resource_id":"<uuid>"}\' \\\n  iam.acme.dev:50051 axiam.v1.AuthorizationService/CheckAccess',
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "The response carries `allowed` plus a machine-readable `reason_code`: `allowed`, `no_grant` when nothing matched, or `denied_by_rule` when an explicit deny overrode an allow. The distinction is the one worth surfacing to a user — `no_grant` means ask an administrator, `denied_by_rule` means one has already decided.",
+      },
+      {
+        type: "warn",
+        text: "`deny_reason` is deprecated. It carries the same string as `reason` until AXIAM 2.0 removes it; new code reads `reason` and must not depend on the older field surviving.",
+      },
+      { type: "h", id: "deadlines", text: "Deadlines and retries" },
+      {
+        type: "p",
+        text: "The retry policy is contract-level and identical across transports, so a gRPC check retries exactly as a REST one does. Every value below is binding on an SDK claiming conformance.",
+      },
+      {
+        type: "table",
+        headers: ["Parameter", "Value"],
+        rows: [
+          ["Attempt cap", "3 total — one initial call and two retries"],
+          ["Base delay", "200 ms"],
+          ["Delay cap", "5 s on any single wait"],
+          ["Backoff", "`min(cap, base × 2^(attempt−1))` — 200 ms, then 400 ms"],
+          ["`Retry-After`", "A floor on the computed backoff, never a ceiling"],
+        ],
+      },
+      {
+        type: "p",
+        text: "Only side-effect-free operations are eligible, and that is not the same as *reads a GET*: `CheckAccess` and `BatchCheckAccess` both qualify, and they are the reason the policy exists. Token minting, credential validation and every mutation are excluded — a transient failure after the server committed is indistinguishable at the client from one before it committed.",
       },
       {
         type: "note",
-        text: "In the shipped Kubernetes manifests, port 50051 is intentionally *not* routed through the Ingress — it is reachable only via the in-cluster ClusterIP service.",
+        text: "A caller who needs more than three attempts should retry at their own layer, where the deadline is known. An SDK may lower the cap or switch retry off; it may never raise it, because a caller who can raise it turns one client into the herd a backoff exists to prevent.",
       },
-      { type: "h", id: "consume", text: "Consuming it" },
+      { type: "h", id: "sender-constrained", text: "Sender-constrained tokens" },
+      {
+        type: "note",
+        text: "`ValidateToken` and `IntrospectToken` return a `cnf` claim, and a token that carries one is **not** a bearer token whichever wire it arrived on. `valid: true` means the signature, expiry and tenant check out — not that the token is usable as presented. When `cnf` is present the caller must verify possession against its **own** connection, because AXIAM cannot: the proof is bound to the caller's connection, not to the one carrying the introspection call. A `cnf` whose members are all empty must be refused rather than read as unbound — proto3 cannot tell an absent string from an empty one.",
+      },
       {
         type: "p",
-        text: "The seven SDKs implementing the full contract — Rust, TypeScript, Python, Java, C#, PHP and Go — ship pre-generated stubs, so you consume gRPC without running codegen yourself. gRPC is a **separate client** rather than a flag on the REST one — it is a different transport, with its own channel, TLS settings and connection lifetime — but it shares the session and the single-flight refresh guard, and the decisions it returns are the same ones REST returns.",
-      },
-      {
-        type: "code",
-        caption: "building a gRPC channel · Rust",
-        code: "use axiam_sdk::grpc::{build_channel, GrpcChannelConfig};\n\n// gRPC is a separate channel rather than a flag on the REST client: it is a\n// different transport with its own TLS and connection settings.\nlet channel = build_channel(\n    \"https://iam.acme.dev:50051\",\n    &GrpcChannelConfig::default(),\n)?;\n\n// The channel then backs `AuthzGrpcClient`, which shares the REST client's\n// single-flight refresh guard. See the SDK's `grpc_check_access` example.",
+        text: "AXIAM's own gRPC interceptor refuses `jkt`-bound tokens, because a Tonic interceptor sees neither the HTTP method nor the URI a DPoP proof is bound to. That is the server's limitation and should not be copied: an SDK guarding a real endpoint knows both, so it can and should verify the proof.",
       },
       { type: "h", id: "codegen", text: "Generating your own stubs" },
       {
@@ -174,7 +236,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "code", code: "buf generate   # from the vendored proto/ tree" },
       {
         type: "note",
-        text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface today; gRPC is a planned follow-up for them. Until it lands, use the REST transport or generate stubs directly from `proto/`.",
+        text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface. gRPC is deferred rather than scheduled for them — the contract sets no §-level gRPC requirement for those four — so use the REST transport, or generate stubs straight from `proto/` if you need this surface. The one thing REST cannot substitute for is `GetUserInfo`, which has no REST form in the SDK vocabulary.",
       },
     ],
   },

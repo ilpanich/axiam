@@ -402,10 +402,39 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "code",
         code: "GET    /scim/v2/ServiceProviderConfig\nGET    /scim/v2/ResourceTypes\nGET    /scim/v2/Schemas\n\nGET    /scim/v2/Users?filter=...&startIndex=1&count=50\nPOST   /scim/v2/Users\nGET    /scim/v2/Users/{id}\nPUT    /scim/v2/Users/{id}\nPATCH  /scim/v2/Users/{id}\nDELETE /scim/v2/Users/{id}\n\nGET    /scim/v2/Groups?filter=...&startIndex=1&count=50\nPOST   /scim/v2/Groups\nGET    /scim/v2/Groups/{id}\nPUT    /scim/v2/Groups/{id}\nPATCH  /scim/v2/Groups/{id}\nDELETE /scim/v2/Groups/{id}",
       },
-      { type: "h", id: "tokens", text: "Authentication & tenant scoping" },
+      { type: "h", id: "tokens", text: "Minting a provisioning token" },
       {
         type: "p",
-        text: "A SCIM client authenticates with a dedicated provisioning token, bound to one tenant and carrying a dedicated permission — not a super-admin session, and not an OAuth2 client secret reused for something else. An IdP integration that is compromised should be able to manage users in one tenant and nothing else.",
+        text: "A SCIM client authenticates with a **provisioning token** — a long-lived, revocable bearer handle meant to be pasted into an IdP once and forgotten. It is not an access token, and it is not a separate token *type* on the SCIM endpoints: `/scim/v2/*` uses the same bearer authentication as the rest of the REST API.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create a dedicated provisioning user",
+            body: "Non-interactive, used for nothing else. A shared administrator account here makes the audit trail useless and the blast radius unnecessary.",
+            code: 'POST /api/v1/users\n{ "username": "scim-provisioner", "...": "..." }',
+          },
+          {
+            title: "Create a role holding only scim:provision",
+            body: "Least privilege, and specifically not the `admin` role — the default-role seeder grants admin every permission except `admin:bootstrap`, so it carries `scim:provision` along with everything else.",
+            code: 'POST /api/v1/roles\nPOST /api/v1/roles/{role_id}/permissions   { "permission": "scim:provision" }',
+          },
+          {
+            title: "Assign the role to that user",
+            body: "The token you mint next inherits its authority from here, so this is the step that decides what the IdP can do.",
+            code: "POST /api/v1/roles/{role_id}/users",
+          },
+          {
+            title: "Mint the provisioning token",
+            body: "Requires `scim_tokens:create`. The value is returned exactly once and stored only as a SHA-256 hash — there is no way to read it back.",
+            code: "POST /api/v1/scim-tokens",
+          },
+          {
+            title: "Paste it into the IdP",
+            body: "Okta calls this HTTP Header authentication; Entra calls it the Secret Token. Nothing else needs to be configured on the AXIAM side.",
+          },
+        ],
       },
       {
         type: "api",
@@ -415,13 +444,141 @@ export const INTEGRATE_PAGES: DocPage[] = [
           { method: "DELETE", path: "/api/v1/scim-tokens/{id}", summary: "Revoke one." },
         ],
       },
+      { type: "h", id: "token-limits", text: "What the token can and cannot do" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Property", "Behaviour"],
+        rows: [
+          [
+            "Scope",
+            "Accepted on `/scim/v2/*` and **nowhere else** — not `/api/v1/*`, not `/oauth2/*`. That containment is what makes a year-long credential defensible in a system whose access tokens live 15 minutes.",
+          ],
+          [
+            "Permissions",
+            "**None of its own.** It authenticates *as* the tenant user it was minted for, and that user's `scim:provision` grant decides everything. Unassign the role or deactivate the user and every token bound to them stops working — no separate revocation needed.",
+          ],
+          ["Storage", "Only a SHA-256 hash is kept. The value is shown once, at creation."],
+          [
+            "Recognisability",
+            "Fixed prefix `axiam_scim_`, so a secret scanner or a grep finds it if it is ever pasted somewhere it should not be.",
+          ],
+          [
+            "Lifetime",
+            "Always expires — there is no never-expires option. The ceiling is `AXIAM__SCIM_TOKEN_MAX_LIFETIME_DAYS`, default 365.",
+          ],
+          [
+            "Tenant reach",
+            "One tenant, enforced by construction rather than by a check: every repository call takes its tenant id from the token's own claim, never from the request path or body. A token for tenant A cannot even name tenant B's users in a query.",
+          ],
+        ],
+      },
       {
         type: "warn",
-        text: "Deactivation, not deletion, is what you usually want from an IdP. A SCIM `DELETE` removes the account; setting `active: false` disables sign-in while leaving the identity intact for the audit trail. Configure your IdP's deprovisioning action deliberately.",
+        text: "**Treat this as an administrator credential, not an integration credential.** RFC 7643 makes `password` a writable User attribute and `PATCH /scim/v2/Users/{id}` honours it — so a holder of `scim:provision` can set any user's password in the tenant, including a tenant administrator's, and then sign in as them. That makes the one permission strictly more powerful than `users:create` and `users:update` combined; the native admin API has no equivalent, because `PUT /api/v1/users/{id}` never writes a password hash. Rotate and store it the way you would an admin password.",
       },
       {
         type: "note",
-        text: "Step-by-step walkthroughs for wiring up Okta and Microsoft Entra ID are in `docs/api/scim-provisioning.md` in the repository.",
+        text: "Most Okta and Entra deployments federate and never push a password, so nothing is lost by the IdP never exercising that capability. AXIAM cannot yet take it away, though — `password` writes are not behind a second permission. Worth knowing before you grant it rather than after.",
+      },
+      { type: "h", id: "deprovision", text: "What deprovisioning actually does" },
+      {
+        type: "p",
+        text: "Deactivation is immediate and complete. A SCIM `password` write, an `active: false` (by `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every live session **and** every OAuth2 refresh token the target holds, on top of flushing the authorization decision cache.",
+      },
+      {
+        type: "note",
+        text: "That last part is the fix for a real gap: before it, only the decision cache was flushed, so an account an offboarding job had just deactivated still held a spendable refresh token. If you are reasoning about offboarding latency, this is the behaviour to rely on.",
+      },
+      {
+        type: "warn",
+        text: "Deactivation, not deletion, is usually what you want from an IdP. A SCIM `DELETE` removes the account; `active: false` disables sign-in while leaving the identity intact for the audit trail. Configure your IdP's deprovisioning action deliberately — both are wired, and they are not the same decision.",
+      },
+      { type: "h", id: "okta", text: "Okta" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create or edit an app integration with SCIM provisioning",
+            body: "In the Okta Admin Console, under the app's Provisioning tab.",
+          },
+          {
+            title: "Set the SCIM connector base URL",
+            body: "The whole SCIM surface hangs off this prefix.",
+            code: "https://<your-axiam-host>/scim/v2",
+          },
+          {
+            title: "Set the unique identifier field to userName",
+            body: "This is the attribute AXIAM filters on, and the only User filter supported besides `externalId`.",
+          },
+          {
+            title: "Enable the provisioning actions you want",
+            body: "Push New Users, Push Profile Updates and Push Groups are all supported — standard CRUD plus PATCH.",
+          },
+          {
+            title: "Set authentication mode to HTTP Header and paste the token",
+            body: "The provisioning token from the steps above. Okta's own Test API Credentials button then exercises the real request shapes: a filtered user lookup, a create, and a deactivating PATCH.",
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "Okta deactivates with `{\"op\": \"replace\", \"path\": \"active\", \"value\": false}`. Group push sends a `displayName` and, once members are assigned, a `members` array, then patches membership with a `members[value eq \"<uuid>\"]` remove when one user leaves the group.",
+      },
+      { type: "h", id: "entra", text: "Microsoft Entra ID" },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Set provisioning mode to Automatic",
+            body: "Entra admin center → Enterprise applications → your app → Provisioning.",
+          },
+          {
+            title: "Set the Tenant URL",
+            body: "Entra's name for the same SCIM base URL.",
+            code: "https://<your-axiam-host>/scim/v2",
+          },
+          {
+            title: "Paste the provisioning token as the Secret Token",
+            body: "Same credential as Okta's HTTP Header value.",
+          },
+          {
+            title: "Test the connection",
+            body: "Entra probes a single-user page as its validity check, so a green result means auth and paging both work.",
+            code: "GET /scim/v2/Users?startIndex=1&count=1",
+          },
+          {
+            title: "Leave the default attribute mappings alone",
+            body: "Entra's defaults already match the supported subset: `userPrincipalName` to `userName`, `mail` and `otherMails` to `emails`, `givenName` and `surname` to the `name` sub-attributes, and `accountEnabled` to `active`.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Entra deactivates with a path-less operation — `{\"op\": \"replace\", \"value\": {\"active\": false}}` — where Okta names the path. Both shapes are handled, which is the kind of divergence that otherwise shows up as an IdP that can create users but never disable them.",
+      },
+      { type: "h", id: "limits", text: "Rate limiting" },
+      {
+        type: "p",
+        text: "The whole `/scim/v2` scope shares **one** bucket, `AXIAM__RATE_LIMIT__SCIM_PER_MIN`, defaulting to 600 per minute per IP — Users, Groups and discovery, reads and writes alike. Past it, requests get the standard `429` with `Retry-After: 60`, which a well-behaved SCIM client honours.",
+      },
+      {
+        type: "note",
+        text: "That ceiling is a CPU guard rather than a throughput number: creating a SCIM user generates and Argon2id-hashes an initial password, and a `password` patch re-hashes one. No rate-limit profile preset moves it — a service-mesh capacity decision must not silently widen an administrative surface. For scale, at a typical IdP page size of 200 a full import of a 100,000-user directory is roughly 500 list calls, well inside one minute's budget.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "SCIM provisioning reference",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/scim-provisioning.md",
+            note: "Field mappings, the PATCH shapes each IdP sends, and the contract fixtures.",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The Okta and Entra contract fixtures are hand-constructed from each vendor's published SCIM notes and RFC 7644's examples, not captured from live traffic. Read them as the request shapes those vendors are documented to send, rather than as a captured-traffic compatibility guarantee.",
       },
     ],
   },

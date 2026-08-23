@@ -11,7 +11,8 @@
     "lint": "oxlint",
     "gen:threat-model": "node scripts/gen-threat-model.mjs",
     "gen:api-index": "node scripts/gen-api-index.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:contract-anchors": "node scripts/gen-contract-anchors.mjs"
   },
   "dependencies": {
     "react": "^19.2.7",

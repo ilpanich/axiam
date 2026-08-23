@@ -22,6 +22,8 @@ import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { ToggleField } from "@/components/shared";
+import { buildEnrollmentForUser } from "@/services/opaque";
+import { useAuthStore } from "@/stores/auth";
 
 // ─── Locked Badge ─────────────────────────────────────────────────────────────
 
@@ -187,6 +189,9 @@ export function UsersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  // Carries the tenant's OPAQUE policy and the org/tenant slugs the enrolment
+  // exchange needs; `/auth/me` puts them there.
+  const user = useAuthStore((s) => s.user);
 
   // ─── Pagination + search + filter state ─────────────────────────────────────
   const [page, setPage] = useState(1);
@@ -242,7 +247,7 @@ export function UsersPage() {
     setCreateError("");
   }
 
-  function handleCreateSubmit(e: React.FormEvent<HTMLFormElement>) {
+  async function handleCreateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setCreateError("");
     if (!createUsername.trim() || !createEmail.trim() || !createPassword) {
@@ -253,11 +258,27 @@ export function UsersPage() {
       setCreateError("Password does not meet the requirements.");
       return;
     }
+
+    // Build the new account's OPAQUE record here, in the browser that holds the
+    // password. The server cannot: the envelope is sealed under a key derived
+    // from the password by way of the OPRF, which is the whole point. This
+    // dialog was the last password-setting form in the admin UI that did not do
+    // it — change-password and reset-completion already did — so under
+    // `optional` every operator-created account stayed password-only forever,
+    // and under `required` creation failed outright with a message about a
+    // missing record the UI gave no way to supply.
+    //
+    // `buildEnrollmentForUser` returns null when the tenant has OPAQUE off or
+    // this browser cannot do it, and the field is then simply absent — which is
+    // exactly what the server accepts under `disabled` and `optional`.
+    const opaque = await buildEnrollmentForUser(user, createPassword);
+
     createMutation.mutate({
       username: createUsername.trim(),
       email: createEmail.trim(),
       password: createPassword,
       display_name: createDisplayName.trim() || undefined,
+      ...(opaque ? { opaque } : {}),
     });
   }
 

@@ -31,6 +31,7 @@ async fn setup() -> (Db, Uuid) {
 
 fn sample_ca(organization_id: Uuid) -> StoreCaCertificate {
     StoreCaCertificate {
+        id: Uuid::new_v4(),
         organization_id,
         subject: "CN=ACME Root CA".into(),
         public_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----".into(),
@@ -39,6 +40,8 @@ fn sample_ca(organization_id: Uuid) -> StoreCaCertificate {
         not_before: Utc::now() - Duration::minutes(1),
         not_after: Utc::now() + Duration::days(3650),
         encrypted_private_key: Some(vec![1, 2, 3, 4, 5]),
+        key_custody: axiam_core::ca_keys::CaKeyCustody::Database,
+        key_locator: None,
     }
 }
 

@@ -827,3 +827,47 @@ async fn half_configured_keys_are_treated_as_no_keys_at_all() {
     let (status, _, _, _, _) = opaque_login(&app, org_id, tenant_id, USERNAME, password()).await;
     assert_eq!(status, 500);
 }
+
+// -----------------------------------------------------------------------
+// The tenant's mode travels with the KE2
+// -----------------------------------------------------------------------
+//
+// A client that has no record — which is every client of a tenant the moment
+// an operator turns OPAQUE on — cannot open the envelope, and the server
+// deliberately makes that indistinguishable from a wrong password so this
+// endpoint cannot enumerate who is enrolled. Under `optional` the password
+// endpoint is still live and is the right next thing to try; under `required`
+// it is not, and an honest client must send no plaintext at all. `mode` is
+// what tells the two apart.
+
+#[actix_web::test]
+async fn login_start_reports_the_tenants_mode() {
+    let (db, org_id, tenant_id, _user_id, app) = enrolled_app!("modeopt");
+
+    let (status, body, _, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["mode"], "optional");
+
+    set_opaque_mode(&db, org_id, OpaqueMode::Required).await;
+    let (status, body, _, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["mode"], "required");
+}
+
+#[actix_web::test]
+async fn the_reported_mode_is_the_same_for_an_unknown_identity() {
+    // It is a property of the tenant, not of whether this identity has a
+    // record. A `mode` that differed between the real and decoy branches would
+    // be the enumeration oracle the decoy exists to prevent.
+    let (_db, org_id, tenant_id, _user_id, app) = enrolled_app!("modedecoy");
+
+    let (_, known, _, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, wrong_password()).await;
+    let (_, unknown, _, _, _) =
+        opaque_login(&app, org_id, tenant_id, "nobody-at-all", wrong_password()).await;
+
+    assert_eq!(known["mode"], unknown["mode"]);
+    assert_eq!(known["mode"], "optional");
+}

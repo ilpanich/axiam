@@ -447,6 +447,14 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/organizations/{org_id}/ca-certificates",
         "ca_certificates:generate",
     ),
+    // Importing a CA is the same act as generating one from every relying
+    // party's point of view: both decide what this organization's certificates
+    // chain to. Same permission.
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/ca-certificates/import",
+        "ca_certificates:generate",
+    ),
     (
         "GET",
         "/api/v1/organizations/{org_id}/ca-certificates/{id}",
@@ -740,6 +748,24 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Settings
     ("GET", "/api/v1/settings", "settings:get"),
     ("PUT", "/api/v1/settings", "settings:update"),
+    // The same overrides addressed by tenant id, for the organization's tenant
+    // detail page. Same permissions: it is the same tenant-scoped policy, and
+    // the handler additionally refuses a tenant that is not the caller's own.
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/settings",
+        "settings:update",
+    ),
     // Email Config (FUNC-03 / D-13) — single email_config:read/write permission
     // shared across org and tenant scopes (D-03), NOT per-verb-per-scope.
     (
@@ -770,6 +796,20 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     (
         "DELETE",
         "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:write",
+    ),
+    // The delivery self-test sends real mail through the configured provider.
+    // Gated on `email_config:write` rather than `:read`: it is the permission
+    // that could change the sender identity anyway, and a read-only viewer
+    // should not be able to make the system emit traffic.
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/email-config/test",
+        "email_config:write",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/email-config/test",
         "email_config:write",
     ),
     // WebAuthn Attestation Policy (X3 wave 3)

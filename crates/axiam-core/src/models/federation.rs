@@ -492,6 +492,8 @@ mod tests {
             not_after: Utc::now(),
             status: CertificateStatus::Active,
             encrypted_private_key: Some(KEY_MARKER.to_vec()),
+            key_custody: crate::ca_keys::CaKeyCustody::Database,
+            key_locator: None,
             created_at: Utc::now(),
         };
 

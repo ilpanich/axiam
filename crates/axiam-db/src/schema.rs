@@ -252,6 +252,21 @@ static MIGRATIONS: &[Migration] = &[
         name: "opaque_replaces_srp",
         sql: SCHEMA_V42,
     },
+    Migration {
+        version: 43,
+        name: "email_config_tenant_override_tristate",
+        sql: SCHEMA_V43,
+    },
+    Migration {
+        version: 44,
+        name: "configurable_deletion_grace_period",
+        sql: SCHEMA_V44,
+    },
+    Migration {
+        version: 45,
+        name: "ca_key_custody",
+        sql: SCHEMA_V45,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2447,6 +2462,93 @@ UPDATE security_settings SET opaque_mode = 'disabled' WHERE opaque_mode = NONE;
 UPDATE security_settings SET opaque_suite = 'ristretto255_sha512' \
     WHERE opaque_suite = NONE;
 UPDATE security_settings SET opaque_ksf = 'argon2id' WHERE opaque_ksf = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v43 — a tenant email override says *which* fields it overrides
+// -----------------------------------------------------------------------
+//
+// The tenant row reused the org row's columns, which have no way to say
+// "inherit this one". `enabled` is the clearest case: every tenant write
+// stored a bool, so the read path handed back `Some(..)` for a field the
+// operator never touched and the merge treated it as a deliberate override.
+// `reply_to` had the opposite problem — no tenant column at all, so a tenant
+// could not override it even deliberately.
+//
+// Two columns, both meaningful only on `scope = 'tenant'` rows:
+//
+//   * `enabled_override` — NONE inherits the org's delivery switch.
+//   * `reply_to_overridden` — when true, this row's `reply_to` is
+//     authoritative, *including* a NONE that clears the org's reply-to.
+//     Without the flag those two states are the same value.
+
+const SCHEMA_V43: &str = "\
+DEFINE FIELD IF NOT EXISTS enabled_override ON TABLE email_config \
+    TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS reply_to_overridden ON TABLE email_config \
+    TYPE bool DEFAULT false;
+-- Existing tenant rows stored `enabled` from `input.enabled.unwrap_or(true)`,
+-- so an explicit override and an untouched field are indistinguishable now.
+-- Carry the stored value forward as explicit: reading it as \"inherit\" would
+-- silently switch delivery off for a tenant that had deliberately turned it on
+-- while the organization's own switch was off.
+UPDATE email_config SET enabled_override = enabled WHERE scope = 'tenant';
+";
+
+// -----------------------------------------------------------------------
+// Schema v44 — the erasure grace window becomes a setting
+// -----------------------------------------------------------------------
+//
+// `POST /api/v1/auth/account/delete` hard-coded 30 days, which made the admin
+// UI's "cancel a pending deletion" control refer to a duration no operator
+// could see, let alone change. It is now an org baseline a tenant may only
+// lower — shorter is more restrictive, being less time holding data the
+// subject has already asked to have erased.
+//
+// The DEFAULT is the same 30 days the handler used, and the backfill applies
+// it to rows that predate the column, so an upgrade changes nothing anywhere.
+
+const SCHEMA_V44: &str = "\
+DEFINE FIELD IF NOT EXISTS privacy_deletion_grace_days ON TABLE \
+    security_settings TYPE int DEFAULT 30 \
+    ASSERT $value >= 1 AND $value <= 90;
+-- DEFAULT only applies on write, so rows written before this migration need
+-- the value put there explicitly.
+UPDATE security_settings SET privacy_deletion_grace_days = 30 \
+    WHERE privacy_deletion_grace_days = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v45 — a CA row records who holds its key
+// -----------------------------------------------------------------------
+//
+// Until now there was one answer: AES-256-GCM ciphertext in the row itself,
+// under the process-wide `pki_encryption_key`. That is a real control with a
+// bounded reach — the key and what opens it are in the same blast radius, and
+// nothing records a read.
+//
+// `key_custody` names the custodian per CA rather than letting configuration
+// imply it, which is what lets a deployment adopt Vault without stranding the
+// CAs it already has: those rows still say `database`, and the signing path
+// asks the row, not the environment.
+//
+// The backfill distinguishes the two states an existing row can be in. One
+// holding ciphertext is `database`; one holding none never had a key here at
+// all and is `external` — a trust anchor AXIAM cannot issue against. Calling
+// the second `database` would produce a CA that claims a key it does not have,
+// failing at issuance with a decryption error instead of a sentence saying it
+// has no key.
+
+const SCHEMA_V45: &str = "\
+DEFINE FIELD IF NOT EXISTS key_custody ON TABLE ca_certificate TYPE string \
+    DEFAULT 'database' ASSERT $value IN ['database', 'vault', 'external'];
+DEFINE FIELD IF NOT EXISTS key_locator ON TABLE ca_certificate \
+    TYPE option<string>;
+-- DEFAULT only applies on write, so pre-existing rows need this explicitly.
+UPDATE ca_certificate SET key_custody = 'database' \
+    WHERE key_custody = NONE AND encrypted_private_key != NONE;
+UPDATE ca_certificate SET key_custody = 'external' \
+    WHERE key_custody = NONE AND encrypted_private_key = NONE;
 ";
 
 #[cfg(test)]

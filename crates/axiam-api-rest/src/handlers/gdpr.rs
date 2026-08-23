@@ -3,7 +3,8 @@
 //! Endpoints:
 //! - `POST /api/v1/account/export`  — enqueue an async data-export job (D-12)
 //! - `GET  /api/v1/account/export/{token}` — single-use download link (D-13)
-//! - `POST /api/v1/account/delete`  — request account erasure / 30-day grace (D-07/D-08)
+//! - `POST /api/v1/account/delete`  — request account erasure, cancellable for
+//!   `privacy.deletion_grace_period_days` (30 by default) (D-07/D-08)
 //! - `GET  /api/v1/auth/account/delete/cancel?token=<opaque>` — public cancel (D-09)
 
 use std::fs::OpenOptions;
@@ -472,8 +473,43 @@ pub async fn request_account_delete<C: Connection + Clone>(
         .get_by_id(auth_user.tenant_id, target_id)
         .await?;
 
-    // Schedule purge at +30 days (D-08).
-    let scheduled_purge_at = Utc::now() + chrono::Duration::days(30);
+    // Schedule the purge at the end of the tenant's grace window (D-08).
+    //
+    // This was a hard-coded 30 days, which left the "cancel a pending
+    // deletion" control in the admin UI referring to a duration no operator
+    // could see or change. It is now `privacy.deletion_grace_period_days` —
+    // an org baseline a tenant may only lower — and still 30 by default, so
+    // an upgrade changes nothing.
+    //
+    // A read failure falls back to that default rather than refusing the
+    // erasure: an unavailable settings row must not stop a data subject
+    // exercising Art. 17, and the default is the value every deployment had
+    // until now.
+    let grace_days = {
+        use axiam_core::repository::{SettingsRepository as _, TenantRepository as _};
+        let resolved = async {
+            let tenant = state
+                .tenant_repo
+                .get_by_id(auth_user.tenant_id)
+                .await
+                .ok()?;
+            let settings = state
+                .settings_repo
+                .get_effective_settings(tenant.organization_id, auth_user.tenant_id)
+                .await
+                .ok()?;
+            Some(settings.privacy.deletion_grace_period_days)
+        }
+        .await;
+        resolved.unwrap_or_else(|| {
+            tracing::warn!(
+                tenant_id = %auth_user.tenant_id,
+                "could not resolve the erasure grace window; using the 30-day default"
+            );
+            30
+        })
+    };
+    let scheduled_purge_at = Utc::now() + chrono::Duration::days(i64::from(grace_days));
 
     // Generate cancel token: 256-bit random token, hex-encoded (CQ-B39).
     // Only the SHA-256 hash is stored in the DB; the raw token is emailed.

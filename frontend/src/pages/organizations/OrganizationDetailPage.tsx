@@ -12,6 +12,9 @@ import {
   type SetOrgSettings,
   type CreateTenantPayload,
   type GenerateCaCertPayload,
+  type ImportCaCertPayload,
+  type CaKeyCustody,
+  MAX_DELETION_GRACE_PERIOD_DAYS,
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
@@ -27,7 +30,7 @@ import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Pencil, Trash2, Plus, ChevronLeft, Loader2 } from "lucide-react";
+import { Pencil, Trash2, Plus, Upload, ChevronLeft, Loader2 } from "lucide-react";
 import { cn, formatDate, slugify } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -417,6 +420,23 @@ function caBadgeStatus(
   }
 }
 
+/** Short label for the "Key" column. */
+const CA_CUSTODY_LABEL: Record<CaKeyCustody, string> = {
+  database: "In database",
+  vault: "In Vault",
+  external: "Not held",
+};
+
+/** The tooltip behind it — what each choice actually means for this CA. */
+const CA_CUSTODY_DESCRIPTION: Record<CaKeyCustody, string> = {
+  database:
+    "Encrypted with AES-256-GCM in the CA record, under the server's PKI encryption key.",
+  vault:
+    "Held in HashiCorp Vault. The CA record stores only a path — a database dump on its own contains no key.",
+  external:
+    "AXIAM holds no private key for this CA. Certificates it signed are trusted; AXIAM cannot issue new ones against it.",
+};
+
 function CaCertificatesTab({ orgId }: { orgId: string }) {
   const queryClient = useQueryClient();
 
@@ -482,6 +502,58 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
     });
   }
 
+  // Import (BYOK)
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCertPem, setImportCertPem] = useState("");
+  const [importKeyPem, setImportKeyPem] = useState("");
+  const [importError, setImportError] = useState("");
+
+  const importMutation = useMutation({
+    mutationFn: (payload: ImportCaCertPayload) =>
+      caCertService.import(orgId, payload),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ca-certificates", orgId] });
+      setImportOpen(false);
+      resetImport();
+    },
+    onError: (err: unknown) =>
+      setImportError(
+        getApiErrorMessage(err, "Failed to import the CA certificate.")
+      ),
+  });
+
+  function resetImport() {
+    setImportCertPem("");
+    setImportKeyPem("");
+    setImportError("");
+  }
+
+  function handleImportSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setImportError("");
+    const certPem = importCertPem.trim();
+    if (!certPem.includes("BEGIN CERTIFICATE")) {
+      setImportError(
+        "Paste the PEM-encoded CA certificate, including its BEGIN and END lines."
+      );
+      return;
+    }
+    const keyPem = importKeyPem.trim();
+    if (keyPem && !keyPem.includes("PRIVATE KEY")) {
+      setImportError(
+        "The private key must be PEM-encoded, including its BEGIN and END lines."
+      );
+      return;
+    }
+    // Everything else — that it is a CA, that it has not expired, that the key
+    // matches it — is checked server-side. Duplicating those rules here would
+    // give an operator two opinions that can disagree.
+    importMutation.mutate({
+      public_cert_pem: certPem,
+      ...(keyPem ? { private_key_pem: keyPem } : {}),
+    });
+  }
+
   // Revoke
   const [revokeCert, setRevokeCert] = useState<CaCertificate | null>(null);
   const revokeMutation = useMutation({
@@ -513,6 +585,18 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       key: "status",
       header: "Status",
       render: (row) => <StatusBadge status={caBadgeStatus(row.status)} />,
+    },
+    {
+      key: "key_custody",
+      header: "Key",
+      render: (row) => (
+        <span
+          className="text-xs text-muted-foreground"
+          title={CA_CUSTODY_DESCRIPTION[row.key_custody ?? "database"]}
+        >
+          {CA_CUSTODY_LABEL[row.key_custody ?? "database"]}
+        </span>
+      ),
     },
     {
       key: "not_after",
@@ -560,7 +644,18 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       id="tabpanel-certificates"
       aria-labelledby="tab-certificates"
     >
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-end gap-2 mb-4">
+        <Button
+          variant="outline"
+          onClick={() => {
+            resetImport();
+            setImportOpen(true);
+          }}
+          size="sm"
+        >
+          <Upload size={14} />
+          Import CA
+        </Button>
         <Button
           onClick={() => {
             resetGenerate();
@@ -642,6 +737,62 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         description={`Are you sure you want to revoke "${revokeCert?.subject}"? This cannot be undone.`}
         isLoading={revokeMutation.isPending}
       />
+
+      <FormDialog
+        open={importOpen}
+        onClose={() => {
+          setImportOpen(false);
+          resetImport();
+        }}
+        title="Import CA Certificate"
+        onSubmit={handleImportSubmit}
+        isLoading={importMutation.isPending}
+        submitLabel="Import"
+        error={importError}
+        errorId="org-ca-import-error"
+      >
+        <p className="text-sm text-muted-foreground">
+          Register a CA this organization already has — from an offline root, an
+          HSM ceremony, or an existing internal PKI — so AXIAM-issued
+          certificates chain to a root the rest of your estate already trusts.
+          The subject, validity window and key algorithm are read from the
+          certificate itself.
+        </p>
+
+        <div className="space-y-2">
+          <Label htmlFor="ca-import-cert">CA certificate (PEM) *</Label>
+          <Textarea
+            id="ca-import-cert"
+            value={importCertPem}
+            onChange={(e) => setImportCertPem(e.target.value)}
+            rows={7}
+            spellCheck={false}
+            placeholder={"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="ca-import-key">Private key (PEM)</Label>
+          <Textarea
+            id="ca-import-key"
+            value={importKeyPem}
+            onChange={(e) => setImportKeyPem(e.target.value)}
+            rows={7}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder={"-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----"}
+            className="font-mono text-xs"
+          />
+          <p className="text-xs text-muted-foreground">
+            Optional. With a key, AXIAM takes custody of it — in Vault where the
+            server is configured for it, otherwise encrypted in the CA record —
+            and can issue certificates against this CA. Without one, the
+            certificate is registered as a trust anchor and AXIAM cannot issue
+            against it. The key is never returned by any endpoint once stored.
+          </p>
+        </div>
+      </FormDialog>
 
       <SecretRevealModal
         open={revealedPrivateKey !== null}
@@ -1121,6 +1272,37 @@ function SettingsTab({
               Enable admin notifications
             </span>
           </label>
+        </div>
+
+        {/* Privacy & data retention */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Privacy &amp; data retention
+          </h3>
+          <div className="space-y-2">
+            <Label htmlFor="deletion-grace-period-days">
+              Pending-deletion window (days)
+            </Label>
+            <Input
+              id="deletion-grace-period-days"
+              type="number"
+              min={1}
+              max={MAX_DELETION_GRACE_PERIOD_DAYS}
+              value={merged.deletion_grace_period_days}
+              onChange={(e) =>
+                setField("deletion_grace_period_days", Number(e.target.value))
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              How long a requested account erasure stays cancellable before the
+              purge runs — the window the &ldquo;Cancel pending deletion&rdquo;
+              control in Privacy &amp; Data acts within. A tenant may shorten
+              this and not lengthen it. The {MAX_DELETION_GRACE_PERIOD_DAYS}-day
+              ceiling is where GDPR Art. 12(3)&rsquo;s one-month deadline plus
+              its two-month extension runs out; anything past 30 wants a reason
+              recorded.
+            </p>
+          </div>
         </div>
 
         {saveError && <p className="text-sm text-destructive">{saveError}</p>}

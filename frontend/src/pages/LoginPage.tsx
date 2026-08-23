@@ -18,6 +18,7 @@ import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 import {
+  OpaqueExchangeFailedError,
   OpaqueNotOfferedError,
   loginOpaque,
 } from "@/services/opaque";
@@ -257,11 +258,25 @@ export function LoginPage() {
         });
         data = outcome.data as LoginResponse;
       } catch (opaqueErr) {
-        // Only a tenant that does not offer OPAQUE, or a browser that cannot
-        // perform it, falls through to the password endpoint. A failed
-        // exchange is a failed login and must not be retried with the
-        // plaintext.
-        if (!(opaqueErr instanceof OpaqueNotOfferedError)) throw opaqueErr;
+        // Three things fall through to the password endpoint, and nothing else:
+        // a tenant that does not offer OPAQUE, a browser that cannot perform
+        // it, and — under `optional` only — an exchange that did not complete.
+        //
+        // That third case is the whole of `optional` mode. Every account has no
+        // registration record the moment an operator turns OPAQUE on, and they
+        // acquire one only as they next set a password; until then the server
+        // answers a decoy exchange, which is indistinguishable from a wrong
+        // password by design so that this endpoint cannot enumerate who is
+        // enrolled. Ending the attempt there locked out every existing user of
+        // any tenant that enabled `optional`.
+        //
+        // Under `required` the exchange failure is never converted, so the
+        // plaintext is never sent — and `/auth/login` refuses for the whole
+        // tenant anyway, which is where the guarantee actually lives.
+        const canRetryWithPassword =
+          opaqueErr instanceof OpaqueNotOfferedError ||
+          opaqueErr instanceof OpaqueExchangeFailedError;
+        if (!canRetryWithPassword) throw opaqueErr;
 
         const response = await api.post<LoginResponse>("/api/v1/auth/login", {
           username,

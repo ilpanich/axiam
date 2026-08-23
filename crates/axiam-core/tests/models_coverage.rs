@@ -4,6 +4,7 @@
 
 use std::str::FromStr;
 
+use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::models::certificate::{
     CaCertificate, CertificateStatus, GeneratedCaCertificate, KeyAlgorithm,
 };
@@ -127,6 +128,8 @@ fn sample_ca() -> CaCertificate {
         not_after: Utc::now(),
         status: CertificateStatus::Active,
         encrypted_private_key: Some(vec![1, 2, 3, 4]),
+        key_custody: CaKeyCustody::Database,
+        key_locator: None,
         created_at: Utc::now(),
     }
 }
@@ -240,6 +243,8 @@ fn many_less_restrictive_overrides_are_rejected() {
         opaque_mode: None,
         opaque_suite: None,
         opaque_ksf: None,
+        // check_max: a window longer than the org's is less restrictive.
+        deletion_grace_period_days: Some(u32::MAX),
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

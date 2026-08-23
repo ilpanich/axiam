@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 import type { PermissionEffect, PermissionGrant } from "@/services/permissions";
 import type { User } from "@/services/users";
 import type { Group } from "@/services/users";
@@ -56,10 +56,7 @@ export interface RoleGroupAssignment {
 // ─── Roles service ────────────────────────────────────────────────────────────
 
 export const roleService = {
-  list: (): Promise<Role[]> =>
-    api
-      .get<Role[] | { items: Role[] }>("/api/v1/roles")
-      .then((r) => unwrapList(r.data)),
+  list: (): Promise<Role[]> => fetchAllPages<Role>("/api/v1/roles"),
 
   get: (roleId: string): Promise<Role> =>
     api.get<Role>(`/api/v1/roles/${roleId}`).then((r) => r.data),
@@ -76,11 +73,7 @@ export const roleService = {
   // ─── Permission management ────────────────────────────────────────────────
 
   listPermissions: (roleId: string): Promise<PermissionGrant[]> =>
-    api
-      .get<PermissionGrant[] | { items: PermissionGrant[] }>(
-        `/api/v1/roles/${roleId}/permissions`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<PermissionGrant>(`/api/v1/roles/${roleId}/permissions`),
 
   /**
    * Grant a permission to a role.
@@ -120,19 +113,11 @@ export const roleService = {
   // ─── User assignment ──────────────────────────────────────────────────────
 
   listUsers: (roleId: string): Promise<RoleUserAssignment[]> =>
-    api
-      .get<RoleUserAssignment[] | { items: RoleUserAssignment[] }>(
-        `/api/v1/roles/${roleId}/users`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<RoleUserAssignment>(`/api/v1/roles/${roleId}/users`),
 
   /** List a user's role assignments, including roles reaching them via a group. */
   listByUser: (userId: string): Promise<RoleAssignment[]> =>
-    api
-      .get<RoleAssignment[] | { items: RoleAssignment[] }>(
-        `/api/v1/users/${userId}/roles`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<RoleAssignment>(`/api/v1/users/${userId}/roles`),
 
   /**
    * Assign a role to a user, optionally scoped to a resource.
@@ -170,19 +155,11 @@ export const roleService = {
   // ─── Group assignment ─────────────────────────────────────────────────────
 
   listGroups: (roleId: string): Promise<RoleGroupAssignment[]> =>
-    api
-      .get<RoleGroupAssignment[] | { items: RoleGroupAssignment[] }>(
-        `/api/v1/roles/${roleId}/groups`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<RoleGroupAssignment>(`/api/v1/roles/${roleId}/groups`),
 
   /** List a group's role assignments. Every member inherits these. */
   listByGroup: (groupId: string): Promise<RoleAssignment[]> =>
-    api
-      .get<RoleAssignment[] | { items: RoleAssignment[] }>(
-        `/api/v1/groups/${groupId}/roles`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<RoleAssignment>(`/api/v1/groups/${groupId}/roles`),
 
   assignToGroup: (
     roleId: string,

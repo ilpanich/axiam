@@ -152,8 +152,12 @@ describe("CertificatesPage", () => {
       within(dialog).getByText("No active CA available")
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText(/Create an organization CA certificate first/)
+      within(dialog).getByText(/This organization has no active CA/)
     ).toBeInTheDocument();
+    // Not a dead end: the note links to the only page that issues one.
+    expect(
+      within(dialog).getByRole("link", { name: /CA Certificates/ })
+    ).toHaveAttribute("href", "/organizations/org1");
     await userEvent.type(within(dialog).getByLabelText("Subject *"), "CN=x");
     await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
     expect(

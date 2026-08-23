@@ -231,7 +231,7 @@ await client.confirmPasswordReset({
           ["disabled", "The default. Only password login is offered."],
           [
             "optional",
-            "Both paths work. Users enrol an OPAQUE record as they sign in or change password; those who have not yet keep using the password path.",
+            "Both paths work. Users enrol an OPAQUE record as they next set a password — creation, change, or reset completion; those who have not yet keep using the password path.",
           ],
           [
             "required",
@@ -242,6 +242,14 @@ await client.confirmPasswordReset({
       {
         type: "warn",
         text: "`required` cannot be turned on safely until every user in the tenant has enrolled. A registration record must be built from the plaintext password, and a stored Argon2id hash is not invertible — so **nobody can be enrolled retroactively**. Switching to `required` early locks out every user who has no record. Run `optional` until enrolment is complete, then flip.",
+      },
+      {
+        type: "p",
+        text: "Turning OPAQUE on provisions the tenant's server-side key material at the settings write, so `opaque_server_setup` is populated immediately rather than waiting for somebody's first sign-in. Registration records are a different matter: `opaque_credential` fills up only as users set passwords, which is what `optional` is for. A tenant that has just switched to `optional` has key material and no records at all, and that is the expected state, not a failure.",
+      },
+      {
+        type: "note",
+        text: "Bootstrap is the exception, and the only moment a deployment can start with OPAQUE already working: `POST /api/v1/admin/bootstrap` receives the plaintext password — it must, to compute the Argon2id hash — so it runs both halves of the registration itself and the first administrator is enrolled with no client involvement. The admin UI's initialization page exposes the three policy fields for exactly this reason.",
       },
       { type: "h", id: "flow", text: "The exchange" },
       {
@@ -260,7 +268,7 @@ await client.confirmPasswordReset({
         type: "list",
         items: [
           "**Build the key-stretching function from what the server named**, never from a local default. `login/start` returns the KSF and its parameters; using anything else produces an envelope that cannot be opened.",
-          "**A failure at `finish` is indistinguishable by design.** Wrong password, unknown account, and a server holding no record all fail identically — and nothing further may be posted after one.",
+          "**A failure at `finish` is indistinguishable by design.** Wrong password, unknown account, and an account with no registration record all fail identically. What to do next comes from `mode` in the `login/start` response, and nothing else: under `required`, the attempt is over and no plaintext may be sent. Under `optional`, retry over `POST /api/v1/auth/login` — an account with no record is the ordinary case there, and a client that treats the failure as final locks out every user of a tenant mid-migration.",
         ],
       },
       {

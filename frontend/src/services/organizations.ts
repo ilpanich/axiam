@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 import {
   readOpaquePolicy,
   type OpaqueKsf,
@@ -34,6 +34,20 @@ export interface Tenant {
   updated_at?: string;
 }
 
+/**
+ * Who holds a CA's signing key.
+ *
+ * Recorded per CA rather than read from configuration, so a deployment that
+ * adopts Vault does not strand the CAs it already has.
+ *
+ * - `database` — AES-256-GCM ciphertext in the CA row, under the server's
+ *   `pki_encryption_key`.
+ * - `vault` — a HashiCorp Vault KV v2 secret; the row holds only a path.
+ * - `external` — AXIAM holds no key. An imported trust anchor: certificates it
+ *   signed are trusted, and AXIAM cannot issue new ones against it.
+ */
+export type CaKeyCustody = "database" | "vault" | "external";
+
 export interface CaCertificate {
   id: string;
   organization_id: string;
@@ -44,6 +58,8 @@ export interface CaCertificate {
   status: "Active" | "Revoked" | "Expired";
   not_before: string;
   not_after: string;
+  /** Optional so a server older than the field does not fail the type. */
+  key_custody?: CaKeyCustody;
 }
 
 // ─── Security settings ─────────────────────────────────────────────────────────
@@ -93,6 +109,23 @@ export interface NotificationPolicy {
   admin_notifications_enabled: boolean;
 }
 
+export interface PrivacyPolicy {
+  /**
+   * How long a requested account erasure stays cancellable, in days.
+   *
+   * The window the "Cancel pending deletion" control in Privacy & Data acts
+   * within. It was fixed at 30 days server-side, so the control referred to a
+   * duration nobody could see or change.
+   */
+  deletion_grace_period_days: number;
+}
+
+/** The longest erasure grace window the server accepts (GDPR Art. 12(3)). */
+export const MAX_DELETION_GRACE_PERIOD_DAYS = 90;
+
+/** The default the server applies, and what every deployment had before it was settable. */
+export const DEFAULT_DELETION_GRACE_PERIOD_DAYS = 30;
+
 /** Nested, fully-resolved org security settings (READ shape). */
 export interface SecuritySettings {
   id: string;
@@ -107,6 +140,8 @@ export interface SecuritySettings {
   notification: NotificationPolicy;
   /** OPAQUE (RFC 9807) policy — the baseline every tenant inherits. */
   opaque: OpaquePolicy;
+  /** Retention rules that apply after a subject asks to be erased. */
+  privacy?: PrivacyPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -146,6 +181,9 @@ export interface SetOrgSettings {
   opaque_mode: OpaqueMode;
   opaque_suite: OpaqueSuite;
   opaque_ksf: OpaqueKsf;
+  // Privacy. Required here for the same reason: the PUT replaces the whole
+  // row, and the server's default for an absent value is 30 days.
+  deletion_grace_period_days: number;
 }
 
 /** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
@@ -176,6 +214,12 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
     // before the OPAQUE migration carries no such block, and an `undefined`
     // here would be dropped from the JSON body and land back as `disabled`.
     ...readOpaquePolicy(s),
+    // Same guard, same reason: a server older than the privacy block sends no
+    // `privacy`, and an `undefined` would be dropped from the body and land
+    // back as the server's own 30-day default anyway — but going through the
+    // constant keeps the form control from rendering an empty number input.
+    deletion_grace_period_days:
+      s.privacy?.deletion_grace_period_days ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
   };
 }
 
@@ -205,6 +249,17 @@ export interface GenerateCaCertPayload {
   validity_days: number;
 }
 
+/**
+ * Body of the import endpoint (BYOK).
+ *
+ * No subject, validity or algorithm: all three come from the certificate.
+ */
+export interface ImportCaCertPayload {
+  public_cert_pem: string;
+  /** Omit to register the certificate as a trust anchor only. Write-only. */
+  private_key_pem?: string;
+}
+
 /// Generation response flattens the CA certificate and adds the one-time
 /// PEM-encoded private key (never retrievable again).
 export interface GeneratedCaCertificate extends CaCertificate {
@@ -215,9 +270,7 @@ export interface GeneratedCaCertificate extends CaCertificate {
 
 export const orgService = {
   list: (): Promise<Organization[]> =>
-    api
-      .get<Organization[] | { items: Organization[] }>("/api/v1/organizations")
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Organization>("/api/v1/organizations"),
 
   get: (orgId: string): Promise<Organization> =>
     api.get<Organization>(`/api/v1/organizations/${orgId}`).then((r) => r.data),
@@ -243,9 +296,7 @@ export const orgService = {
 
 export const tenantService = {
   list: (orgId: string): Promise<Tenant[]> =>
-    api
-      .get<Tenant[] | { items: Tenant[] }>(`/api/v1/organizations/${orgId}/tenants`)
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<Tenant>(`/api/v1/organizations/${orgId}/tenants`),
 
   get: (orgId: string, tenantId: string): Promise<Tenant> =>
     api
@@ -279,11 +330,7 @@ export const tenantService = {
 
 export const caCertService = {
   list: (orgId: string): Promise<CaCertificate[]> =>
-    api
-      .get<CaCertificate[] | { items: CaCertificate[] }>(
-        `/api/v1/organizations/${orgId}/ca-certificates`
-      )
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<CaCertificate>(`/api/v1/organizations/${orgId}/ca-certificates`),
 
   generate: (
     orgId: string,
@@ -292,6 +339,31 @@ export const caCertService = {
     api
       .post<GeneratedCaCertificate>(
         `/api/v1/organizations/${orgId}/ca-certificates`,
+        payload
+      )
+      .then((r) => r.data),
+
+  /**
+   * Register a CA the organization already has, instead of generating one.
+   *
+   * For an organization whose root lives offline, in an HSM, or in an existing
+   * internal PKI and which wants AXIAM in the chain rather than at the top of
+   * it. Subject, validity window and key algorithm are read from the
+   * certificate server-side and are not part of the request — a caller that
+   * could name them separately could name a subject the certificate does not
+   * have.
+   *
+   * With `private_key_pem`, the server takes custody of the key (Vault when
+   * configured, otherwise sealed into the row) and can issue against the CA.
+   * Without it, the certificate is a trust anchor only.
+   */
+  import: (
+    orgId: string,
+    payload: ImportCaCertPayload
+  ): Promise<CaCertificate> =>
+    api
+      .post<CaCertificate>(
+        `/api/v1/organizations/${orgId}/ca-certificates/import`,
         payload
       )
       .then((r) => r.data),

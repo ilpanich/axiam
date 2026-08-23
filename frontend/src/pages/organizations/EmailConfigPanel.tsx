@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Trash2 } from "lucide-react";
+import { Loader2, Send, Trash2 } from "lucide-react";
 import {
   emailConfigService,
   validateOrgEmailConfig,
@@ -9,9 +9,11 @@ import {
   type EmailConfig,
   type EmailConfigOverride,
   type EmailProviderKind,
+  type EmailTestResult,
   type ProviderConfig,
   type SetOrgEmailConfigPayload,
 } from "@/services/emailConfig";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { usePermissions } from "@/hooks/usePermissions";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -340,6 +342,67 @@ function StatusLine({
   return null;
 }
 
+/**
+ * "Send test email" — the one control that tells an operator whether the
+ * configuration they just saved actually delivers.
+ *
+ * Nothing else in the admin UI can answer that. `PUT` validates structure only
+ * and never opens a connection (D-15), and real sends happen on an AMQP
+ * consumer in another process, so a provider rejection — an unverified sender
+ * domain, a revoked key — reaches an operator only as a dead-letter line in a
+ * log they are not reading. This runs the same resolve → build → send path
+ * inline and prints the provider's own words next to the button.
+ *
+ * The endpoint takes no recipient: the server reads the caller's own address
+ * from their user record, so this cannot mail anyone else.
+ */
+function SelfTestButton({ send }: { send: () => Promise<EmailTestResult> }) {
+  const [result, setResult] = useState<EmailTestResult | null>(null);
+  const [failure, setFailure] = useState("");
+
+  const testMutation = useMutation({
+    mutationFn: send,
+    onMutate: () => {
+      setResult(null);
+      setFailure("");
+    },
+    onSuccess: setResult,
+    onError: (err: unknown) =>
+      setFailure(
+        getApiErrorMessage(err, "The provider rejected the test message.")
+      ),
+  });
+
+  return (
+    <div className="space-y-2">
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={() => testMutation.mutate()}
+        disabled={testMutation.isPending}
+      >
+        {testMutation.isPending ? (
+          <Loader2 size={14} className="animate-spin" />
+        ) : (
+          <Send size={14} />
+        )}
+        Send test email
+      </Button>
+      {result && (
+        <p role="status" className="text-sm text-emerald-400">
+          {result.provider} accepted a message to {result.to}
+          {result.message_id ? ` (id ${result.message_id})` : ""}.
+        </p>
+      )}
+      {failure && (
+        <p role="alert" className="text-sm text-destructive">
+          {failure}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Organization panel ───────────────────────────────────────────────────────
 
 /**
@@ -559,6 +622,12 @@ export function OrgEmailConfigPanel({ orgId }: { orgId: string }) {
         )}
       </form>
 
+      {canWrite && config && (
+        <div className="mt-4 pt-4 border-t border-primary/10">
+          <SelfTestButton send={() => emailConfigService.sendOrgTest(orgId)} />
+        </div>
+      )}
+
       <ConfirmDialog
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
@@ -623,7 +692,9 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
     if (!override) return;
     setToggles({
       sender:
-        override.from_name !== undefined || override.from_email !== undefined,
+        override.from_name !== undefined ||
+        override.from_email !== undefined ||
+        override.reply_to !== undefined,
       provider: override.provider !== undefined,
       enabled: override.enabled !== undefined,
     });
@@ -634,6 +705,9 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
           enabled: override.enabled ?? EMPTY_FORM.enabled,
           fromName: override.from_name ?? "",
           fromEmail: override.from_email ?? "",
+          // `null` is a deliberate "no reply-to", distinct from `undefined`
+          // (inherit); both render as an empty input, and the sender-override
+          // toggle is what tells them apart on save.
           replyTo: override.reply_to ?? "",
         },
         override.provider
@@ -701,11 +775,18 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
         setError("From address must be a valid email address.");
         return;
       }
+      const replyTo = form.replyTo.trim();
+      if (replyTo && !replyTo.includes("@")) {
+        setError("Reply-to must be a valid email address.");
+        return;
+      }
       payload.from_name = form.fromName.trim();
       payload.from_email = form.fromEmail.trim();
-      // No `reply_to`: the tenant override row has no column for it, so the
-      // repository reads it back as None regardless of what was sent. Sending
-      // it would look like it saved and then quietly not.
+      // Schema v43 gave the tenant row a reply-to of its own, plus the flag
+      // that separates "clear the organization's reply-to" (null) from
+      // "inherit it" (field absent). An empty box under an active sender
+      // override means the former.
+      payload.reply_to = replyTo || null;
     }
     if (toggles.provider) {
       if (form.providerKind === "smtp") {
@@ -815,8 +896,13 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
                 setField={setField}
                 idPrefix="tenant-email"
                 required
-                showReplyTo={false}
+                showReplyTo
               />
+              <p className="text-xs text-muted-foreground">
+                Leaving reply-to empty clears the organization's reply-to for
+                this tenant rather than inheriting it. To inherit it again,
+                turn off this sender override.
+              </p>
             </div>
           )}
 
@@ -875,6 +961,18 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
           </div>
         )}
       </form>
+
+      {canWrite && (
+        <div className="mt-4 pt-4 border-t border-primary/10 space-y-1">
+          <SelfTestButton
+            send={() => emailConfigService.sendTenantTest(tenantId)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Sends through this tenant's effective configuration — its own
+            overrides where set, the organization's baseline everywhere else.
+          </p>
+        </div>
+      )}
 
       <ConfirmDialog
         open={confirmDelete}

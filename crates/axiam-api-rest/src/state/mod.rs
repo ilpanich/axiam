@@ -562,16 +562,31 @@ impl<C: Connection + Clone> AppState<C> {
                 .expect("test WebauthnService construction");
         let mfa_method_service =
             MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
+        // Same resolution the composition root performs, from the same
+        // function: two copies of "which custodian is the default" is how a
+        // test suite ends up agreeing with itself and not with production.
+        //
+        // The all-zero key rather than `pki_config.encryption_key`, which is
+        // deliberately `None` above: CA key custody no longer reads
+        // `PkiConfig`, and a custodian set with nothing in it cannot be built
+        // at all. This is the same key every PKI test's own `test_pki_config`
+        // uses, so a CA generated through this state opens through theirs.
+        let ca_custodians = Arc::new(
+            axiam_pki::custodians_from_env(Some([0u8; 32]))
+                .expect("test CA key custody construction"),
+        );
         let ca_service = CaService::new(
             ca_cert_repo.clone(),
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
+            Arc::clone(&ca_custodians),
         );
         let cert_service = CertService::new(
             ca_cert_repo.clone(),
             cert_repo.clone(),
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
+            Arc::clone(&ca_custodians),
         );
         let pgp_service = PgpService::new(
             pgp_repo.clone(),

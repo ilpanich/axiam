@@ -1,9 +1,11 @@
 import { useNavigate, useMatches } from "react-router";
-import { Menu, LogOut, ChevronDown, Building2 } from "lucide-react";
+import { Menu, LogOut, ChevronDown, Building2, Check } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
+import { orgService, tenantService } from "@/services/organizations";
+import { usePermissions } from "@/hooks/usePermissions";
 import {
   useState,
   useEffect,
@@ -21,6 +23,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   const matches = useMatches();
   const { user, tenantSlug, orgSlug, clearAuth } = useAuthStore();
   const queryClientInstance = useQueryClient();
+  const { can } = usePermissions();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
   const tenantPanelRef = useRef<HTMLDivElement>(null);
@@ -85,6 +88,59 @@ export function Topbar({ onMenuClick }: TopbarProps) {
     },
     [],
   );
+
+  // The tenants of the caller's own organization.
+  //
+  // `orgService.list()` returns only that organization — the endpoint refuses
+  // any other — so resolving the id from the slug the auth store carries costs
+  // one request and needs no extra permission beyond the two checked here.
+  // Fetched only while the menu is open: an operator who never switches tenants
+  // should not pay for this on every page.
+  const { data: tenants = [], isLoading: tenantsLoading } = useQuery({
+    queryKey: ["topbar-tenants", orgSlug],
+    enabled: tenantMenuOpen && can("organizations:list") && can("tenants:list"),
+    queryFn: async () => {
+      const orgs = await orgService.list();
+      const org = orgSlug ? orgs.find((o) => o.slug === orgSlug) : orgs[0];
+      if (!org) return [];
+      return tenantService.list(org.id);
+    },
+  });
+
+  /**
+   * Switch to another tenant.
+   *
+   * A session is bound to one tenant and a user record belongs to one tenant:
+   * the JWT carries `tenant_id`, every repository call is scoped by it, and a
+   * principal of one tenant is simply not a principal of another. So switching
+   * cannot re-scope the current session — there is no server-side operation
+   * that would make that safe, and inventing one would be a cross-tenant
+   * privilege path in a product whose central promise is tenant isolation.
+   *
+   * What it does instead is honest and does the job: revoke the current session
+   * and hand the login page the target org and tenant pre-filled. The operator
+   * authenticates as a principal of that tenant, which is the only way to
+   * become one.
+   */
+  const switchTenant = async (targetSlug: string) => {
+    if (targetSlug === tenantSlug) {
+      closeAll();
+      return;
+    }
+    try {
+      await api.post("/api/v1/auth/logout");
+    } catch {
+      // Ignore: the local state is cleared either way, and a session left
+      // alive server-side expires on its own.
+    }
+    queryClientInstance.clear();
+    clearAuth();
+    const params = new URLSearchParams({
+      tenant: targetSlug,
+      ...(orgSlug ? { org: orgSlug } : {}),
+    });
+    navigate(`/login?${params.toString()}`);
+  };
 
   const handleLogout = async () => {
     try {
@@ -176,13 +232,53 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               ref={tenantPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-48",
-                "glass-card px-0 py-1 shadow-glass",
+                "glass-menu px-0 py-1 shadow-glass",
               )}
               role="menu"
               aria-label="Tenant selector"
+              onKeyDown={handleMenuKeyDown}
             >
-              <p className="px-3 py-2 text-xs text-muted-foreground">
-                Tenant switching coming soon
+              <p className="px-3 pt-2 pb-1 text-xs text-muted-foreground">
+                {orgSlug ? `Tenants in ${orgSlug}` : "Tenants"}
+              </p>
+              {tenantsLoading && (
+                <p className="px-3 py-2 text-xs text-muted-foreground">
+                  Loading…
+                </p>
+              )}
+              {!tenantsLoading && tenants.length === 0 && (
+                <p className="px-3 py-2 text-xs text-muted-foreground">
+                  No other tenant is visible to you.
+                </p>
+              )}
+              {tenants.map((t) => {
+                const current = t.slug === tenantSlug;
+                return (
+                  <button
+                    key={t.id}
+                    role="menuitem"
+                    onClick={() => void switchTenant(t.slug)}
+                    aria-current={current ? "true" : undefined}
+                    className={cn(
+                      "w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left",
+                      "hover:bg-white/5 transition-colors",
+                      current ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
+                    <span className="truncate">{t.name}</span>
+                    {current && (
+                      <Check
+                        size={14}
+                        className="shrink-0 text-primary"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+              <p className="px-3 pt-2 pb-1 border-t border-primary/10 text-xs text-muted-foreground">
+                A session belongs to one tenant, so switching signs you out and
+                asks you to sign in to the tenant you picked.
               </p>
             </div>
           )}
@@ -222,7 +318,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               ref={userPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-40",
-                "glass-card px-0 py-1 shadow-glass",
+                "glass-menu px-0 py-1 shadow-glass",
               )}
               role="menu"
               aria-label="User menu"

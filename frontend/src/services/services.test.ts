@@ -221,7 +221,7 @@ describe("orgService & tenantService & caCertService & orgSettingsService", () =
   it("tenantService CRUD is org-scoped", async () => {
     apiMock.get.mockResolvedValue(res([{ id: "t1" }]));
     await tenantService.list("o1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/tenants");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/tenants", { params: { offset: 0, limit: 200 } });
     apiMock.get.mockResolvedValue(res({ id: "t1" }));
     await tenantService.get("o1", "t1");
     expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/tenants/t1");
@@ -239,7 +239,7 @@ describe("orgService & tenantService & caCertService & orgSettingsService", () =
   it("caCertService list/generate/revoke", async () => {
     apiMock.get.mockResolvedValue(res({ items: [{ id: "ca1" }] }));
     await caCertService.list("o1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/ca-certificates");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/ca-certificates", { params: { offset: 0, limit: 200 } });
     apiMock.post.mockResolvedValue(res({ id: "ca1", private_key_pem: "PK" }));
     const g = await caCertService.generate("o1", { subject: "s", key_algorithm: "Ed25519", validity_days: 365 });
     expect(g.private_key_pem).toBe("PK");
@@ -430,7 +430,7 @@ describe("certificateService", () => {
         ])
       );
     const cas = await certificateService.listSigningCas("acme");
-    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates");
+    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates", { params: { offset: 0, limit: 200 } });
     expect(cas).toEqual([{ id: "ca1", status: "Active" }]);
   });
 
@@ -439,7 +439,7 @@ describe("certificateService", () => {
       .mockResolvedValueOnce(res([{ id: "o1", slug: "acme" }]))
       .mockResolvedValueOnce(res({ items: [] }));
     await certificateService.listSigningCas();
-    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates");
+    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates", { params: { offset: 0, limit: 200 } });
   });
 
   it("listSigningCas returns [] when the org slug is unknown", async () => {
@@ -604,7 +604,7 @@ describe("resourceService & resourceTypeLabel", () => {
     expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/resources/r1");
     apiMock.get.mockResolvedValue(res([{ id: "r2" }]));
     expect(await resourceService.listChildren("r1")).toEqual([{ id: "r2" }]);
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/resources/r1/children");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/resources/r1/children", { params: { offset: 0, limit: 200 } });
   });
 });
 
@@ -661,7 +661,7 @@ describe("roleService", () => {
   it("user & group assignment", async () => {
     apiMock.get.mockResolvedValue(res({ items: [{ id: "u1", metadata: {} }] }));
     await roleService.listUsers("r1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/users");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/users", { params: { offset: 0, limit: 200 } });
     apiMock.post.mockResolvedValue(res(undefined));
     await roleService.assignToUser("r1", "u1");
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/users", { user_id: "u1" });
@@ -670,11 +670,11 @@ describe("roleService", () => {
     expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/users/u1", {});
     apiMock.get.mockResolvedValue(res({ items: [{ id: "g1" }] }));
     await roleService.listGroups("r1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/groups");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/groups", { params: { offset: 0, limit: 200 } });
     await roleService.listByGroup("g1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/groups/g1/roles");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/groups/g1/roles", { params: { offset: 0, limit: 200 } });
     await roleService.listByUser("u1");
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/users/u1/roles");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/users/u1/roles", { params: { offset: 0, limit: 200 } });
     await roleService.assignToGroup("r1", "g1");
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", { group_id: "g1" });
     await roleService.unassignFromGroup("r1", "g1");

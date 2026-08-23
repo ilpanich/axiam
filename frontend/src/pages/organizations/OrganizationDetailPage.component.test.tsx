@@ -374,6 +374,132 @@ describe("OrganizationDetailPage — CA certificates tab", () => {
     expect(await screen.findByText("CA limit reached")).toBeInTheDocument();
   });
 
+  // ─── Import (BYOK) ────────────────────────────────────────────────────────
+
+  const CERT_PEM =
+    "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----";
+  const KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMC4fake\n-----END PRIVATE KEY-----";
+
+  async function openImport() {
+    routeGet({ [URLS.org]: org, [URLS.certs]: certs });
+    await goToCerts();
+    await userEvent.click(await screen.findByRole("button", { name: /Import CA/ }));
+    return screen.getByRole("dialog");
+  }
+
+  it("imports a CA with its private key", async () => {
+    // The case an organization with an offline or HSM-held root needs: AXIAM in
+    // the chain rather than at the top of it. Nothing about the certificate is
+    // named in the request — subject, validity and algorithm all come from the
+    // certificate server-side.
+    const dialog = await openImport();
+    apiMock.post.mockResolvedValue(res({ ...certs[0], id: "c9" }));
+
+    await userEvent.type(
+      within(dialog).getByLabelText("CA certificate (PEM) *"),
+      CERT_PEM
+    );
+    await userEvent.type(within(dialog).getByLabelText("Private key (PEM)"), KEY_PEM);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(`${URLS.certs}/import`, {
+        public_cert_pem: CERT_PEM,
+        private_key_pem: KEY_PEM,
+      })
+    );
+  });
+
+  it("imports a CA with no key at all, as a trust anchor", async () => {
+    // Absent rather than empty: an empty string is not a key, and sending one
+    // would ask the custodian to store nothing under a CA that lists as
+    // issuable.
+    const dialog = await openImport();
+    apiMock.post.mockResolvedValue(res({ ...certs[0], id: "c9" }));
+
+    await userEvent.type(
+      within(dialog).getByLabelText("CA certificate (PEM) *"),
+      CERT_PEM
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(`${URLS.certs}/import`, {
+        public_cert_pem: CERT_PEM,
+      })
+    );
+  });
+
+  it("refuses something that is not a PEM certificate before sending it", async () => {
+    const dialog = await openImport();
+    await userEvent.type(
+      within(dialog).getByLabelText("CA certificate (PEM) *"),
+      "just some text"
+    );
+    fireEvent.submit(dialog.querySelector("form")!);
+
+    expect(
+      await screen.findByText(/Paste the PEM-encoded CA certificate/)
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("refuses something that is not a PEM key before sending it", async () => {
+    const dialog = await openImport();
+    await userEvent.type(
+      within(dialog).getByLabelText("CA certificate (PEM) *"),
+      CERT_PEM
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText("Private key (PEM)"),
+      "not a key"
+    );
+    fireEvent.submit(dialog.querySelector("form")!);
+
+    expect(
+      await screen.findByText(/private key must be PEM-encoded/)
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal of a mismatched key", async () => {
+    // Everything beyond "is this PEM" is checked server-side, so this is the
+    // path an operator actually meets — and the message has to reach them.
+    const dialog = await openImport();
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 400,
+        data: {
+          message:
+            "the supplied private key does not match the supplied CA certificate",
+        },
+      },
+    });
+
+    await userEvent.type(
+      within(dialog).getByLabelText("CA certificate (PEM) *"),
+      CERT_PEM
+    );
+    await userEvent.type(within(dialog).getByLabelText("Private key (PEM)"), KEY_PEM);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import" }));
+
+    expect(await screen.findByText(/does not match/)).toBeInTheDocument();
+  });
+
+  it("shows where each CA's key is held", async () => {
+    routeGet({
+      [URLS.org]: org,
+      [URLS.certs]: [
+        { ...certs[0], key_custody: "vault" },
+        { ...certs[1], key_custody: "external" },
+      ],
+    });
+    await goToCerts();
+
+    expect(await screen.findByText("In Vault")).toBeInTheDocument();
+    expect(screen.getByText("Not held")).toBeInTheDocument();
+  });
+
   it("revokes an active certificate after confirmation", async () => {
     routeGet({ [URLS.org]: org, [URLS.certs]: certs });
     apiMock.post.mockResolvedValue(res(undefined));

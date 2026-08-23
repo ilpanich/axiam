@@ -3911,6 +3911,18 @@
                           "key_algorithm": {
                             "$ref": "#/components/schemas/KeyAlgorithm"
                           },
+                          "key_custody": {
+                            "type": "string",
+                            "description": "Which custodian holds this CA's signing key.\n\nRecorded per CA rather than read from configuration, so adopting a new\ncustodian does not strand the CAs that already exist. Not secret — an\noperator needs to see it, and it discloses only where a key is kept.",
+                            "example": "database"
+                          },
+                          "key_locator": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+                          },
                           "not_after": {
                             "type": "string",
                             "format": "date-time",
@@ -4005,6 +4017,58 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/ca-certificates/import": {
+      "post": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates/import`",
+        "description": "Register a CA an organization already has, instead of generating one.\n\nThe case this exists for: an organization whose root lives offline, in an\nHSM, or in an existing internal PKI, and which wants AXIAM in the chain\nrather than at the top of it. Without it, the only CA AXIAM could use was\none it generated, which means every AXIAM-issued certificate chains to a\nroot nothing else in the estate trusts.\n\nWith a private key, AXIAM takes custody of it — Vault when configured,\notherwise sealed into the row — and can issue against the CA. Without one,\nthe certificate is a trust anchor and `/api/v1/certificates` says so rather\nthan failing at the point of use.\n\nGated on `ca_certificates:generate`: importing a CA is the same act as\ngenerating one from every relying party's point of view — it decides what\nthis organization's certificates chain to.",
+        "operationId": "import",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportCaCertificateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "CA certificate imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaCertificate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a CA certificate, already expired, or the supplied key does not match it"
           }
         },
         "security": [
@@ -4210,6 +4274,47 @@
         "responses": {
           "204": {
             "description": "Organization email configuration deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/email-config/test": {
+      "post": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/email-config/test`",
+        "operationId": "test_org_email_config",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The provider accepted the message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provider rejected it, or no configuration applies"
           }
         },
         "security": [
@@ -7467,6 +7572,166 @@
         ]
       }
     },
+    "/api/v1/tenants/{tenant_id}/email-config/test": {
+      "post": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/email-config/test`",
+        "operationId": "test_tenant_email_config",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The provider accepted the message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provider rejected it, or no configuration applies"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/settings`",
+        "operationId": "get_tenant_override",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's own overrides, sparse — an absent field is inherited from the org baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSettingsOverride"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This tenant overrides nothing"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/settings`",
+        "operationId": "set_tenant_override",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingsOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored overrides, sparse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSettingsOverride"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An override is less restrictive than the org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{tenant_id}/settings`",
+        "operationId": "delete_tenant_override",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Overrides cleared; the tenant inherits the org baseline entirely"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy": {
       "get": {
         "tags": [
@@ -9458,6 +9723,18 @@
           "key_algorithm": {
             "$ref": "#/components/schemas/KeyAlgorithm"
           },
+          "key_custody": {
+            "type": "string",
+            "description": "Which custodian holds this CA's signing key.\n\nRecorded per CA rather than read from configuration, so adopting a new\ncustodian does not strand the CAs that already exist. Not secret — an\noperator needs to see it, and it discloses only where a key is kept.",
+            "example": "database"
+          },
+          "key_locator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+          },
           "not_after": {
             "type": "string",
             "format": "date-time",
@@ -10956,6 +11233,31 @@
           "brevo"
         ]
       },
+      "EmailTestResult": {
+        "type": "object",
+        "description": "What a test send did.",
+        "required": [
+          "provider",
+          "to"
+        ],
+        "properties": {
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's message id, when it returns one."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Which provider the effective configuration resolved to."
+          },
+          "to": {
+            "type": "string",
+            "description": "Where the message went — always the caller's own address."
+          }
+        }
+      },
       "EmailVerificationPolicy": {
         "type": "object",
         "description": "Email verification requirements.",
@@ -11287,6 +11589,43 @@
         "properties": {
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ImportCaCertificate": {
+        "type": "object",
+        "description": "Import an externally-generated CA (BYOK).\n\nThe other way a CA comes to exist. Generation makes a key AXIAM chose;\nthis takes one an organization already has — from an offline root, an\nexisting internal PKI, or an HSM ceremony — and puts AXIAM in the chain\nrather than at the top of it.\n\n`private_key_pem` is optional, and the two cases are genuinely different\nrather than one being a degraded form of the other:\n\n* **With a key**, AXIAM takes custody of it (Vault, or sealed into the row)\n  and can issue certificates against this CA.\n* **Without one**, the certificate is a trust anchor and nothing more.\n  `/api/v1/certificates` cannot sign against it, and says so rather than\n  failing at the point of use.",
+        "required": [
+          "public_cert_pem"
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "public_cert_pem": {
+            "type": "string",
+            "description": "PEM-encoded CA certificate."
+          }
+        }
+      },
+      "ImportCaCertificateRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/organizations/{org_id}/ca-certificates/import`.\n\nDeliberately carries no subject, validity window or key algorithm: all\nthree are read out of the certificate itself. A caller that could name them\nseparately could name a subject the certificate does not have, and AXIAM\nwould enforce the claim while every relying party read the certificate.",
+        "required": [
+          "public_cert_pem"
+        ],
+        "properties": {
+          "private_key_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PEM-encoded private key, if AXIAM is to take custody of it.\n\nOmit it to register the certificate as a trust anchor only. Write-only:\nit goes to the configured custodian on the way in and no endpoint\nreturns it."
+          },
+          "public_cert_pem": {
+            "type": "string",
+            "description": "PEM-encoded CA certificate."
           }
         }
       },
@@ -12682,6 +13021,11 @@
             "description": "Argon2id memory cost in KiB; absent for scrypt.",
             "minimum": 0
           },
+          "mode": {
+            "type": "string",
+            "description": "The tenant's OPAQUE mode — `optional` or `required`, never `disabled`\n(that path answers `404` instead of reaching here).\n\nThis is what lets a client know whether falling back to\n`POST /auth/login` after a failed exchange is legitimate. Under\n`optional` a client whose envelope did not open — the ordinary case for\na user who has not enrolled yet, which is every user the moment an\noperator turns OPAQUE on — must be able to try the password endpoint,\nor `optional` is not a migration mode but a lockout. Under `required`\nit must not, and an honest client never transmits the plaintext at all.\n\nIt discloses a property of the tenant, not of any user, and the same\nproperty the `404`-vs-`200` split on this endpoint already reveals\nhalf of, so it does not weaken the enumeration guarantee.\n\nNote what it is *not*: downgrade protection against a hostile server.\nA server that wanted the plaintext could always answer `404` and get\nthe fallback regardless of what it puts here. Only `required` — which\nmakes `/auth/login` refuse before examining any credential — closes\nthat, and it closes it server-side where it belongs.",
+            "example": "optional"
+          },
           "opaque_session": {
             "type": "string",
             "description": "Opaque sealed server state. Must be echoed verbatim to\n`/auth/opaque/login/finish`; the client cannot read or forge it."
@@ -13147,6 +13491,21 @@
           }
         ],
         "description": "`GET` response: the stored policy plus the unknown-AAGUID action it\ncurrently *resolves to*.\n\n`unknown_aaguid` is nullable, where `null` means \"use this mode's\ndefault\" (deny under `direct_required`, allow otherwise). A client that\nonly saw the stored `null` would have to re-derive that rule itself to\ndisplay what the policy actually does — and a security rule implemented\ntwice is a security rule that will eventually disagree with itself. So\nthe server resolves it once, here, and reports both: the admin's stored\nintent and its effect."
+      },
+      "PrivacyPolicy": {
+        "type": "object",
+        "description": "Data-retention rules that apply after a subject asks to be erased.",
+        "required": [
+          "deletion_grace_period_days"
+        ],
+        "properties": {
+          "deletion_grace_period_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How long a requested account erasure stays cancellable before the purge\nruns, in days.\n\nThe window exists so an erasure triggered by mistake, or under\ncoercion, can be undone — `POST /api/v1/auth/account/delete/cancel`\nworks for exactly this long. It was fixed at 30 days in the handler,\nwhich meant the \"cancel a pending deletion\" control in the admin UI\nreferred to a duration no operator could see or change.\n\nShorter is the more restrictive direction, so a tenant may lower it and\nnot raise it: it is time spent holding data the subject has already\nasked to have erased, and GDPR Art. 17(1) asks for that to be\n\"without undue delay\". The upper bound of 90 days is where Art. 12(3)'s\none-month response deadline plus its two-month extension for complex\ncases runs out; anything past 30 wants a reason recorded.",
+            "minimum": 0
+          }
+        }
       },
       "ProviderConfig": {
         "oneOf": [
@@ -14029,6 +14388,7 @@
           "certificate",
           "notification",
           "opaque",
+          "privacy",
           "created_at",
           "updated_at"
         ],
@@ -14061,6 +14421,9 @@
           },
           "password": {
             "$ref": "#/components/schemas/PasswordPolicy"
+          },
+          "privacy": {
+            "$ref": "#/components/schemas/PrivacyPolicy"
           },
           "scope": {
             "$ref": "#/components/schemas/SettingsScope"
@@ -14292,6 +14655,12 @@
           "default_cert_validity_days": {
             "type": "integer",
             "format": "int32",
+            "minimum": 0
+          },
+          "deletion_grace_period_days": {
+            "type": "integer",
+            "format": "int32",
+            "example": 30,
             "minimum": 0
           },
           "email_verification_grace_period_hours": {
@@ -14639,6 +15008,14 @@
             ]
           },
           "default_cert_validity_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "deletion_grace_period_days": {
             "type": [
               "integer",
               "null"

@@ -47,7 +47,7 @@ describe("ScopesPanel", () => {
     renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
     expect(await screen.findByText("invoices")).toBeInTheDocument();
     expect(screen.getByText("Invoice access")).toBeInTheDocument();
-    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/resources/r1/scopes");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/resources/r1/scopes", { params: { offset: 0, limit: 200 } });
   });
 
   it("hides the New Scope button without scopes:create", async () => {

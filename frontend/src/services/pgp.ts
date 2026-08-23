@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Backend enums (PascalCase — serde default, no rename) ──────────────────────
 
@@ -80,10 +80,7 @@ export interface SignAuditBatchResponse {
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const pgpService = {
-  list: (): Promise<PgpKey[]> =>
-    api
-      .get<PgpKey[] | { items: PgpKey[] }>("/api/v1/pgp-keys")
-      .then((r) => unwrapList(r.data)),
+  list: (): Promise<PgpKey[]> => fetchAllPages<PgpKey>("/api/v1/pgp-keys"),
 
   generate: (payload: GeneratePgpKeyPayload): Promise<GeneratePgpKeyResponse> =>
     api

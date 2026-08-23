@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { TenantEmailConfigPanel } from "./EmailConfigPanel";
+import { TenantSecurityOverridePanel } from "./SecurityOverridePanel";
 import { usePermissions } from "@/hooks/usePermissions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -137,9 +138,17 @@ export function TenantDetailPage() {
         <p className="text-muted-foreground">Tenant not found.</p>
       )}
 
-      {/* FUNC-03 / D-13 — the tenant's partial overrides on the org email
-          baseline. Gated on the read permission rather than rendered and
-          left to 403, so an operator without it sees no half-loaded panel. */}
+      {/* The tenant's partial overrides on the org baselines — security first,
+          because it is the one an operator comes here to check. Both are gated
+          on their read permission rather than rendered and left to 403, so an
+          operator without it sees no half-loaded panel. */}
+      {tenant && can("settings:get") && (
+        <div className="mt-6">
+          <TenantSecurityOverridePanel tenantId={tenantId} />
+        </div>
+      )}
+
+      {/* FUNC-03 / D-13 */}
       {tenant && can("email_config:read") && (
         <div className="mt-6">
           <TenantEmailConfigPanel tenantId={tenantId} />

@@ -111,6 +111,7 @@ use crate::handlers;
         handlers::scopes::delete,
         // CA Certificates
         handlers::ca_certificates::generate,
+        handlers::ca_certificates::import,
         handlers::ca_certificates::list,
         handlers::ca_certificates::get,
         handlers::ca_certificates::revoke,
@@ -198,6 +199,9 @@ use crate::handlers;
         handlers::settings::set_org_settings,
         handlers::settings::get_tenant_settings,
         handlers::settings::set_tenant_settings,
+        handlers::settings::get_tenant_override,
+        handlers::settings::set_tenant_override,
+        handlers::settings::delete_tenant_override,
         // Email Config (FUNC-03 / D-13)
         handlers::email_config::get_org_email_config,
         handlers::email_config::set_org_email_config,
@@ -205,6 +209,8 @@ use crate::handlers;
         handlers::email_config::get_tenant_email_config,
         handlers::email_config::set_tenant_email_config,
         handlers::email_config::delete_tenant_email_config,
+        handlers::email_config::test_org_email_config,
+        handlers::email_config::test_tenant_email_config,
         // Federation
         handlers::federation::create,
         handlers::federation::list,
@@ -342,6 +348,7 @@ use crate::handlers;
         handlers::service_accounts::RotateSecretResponse,
         // CA Certificates
         axiam_core::models::certificate::CaCertificate,
+        axiam_core::models::certificate::ImportCaCertificate,
         axiam_core::models::certificate::CreateCaCertificate,
         axiam_core::models::certificate::GeneratedCaCertificate,
         axiam_core::models::certificate::CertificateStatus,
@@ -447,6 +454,7 @@ use crate::handlers;
         axiam_core::models::email::EmailConfig,
         axiam_core::models::email::EmailConfigOverride,
         axiam_core::models::email::SetOrgEmailConfig,
+        handlers::email_config::EmailTestResult,
         axiam_core::models::email::ProviderConfig,
         axiam_core::models::email::SmtpConfig,
         axiam_core::models::email::ApiProviderConfig,

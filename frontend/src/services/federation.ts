@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages, unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -164,9 +164,7 @@ const LINKS_BASE = "/api/v1/federation-links";
 
 export const federationService = {
   getAll: (): Promise<FederationConfig[]> =>
-    api
-      .get<FederationConfig[] | { items: FederationConfig[] }>(BASE)
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<FederationConfig>(BASE),
 
   create: (data: CreateFederationConfigRequest): Promise<FederationConfig> =>
     api.post<FederationConfig>(BASE, data).then((r) => r.data),

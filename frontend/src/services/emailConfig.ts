@@ -83,13 +83,13 @@ export interface EmailConfigOverride {
   from_name?: string;
   from_email?: string;
   /**
-   * Present in the backend's DTO but **not persisted**: the tenant
-   * email-config table has no `reply_to` column, and `get_tenant_override`
-   * hard-codes it to `None` ("not stored per-tenant in current schema" —
-   * `crates/axiam-db/src/repository/email_config.rs`). The admin UI therefore
-   * offers no control for it rather than accepting a value that would be
-   * dropped on the next read; typed here only so a server that starts
-   * returning one does not fail the type.
+   * Three states, not two. `undefined` inherits the organization's reply-to;
+   * `null` clears it for this tenant; a string replaces it.
+   *
+   * Schema v43 gave the tenant row its own `reply_to` column plus a
+   * `reply_to_overridden` flag, because a stored NULL cannot otherwise be
+   * told apart from "never set". Before that the field round-tripped to
+   * nothing and the panel deliberately offered no control for it.
    */
   reply_to?: string | null;
   /** Full provider replacement — there is no partial merge within a provider. */
@@ -107,6 +107,16 @@ export interface SetOrgEmailConfigPayload {
 }
 
 export type SetTenantEmailOverridePayload = EmailConfigOverride;
+
+/** What a delivery self-test did — the response of the `/email-config/test` endpoints. */
+export interface EmailTestResult {
+  /** Which provider the effective configuration resolved to. */
+  provider: string;
+  /** Where the message went — always the caller's own address. */
+  to: string;
+  /** The provider's message id, when it returns one. */
+  message_id: string | null;
+}
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -197,4 +207,23 @@ export const emailConfigService = {
 
   deleteTenantOverride: (tenantId: string): Promise<void> =>
     api.delete(`/api/v1/tenants/${tenantId}/email-config`).then(() => undefined),
+
+  /**
+   * Send one real message through the effective configuration.
+   *
+   * The recipient is fixed server-side to the caller's own address — the
+   * endpoint takes no recipient parameter, so it cannot be used to mail anyone
+   * else. A rejection comes back as a 400 carrying the provider's own words
+   * (an unverified sender domain, a revoked key), which is otherwise only
+   * visible in the mail consumer's dead-letter log.
+   */
+  sendOrgTest: (orgId: string): Promise<EmailTestResult> =>
+    api
+      .post<EmailTestResult>(`/api/v1/organizations/${orgId}/email-config/test`)
+      .then((r) => r.data),
+
+  sendTenantTest: (tenantId: string): Promise<EmailTestResult> =>
+    api
+      .post<EmailTestResult>(`/api/v1/tenants/${tenantId}/email-config/test`)
+      .then((r) => r.data),
 };

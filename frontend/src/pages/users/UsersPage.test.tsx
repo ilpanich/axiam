@@ -14,6 +14,38 @@ vi.mock("react-router", async (importOriginal) => {
 import { UsersPage } from "./UsersPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { setToastDispatch } from "@/hooks/useToast";
+import { useAuthStore } from "@/stores/auth";
+
+// Stands in for the WebAssembly build of `crates/axiam-opaque` — a checkout
+// that has not run the Rust toolchain has no artifact to load, and `lib/opaque`
+// resolves it through a runtime specifier that `vi.mock` cannot reach.
+const opaqueModuleMock = {
+  default: vi.fn(async () => undefined),
+  opaqueAvailable: () => true,
+  OpaqueKsf: {
+    argon2id: (memoryKib: number, iterations: number, parallelism: number) => ({
+      kind: "argon2id",
+      memoryKib,
+      iterations,
+      parallelism,
+    }),
+    scrypt: (logN: number, r: number, p: number) => ({ kind: "scrypt", logN, r, p }),
+  },
+  OpaqueLogin: class {
+    ke1 = "aa".repeat(96);
+    constructor(_password: string) {}
+    finish() {
+      return { ke3: "bb".repeat(64), sessionKey: "cc".repeat(64), exportKey: "dd".repeat(64) };
+    }
+  },
+  OpaqueRegistration: class {
+    request = "ee".repeat(32);
+    constructor(_password: string) {}
+    finish() {
+      return { record: "ff".repeat(192), exportKey: "dd".repeat(64) };
+    }
+  },
+};
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 // Raw shape as returned by the backend (UserResponseDto): display_name lives
@@ -57,12 +89,19 @@ function listResponse(items: unknown[], total = items.length, limit = 20) {
   return res({ items, total, offset: 0, limit });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  // Most tests here never reach OPAQUE: with no signed-in user carrying a
+  // policy, `buildEnrollmentForUser` returns null and the field is absent.
+  useAuthStore.setState({ user: null });
+  const { __setOpaqueModuleForTests } = await import("@/lib/opaque");
+  __setOpaqueModuleForTests(opaqueModuleMock);
 });
 
-afterEach(() => {
+afterEach(async () => {
   setToastDispatch(null);
+  const { __resetOpaqueModuleForTests } = await import("@/lib/opaque");
+  __resetOpaqueModuleForTests();
 });
 
 describe("UsersPage", () => {
@@ -217,6 +256,69 @@ describe("UsersPage", () => {
         email: "carol@x.io",
         password: "Str0ng!Passw0rd",
       })
+    );
+  });
+
+  it("enrols an OPAQUE record for the new account when the tenant uses OPAQUE", async () => {
+    // The gap this closes: change-password and reset-completion built a record,
+    // and this dialog did not. Under `optional` every operator-created account
+    // stayed password-only forever; under `required` creation failed outright,
+    // because the server refuses a new account with no record — an account that
+    // could never authenticate — and the UI had no way to supply one.
+    useAuthStore.setState({
+      user: {
+        id: "u1",
+        username: "admin",
+        email: "admin@example.com",
+        permissions: [],
+        tenant_id: "t1",
+        orgSlug: "acme",
+        tenantSlug: "default",
+        opaque: {
+          opaque_mode: "optional",
+          opaque_suite: "ristretto255_sha512",
+          opaque_ksf: "argon2id",
+        },
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+
+    apiMock.get.mockResolvedValue(listResponse([alice, bob]));
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === "/api/v1/auth/opaque/register/start") {
+        return res({
+          opaque_session: "sealed",
+          registration_response: "aa".repeat(32),
+          suite: "ristretto255_sha512",
+          ksf: "argon2id",
+          memory_kib: 19456,
+          iterations: 2,
+          parallelism: 1,
+        });
+      }
+      return res(rawUser({ id: "u3", username: "carol" }));
+    });
+
+    renderWithProviders(<UsersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Username *"), "carol");
+    await userEvent.type(within(dialog).getByLabelText("Email *"), "carol@x.io");
+    await userEvent.type(within(dialog).getByLabelText("Password *"), "Str0ng!Passw0rd");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/users",
+        expect.objectContaining({
+          username: "carol",
+          opaque: {
+            opaque_session: "sealed",
+            registration_record: "ff".repeat(192),
+          },
+        })
+      )
     );
   });
 

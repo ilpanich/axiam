@@ -719,3 +719,112 @@ async fn cancel_expired_grace_window_is_forbidden() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);
 }
+
+// ---------------------------------------------------------------------------
+// The erasure grace window is a setting, not a constant
+// ---------------------------------------------------------------------------
+//
+// It was `Duration::days(30)` in the handler, which meant the "Cancel a pending
+// deletion" control in the admin UI acted within a window no operator could
+// see, let alone change. `scheduled_purge_at` now comes from the tenant's
+// effective `privacy.deletion_grace_period_days`.
+
+/// Read back the `account_deletion` row's scheduled purge, in days from now.
+async fn scheduled_purge_in_days(db: &Surreal<TestDb>, user_id: Uuid) -> i64 {
+    let mut result = db
+        .query(
+            "SELECT VALUE scheduled_purge_at FROM account_deletion \
+             WHERE user_id = $user_id",
+        )
+        .bind(("user_id", user_id.to_string()))
+        .await
+        .unwrap();
+    let rows: Vec<chrono::DateTime<Utc>> = result.take(0).unwrap();
+    let at = rows.into_iter().next().expect("a deletion row must exist");
+    // Round to whole days: the write happened a few milliseconds ago.
+    (at - Utc::now()).num_hours().div_euclid(24) + 1
+}
+
+async fn request_own_erasure(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+) -> u16 {
+    let (bearer, header) = auth_headers(token);
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/account/delete")
+        .insert_header((header, bearer))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({}))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+#[actix_web::test]
+async fn erasure_defaults_to_a_thirty_day_window() {
+    // No settings row written at all — the same state every deployment that has
+    // never touched security settings is in. It must behave exactly as the
+    // hard-coded handler did.
+    let f = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, f.user_id, f.tenant_id, f.org_id);
+    let app = test_app!(f.db, auth);
+
+    assert_eq!(request_own_erasure(&app, &token).await, 200);
+    assert_eq!(scheduled_purge_in_days(&f.db, f.user_id).await, 30);
+}
+
+#[actix_web::test]
+async fn erasure_honours_the_configured_window() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, f.user_id, f.tenant_id, f.org_id);
+    let app = test_app!(f.db, auth);
+
+    // Shorten the org baseline to 7 days through the public endpoint, so this
+    // exercises the same path an operator takes.
+    let (bearer, header) = auth_headers(&token);
+    let mut settings = json!({
+        "min_length": 12,
+        "require_uppercase": true,
+        "require_lowercase": true,
+        "require_digits": true,
+        "require_symbols": false,
+        "password_history_count": 5,
+        "hibp_check_enabled": true,
+        "mfa_enforced": false,
+        "mfa_challenge_lifetime_secs": 300,
+        "max_failed_login_attempts": 5,
+        "lockout_duration_secs": 300,
+        "lockout_backoff_multiplier": 2.0,
+        "max_lockout_duration_secs": 3600,
+        "access_token_lifetime_secs": 900,
+        "refresh_token_lifetime_secs": 2592000,
+        "email_verification_required": true,
+        "email_verification_grace_period_hours": 24,
+        "default_cert_validity_days": 365,
+        "max_cert_validity_days": 730,
+        "admin_notifications_enabled": true,
+    });
+    settings["deletion_grace_period_days"] = json!(7);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{}/settings", f.org_id))
+        .insert_header((header, bearer))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(&settings)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["privacy"]["deletion_grace_period_days"], json!(7));
+
+    assert_eq!(request_own_erasure(&app, &token).await, 200);
+    assert_eq!(scheduled_purge_in_days(&f.db, f.user_id).await, 7);
+}

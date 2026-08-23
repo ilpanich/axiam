@@ -33,6 +33,12 @@ const EXPECTED_PAYLOAD = {
   email: "admin@example.com",
   username: "admin",
   password: STRONG_PASSWORD,
+  // Always sent, always `disabled` unless the operator opens the OPAQUE
+  // section and changes it. The server defaults every one of the three, so
+  // sending them explicitly changes nothing for a default bootstrap.
+  opaque_mode: "disabled",
+  opaque_suite: "ristretto255_sha512",
+  opaque_ksf: "argon2id",
 };
 
 beforeEach(() => {
@@ -114,6 +120,30 @@ describe("BootstrapPage", () => {
       expect(apiMock.post).toHaveBeenCalledWith("/api/v1/admin/bootstrap", {
         ...EXPECTED_PAYLOAD,
         setup_token: "tok-123",
+      })
+    );
+  });
+
+  it("bootstraps with OPAQUE on when the operator asks for it", async () => {
+    // The gap this closes: bootstrap is the one enrolment path where the
+    // server holds the plaintext and builds the record itself, so it is the
+    // only moment a deployment can start with OPAQUE already working. The page
+    // offered no way to ask for it, so every browser-bootstrapped deployment
+    // began with OPAQUE off and both OPAQUE tables empty.
+    apiMock.post.mockResolvedValue(res({ user_id: "admin-1" }));
+    renderWithProviders(<BootstrapPage />);
+    await fillValidForm();
+
+    await userEvent.click(screen.getByText(/OPAQUE sign-in/));
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "optional");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Create Organization & Admin" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/admin/bootstrap", {
+        ...EXPECTED_PAYLOAD,
+        opaque_mode: "optional",
       })
     );
   });

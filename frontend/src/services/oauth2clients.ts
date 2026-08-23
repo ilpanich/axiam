@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import { unwrapList } from "@/services/_pagination";
+import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -289,9 +289,7 @@ export function validateClientPosture(p: ClientPosturePayload): string | null {
 
 export const oauth2ClientService = {
   list: (): Promise<OAuth2Client[]> =>
-    api
-      .get<OAuth2Client[] | { items: OAuth2Client[] }>("/api/v1/oauth2-clients")
-      .then((r) => unwrapList(r.data)),
+    fetchAllPages<OAuth2Client>("/api/v1/oauth2-clients"),
 
   create: (payload: CreateOAuth2ClientPayload): Promise<CreateOAuth2ClientResponse> =>
     api

@@ -643,4 +643,208 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
     ],
   },
+
+  {
+    slug: "tutorial",
+    section: "Getting started",
+    navLabel: "Protect an app",
+    title: "Tutorial — protect an app",
+    intro:
+      "One small service, protected end to end: sign a user in, guard a route, and check a permission on a real resource. From an empty machine to a request that is allowed because you granted it.",
+    blocks: [
+      { type: "h", id: "shape", text: "What you are building" },
+      {
+        type: "p",
+        text: "The [quickstart](#/docs/quickstart) gets a server running and makes one check with `curl`. [Core concepts](#/docs/concepts) explains what the pieces mean. This page is the bridge: a working service with the three things every protected application needs — a sign-in, a guard that rejects anonymous callers, and a per-request authorization check against a resource you created.",
+      },
+      {
+        type: "p",
+        text: "Two decisions are worth understanding before you start, because they are the ones people get wrong. **The guard and the check are different layers**: the guard establishes *who* is calling and fails with `401`; the check asks whether *that* caller may act on *this* resource and fails with `403`. And **the check is always made for the request's user**, never for the service account your application authenticated with — otherwise every user inherits your service's authority.",
+      },
+      { type: "h", id: "stack", text: "1. Bring the stack up" },
+      {
+        type: "p",
+        text: "Dev infrastructure — SurrealDB and RabbitMQ — runs in Docker; the server builds with Rust. If you already have an AXIAM instance to point at, skip to step 3.",
+      },
+      {
+        type: "code",
+        caption: "terminal",
+        code: "git clone https://github.com/ilpanich/axiam.git\ncd axiam\n\njust dev-up      # SurrealDB + RabbitMQ\njust build\njust run         # REST on :8090, gRPC on :50051",
+      },
+      {
+        type: "code",
+        code: "curl -s localhost:8090/health   # liveness — 200 whenever the process is up\ncurl -s localhost:8090/ready    # readiness — 200 only once SurrealDB answers",
+      },
+      {
+        type: "note",
+        text: "Wait for `/ready`, not `/health`. A server that is up but cannot reach its database will accept your bootstrap call and fail it, which looks like a bad request rather than a cold start.",
+      },
+      { type: "h", id: "bootstrap", text: "2. Create the organization, tenant and admin" },
+      {
+        type: "p",
+        text: "A fresh deployment has no users, and the endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. Both gates and the seeded role set are on [First organization, tenant and admin](#/docs/bootstrap); the short version:",
+      },
+      {
+        type: "code",
+        caption: "terminal",
+        code: "export AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev   # set before starting the server\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"tenant_name\": \"Production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+      },
+      { type: "h", id: "grant", text: "3. Create something to protect, and grant access to it" },
+      {
+        type: "p",
+        text: "An authorization check needs a resource to be about and a grant that reaches it. Four calls, as the tenant admin — a resource, a permission, a role holding it, and the assignment that ties a user to the role.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create the resource",
+            body: "Resources are hierarchical, and a role granted on a parent cascades to its children. Start with one node; the cascade is what you will lean on later.",
+            code: "POST /api/v1/resources",
+          },
+          {
+            title: "Create the permission",
+            body: "A permission names an action on a resource type. This is the string your guard will ask about.",
+            code: "POST /api/v1/permissions",
+          },
+          {
+            title: "Create a role and attach the permission",
+            body: "Roles are collections of permissions. Grant the narrow one you just made rather than reaching for the seeded admin role, which carries everything.",
+            code: "POST /api/v1/roles\nPOST /api/v1/roles/{role_id}/permissions",
+          },
+          {
+            title: "Assign the role to your test user",
+            body: "Assign to a group instead and every member inherits it — the same grant, one indirection up.",
+            code: "POST /api/v1/roles/{role_id}/users",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Nothing here grants anything by default. The engine is default-deny: a subject with no matching grant is refused, and an explicit deny anywhere in the resource tree overrides every allow at any depth. See [Deny overrides](#/docs/deny).",
+      },
+      { type: "h", id: "signin", text: "4. Sign a user in" },
+      {
+        type: "p",
+        text: "The client takes a tenant **and** an organization: a tenant slug is only unique within an organization, so there is no default for either. Login has three outcomes, not two — success, MFA required, and MFA *setup* required when the tenant mandates MFA for an account that has none. Handle the third or those users cannot sign in at all.",
+      },
+      {
+        type: "codegroup",
+        caption: "sign in",
+        tabs: [
+          {
+            label: "Rust",
+            code: 'use axiam_sdk::client::AxiamClient;\n\nlet client = AxiamClient::builder()\n    .base_url("http://localhost:8090")?\n    .tenant_slug("production")\n    .org_slug("acme")\n    .build()?;\n\nlet login_result = client.login("user@acme.dev", &password).await?;\nif login_result.mfa_required {\n    client.verify_mfa("123456").await?;\n}',
+          },
+          {
+            label: "TypeScript",
+            code: "import { AxiamClient } from 'axiam-sdk';\n\nconst client = new AxiamClient({\n  baseUrl: 'http://localhost:8090',\n  tenantSlug: 'production',\n  orgSlug: 'acme',\n});\n\nconst result = await client.login(email, password);\nswitch (result.status) {\n  case 'authenticated':\n    console.log(`signed in as ${result.user.username}`);\n    break;\n  case 'mfa_required': {\n    const code = await promptForMfaCode(result.availableMethods);\n    await client.verifyMfa(result.mfaToken, code);\n    break;\n  }\n}",
+          },
+          {
+            label: "Python",
+            code: 'from axiam_sdk import AxiamClient\n\nclient = AxiamClient(\n    base_url="http://localhost:8090",\n    tenant_slug="production",\n    org_slug="acme",\n)\n\nresult = client.login("user@acme.dev", password)',
+          },
+        ],
+      },
+      { type: "h", id: "guard", text: "5. Guard the route" },
+      {
+        type: "p",
+        text: "The guard verifies the caller's token against a locally cached JWKS — no round trip per request — and injects the authenticated identity into your handler. It must be told which tenant it is guarding: the JWKS trust anchor is organization-wide, so a verifier that does not pin a tenant would accept a sibling tenant's token.",
+      },
+      {
+        type: "codegroup",
+        caption: "authenticate every request",
+        tabs: [
+          {
+            label: "Rust",
+            code: '// Cargo.toml: features = ["actix"]\nuse axiam_sdk::middleware::AxiamUser;\n\n// Pin the tenant — §10.1 rule 4, fails closed without it.\nlet verifier = JwksVerifier::new(http, &base_url)?\n    .expect_tenant_id(tenant_uuid)\n    .expect_audience("axiam:user");\n\nasync fn protected(user: AxiamUser) -> String {\n    format!("hello {}", user.user_id)\n}',
+          },
+          {
+            label: "TypeScript",
+            code: "import express from 'express';\nimport { createNodeSession } from 'axiam-sdk/grpc';\nimport { axiamMiddleware, type AxiamRequest } from 'axiam-sdk/middleware';\n\nconst session = createNodeSession({ baseUrl: 'http://localhost:8090', tenantSlug: 'production' });\nconst app = express();\n\napp.use(axiamMiddleware(session));\n\napp.get('/protected', (req, res) => {\n  const user = (req as AxiamRequest).axiamUser;\n  res.json({ userId: user?.userId, roles: user?.roles });\n});",
+          },
+          {
+            label: "Python",
+            code: 'from fastapi import Depends, FastAPI\nfrom axiam_sdk.fastapi import AxiamUser, JwksVerifier, require_authenticated_user\n\nverifier = JwksVerifier(base_url)\nauthenticated_user = require_authenticated_user(verifier, "production")\n\napp = FastAPI()\n\n\n@app.get("/protected")\nasync def protected(user: AxiamUser = Depends(authenticated_user)):\n    return {"user_id": user.user_id, "roles": user.roles}',
+          },
+        ],
+      },
+      { type: "h", id: "check", text: "6. Check the permission" },
+      {
+        type: "p",
+        text: "Authentication is not authorization. The declarative helpers add the per-endpoint check on top of the guard, resolving the resource id from the request — usually a path parameter — and asking the server whether *this* caller may perform *this* action on it.",
+      },
+      {
+        type: "codegroup",
+        caption: "authorize the request",
+        tabs: [
+          {
+            label: "Rust",
+            code: '// Cargo.toml: features = ["macros"]\nuse axiam_sdk::require_access;\nuse axiam_sdk::middleware::AxiamUser;\n\n#[require_access(action = "read", resource_param = "id")]\nasync fn get_document(user: AxiamUser) -> String {\n    format!("user {} may read this document", user.user_id)\n}',
+          },
+          {
+            label: "TypeScript",
+            code: "import { requireAccess, fromParam } from 'axiam-sdk/middleware';\n\napp.get(\n  '/documents/:id',\n  requireAccess(authzSession, 'read', fromParam('id')),\n  (req, res) => res.json({ documentId: req.params.id }),\n);",
+          },
+          {
+            label: "Python",
+            code: 'from axiam_sdk import AsyncAxiamClient\nfrom axiam_sdk.fastapi import AxiamUser, require_access\n\nauthz_client = AsyncAxiamClient(base_url=base_url, tenant_slug="production")\nrequire_doc_read = require_access(\n    verifier, "production", authz_client, "documents:read", resource_param="doc_id"\n)\n\n\n@app.get("/docs/{doc_id}")\nasync def get_doc(doc_id: str, user: AxiamUser = Depends(require_doc_read)):\n    return {"message": f"user {user.user_id} may read document {doc_id}"}',
+          },
+        ],
+      },
+      {
+        type: "table",
+        headers: ["Outcome", "Status", "Meaning"],
+        rows: [
+          ["Allowed", "your handler runs", "A grant matched and no deny overrode it."],
+          ["Unauthenticated", "`401`", "No identity — the guard, not the check, refused."],
+          ["Denied", "`403`", "Identity established, grant absent or overridden by a deny."],
+          ["Unresolvable resource", "`400`", "The request named no resource the helper could resolve."],
+          ["Authz unavailable", "`503`", "The check could not be made. **Fails closed** — never allowed on error."],
+        ],
+      },
+      {
+        type: "warn",
+        text: "The role check that ships alongside these — `require_role` and its equivalents — is a local test against the verified token's roles, with no round trip. It is cheaper and coarser, and it is **not** a substitute for the resource-level check: it cannot see a deny on a child resource, and it does not know which resource the request is about.",
+      },
+      { type: "h", id: "verify", text: "7. Watch it refuse, then allow" },
+      {
+        type: "p",
+        text: "The check is worth exercising in both directions, because a guard that never refuses is indistinguishable from one that is not wired up. Call the route as a user with no grant and expect `403`; assign the role from step 3 and call again.",
+      },
+      {
+        type: "code",
+        caption: "terminal",
+        code: "# before the grant\ncurl -i -b cookies.txt localhost:3000/documents/$DOC_ID    # 403\n\n# after POST /api/v1/roles/{role_id}/users\ncurl -i -b cookies.txt localhost:3000/documents/$DOC_ID    # 200",
+      },
+      {
+        type: "note",
+        text: "No decision is cached by the helpers — every request is a fresh check — so a grant takes effect on the next call rather than on the next session. Sessions are a different matter: revoking a role does not retract a token already issued, which is what the short access-token lifetime and the revocation paths are for.",
+      },
+      { type: "h", id: "next", text: "Where to go next" },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Authorization engine →",
+            body: "How a decision is actually computed: precedence, cascade and scopes.",
+            to: "docs",
+            doc: "authz",
+          },
+          {
+            title: "Deny overrides →",
+            body: "Why an explicit deny beats every allow, at any depth.",
+            to: "docs",
+            doc: "deny",
+          },
+          {
+            title: "Client SDKs →",
+            body: "The same three steps in the other eight languages.",
+            to: "docs",
+            doc: "sdks",
+          },
+        ],
+      },
+    ],
+  },
 ];

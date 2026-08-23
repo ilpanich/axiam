@@ -52,7 +52,7 @@ export const DOC_PAGES: DocPage[] = [
 export const DOC_SECTIONS: DocSectionGroup[] = [
   {
     label: "Getting started",
-    slugs: ["overview", "quickstart", "installation", "bootstrap", "concepts"],
+    slugs: ["overview", "quickstart", "installation", "bootstrap", "concepts", "tutorial"],
   },
   {
     label: "Authentication",

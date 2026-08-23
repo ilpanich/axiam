@@ -16,3 +16,17 @@ export const SECURITY_VERIFIED_RELEASE = "1.0.0-alpha38";
 
 /** Date of that verification pass, ISO 8601. */
 export const SECURITY_VERIFIED_DATE = "2026-08-22";
+
+/**
+ * The release a documentation page's claims were last verified against.
+ *
+ * Separate from `SECURITY_VERIFIED_RELEASE` and hand-maintained for the same
+ * reason: it records when someone last re-derived a page's contents from
+ * source, which no automatic value can tell us.
+ *
+ * It is stamped **per page**, via `DocPage.verifiedRelease`, rather than across
+ * the section. A section-wide banner would assert a verification that did not
+ * happen for pages nobody looked at, which is worse than saying nothing — an
+ * unstamped page reads as "not checked recently", which is exactly what it is.
+ */
+export const DOCS_VERIFIED_RELEASE = "1.0.0-alpha38";

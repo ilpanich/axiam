@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Getting started" — the path from nothing to a running instance with a real
@@ -651,6 +652,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
     title: "Tutorial — protect an app",
     intro:
       "One small service, protected end to end: sign a user in, guard a route, and check a permission on a real resource. From an empty machine to a request that is allowed because you granted it.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "shape", text: "What you are building" },
       {

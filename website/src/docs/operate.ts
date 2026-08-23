@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Operate" — running AXIAM rather than integrating with it.
@@ -15,6 +16,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Docker & Kubernetes",
     intro:
       "Package AXIAM as a container and run it on Kubernetes with the shipped manifests.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "docker", text: "Docker" },
       {
@@ -386,6 +388,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "PKI & certificates",
     intro:
       "Per-tenant X.509 issuance under an organization CA, for users, services and IoT devices — plus the OpenPGP keys that sign the audit trail.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "hierarchy", text: "Certificate hierarchy" },
       {
@@ -541,6 +544,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Health & observability",
     intro:
       "Probes, structured logs, telemetry hooks and the audit trail — what AXIAM tells you about itself, and what it deliberately does not.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "probes", text: "Probes" },
       {
@@ -658,6 +662,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Production hardening checklist",
     intro:
       "Work through this before a deployment carries real identity traffic. Every item is something AXIAM leaves to you on purpose, because it cannot be decided from inside the process.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       {
         type: "p",
@@ -878,6 +883,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Troubleshooting",
     intro:
       "The failures that come up most often, what they actually mean, and the fix.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "startup", text: "The server will not start" },
       {

@@ -269,6 +269,21 @@ export default function Docs({ go }: DocsProps) {
           <Block key={i} block={block} go={go} />
         ))}
 
+        {/* Verification stamp — rendered only for a page that carries one */}
+        {page.verifiedRelease && (
+          <p
+            style={{
+              fontSize: 12,
+              color: "#64748b",
+              marginTop: 32,
+              paddingTop: 16,
+              borderTop: "1px solid rgba(0,212,255,.10)",
+            }}
+          >
+            Verified against AXIAM {page.verifiedRelease}.
+          </p>
+        )}
+
         {/* Previous / next pager */}
         {(prev || next) && (
           <nav

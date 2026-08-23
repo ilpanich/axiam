@@ -2,6 +2,7 @@ import type { Sdk } from "../types";
 import { SDKS } from "../data";
 import { contractLink } from "../contractAnchors";
 import type { DocCodeTab, DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * Conformance, as each SDK's own README states it.
@@ -74,6 +75,7 @@ export const REFERENCE_PAGES: DocPage[] = [
     title: "Standards & compliance",
     intro:
       "Which specifications AXIAM implements, how conformance is evidenced, and — just as importantly — what the evidence is not.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "honesty", text: "What these claims mean" },
       {
@@ -239,6 +241,7 @@ export const REFERENCE_PAGES: DocPage[] = [
     title: "Client SDKs",
     intro:
       "Eleven official client libraries, all conforming to one cross-language behavioral contract — so an integration ported between languages keeps the same semantics.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "contract", text: "One contract, many languages" },
       {

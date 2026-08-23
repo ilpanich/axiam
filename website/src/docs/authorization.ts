@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Authorization" — the RBAC engine and the entities it evaluates over.
@@ -15,6 +16,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     title: "The authorization engine",
     intro:
       "Role-based, default-deny, evaluated over a cascading resource hierarchy — and reachable over REST, gRPC or AMQP with the same answer from each.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "model", text: "The evaluation model" },
       {
@@ -313,6 +315,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     title: "Deny grants & precedence",
     intro:
       "An explicit deny refuses regardless of what else allows it — at any depth of the hierarchy and at equal specificity. This page is the precedence table, and the reasoning behind choosing that rule.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "rule", text: "The rule" },
       {

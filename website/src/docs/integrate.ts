@@ -1,5 +1,6 @@
 import { API_INDEX, API_OPERATION_COUNT, API_PATH_COUNT, API_VERSION } from "../apiIndex";
 import type { DocBlock, DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * The endpoint index, expanded from the generated `apiIndex.ts`.
@@ -114,6 +115,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "gRPC API",
     intro:
       "A low-latency surface for service-mesh authorization checks, token validation and user lookups — Tonic on the server, one protobuf contract shared by every SDK.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Why gRPC" },
       {
@@ -248,6 +250,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "AMQP — asynchronous authorization & events",
     intro:
       "The message bus behind deferred authorization decisions, audit ingestion, mail, webhook delivery and Reactor hooks — specified as AsyncAPI 2.6.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "What runs over the bus" },
       {
@@ -362,6 +365,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "SCIM 2.0 provisioning",
     intro:
       "Let Okta, Microsoft Entra ID or any SCIM-compliant IdP create, update and deactivate AXIAM users and groups directly, instead of an administrator doing it by hand.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Federation is not provisioning" },
       {

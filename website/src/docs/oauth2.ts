@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "OAuth2 & OIDC" — the authorization-server surface.
@@ -18,6 +19,7 @@ export const OAUTH2_PAGES: DocPage[] = [
     title: "OAuth2 & OpenID Connect",
     intro:
       "AXIAM is a complete OAuth2 authorization server and OpenID Connect provider — discovery, JWKS, five grant types, introspection, revocation and userinfo.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "grants", text: "Supported grants" },
       {

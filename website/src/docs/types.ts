@@ -87,6 +87,15 @@ export interface DocPage {
   title: string;
   intro: string;
   blocks: DocBlock[];
+  /**
+   * The release this page's claims were last re-derived from source against.
+   *
+   * Set it when you have actually checked the page, not when you have edited
+   * it — the stamp is a statement about verification, and a page carrying one
+   * nobody earned is worse than a page carrying none. Absent means "not
+   * verified recently", which the footer renders as nothing at all.
+   */
+  verifiedRelease?: string;
 }
 
 export interface DocSectionGroup {

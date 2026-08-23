@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * "Authentication" — every way a principal can prove who it is, one page per
@@ -186,6 +187,7 @@ await client.confirmPasswordReset({
     title: "OPAQUE — the password never reaches the server",
     intro:
       "An augmented PAKE in which AXIAM authenticates you without ever receiving your password, and in which a stolen credential database is not offline-crackable on its own.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "what", text: "What it changes" },
       {

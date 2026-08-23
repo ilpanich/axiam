@@ -1,4 +1,5 @@
 import type { DocPage } from "./types";
+import { DOCS_VERIFIED_RELEASE } from "../version";
 
 /**
  * The configuration reference.
@@ -15,6 +16,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
     title: "Configuration & environment variables",
     intro:
       "Every setting on the AXIAM server image is an environment variable. This is the reference: what each variable means, its default, and an example value.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "naming", text: "The naming convention" },
       {

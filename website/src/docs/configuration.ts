@@ -30,11 +30,15 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       { type: "h", id: "scope", text: "What this page covers" },
       {
         type: "p",
-        text: "This is a **curated reference, not an exhaustive one.** It documents the settings a deployment normally has to make a decision about — connectivity, secrets, token and hashing policy, rate limits, caches and TLS — which is roughly two thirds of the keys the server reads. The remainder are internal tuning values that have working defaults and no deployment-specific right answer.",
+        text: "This is a **curated reference, not an exhaustive one.** It documents the settings a deployment normally has to make a decision about — connectivity, secrets, token and hashing policy, rate limits, caches and TLS. The keys it leaves out are transport and pool tuning, debug-build fallbacks, and switches for features that are not shipped yet: things with working defaults and no deployment-specific right answer.",
       },
       {
         type: "note",
         text: "The complete list is the configuration structs themselves, and it is worth knowing that they are the authority in two ways. Many keys never appear as a literal string in the source: the config layer derives `AXIAM__SERVER__HOST` from the `host` field of the server config struct, so grepping for the variable name finds nothing while the variable works perfectly. If a setting you need is not on this page, look for the field rather than for the key.",
+      },
+      {
+        type: "note",
+        text: "That scope is enforced rather than asserted. `scripts/check-config-key-coverage.py` compares every key literally present in the server against this page, and fails on one that is neither documented here nor carrying a written exemption saying why a deployment never needs to set it — so the gap between the two can be argued with, but it cannot quietly grow.",
       },
       { type: "h", id: "connectivity", text: "Connectivity & bind addresses" },
       {
@@ -54,6 +58,21 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "amqps://user:pass@rabbitmq:5671",
           ],
           [
+            "AXIAM__AMQP__TLS__CA_CERT_PATH",
+            "CA bundle for the broker's certificate. rustls compiles its roots in, so an in-cluster broker issued by a private CA is unverifiable without this — and that is the common case rather than the exception.",
+            "/etc/axiam/amqp/ca.pem",
+          ],
+          [
+            "AXIAM__AMQP__TLS__CLIENT_CERT_PATH",
+            "Client certificate chain for mutual TLS toward the broker. Optional.",
+            "/etc/axiam/amqp/client.pem",
+          ],
+          [
+            "AXIAM__AMQP__TLS__CLIENT_KEY_PATH",
+            "Its private key. Required together with the certificate — setting one without the other is refused at startup rather than connecting without the mutual half.",
+            "/etc/axiam/amqp/client.key",
+          ],
+          [
             "AXIAM__SERVER__HOST",
             "REST bind address (default 127.0.0.1). Set 0.0.0.0 in a container.",
             "0.0.0.0",
@@ -65,6 +84,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "0.0.0.0",
           ],
           ["AXIAM__GRPC__PORT", "gRPC bind port (default 50051).", "50051"],
+          [
+            "AXIAM__GRPC_TLS_CERT_PATH",
+            "PEM certificate for the gRPC listener. **Both this and the key must be set or gRPC serves plaintext** — acceptable in a mesh that provides its own transport security, and not otherwise. Note the single underscore after the prefix: these two are read directly rather than through the layered config.",
+            "/etc/axiam/grpc/server.pem",
+          ],
+          [
+            "AXIAM__GRPC_TLS_KEY_PATH",
+            "Its private key. Set together with the certificate; the server logs a warning at startup whenever TLS is off.",
+            "/etc/axiam/grpc/server.key",
+          ],
           [
             "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC",
             "Max gRPC authz requests per second per IP (default 100).",
@@ -305,6 +334,37 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "600",
           ],
           ["AXIAM__RATE_LIMIT__REVOKE_PER_MIN", "Max /oauth2/revoke per minute.", "60"],
+          [
+            "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN",
+            "Max RFC 8693 token exchanges per minute.",
+            "120",
+          ],
+          ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
+          [
+            "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
+            "Max /oauth2/end_session per minute. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN",
+            "Max device-grant starts per minute. Sized as a state-allocation guard rather than from capacity — each call reserves a user code — and never moved by a preset.",
+            "12",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN",
+            "Max device-code verifications per minute. Human-driven, so sized for a person at a keyboard; never moved by a preset.",
+            "10",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN",
+            "Max UMA permission-ticket requests per minute.",
+            "120",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN",
+            "Max UMA ticket redemptions per minute.",
+            "120",
+          ],
           [
             "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN",
             "Max authz-check requests per minute.",

@@ -250,7 +250,7 @@ mod tests {
     use super::*;
     use axiam_core::error::AxiamResult;
     use axiam_core::models::permission::{Permission, PermissionGrant};
-    use axiam_core::models::role::{Role, RoleAssignment};
+    use axiam_core::models::role::{Role, RoleAssignment, RoleSubjectAssignment};
     use chrono::Utc;
     use std::collections::HashMap;
 
@@ -324,6 +324,13 @@ mod tests {
         unreachable_method!(get_group_roles(Uuid, Uuid) -> Vec<Role>);
         unreachable_method!(get_role_user_ids(Uuid, Uuid) -> Vec<Uuid>);
         unreachable_method!(get_role_group_ids(Uuid, Uuid) -> Vec<Uuid>);
+        unreachable_method!(get_group_role_assignments(Uuid, Uuid) -> Vec<RoleAssignment>);
+        unreachable_method!(
+            get_role_user_assignments(Uuid, Uuid) -> Vec<RoleSubjectAssignment>
+        );
+        unreachable_method!(
+            get_role_group_assignments(Uuid, Uuid) -> Vec<RoleSubjectAssignment>
+        );
     }
 
     #[derive(Clone, Default)]

@@ -34,7 +34,9 @@ use axiam_core::models::permission::{
     CreatePermission, Permission, PermissionGrant, UpdatePermission,
 };
 use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
-use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
+use axiam_core::models::role::{
+    CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
+};
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::models::user::User;
 use axiam_core::repository::{
@@ -187,6 +189,27 @@ impl RoleRepository for MockRoleRepo {
         unimplemented!()
     }
     async fn get_role_group_ids(&self, _t: Uuid, _r: Uuid) -> AxiamResult<Vec<Uuid>> {
+        unimplemented!()
+    }
+    async fn get_group_role_assignments(
+        &self,
+        _t: Uuid,
+        _g: Uuid,
+    ) -> AxiamResult<Vec<RoleAssignment>> {
+        unimplemented!()
+    }
+    async fn get_role_user_assignments(
+        &self,
+        _t: Uuid,
+        _r: Uuid,
+    ) -> AxiamResult<Vec<RoleSubjectAssignment>> {
+        unimplemented!()
+    }
+    async fn get_role_group_assignments(
+        &self,
+        _t: Uuid,
+        _r: Uuid,
+    ) -> AxiamResult<Vec<RoleSubjectAssignment>> {
         unimplemented!()
     }
 }

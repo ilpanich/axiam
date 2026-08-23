@@ -43,7 +43,7 @@ use crate::models::{
     pgp_key::{PgpKey, StorePgpKey},
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
-    role::{CreateRole, Role, RoleAssignment, UpdateRole},
+    role::{CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
@@ -316,6 +316,18 @@ pub trait RoleRepository: Send + Sync {
         group_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
 
+    /// Get a group's role assignments including the resource scope of each.
+    ///
+    /// The scoped counterpart of [`Self::get_group_roles`]: same edges, but
+    /// carrying the `resource_id` that distinguishes a global grant from one
+    /// that only applies under a resource — and that the revoke path needs in
+    /// order to remove the grant the caller meant.
+    fn get_group_role_assignments(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+
     /// Get the IDs of all users directly assigned this role.
     fn get_role_user_ids(
         &self,
@@ -329,6 +341,29 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
+
+    /// Get the users directly assigned this role, with the resource scope of
+    /// each assignment.
+    ///
+    /// The scoped counterpart of [`Self::get_role_user_ids`]: the same rows,
+    /// plus the `resource_id` that method throws away. A member table needs it
+    /// to say whether a grant is global or applies only under one resource, and
+    /// the revoke path needs it to delete the edge the caller meant — an
+    /// unassign that omits it matches only `resource_id = NONE`.
+    fn get_role_user_assignments(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send;
+
+    /// Get the groups directly assigned this role, with the resource scope of
+    /// each assignment. The group-side counterpart of
+    /// [`Self::get_role_user_assignments`].
+    fn get_role_group_assignments(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send;
 }
 
 pub trait PermissionRepository: Send + Sync {

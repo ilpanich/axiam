@@ -85,7 +85,7 @@ pub struct UpdateUserRequest {
 }
 
 /// Public-safe user representation (no password_hash, no mfa_secret).
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct UserResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,

@@ -270,6 +270,90 @@ await client.confirmPasswordReset({
         type: "note",
         text: "`login` is **consumed** by `finish`. Calling it twice throws rather than reusing one OPRF blind across two exchanges.",
       },
+      { type: "h", id: "sdk-usage", text: "Through an SDK" },
+      {
+        type: "p",
+        text: "Integrating directly is only necessary in a browser or on an unsupported platform. Every SDK wraps the exchange in one call that returns the same result type as an ordinary login, MFA challenge included.",
+      },
+      {
+        type: "codegroup",
+        caption: "sign in without sending the password",
+        tabs: [
+          {
+            label: "Rust",
+            code: 'use axiam_sdk::AxiamClient;\n\nlet client = AxiamClient::builder()\n    .base_url("https://axiam.example")?\n    .org_slug("acme")\n    .tenant_slug("default")\n    .build()?;\n\n// Same LoginResult as login(), including the MFA-challenge case.\nlet result = client.login_opaque("alice", "correct horse battery staple").await?;\nif result.mfa_required {\n    client.verify_mfa("123456").await?;\n}',
+          },
+          {
+            label: "Python",
+            code: '# Same LoginResult as login(), including the mfa_required case.\nresult = client.login_opaque("alice", "correct horse battery staple")',
+          },
+          {
+            label: "Go",
+            code: 'result, err := client.LoginOpaque(ctx, "alice", password)',
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "Enrolment is a separate call, and it exists because the server cannot build a record on its own — it never sees the plaintext. Send the result with any request that sets a password.",
+      },
+      {
+        type: "codegroup",
+        caption: "enrol a record when setting a password",
+        tabs: [
+          {
+            label: "Rust",
+            code: 'let enrollment = client.opaque_enrollment("new password").await?;\n// send `enrollment` as the request\'s `opaque` field',
+          },
+          {
+            label: "Python",
+            code: 'enrollment = client.opaque_enrollment("new password")\n# send enrollment["registration_record"] and enrollment["opaque_session"]\n# as the request\'s `opaque` object',
+          },
+          {
+            label: "Go",
+            code: 'enrollment, err := client.OpaqueEnrollment(ctx, newPassword)\n// send `enrollment` as the request body\'s `opaque` field',
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Enrolment takes one argument where the SRP verifier it replaced took four. There is no identity, group or KDF to pass: the server names the ciphersuite and the costs in its `register/start` response, and the record binds to a credential identifier the server chooses — so enrolling against an email can no longer produce a record no login can satisfy, and a later rename no longer invalidates a credential.",
+      },
+      {
+        type: "warn",
+        text: "**Fall back to ordinary login on exactly one error.** A tenant that does not offer OPAQUE reports it as a network-class error naming OPAQUE — deliberately not an authentication error, so it cannot be mistaken for a bad password. Fall back on that one and nothing else: a failed exchange *is* a failed login, and retrying it over the password path hands the plaintext to a server that just failed to prove it holds the record.",
+      },
+      {
+        type: "note",
+        text: "The call blocks for as long as the tenant's key-stretching function takes — Argon2id at 19 MiB by default, so tens to hundreds of milliseconds. That cost is the point, since it is what makes a stolen record expensive to attack even for someone holding the OPRF seed, but on an async runtime treat it as blocking work rather than as a quick round trip.",
+      },
+      { type: "h", id: "availability", text: "How each SDK binds it" },
+      {
+        type: "p",
+        text: "Every SDK ships OPAQUE. There is no conditional row in the sense that mattered before — the SRP implementation this replaced had four SDKs that could not compute Argon2id and one that needed a specific bignum extension. What differs now is only *how* each binds the single implementation.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["SDK", "Binding", "What that means for you"],
+        rows: [
+          ["Rust", "Native crate", "Also compiles to `wasm32-unknown-unknown` for the WASM package."],
+          ["TypeScript", "WebAssembly", "Adds a WASM module to the package; check its README for the size."],
+          ["Go", "Native", "No cgo, so a `CGO_ENABLED=0` build still works."],
+          ["Python", "C ABI via wheels", "Platform wheels. A source install needs a Rust toolchain."],
+          ["Java", "C ABI via JNI/FFM", "Native artifacts ship inside the jar."],
+          ["Kotlin", "As Java", "Same JVM target, same artifacts."],
+          ["C#", "C ABI via P/Invoke", "Native assets ship in the NuGet package."],
+          [
+            "PHP",
+            "C ABI via `ext-ffi`",
+            "**The one build-time conditional.** Without `ext-ffi` and the shared library present, the availability probe answers false.",
+          ],
+          ["Swift", "C interop", "Replaces the bundled modular exponentiation SRP required."],
+          ["C", "Header and library", "Direct."],
+          ["C++", "Wraps the C binding", "Direct."],
+        ],
+      },
       { type: "h", id: "one-impl", text: "One implementation, twelve callers" },
       {
         type: "p",

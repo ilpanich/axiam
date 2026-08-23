@@ -281,6 +281,11 @@ describe("orgService & tenantService & caCertService & orgSettingsService", () =
       email: { email_verification_required: true, email_verification_grace_period_hours: 12 },
       certificate: { default_cert_validity_days: 30, max_cert_validity_days: 90 },
       notification: { admin_notifications_enabled: false },
+      opaque: {
+        opaque_mode: "required",
+        opaque_suite: "ristretto255_sha512",
+        opaque_ksf: "scrypt",
+      },
       created_at: "t",
       updated_at: "t",
     };
@@ -291,6 +296,10 @@ describe("orgService & tenantService & caCertService & orgSettingsService", () =
     expect(flat.email_verification_grace_period_hours).toBe(12);
     expect(flat.default_cert_validity_days).toBe(30);
     expect(flat.admin_notifications_enabled).toBe(false);
+    // The OPAQUE block must survive the flatten: this PUT replaces the whole
+    // row, and the three fields default to `disabled` server-side when absent.
+    expect(flat.opaque_mode).toBe("required");
+    expect(flat.opaque_ksf).toBe("scrypt");
   });
 });
 
@@ -628,12 +637,22 @@ describe("roleService", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
       permission_id: "p1",
       effect: "allow",
+      // C4: empty is the wildcard the server already defaults to.
+      scope_ids: [],
     });
     apiMock.post.mockClear();
     await roleService.grantPermission("r1", "p1", "deny");
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
       permission_id: "p1",
       effect: "deny",
+      scope_ids: [],
+    });
+    apiMock.post.mockClear();
+    await roleService.grantPermission("r1", "p1", "allow", ["s1", "s2"]);
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/permissions", {
+      permission_id: "p1",
+      effect: "allow",
+      scope_ids: ["s1", "s2"],
     });
     apiMock.delete.mockResolvedValue(res(undefined));
     await roleService.revokePermission("r1", "p1");

@@ -127,7 +127,18 @@
 }
 
 @layer components {
+  /* The panel surface used for cards, dialogs and section boxes.
+     
+     `padding` belongs here rather than at each call site: the class is named
+     for a card and is used as one, and about two thirds of its call sites —
+     every `SectionCard`, both organization settings forms, the email config
+     panels, four dialogs — set no padding of their own and rendered with their
+     content flush against the border. Sites that want a different inset still
+     win: Tailwind's utilities layer is declared after this one, so `p-0`,
+     `p-8` and `py-12` all override, and `py-*` leaves this horizontal inset in
+     place. */
   .glass-card {
+    padding: 1.5rem;
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);

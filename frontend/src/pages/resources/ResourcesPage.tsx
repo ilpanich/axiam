@@ -525,7 +525,16 @@ export function ResourcesPage() {
           selected resource. Kept as separate components (ScopesPanel /
           EffectiveAccessPanel) so the two surfaces stay independently
           reviewable despite sharing this mount point. */}
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+      {/* Two columns only when both panels are on screen. ScopesPanel renders
+          nothing until a resource is selected, and a lone half-width preview
+          box next to an empty column reads as a broken layout rather than a
+          deliberate one. */}
+      <div
+        className={cn(
+          "mt-6 grid grid-cols-1 gap-6 items-start",
+          selectedResource && "lg:grid-cols-2"
+        )}
+      >
         <EffectiveAccessPanel
           resources={resources}
           selectedResource={selectedResource}

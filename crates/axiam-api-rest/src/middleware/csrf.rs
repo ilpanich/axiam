@@ -52,6 +52,24 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/mfa/verify",
     "/api/v1/auth/mfa/setup/enroll",
     "/api/v1/auth/mfa/setup/confirm",
+    // WebAuthn **authentication** — the passkey and security-key equivalents of
+    // /login, and unauthenticated for the same reason: these ceremonies *are*
+    // the authentication, so the caller holds no session and has no
+    // `axiam_csrf` cookie to echo. They were listed in `permissions::
+    // PUBLIC_PATHS` but not here, and both registries must cover a route: the
+    // result was a `403 CSRF validation failed` on
+    // `/webauthn/authenticate/start` before the handler ever ran, which made
+    // passkey sign-in impossible from a browser with no prior session.
+    //
+    // The **registration** pair is deliberately NOT exempt. Adding a passkey is
+    // done by a user who is already signed in and therefore does carry the
+    // cookie, and an exemption there would let any site silently enrol its own
+    // authenticator onto a logged-in victim's account — account takeover by
+    // exactly the request forgery this middleware exists to stop.
+    "/api/v1/auth/webauthn/authenticate/start",
+    "/api/v1/auth/webauthn/authenticate/finish",
+    "/api/v1/auth/webauthn/authenticate/discoverable/start",
+    "/api/v1/auth/webauthn/authenticate/discoverable/finish",
     "/api/v1/auth/device",
     // Password reset request + confirm are unauthenticated and token-based:
     // the caller has no session and therefore no CSRF cookie yet (same model
@@ -287,6 +305,54 @@ pub fn clear_csrf_cookie() -> Cookie<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The exempt list and `permissions::PUBLIC_PATHS` are separate registries
+    // and a route needs both. These pin the half that was missing, and the one
+    // neighbouring route that must stay protected.
+    #[test]
+    fn webauthn_authentication_ceremonies_are_csrf_exempt() {
+        for path in [
+            "/api/v1/auth/webauthn/authenticate/start",
+            "/api/v1/auth/webauthn/authenticate/finish",
+            "/api/v1/auth/webauthn/authenticate/discoverable/start",
+            "/api/v1/auth/webauthn/authenticate/discoverable/finish",
+        ] {
+            assert!(
+                is_csrf_exempt(path),
+                "{path} must be CSRF-exempt: the caller is signing in and has no csrf cookie yet"
+            );
+        }
+    }
+
+    #[test]
+    fn webauthn_registration_is_not_csrf_exempt() {
+        for path in [
+            "/api/v1/auth/webauthn/register/start",
+            "/api/v1/auth/webauthn/register/finish",
+        ] {
+            assert!(
+                !is_csrf_exempt(path),
+                "{path} must stay CSRF-protected: enrolling a passkey is done from an \
+                 authenticated session, and an exemption would allow silent enrolment \
+                 onto a signed-in victim's account"
+            );
+        }
+    }
+
+    #[test]
+    fn every_csrf_exempt_auth_path_is_also_publicly_routable() {
+        // A path exempted here but absent from PUBLIC_PATHS is 401'd by
+        // AuthzMiddleware instead — the same drift in the other direction.
+        for path in CSRF_EXEMPT_SUFFIXES {
+            if !path.starts_with("/api/v1/auth/") {
+                continue;
+            }
+            assert!(
+                crate::permissions::PUBLIC_PATHS.contains(path),
+                "{path} is CSRF-exempt but not in PUBLIC_PATHS"
+            );
+        }
+    }
 
     #[test]
     fn cookie_secure_true_sets_secure_attribute() {

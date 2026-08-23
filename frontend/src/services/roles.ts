@@ -58,16 +58,27 @@ export const roleService = {
    * `effect` defaults to `"allow"` server-side, so omitting it is exactly the
    * pre-deny-override behaviour. Passing `"deny"` writes a rule that overrides
    * every allow -- see `PermissionEffect`.
+   *
+   * `scopeIds` constrains the grant to sub-resource scopes (C4). Empty — the
+   * default — is the wildcard: the grant covers every scope of the resource,
+   * and unscoped checks too.
    */
   grantPermission: (
     roleId: string,
     permissionId: string,
     effect: PermissionEffect = "allow",
+    scopeIds: string[] = [],
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/permissions`, {
         permission_id: permissionId,
         effect,
+        // An empty array is the wildcard the server already defaults to, so
+        // sending it changes nothing for an unscoped grant. A non-empty one
+        // narrows the grant to those scopes — and, for a deny, narrows what it
+        // masks: an unscoped deny masks the action entirely on this node and
+        // its descendants, a scoped deny only the scopes it names.
+        scope_ids: scopeIds,
       })
       .then(() => undefined),
 

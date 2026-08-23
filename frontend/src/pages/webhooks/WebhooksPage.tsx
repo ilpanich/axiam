@@ -3,9 +3,13 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   webhookService,
   WEBHOOK_EVENT_GROUPS,
+  DEFAULT_RETRY_POLICY,
+  RETRY_POLICY_BOUNDS,
+  validateRetryPolicy,
   type Webhook,
   type CreateWebhookPayload,
   type UpdateWebhookPayload,
+  type RetryPolicy,
 } from "@/services/webhooks";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -18,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import { formatDate } from "@/lib/utils";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { ToggleField } from "@/components/shared";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,24 +75,108 @@ function EventTypeSelector({ selected, onChange }: EventTypeSelectorProps) {
   );
 }
 
+// ─── Retry policy fields ──────────────────────────────────────────────────────
+//
+// Delivery is retried with exponential backoff; the three numbers are the whole
+// of that policy. Bounds come from `validate_retry_policy` in the webhooks
+// handler, repeated here so an out-of-range value is caught before the round
+// trip rather than as a 400.
+
+interface RetryPolicyFieldsProps {
+  idPrefix: string;
+  value: RetryPolicy;
+  onChange: (next: RetryPolicy) => void;
+}
+
+function RetryPolicyFields({ idPrefix, value, onChange }: RetryPolicyFieldsProps) {
+  const previewDelays = [0, 1, 2]
+    .map((n) =>
+      Math.round(value.initial_delay_secs * value.backoff_multiplier ** n)
+    )
+    .join("s, ");
+
+  return (
+    <div className="space-y-3">
+      <Label>Retry Policy</Label>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="space-y-1">
+          <Label htmlFor={`${idPrefix}-retry-max`} className="text-xs">
+            Max retries
+          </Label>
+          <Input
+            id={`${idPrefix}-retry-max`}
+            type="number"
+            min={RETRY_POLICY_BOUNDS.max_retries.min}
+            max={RETRY_POLICY_BOUNDS.max_retries.max}
+            value={value.max_retries}
+            onChange={(e) =>
+              onChange({ ...value, max_retries: Number(e.target.value) })
+            }
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor={`${idPrefix}-retry-delay`} className="text-xs">
+            Initial delay (s)
+          </Label>
+          <Input
+            id={`${idPrefix}-retry-delay`}
+            type="number"
+            min={RETRY_POLICY_BOUNDS.initial_delay_secs.min}
+            max={RETRY_POLICY_BOUNDS.initial_delay_secs.max}
+            value={value.initial_delay_secs}
+            onChange={(e) =>
+              onChange({ ...value, initial_delay_secs: Number(e.target.value) })
+            }
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor={`${idPrefix}-retry-backoff`} className="text-xs">
+            Backoff multiplier
+          </Label>
+          <Input
+            id={`${idPrefix}-retry-backoff`}
+            type="number"
+            step={0.1}
+            min={RETRY_POLICY_BOUNDS.backoff_multiplier.min}
+            max={RETRY_POLICY_BOUNDS.backoff_multiplier.max}
+            value={value.backoff_multiplier}
+            onChange={(e) =>
+              onChange({ ...value, backoff_multiplier: Number(e.target.value) })
+            }
+          />
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {value.max_retries === 0
+          ? "No retries: a failed delivery is dropped after the first attempt."
+          : `First three retries after roughly ${previewDelays}s.`}
+      </p>
+    </div>
+  );
+}
+
 // ─── Create form fields ───────────────────────────────────────────────────────
 
 interface CreateWebhookFieldsProps {
   url: string;
   eventTypes: string[];
   secret: string;
+  retryPolicy: RetryPolicy;
   onUrlChange: (v: string) => void;
   onEventTypesChange: (v: string[]) => void;
   onSecretChange: (v: string) => void;
+  onRetryPolicyChange: (v: RetryPolicy) => void;
 }
 
 function CreateWebhookFields({
   url,
   eventTypes,
   secret,
+  retryPolicy,
   onUrlChange,
   onEventTypesChange,
   onSecretChange,
+  onRetryPolicyChange,
 }: CreateWebhookFieldsProps) {
   return (
     <>
@@ -133,6 +222,12 @@ function CreateWebhookFields({
           Used for HMAC-SHA256 signature verification.
         </p>
       </div>
+
+      <RetryPolicyFields
+        idPrefix="wh"
+        value={retryPolicy}
+        onChange={onRetryPolicyChange}
+      />
     </>
   );
 }
@@ -143,18 +238,26 @@ interface EditWebhookFieldsProps {
   url: string;
   enabled: boolean;
   eventTypes: string[];
+  retryPolicy: RetryPolicy;
+  secret: string;
   onUrlChange: (v: string) => void;
   onEnabledChange: (v: boolean) => void;
   onEventTypesChange: (v: string[]) => void;
+  onRetryPolicyChange: (v: RetryPolicy) => void;
+  onSecretChange: (v: string) => void;
 }
 
 function EditWebhookFields({
   url,
   enabled,
   eventTypes,
+  retryPolicy,
+  secret,
   onUrlChange,
   onEnabledChange,
   onEventTypesChange,
+  onRetryPolicyChange,
+  onSecretChange,
 }: EditWebhookFieldsProps) {
   return (
     <>
@@ -186,6 +289,30 @@ function EditWebhookFields({
           />
         </div>
       </div>
+
+      <RetryPolicyFields
+        idPrefix="edit-wh"
+        value={retryPolicy}
+        onChange={onRetryPolicyChange}
+      />
+
+      {/* D-02 secret rotation. Left blank the field is omitted from the
+          payload, which is what leaves the stored secret in place — an empty
+          string would be rejected rather than meaning "no change". */}
+      <div className="space-y-2">
+        <Label htmlFor="edit-wh-secret">Rotate secret</Label>
+        <Input
+          id="edit-wh-secret"
+          value={secret}
+          onChange={(e) => onSecretChange(e.target.value)}
+          placeholder="Leave blank to keep the current secret"
+          autoComplete="off"
+        />
+        <p className="text-xs text-muted-foreground">
+          Deliveries are signed with the new secret as soon as this is saved.
+          Update the receiver first, or it will reject every event.
+        </p>
+      </div>
     </>
   );
 }
@@ -205,6 +332,8 @@ export function WebhooksPage() {
   const [createUrl, setCreateUrl] = useState("");
   const [createEventTypes, setCreateEventTypes] = useState<string[]>([]);
   const [createSecret, setCreateSecret] = useState("");
+  const [createRetryPolicy, setCreateRetryPolicy] =
+    useState<RetryPolicy>(DEFAULT_RETRY_POLICY);
   const [createError, setCreateError] = useState("");
 
   const createMutation = useMutation({
@@ -217,7 +346,10 @@ export function WebhooksPage() {
     },
     onError: (err: unknown) => {
       setCreateError(
-        err instanceof Error ? err.message : "Failed to create webhook."
+        getApiErrorMessage(
+          err,
+          err instanceof Error ? err.message : "Failed to create webhook."
+        )
       );
     },
   });
@@ -226,6 +358,7 @@ export function WebhooksPage() {
     setCreateUrl("");
     setCreateEventTypes([]);
     setCreateSecret("");
+    setCreateRetryPolicy(DEFAULT_RETRY_POLICY);
     setCreateError("");
   }
 
@@ -244,10 +377,16 @@ export function WebhooksPage() {
       setCreateError("Secret is required.");
       return;
     }
+    const retryError = validateRetryPolicy(createRetryPolicy);
+    if (retryError) {
+      setCreateError(retryError);
+      return;
+    }
     const payload: CreateWebhookPayload = {
       url: createUrl.trim(),
       events: createEventTypes,
       secret: createSecret.trim(),
+      retry_policy: createRetryPolicy,
     };
     createMutation.mutate(payload);
   }
@@ -257,6 +396,9 @@ export function WebhooksPage() {
   const [editUrl, setEditUrl] = useState("");
   const [editEnabled, setEditEnabled] = useState(true);
   const [editEventTypes, setEditEventTypes] = useState<string[]>([]);
+  const [editRetryPolicy, setEditRetryPolicy] =
+    useState<RetryPolicy>(DEFAULT_RETRY_POLICY);
+  const [editSecret, setEditSecret] = useState("");
   const [editError, setEditError] = useState("");
 
   const editMutation = useMutation({
@@ -268,7 +410,10 @@ export function WebhooksPage() {
     },
     onError: (err: unknown) => {
       setEditError(
-        err instanceof Error ? err.message : "Failed to update webhook."
+        getApiErrorMessage(
+          err,
+          err instanceof Error ? err.message : "Failed to update webhook."
+        )
       );
     },
   });
@@ -278,6 +423,9 @@ export function WebhooksPage() {
     setEditUrl(hook.url);
     setEditEnabled(hook.enabled);
     setEditEventTypes(hook.events);
+    // A row from a server that predates the field would carry none.
+    setEditRetryPolicy(hook.retry_policy ?? DEFAULT_RETRY_POLICY);
+    setEditSecret("");
     setEditError("");
   }
 
@@ -288,12 +436,21 @@ export function WebhooksPage() {
       setEditError("URL is required.");
       return;
     }
+    const retryError = validateRetryPolicy(editRetryPolicy);
+    if (retryError) {
+      setEditError(retryError);
+      return;
+    }
     editMutation.mutate({
       id: editWebhook.id,
       payload: {
         url: editUrl.trim(),
         events: editEventTypes,
         enabled: editEnabled,
+        retry_policy: editRetryPolicy,
+        // Only when the admin typed one: an omitted `secret` keeps the stored
+        // one, an empty string is a validation error.
+        ...(editSecret.trim() ? { secret: editSecret.trim() } : {}),
       },
     });
   }
@@ -420,6 +577,8 @@ export function WebhooksPage() {
           onUrlChange={setCreateUrl}
           onEventTypesChange={setCreateEventTypes}
           onSecretChange={setCreateSecret}
+          retryPolicy={createRetryPolicy}
+          onRetryPolicyChange={setCreateRetryPolicy}
         />
       </FormDialog>
 
@@ -441,6 +600,10 @@ export function WebhooksPage() {
           onUrlChange={setEditUrl}
           onEnabledChange={setEditEnabled}
           onEventTypesChange={setEditEventTypes}
+          retryPolicy={editRetryPolicy}
+          onRetryPolicyChange={setEditRetryPolicy}
+          secret={editSecret}
+          onSecretChange={setEditSecret}
         />
       </FormDialog>
 

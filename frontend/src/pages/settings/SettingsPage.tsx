@@ -8,6 +8,7 @@ import {
   Smartphone,
   Bell,
   Fingerprint,
+  KeyRound,
   Pencil,
   X,
   Loader2,
@@ -20,6 +21,18 @@ import {
   type SecuritySettings,
   type TenantSettingsOverride,
 } from "@/services/settings";
+import {
+  opaqueRelaxationWarning,
+  readOpaquePolicy,
+  type OpaqueKsf,
+  type OpaqueMode,
+  type OpaqueSuite,
+} from "@/services/opaquePolicy";
+import {
+  OpaquePolicyFields,
+  OpaquePolicySummary,
+} from "@/components/OpaquePolicyFields";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -57,6 +70,10 @@ interface SettingsForm {
   default_cert_validity_days: number;
   // Notification
   admin_notifications_enabled: boolean;
+  // OPAQUE
+  opaque_mode: OpaqueMode;
+  opaque_suite: OpaqueSuite;
+  opaque_ksf: OpaqueKsf;
 }
 
 const SECS_PER_MIN = 60;
@@ -88,6 +105,7 @@ function toForm(s: SecuritySettings): SettingsForm {
     email_verification_required: s.email.email_verification_required,
     default_cert_validity_days: s.certificate.default_cert_validity_days,
     admin_notifications_enabled: s.notification.admin_notifications_enabled,
+    ...readOpaquePolicy(s),
   };
 }
 
@@ -110,6 +128,9 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     email_verification_required: f.email_verification_required,
     default_cert_validity_days: f.default_cert_validity_days,
     admin_notifications_enabled: f.admin_notifications_enabled,
+    opaque_mode: f.opaque_mode,
+    opaque_suite: f.opaque_suite,
+    opaque_ksf: f.opaque_ksf,
   };
 }
 
@@ -239,12 +260,16 @@ export function SettingsPage() {
       setTimeout(() => setFeedback(null), 4000);
     },
     onError: (err: unknown) => {
+      // The 400 from `validate_tenant_override` lists exactly which field was
+      // below the org baseline; that text is the whole value of the response.
       setFeedback({
         type: "error",
-        message:
+        message: getApiErrorMessage(
+          err,
           err instanceof Error
             ? err.message
-            : "Failed to save settings. Please try again.",
+            : "Failed to save settings. Please try again."
+        ),
       });
     },
   });
@@ -304,6 +329,9 @@ export function SettingsPage() {
   }
 
   const data = form;
+  // The advisory compares against the *loaded effective* policy, which is the
+  // only thing this endpoint exposes — the org baseline is not readable here.
+  const effectiveOpaque = readOpaquePolicy(settings);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -611,6 +639,52 @@ export function SettingsPage() {
                 unit="minutes"
               />
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── OPAQUE (RFC 9807) ──────────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <KeyRound size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">OPAQUE (RFC 9807)</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            An augmented PAKE: the password never leaves the browser, not even
+            over TLS. This tenant inherits its organization's baseline and may
+            only tighten it.
+          </p>
+          {editing ? (
+            <OpaquePolicyFields
+              idPrefix="tenant"
+              value={{
+                opaque_mode: data.opaque_mode,
+                opaque_suite: data.opaque_suite,
+                opaque_ksf: data.opaque_ksf,
+              }}
+              onChange={(next) =>
+                setFormOverrides((prev) => ({ ...prev, ...next }))
+              }
+              warning={opaqueRelaxationWarning(
+                {
+                  opaque_mode: data.opaque_mode,
+                  opaque_suite: data.opaque_suite,
+                  opaque_ksf: data.opaque_ksf,
+                },
+                effectiveOpaque
+              )}
+            />
+          ) : (
+            <OpaquePolicySummary
+              value={{
+                opaque_mode: data.opaque_mode,
+                opaque_suite: data.opaque_suite,
+                opaque_ksf: data.opaque_ksf,
+              }}
+            />
           )}
         </CardContent>
       </Card>

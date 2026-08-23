@@ -12,6 +12,8 @@ import {
   type PermissionEffect,
 } from "@/services/permissions";
 import { groupService, type Group, type User } from "@/services/users";
+import { resourceService } from "@/services/resources";
+import { scopeService } from "@/services/scopes";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -29,6 +31,7 @@ import {
   Pencil,
   Trash2,
   Ban,
+  Filter,
   AlertTriangle,
 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
@@ -57,11 +60,28 @@ function GrantPermissionDialog({
   // B1/C4: which kind of rule the next grant writes. Defaults to allow, which
   // is what every grant meant before deny-override existed.
   const [effect, setEffect] = useState<PermissionEffect>("allow");
+  // C4 scope constraint. Scopes live under a resource, and there is no
+  // tenant-wide scope listing, so narrowing a grant means picking the resource
+  // first. Empty selection = the wildcard the server defaults to.
+  const [scopeResourceId, setScopeResourceId] = useState("");
+  const [scopeIds, setScopeIds] = useState<string[]>([]);
 
   const { data: allPermissions = [], isLoading } = useQuery({
     queryKey: ["permissions"],
     queryFn: () => permissionService.list(),
     enabled: open,
+  });
+
+  const { data: resources = [] } = useQuery({
+    queryKey: ["resources"],
+    queryFn: () => resourceService.list(),
+    enabled: open,
+  });
+
+  const { data: scopes = [], isLoading: scopesLoading } = useQuery({
+    queryKey: ["scopes", scopeResourceId],
+    queryFn: () => scopeService.list(scopeResourceId),
+    enabled: open && scopeResourceId !== "",
   });
 
   const filtered = allPermissions.filter(
@@ -73,7 +93,7 @@ function GrantPermissionDialog({
   async function handleGrant(permission: Permission) {
     setGrantingId(permission.id);
     try {
-      await roleService.grantPermission(roleId, permission.id, effect);
+      await roleService.grantPermission(roleId, permission.id, effect, scopeIds);
       onGranted();
     } catch {
       // parent will refetch
@@ -84,7 +104,15 @@ function GrantPermissionDialog({
 
   function handleClose() {
     setSearch("");
+    setScopeResourceId("");
+    setScopeIds([]);
     onClose();
+  }
+
+  function toggleScope(id: string) {
+    setScopeIds((prev) =>
+      prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
+    );
   }
 
   if (!open) return null;
@@ -176,6 +204,64 @@ function GrantPermissionDialog({
                   instead.
                 </p>
               )}
+            </fieldset>
+
+            {/* C4: optional scope constraint. Left alone the grant keeps the
+                wildcard it has always had. */}
+            <fieldset className="px-3 py-3 border-b border-white/5 space-y-2">
+              <legend className="sr-only">Scope constraint</legend>
+              <Label htmlFor="grant-scope-resource" className="text-xs">
+                Limit to scopes (optional)
+              </Label>
+              <select
+                id="grant-scope-resource"
+                value={scopeResourceId}
+                onChange={(e) => {
+                  setScopeResourceId(e.target.value);
+                  setScopeIds([]);
+                }}
+                className="focus-ring w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+              >
+                <option value="">Every scope (unscoped grant)</option>
+                {resources.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+
+              {scopeResourceId !== "" &&
+                (scopesLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading scopes…</p>
+                ) : scopes.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    This resource defines no scopes. The grant will cover every
+                    scope.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {scopes.map((scope) => (
+                      <label
+                        key={scope.id}
+                        className="flex items-center gap-2 text-xs text-foreground cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={scopeIds.includes(scope.id)}
+                          onChange={() => toggleScope(scope.id)}
+                          className="h-3.5 w-3.5 rounded border-primary/40 bg-white/5 text-primary focus:ring-primary/40"
+                        />
+                        <span className="font-mono">{scope.name}</span>
+                      </label>
+                    ))}
+                    {effect === "deny" && scopeIds.length > 0 && (
+                      <p role="note" className="text-xs text-destructive/90">
+                        A scoped deny masks only the scopes you name. Leave the
+                        selection empty to mask the action entirely.
+                      </p>
+                    )}
+                  </div>
+                ))}
             </fieldset>
 
             {isLoading ? (
@@ -442,6 +528,12 @@ export function RoleDetailPage() {
 
   // B1: permission id -> effect, so the table can mark deny rules. Grants
   // written before deny-override carry no `effect` and mean allow.
+  // C4: how many scopes each grant is constrained to. Zero is the wildcard, so
+  // only a non-zero count is worth a badge.
+  const grantScopeCounts = new Map<string, number>(
+    grantedPermissions.map((g) => [g.permission.id, g.scope_ids?.length ?? 0])
+  );
+
   const grantEffects = new Map<string, PermissionEffect>(
     grantedPermissions.map((g) => [g.permission.id, g.effect ?? "allow"])
   );
@@ -582,6 +674,19 @@ export function RoleDetailPage() {
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-destructive/20 text-destructive border border-destructive/40">
               <Ban size={9} aria-hidden="true" />
               Deny
+            </span>
+          )}
+          {/* C4: a scoped grant covers only the scopes it names, so a row that
+              looked identical to a wildcard grant would overstate what it
+              allows (or, for a deny, what it masks). */}
+          {(grantScopeCounts.get(row.id) ?? 0) > 0 && (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-white/5 text-muted-foreground border border-white/15"
+              title="Constrained to specific scopes of a resource"
+            >
+              <Filter size={9} aria-hidden="true" />
+              {grantScopeCounts.get(row.id)} scope
+              {grantScopeCounts.get(row.id) === 1 ? "" : "s"}
             </span>
           )}
         </div>

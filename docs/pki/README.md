@@ -99,6 +99,7 @@ three values:
 | --- | --- | --- |
 | `database` | AES-256-GCM ciphertext in the CA record, under `pki_encryption_key` | The default, and what every AXIAM deployment had before this was configurable |
 | `vault` | A HashiCorp Vault KV v2 secret; the record holds only a path | `AXIAM__PKI__VAULT_ADDR` + `AXIAM__PKI__VAULT_TOKEN` configured |
+| `vault_pki` | Inside Vault's **PKI secrets engine**, and nowhere else — AXIAM never holds it | `AXIAM__PKI__CA_KEY_STORE=vault_pki` |
 | `external` | Nowhere in AXIAM | An import with no `private_key_pem` |
 
 **It is recorded per CA, not read from configuration**, and that is the point.
@@ -168,19 +169,135 @@ is the truth of what exists, and AXIAM will not sign with a revoked CA whatever
 the custodian still holds. What is left behind is an orphaned secret: a cleanup
 task, not a security failure.
 
-### What Vault custody is not, yet
+### What KV custody is not
 
-The key still reaches AXIAM's memory to sign with. Vault holds it and audits
-access; it does not perform the signature. The stronger property — a key that
-never leaves the custodian — needs certificate *issuance* to move there too,
-which means Vault's PKI secrets engine (or a KMS) doing the signing rather than
-storing the key. The `CaKeyStore` port is deliberately addressed by key
-*reference* rather than by key, so an implementation that answers a sign call
-without ever answering a load one slots in beside these rather than replacing
-them. That, and an external KMS, are the next steps.
+Under `vault` custody the key still reaches AXIAM's memory to sign with. Vault
+holds it and audits access; it does not perform the signature. That is custody,
+and it is a real improvement on a database column — but it is not the strongest
+thing available.
 
-Nothing about the wire changes when that happens: `key_custody` gains a value
-and CAs created before it keep working.
+`vault_pki` is. Read on.
+
+## Custody in Vault's PKI engine (`vault_pki`)
+
+Vault's PKI secrets engine generates the key inside itself, exposes no API that
+exports it, and signs on AXIAM's behalf. The private key of a CA under this
+custodian has **never existed in the AXIAM process**. A compromise of AXIAM —
+a memory dump, a malicious build, an operator with a shell — yields
+certificates that Vault's audit log records, and no key.
+
+The arrangement follows [HashiCorp's own PKI walkthrough][pki-tutorial]
+literally:
+
+1. `POST <root_mount>/root/generate/internal` — a root whose key stays in Vault.
+   `internal` rather than `exported` is what makes that true.
+2. `POST <int_mount>/intermediate/generate/internal` — a second key, also kept,
+   and a CSR.
+3. `POST <root_mount>/issuer/<root>/sign-intermediate` — the root signs it, with
+   `max_path_length=0` so the intermediate can sign leaves and nothing else.
+4. `POST <int_mount>/intermediate/set-signed` — the signed certificate goes back
+   to the mount holding its key, which is now an issuer.
+5. `POST <int_mount>/issuer/<int>/sign-verbatim` — every leaf, thereafter.
+
+[pki-tutorial]: https://developer.hashicorp.com/vault/tutorials/pki/pki-engine
+
+The two tiers are not ceremony. A root that signs exactly one intermediate and
+nothing else can have that intermediate revoked and replaced without
+redistributing the trust anchor, which is the one PKI operation that is
+otherwise impossible to perform quietly. Pass `issue_from_root: true` to skip
+the intermediate; the default does not, and the default is the safer one.
+
+### Both ways in: generate, or bring your own
+
+| | What happens | What AXIAM keeps |
+| --- | --- | --- |
+| `POST .../ca-certificates` | Vault generates the root and the intermediate | The certificates. No key, and `private_key_pem` is **absent** from the response |
+| `POST .../ca-certificates/import` with `private_key_pem` | The key and certificate go to Vault as one bundle (`issuers/import/bundle`) | The certificate. The key is not stored here |
+
+On the import path the supplied key does pass through AXIAM's memory on its way
+to Vault — it has to, because AXIAM is what received the HTTP request. What the
+operator gets is that AXIAM never *stores* it and every later use of it is
+Vault's.
+
+### What the response looks like
+
+A generated `vault_pki` CA answers with **no** `private_key_pem`, because there
+is none, and with `chain_pem` holding the root's certificate. Keep it: Vault
+returns a generated root's certificate exactly once, and without it nothing
+outside Vault can validate a chain to an AXIAM-issued leaf. Leaf issuance
+returns `chain_pem` too, for the same reason.
+
+RSA-4096 CAs can be *generated* under this custodian and no other: Vault
+generates RSA keys and rcgen's `ring` backend does not.
+
+### Configuring PKI custody
+
+```sh
+AXIAM__PKI__VAULT_ADDR=https://vault.internal:8200   # shared with KV custody
+AXIAM__PKI__VAULT_TOKEN=<token with the policy below>
+AXIAM__PKI__VAULT_CA_CERT_PATH=/etc/ssl/vault-ca.pem # as for KV custody
+AXIAM__PKI__VAULT_PKI_ROOT_MOUNT=pki                 # optional, Vault's own convention
+AXIAM__PKI__VAULT_PKI_INT_MOUNT=pki_int              # optional
+AXIAM__PKI__CA_KEY_STORE=vault_pki                   # required — not implied
+```
+
+The address and token are the same two variables KV custody uses: one Vault
+should not be configured twice. `CA_KEY_STORE=vault_pki` is required rather than
+implied, because an address and a token alone still mean `vault` — moving where
+new CAs' keys are *generated* is not something an upgrade should do on its own.
+
+Both mounts are enabled by the operator, not by AXIAM, and shared by every CA.
+Enabling a mount per CA would need `sys/mounts` write, a permission that can
+rewrite the whole Vault; sharing two mounts and addressing issuers by the id
+Vault minted keeps the token's policy to the PKI paths themselves. Vault has
+supported multiple issuers per mount since 1.11.
+
+```sh
+vault secrets enable -path=pki pki
+vault secrets tune -max-lease-ttl=87600h pki
+vault secrets enable -path=pki_int pki
+vault secrets tune -max-lease-ttl=43800h pki_int
+```
+
+**Tune the mounts.** A PKI mount's `max_lease_ttl` defaults to 30 days, and
+Vault silently caps a longer request to it rather than failing — a ten-year root
+becomes a month-long one. AXIAM records what came back rather than what it asked
+for, so the record stays truthful, and logs Vault's warning at `WARN`. Neither
+is a substitute for tuning the mount.
+
+A minimal policy:
+
+```hcl
+path "pki/root/generate/internal"        { capabilities = ["update"] }
+path "pki/issuer/+/sign-intermediate"    { capabilities = ["update"] }
+path "pki/issuer/+"                      { capabilities = ["delete"] }
+path "pki/key/+"                         { capabilities = ["delete"] }
+
+path "pki_int/intermediate/generate/internal" { capabilities = ["update"] }
+path "pki_int/intermediate/set-signed"        { capabilities = ["update"] }
+path "pki_int/issuers/import/bundle"          { capabilities = ["update"] }
+path "pki_int/issuer/+/sign-verbatim"         { capabilities = ["update"] }
+path "pki_int/issuer/+"                       { capabilities = ["delete"] }
+path "pki_int/key/+"                          { capabilities = ["delete"] }
+```
+
+`sign-verbatim` takes the CSR's subject and extensions as given, because AXIAM
+has already decided what the certificate says — subject, validity, algorithm,
+and the tenant policy behind them. A Vault role would restate a subset of those
+rules in a second place and the two would drift. The cost is real and worth
+naming: the policy on that path is what stands between a compromised AXIAM and a
+certificate for any name at all. An operator who wants Vault to enforce names as
+well can add a role against the same issuer; what they cannot do is have
+neither.
+
+Revocation deletes the issuer and then the key, at both tiers — in that order,
+because Vault refuses to delete a key an issuer still references.
+
+### What `vault_pki` does not remove
+
+The subscriber's key. Leaf keys are still generated by AXIAM and returned once,
+exactly as under every other custodian; what moved to Vault is the *signature*.
+A CSR carries the public half and nothing else.
 
 ## Issue a leaf certificate
 
@@ -202,9 +319,11 @@ POST /api/v1/certificates
 `cert_type` is one of `User` (authenticate a human user), `Service`
 (authenticate a service/service-account), or `Device` (authenticate an IoT
 device). Response (`201`) is a `GeneratedCertificate`: the stored
-certificate metadata plus `private_key_pem`, again returned only once. A
-tenant may cap `validity_days` via its `max_certificate_validity_days`
-metadata setting; requests exceeding that cap are rejected.
+certificate metadata plus `private_key_pem`, again returned only once — and,
+when the issuing CA is under `vault_pki` custody, `chain_pem` holding the chain
+the signer returned. A tenant may cap `validity_days` via its
+`max_certificate_validity_days` metadata setting; requests exceeding that cap
+are rejected.
 
 ## Bind a certificate for mTLS (service accounts)
 

@@ -424,6 +424,7 @@ function caBadgeStatus(
 const CA_CUSTODY_LABEL: Record<CaKeyCustody, string> = {
   database: "In database",
   vault: "In Vault",
+  vault_pki: "In Vault (PKI)",
   external: "Not held",
 };
 
@@ -433,6 +434,8 @@ const CA_CUSTODY_DESCRIPTION: Record<CaKeyCustody, string> = {
     "Encrypted with AES-256-GCM in the CA record, under the server's PKI encryption key.",
   vault:
     "Held in HashiCorp Vault. The CA record stores only a path — a database dump on its own contains no key.",
+  vault_pki:
+    "Generated inside Vault's PKI engine, which exposes no API that exports it. AXIAM has never held this key: Vault performs every signature.",
   external:
     "AXIAM holds no private key for this CA. Certificates it signed are trusted; AXIAM cannot issue new ones against it.",
 };
@@ -453,10 +456,12 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
   );
   const [validityDays, setValidityDays] = useState(365);
   const [generateError, setGenerateError] = useState("");
-  // The one-time PEM private key returned on generation (never retrievable again).
-  const [revealedPrivateKey, setRevealedPrivateKey] = useState<string | null>(
-    null
-  );
+  // What generation returned exactly once and no endpoint returns again: the
+  // CA private key, the issuing chain, or — under `vault_pki` — only the
+  // second, because the key was born inside Vault and stays there.
+  const [revealedSecrets, setRevealedSecrets] = useState<
+    { label: string; value: string }[] | null
+  >(null);
 
   const generateMutation = useMutation({
     mutationFn: (payload: GenerateCaCertPayload) =>
@@ -465,9 +470,20 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       void queryClient.invalidateQueries({ queryKey: ["ca-certificates", orgId] });
       setGenerateOpen(false);
       resetGenerate();
-      // Surface the one-time private key — it is never retrievable again.
-      if (result.private_key_pem) {
-        setRevealedPrivateKey(result.private_key_pem);
+      // Surface whatever is returned exactly once. Under `vault_pki` custody
+      // that is not a private key — there is none — but the root's
+      // certificate, which Vault hands over once and which nothing outside
+      // Vault can validate a chain without.
+      const once = [
+        result.private_key_pem
+          ? { label: "Private Key (PEM)", value: result.private_key_pem }
+          : null,
+        result.chain_pem
+          ? { label: "Issuing chain (PEM)", value: result.chain_pem }
+          : null,
+      ].filter((s): s is { label: string; value: string } => s !== null);
+      if (once.length > 0) {
+        setRevealedSecrets(once);
       }
     },
     onError: (err: unknown) => {
@@ -785,25 +801,22 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             className="font-mono text-xs"
           />
           <p className="text-xs text-muted-foreground">
-            Optional. With a key, AXIAM takes custody of it — in Vault where the
-            server is configured for it, otherwise encrypted in the CA record —
-            and can issue certificates against this CA. Without one, the
-            certificate is registered as a trust anchor and AXIAM cannot issue
-            against it. The key is never returned by any endpoint once stored.
+            Optional. With a key, AXIAM takes custody of it — imported into
+            Vault's PKI engine, written to Vault, or encrypted in the CA record,
+            depending on how the server is configured — and can issue
+            certificates against this CA. Without one, the certificate is
+            registered as a trust anchor and AXIAM cannot issue against it. The
+            key is never returned by any endpoint once stored.
           </p>
         </div>
       </FormDialog>
 
       <SecretRevealModal
-        open={revealedPrivateKey !== null}
-        onClose={() => setRevealedPrivateKey(null)}
+        open={revealedSecrets !== null}
+        onClose={() => setRevealedSecrets(null)}
         title="CA Certificate Generated"
-        description="Save the CA private key now — it is never shown again and cannot be recovered."
-        secrets={
-          revealedPrivateKey
-            ? [{ label: "Private Key (PEM)", value: revealedPrivateKey }]
-            : []
-        }
+        description="Save this now — it is never shown again and cannot be recovered."
+        secrets={revealedSecrets ?? []}
       />
     </div>
   );

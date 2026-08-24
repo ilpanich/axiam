@@ -69,6 +69,9 @@ async fn ca_get_list_revoke_lifecycle() {
             subject: "Root CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .unwrap();
@@ -130,6 +133,9 @@ async fn cert_get_by_id_fingerprint_list_revoke() {
             subject: "Root CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .unwrap();

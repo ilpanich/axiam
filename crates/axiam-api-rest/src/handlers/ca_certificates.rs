@@ -24,9 +24,39 @@ pub struct CreateCaCertificateRequest {
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.
     pub validity_days: u32,
+    /// Common name for the signing intermediate — `vault_pki` custody only.
+    ///
+    /// Under that custodian Vault generates a root and an intermediate beneath
+    /// it, and this names the second. Defaults to the root's subject with
+    /// `Intermediate Authority` appended. Ignored by every other custodian,
+    /// which produces one self-signed CA and has no second certificate to name.
+    #[serde(default)]
+    pub intermediate_subject: Option<String>,
+    /// Validity of the signing intermediate, in days. Defaults to the root's.
+    #[serde(default)]
+    pub intermediate_validity_days: Option<u32>,
+    /// Issue leaves straight from the generated root instead of creating an
+    /// intermediate. `vault_pki` custody only, and off by default.
+    ///
+    /// The default is the safer one: a root that signs only an intermediate can
+    /// have that intermediate revoked and replaced without redistributing the
+    /// trust anchor, and a root that signs leaves cannot.
+    #[serde(default)]
+    pub issue_from_root: bool,
 }
 
 /// `POST /api/v1/organizations/{org_id}/ca-certificates`
+///
+/// Generate a CA. What that means depends on the configured key custodian, and
+/// deliberately not on the request:
+///
+/// * Under `database` or `vault` custody, AXIAM generates a self-signed root
+///   and returns its private key once, in `private_key_pem`.
+/// * Under `vault_pki` custody, Vault generates a root and a signing
+///   intermediate beneath it, and the response has **no** `private_key_pem`
+///   because the key never existed outside Vault. The root's certificate comes
+///   back in `chain_pem`, which is the only copy anything outside Vault will
+///   see.
 #[utoipa::path(
     post,
     path = "/api/v1/organizations/{org_id}/ca-certificates",
@@ -68,6 +98,11 @@ pub async fn generate<C: Connection + Clone>(
         subject: req.subject,
         key_algorithm: req.key_algorithm,
         validity_days: req.validity_days,
+        // An empty string is not a subject; it would produce an intermediate
+        // with a blank CN rather than the documented default.
+        intermediate_subject: req.intermediate_subject.filter(|s| !s.trim().is_empty()),
+        intermediate_validity_days: req.intermediate_validity_days,
+        issue_from_root: req.issue_from_root,
     };
     let result = state.pki.ca_service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
@@ -117,10 +152,17 @@ impl std::fmt::Debug for ImportCaCertificateRequest {
 /// one it generated, which means every AXIAM-issued certificate chains to a
 /// root nothing else in the estate trusts.
 ///
-/// With a private key, AXIAM takes custody of it — Vault when configured,
-/// otherwise sealed into the row — and can issue against the CA. Without one,
-/// the certificate is a trust anchor and `/api/v1/certificates` says so rather
-/// than failing at the point of use.
+/// With a private key, AXIAM takes custody of it and can issue against the CA.
+/// Where it goes is the configured custodian's business: sealed into the row,
+/// written to Vault's KV engine, or — under `vault_pki` — imported into Vault's
+/// PKI engine as an issuer, after which AXIAM signs through Vault and holds
+/// nothing. That last one is the BYOK counterpart to generating in Vault: the
+/// key does pass through AXIAM's memory on the way in, because AXIAM is what
+/// received the request, but it is never stored here and every later use of it
+/// is Vault's.
+///
+/// Without a private key, the certificate is a trust anchor and
+/// `/api/v1/certificates` says so rather than failing at the point of use.
 ///
 /// Gated on `ca_certificates:generate`: importing a CA is the same act as
 /// generating one from every relying party's point of view — it decides what

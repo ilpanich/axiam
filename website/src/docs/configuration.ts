@@ -605,9 +605,19 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "/etc/ssl/certs/vault-ca.pem",
           ],
           [
+            "AXIAM__PKI__VAULT_PKI_ROOT_MOUNT",
+            "`vault_pki` custody only: the PKI mount holding the roots AXIAM generates. Default `pki`, Vault's own convention. The operator enables and tunes the mount; AXIAM never calls `sys/mounts`.",
+            "pki",
+          ],
+          [
+            "AXIAM__PKI__VAULT_PKI_INT_MOUNT",
+            "`vault_pki` custody only: the PKI mount holding the signing intermediates, and the issuer every leaf is signed by. Default `pki_int`.",
+            "pki_int",
+          ],
+          [
             "AXIAM__PKI__CA_KEY_STORE",
-            "Which custodian **new** CAs are created with: `database` or `vault`. Rarely needed — an address and a token together already imply `vault`. Naming `vault` without them is a startup failure rather than a fallback.",
-            "vault",
+            "Which custodian **new** CAs are created with: `database`, `vault` or `vault_pki`. An address and a token together already imply `vault`; `vault_pki` must be named explicitly. Naming a custodian that is not configured is a startup failure rather than a fallback.",
+            "vault_pki",
           ],
         ],
       },
@@ -621,7 +631,20 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This is custody, not a key that never leaves the custodian. Vault holds the key and audits access to it; the key still reaches AXIAM's memory to sign with. The stronger property needs certificate *issuance* to move there too — Vault's PKI secrets engine, or a KMS, performing the signature rather than storing the key. That is the next step, and nothing on the wire changes when it arrives.",
+        text: "`vault` is custody, not a key that never leaves the custodian. Vault holds the key and audits access to it; the key still reaches AXIAM's memory to sign with. For the stronger property, set `AXIAM__PKI__CA_KEY_STORE=vault_pki`.",
+      },
+      { type: "h", id: "ca-key-custody-pki", text: "Keys Vault generates and never releases (`vault_pki`)" },
+      {
+        type: "p",
+        text: "Under `vault_pki` custody the key is generated inside Vault's PKI secrets engine, which exposes no API that exports it, and Vault performs the signature. The private key of such a CA has never existed in the AXIAM process: a memory dump, a malicious build or an operator with a shell yields certificates that Vault's audit log records, and no key. The arrangement follows HashiCorp's own PKI walkthrough — a root at one mount generates a key and certificate, an intermediate at a second mount generates a key and a CSR, the root signs it with `max_path_length=0`, and every leaf thereafter goes to the intermediate's `sign-verbatim`.",
+      },
+      {
+        type: "p",
+        text: "Both ways in are supported. Generating a CA has Vault create the root and the intermediate, and the response carries **no** `private_key_pem` because there is none — keep the `chain_pem` it returns instead, since Vault hands over a generated root's certificate exactly once and nothing outside Vault can validate a chain without it. Importing a CA with a `private_key_pem` sends the key and certificate to Vault as one bundle; the key passes through AXIAM's memory on the way, because AXIAM is what received the request, but it is never stored here.",
+      },
+      {
+        type: "note",
+        text: "Tune the mounts. A PKI mount's `max_lease_ttl` defaults to 30 days and Vault silently caps a longer request to it rather than failing, so an untuned mount turns a ten-year root into a month-long one. AXIAM records the certificate that came back rather than the one it asked for, and logs Vault's warning — neither is a substitute for `vault secrets tune -max-lease-ttl=87600h pki`.",
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {

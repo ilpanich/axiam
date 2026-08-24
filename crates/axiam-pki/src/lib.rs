@@ -14,6 +14,7 @@ pub mod mds;
 pub mod mtls;
 pub mod pgp;
 pub mod ssrf;
+pub mod vault_pki;
 
 pub use ca::{CaService, MAX_CA_VALIDITY_DAYS};
 pub use ca_key_store::{
@@ -24,3 +25,4 @@ pub use cert::{CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, MAX_LEAF_CERT_VALID
 pub use config::PkiConfig;
 pub use mtls::DeviceAuthService;
 pub use pgp::PgpService;
+pub use vault_pki::{VaultPkiCaKeyStore, VaultPkiConfig, VaultPkiIssuer, VaultPkiLocator};

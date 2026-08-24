@@ -24,6 +24,9 @@ struct CaCertificateRow {
     organization_id: String,
     subject: String,
     public_cert_pem: String,
+    /// Schema v46. `Option` for every row written before it, and for every CA
+    /// that is its own root.
+    chain_pem: Option<String>,
     fingerprint: String,
     key_algorithm: String,
     not_before: DateTime<Utc>,
@@ -43,6 +46,9 @@ struct CaCertificateRowWithId {
     organization_id: String,
     subject: String,
     public_cert_pem: String,
+    /// Schema v46. `Option` for every row written before it, and for every CA
+    /// that is its own root.
+    chain_pem: Option<String>,
     fingerprint: String,
     key_algorithm: String,
     not_before: DateTime<Utc>,
@@ -127,6 +133,7 @@ impl CaCertificateRow {
             organization_id,
             subject: self.subject,
             public_cert_pem: self.public_cert_pem,
+            chain_pem: self.chain_pem,
             fingerprint: self.fingerprint,
             key_algorithm: parse_key_algorithm(&self.key_algorithm)?,
             not_before: self.not_before,
@@ -154,6 +161,7 @@ impl CaCertificateRowWithId {
             organization_id,
             subject: self.subject,
             public_cert_pem: self.public_cert_pem,
+            chain_pem: self.chain_pem,
             fingerprint: self.fingerprint,
             key_algorithm: parse_key_algorithm(&self.key_algorithm)?,
             not_before: self.not_before,
@@ -203,6 +211,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                  organization_id = $org_id, \
                  subject = $subject, \
                  public_cert_pem = $public_cert_pem, \
+                 chain_pem = $chain_pem, \
                  fingerprint = $fingerprint, \
                  key_algorithm = $key_algorithm, \
                  not_before = $not_before, \
@@ -216,6 +225,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .bind(("org_id", input.organization_id.to_string()))
             .bind(("subject", input.subject))
             .bind(("public_cert_pem", input.public_cert_pem))
+            .bind(("chain_pem", input.chain_pem))
             .bind(("fingerprint", input.fingerprint))
             .bind(("key_algorithm", key_algorithm_str(&input.key_algorithm)))
             .bind(("not_before", input.not_before))

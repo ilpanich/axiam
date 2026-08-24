@@ -122,6 +122,7 @@ fn sample_ca() -> CaCertificate {
         organization_id: Uuid::new_v4(),
         subject: "CN=Root".into(),
         public_cert_pem: "-----BEGIN CERTIFICATE-----".into(),
+        chain_pem: None,
         fingerprint: "ab:cd".into(),
         key_algorithm: KeyAlgorithm::Ed25519,
         not_before: Utc::now(),
@@ -156,11 +157,27 @@ fn ca_certificate_debug_none_private_key() {
 fn generated_ca_certificate_debug_redacts_private_key_pem() {
     let generated = GeneratedCaCertificate {
         certificate: sample_ca(),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----SENSITIVE".into(),
+        private_key_pem: Some("-----BEGIN PRIVATE KEY-----SENSITIVE".into()),
     };
     let dbg = format!("{generated:?}");
     assert!(dbg.contains("[REDACTED]"));
     assert!(!dbg.contains("SENSITIVE"));
+}
+
+#[test]
+fn generated_ca_certificate_debug_says_none_when_there_is_no_key() {
+    // A `vault_pki` CA: Vault generated the key and no API exports it. Printing
+    // `[REDACTED]` here would say a key was withheld when none exists.
+    let mut certificate = sample_ca();
+    // A `vault_pki` row holds no ciphertext either — the key is Vault's.
+    certificate.encrypted_private_key = None;
+    let generated = GeneratedCaCertificate {
+        certificate,
+        private_key_pem: None,
+    };
+    let dbg = format!("{generated:?}");
+    assert!(dbg.contains("private_key_pem: None"), "{dbg}");
+    assert!(!dbg.contains("[REDACTED]"), "{dbg}");
 }
 
 // ---------------------------------------------------------------------------

@@ -78,6 +78,9 @@ async fn cert_generate_against_active_ca_succeeds() {
             subject: "Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -147,6 +150,9 @@ async fn cert_generate_rejects_revoked_ca() {
             subject: "Revoked CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -215,6 +221,9 @@ async fn cert_generate_rejects_expired_ca() {
             subject: "Expired CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 1,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -228,6 +237,7 @@ async fn cert_generate_rejects_expired_ca() {
             organization_id: org_id,
             subject: "Expired CA Clone".into(),
             public_cert_pem: real_ca.certificate.public_cert_pem.clone(),
+            chain_pem: None,
             fingerprint: format!("expired-{}", real_ca.certificate.fingerprint),
             key_algorithm: KeyAlgorithm::Ed25519,
             not_before: now - Duration::days(10),
@@ -314,6 +324,9 @@ async fn cert_generate_issuer_dn_matches_real_ca_subject_not_stored_subject_fiel
             subject: "Real CA Subject".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -327,6 +340,7 @@ async fn cert_generate_issuer_dn_matches_real_ca_subject_not_stored_subject_fiel
             organization_id: org_id,
             subject: "Drifted Subject Inc".into(),
             public_cert_pem: real_ca.certificate.public_cert_pem.clone(),
+            chain_pem: None,
             fingerprint: format!("drifted-{}", real_ca.certificate.fingerprint),
             key_algorithm: KeyAlgorithm::Ed25519,
             not_before: real_ca.certificate.not_before,
@@ -425,6 +439,9 @@ async fn cert_generate_rejects_zero_validity_days() {
             subject: "Zero-Days CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -484,6 +501,9 @@ async fn cert_generate_rejects_validity_days_above_default_max() {
             subject: "Over-Max CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 3650,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -552,6 +572,9 @@ async fn cert_generate_clamps_tenant_override_to_hard_cap() {
             subject: "Long-Lived CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 3650,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -609,6 +632,7 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
             subject: "Keyless CA".into(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .into(),
+            chain_pem: None,
             fingerprint: "keyless-fingerprint".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             not_before: now - Duration::days(1),
@@ -682,6 +706,9 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
             subject: "No-Enc-Key Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -706,6 +733,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
                     ca_cert_path: None,
                 },
             )),
+            None,
             Some(axiam_core::ca_keys::CaKeyCustody::Vault),
         )
         .expect("a vault-default custodian set"),
@@ -771,6 +799,9 @@ async fn cert_generate_rsa4096_ca_errors_under_ring_backend() {
             subject: "RSA Test CA".into(),
             key_algorithm: KeyAlgorithm::Rsa4096,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await;
 
@@ -810,6 +841,9 @@ async fn cert_service_read_and_revoke_wrappers_work() {
             subject: "Wrapper Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");

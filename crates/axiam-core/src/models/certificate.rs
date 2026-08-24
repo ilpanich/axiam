@@ -49,7 +49,20 @@ pub struct CaCertificate {
     /// The certificate subject (e.g., `CN=ACME Corp Root CA`).
     pub subject: String,
     /// PEM-encoded public certificate.
+    ///
+    /// The certificate that *signs*, which under `vault_pki` custody is the
+    /// intermediate rather than the root beneath which it was created.
     pub public_cert_pem: String,
+    /// The issuers above [`Self::public_cert_pem`], concatenated PEM, nearest
+    /// issuer first and the root last.
+    ///
+    /// `None` for a CA that is its own root, which is every CA AXIAM generated
+    /// before Vault's PKI engine was an option. Present for a `vault_pki` CA,
+    /// where it is the only copy of the root certificate anything outside Vault
+    /// will ever see — a relying party cannot validate an AXIAM-issued leaf
+    /// without it, and `root/generate/internal` returns it exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_pem: Option<String>,
     /// SHA-256 fingerprint of the certificate.
     pub fingerprint: String,
     pub key_algorithm: KeyAlgorithm,
@@ -98,6 +111,7 @@ impl std::fmt::Debug for CaCertificate {
             .field("organization_id", &self.organization_id)
             .field("subject", &self.subject)
             .field("public_cert_pem", &self.public_cert_pem)
+            .field("chain_pem", &self.chain_pem)
             .field("fingerprint", &self.fingerprint)
             .field("key_algorithm", &self.key_algorithm)
             .field("not_before", &self.not_before)
@@ -123,6 +137,30 @@ pub struct CreateCaCertificate {
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.
     pub validity_days: u32,
+    /// Common name for the signing intermediate, under `vault_pki` custody.
+    ///
+    /// Ignored by every other custodian, which generates one self-signed CA and
+    /// has no second certificate to name. Defaults to the root's subject with
+    /// `Intermediate Authority` appended, which is what HashiCorp's own PKI
+    /// walkthrough calls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intermediate_subject: Option<String>,
+    /// Validity of the signing intermediate, in days. Defaults to the root's.
+    ///
+    /// Vault caps it to the root's own expiry regardless, so asking for more
+    /// than the root has is not an error — it is quietly shortened, and the
+    /// stored record describes what came back rather than what was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intermediate_validity_days: Option<u32>,
+    /// Issue directly from the generated root instead of creating an
+    /// intermediate. `vault_pki` custody only.
+    ///
+    /// Off by default, and the default is the safer one: a root that signs only
+    /// one intermediate can have that intermediate revoked and replaced without
+    /// redistributing the trust anchor, while a root that signs leaves directly
+    /// cannot be rotated without touching every relying party.
+    #[serde(default)]
+    pub issue_from_root: bool,
 }
 
 /// All fields required to store a CA certificate in the database.
@@ -141,6 +179,9 @@ pub struct StoreCaCertificate {
     pub organization_id: Uuid,
     pub subject: String,
     pub public_cert_pem: String,
+    /// The issuers above `public_cert_pem`, concatenated PEM. See
+    /// [`CaCertificate::chain_pem`].
+    pub chain_pem: Option<String>,
     pub fingerprint: String,
     pub key_algorithm: KeyAlgorithm,
     pub not_before: DateTime<Utc>,
@@ -198,13 +239,23 @@ impl std::fmt::Debug for ImportCaCertificate {
 /// Response returned when a CA certificate is generated.
 ///
 /// Includes the private key PEM, which is returned **once** and never
-/// stored or retrievable again.
+/// stored or retrievable again — when the custodian produced one at all. Under
+/// `vault_pki` custody the key was born inside Vault and there is nothing to
+/// return, which is the point of that custodian rather than a shortcoming of
+/// this response.
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GeneratedCaCertificate {
     #[serde(flatten)]
     pub certificate: CaCertificate,
-    /// PEM-encoded private key — returned only on generation.
-    pub private_key_pem: String,
+    /// PEM-encoded private key — returned only on generation, and only when
+    /// there is one to return.
+    ///
+    /// Absent under `vault_pki` custody, where the key was generated inside
+    /// Vault and no API exports it. The field is omitted rather than sent as
+    /// `null` so a client that has always read it keeps working unchanged for
+    /// every custodian that does produce a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_pem: Option<String>,
 }
 
 /// Manual `Debug` impl (SECHRD-09 / D-06): redacts `private_key_pem` (raw
@@ -214,7 +265,13 @@ impl std::fmt::Debug for GeneratedCaCertificate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GeneratedCaCertificate")
             .field("certificate", &self.certificate)
-            .field("private_key_pem", &"[REDACTED]")
+            // `Option`-aware rather than an unconditional `[REDACTED]`: a
+            // `vault_pki` CA has no key, and printing the redaction marker for
+            // one would say a key was withheld when none exists.
+            .field(
+                "private_key_pem",
+                &self.private_key_pem.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -317,6 +374,15 @@ pub struct DeviceAuthResponse {
 pub struct GeneratedCertificate {
     #[serde(flatten)]
     pub certificate: Certificate,
+    /// The issuing chain, concatenated PEM, nearest issuer first.
+    ///
+    /// Present only when the signer returned one — which is the `vault_pki`
+    /// case, where the root's certificate exists nowhere a client could fetch
+    /// it from. For a CA AXIAM signed with itself the chain is the CA
+    /// certificate, which `GET .../ca-certificates/{id}` already serves, so the
+    /// field is omitted rather than restating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_pem: Option<String>,
     /// PEM-encoded private key — returned only on generation.
     pub private_key_pem: String,
 }

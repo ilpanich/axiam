@@ -486,6 +486,7 @@ mod tests {
             subject: "CN=Test Root CA".to_string(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
                 .to_string(),
+            chain_pem: None,
             fingerprint: "aa:bb:cc".to_string(),
             key_algorithm: KeyAlgorithm::Ed25519,
             not_before: Utc::now(),

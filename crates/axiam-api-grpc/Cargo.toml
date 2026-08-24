@@ -22,6 +22,7 @@ serde = { workspace = true }
 tower_governor = { workspace = true }
 governor = { workspace = true }
 tower = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }

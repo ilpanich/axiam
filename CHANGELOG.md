@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha41] - 2026-08-24
+
+### Added
+
+- Let Vault generate the CA and its signing intermediate (#368)
+- Put CA signing keys in Vault, and let an organization bring its own
+- Working tenant switcher, opaque menus, a way out of the no-CA dead end
+- Make the erasure window a setting and the tenant overrides visible
+
+### Changed
+
+- Exercise the Vault CA key store against a real HTTP server
+- Document the six CA key custody variables
+
+### Fixed
+
+- Do not refuse to boot when no CA key custodian is configured
+- Make enabling OPAQUE actually enable it
+- Make the tenant cascade work, and let an operator prove delivery
+- Page list endpoints to the end instead of taking the first 50
+
 ## [1.0.0-alpha40] - 2026-08-23
 
 ### Added

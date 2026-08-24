@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [1.0.0-alpha41] - 2026-08-24
 
 ### Added
@@ -46,47 +48,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Gate the configuration page against the keys the server reads
+
 - Rate-limit the WebAuthn ceremony routes
 
 ### Changed
 
 - Give federation a setup procedure and service accounts an audience warning
+
 - Stamp docs pages per page, not per section
+
 - Walk the code flow, and open the token up
+
 - Show OPAQUE through an SDK, and how each one binds it
+
 - Resolve one tree node by node on the authorization engine page
+
 - Give the operate pages the data they were describing
+
 - State what the config reference covers, and add the keys it lacked
+
 - Add the tutorial that bridges quickstart and core concepts
+
 - Turn SCIM into a walkthrough, and fix what it said about the token
+
 - Show the AMQP topology and one signed message
+
 - Deepen the gRPC page to the surface the server actually serves
+
 - Back the compliance claims with links, and generate contract anchors
+
 - Follow up on #362 — model carries T-182's clause, site documents the throttle
+
 - Index the GDPR endpoints, and fix two summary-extraction bugs
+
 - Say precisely what PUBLIC means on an OAuth2 route
+
 - Generate the REST endpoint index from the OpenAPI document
+
 - Add the missing pushed-authorization page
+
 - Record the rate-limit gate T-182 did not re-establish
+
 - Lead every code sample with Rust
+
 - Bring the passkey, MFA and lifecycle pages up to contract 1.28
+
 - Give the Client SDKs page the matrix and the code it lacked
+
 - Correct and complete the webhook page
+
 - Show the reactor registry instead of describing it
+
 - Put coverage, the open risk register and the evidence on the page
+
 - Make the threat model citable — IDs, deep links and filters
+
 - Emit STRIDE, severity and open-risk data from the threat model
+
 - Plan the docs-section deepening, page by page
+
 - Record the contract 1.28 SDK surface and the passkey cookie fix
 
 ### Fixed
 
 - Repair §14.1's link to the device_login heading
+
 - Classify the GDPR paths for the route ↔ OpenAPI parity check
+
 - Register the GDPR endpoints in the OpenAPI document
+
 - Bring the harness and quick runbook up to alpha38
 
-## [Unreleased]
+- Benchmark harness and quick runbook brought up to alpha38. The two `opaque_*`
+  cells could not pass — missing from `AXIAM_ONLY_SCENARIOS`, so they ran
+  against Keycloak and Zitadel and failed in `setup()`, and the bench tenant
+  left `opaque_mode` disabled so they 404'd against AXIAM too. `bench-quick`'s
+  reactor probe had gone stale into a false negative. `rl_prod_check.py` had
+  rows for eleven of sixteen REST rate-limit families, with five absent rather
+  than reported unchecked.
 
 ### Security
 
@@ -98,16 +137,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaulting to 10 and applying to each of the six routes independently —
   deliberately the same per-IP sign-in allowance `login_per_min` already
   grants passwords.
-
-### Fixed
-
-- Benchmark harness and quick runbook brought up to alpha38. The two `opaque_*`
-  cells could not pass — missing from `AXIAM_ONLY_SCENARIOS`, so they ran
-  against Keycloak and Zitadel and failed in `setup()`, and the bench tenant
-  left `opaque_mode` disabled so they 404'd against AXIAM too. `bench-quick`'s
-  reactor probe had gone stale into a false negative. `rl_prod_check.py` had
-  rows for eleven of sixteen REST rate-limit families, with five absent rather
-  than reported unchecked.
 
 ## [1.0.0-alpha38] - 2026-08-22
 
@@ -150,16 +179,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-alpha35] - 2026-08-21
 
-### Changed
-
-- Justfile prod-up to use official images instead of local builds.
-
-### Fixed
-
-- Make `just prod-up` able to bring the stack up
-
-## [Unreleased]
-
 ### Added
 
 - `AXIAM__AUTH__VAULT_CA_CERT_PATH` — trust anchor for a Vault fronted by a
@@ -169,12 +188,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Justfile prod-up to use official images instead of local builds.
+
 - Threat model brought up to `1.0.0-alpha38`: the contract 1.28 SDK surface —
   WebAuthn (§24), account lifecycle (§25), PAR (§26) and the Swift/C/C++
   reactor protocol core (§22.11) — is recorded as four new mitigated threats on
   the SDK diagram (T-183…T-186, 186 threats total, 170 mitigated / 16 open),
   T-182 notes the passkey session-cookie fix, and the website Security section
   (`src/security.ts` plus the generated model files) is updated in step.
+
 - Website Security section brought up to `1.0.0-alpha34` from
   `claude_dev/threat-modeling-and-security.md`: OPAQUE (RFC 9807) as an
   optional augmented PAKE, Vault as the production secret provider, TLS-only
@@ -186,14 +208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make `just prod-up` able to bring the stack up
+
 - `just prod-up` could not start any stack: `${AXIAM_IMAGE_TAG:latest}` is not
   valid Compose interpolation, the SurrealDB and RabbitMQ credentials the
   compose file requires were never generated, and `AXIAM__AUTH__VAULT_TOKEN`
   was demanded before the Vault that issues it existed.
+
 - Vault's listener key was mode 0600, unreadable to uid 100 in the container,
   so the Vault service restart-looped on "error loading TLS cert".
+
 - Vault's port is published on loopback, which `prod-up` needs to initialise,
   unseal and seed it from the host.
+
 - A Vault init that failed mid-write left an empty `vault-init.json` that
   wedged every later run; initialisation is now driven by Vault's own
   `sys/init` status and validated before it replaces the state file.

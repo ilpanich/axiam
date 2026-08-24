@@ -614,47 +614,77 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     ) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let tenant_id_str = tenant_id.to_string();
-        self.db
-            .current()
-            .query(
-                // SurrealDB evaluates each RHS in this SET against the
-                // pre-update document, so `failed_login_attempts` inside the IF
-                // is the OLD count (before `+= 1`). Compare `+ 1` so the lock
-                // fires on the Nth failure (when the new count reaches the
-                // threshold), not the N+1th — otherwise an account gets one
-                // extra guess past the configured limit.
-                //
-                // Lockout duration grows exponentially with each lockout past
-                // the threshold and is capped at $max_secs (brute-force
-                // protection): d = min(base * mult^(new_count - threshold), max).
-                // `duration::from_secs` needs an int, so the float result of the
-                // math is cast with `<int>`. (SurrealDB v3 renamed the duration
-                // constructor; `duration::secs` is now an accessor, not a ctor.)
-                "UPDATE type::record('user', $id) \
-                 SET \
-                   failed_login_attempts += 1, \
-                   last_failed_login_at = time::now(), \
-                   locked_until = IF (failed_login_attempts + 1 >= $threshold) \
-                     THEN time::now() + duration::from_secs(<int> math::min([ \
-                       $base_secs * math::pow($mult, failed_login_attempts + 1 - $threshold), \
-                       $max_secs \
-                     ])) \
-                     ELSE locked_until \
-                   END, \
-                   updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("id", user_id_str))
-            .bind(("tenant_id", tenant_id_str))
-            .bind(("threshold", lockout_threshold))
-            .bind(("base_secs", base_lockout_secs))
-            .bind(("mult", backoff_multiplier))
-            .bind(("max_secs", max_lockout_secs))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
-        Ok(())
+        // Retried on an optimistic-concurrency loss (`is_write_conflict`).
+        //
+        // SurrealDB is optimistic, and this statement targets ONE row: every
+        // failed credential check for a given user updates the SAME record, so
+        // two concurrent failures race by construction. Before this loop the
+        // loser was reported to the caller as a 5xx — `grpc_admin_validate`
+        // reproduces it as gRPC INTERNAL on ~0.3-0.7 % of calls — for a write
+        // the datastore itself labels "can be retried".
+        //
+        // Replaying is safe precisely because the loser commits NOTHING, so the
+        // non-idempotent `failed_login_attempts += 1` cannot double-count. Only
+        // the conflict class is retried; any other error returns immediately.
+        let mut attempt = 1;
+        loop {
+            let outcome = self
+                .db
+                .current()
+                .query(
+                    // SurrealDB evaluates each RHS in this SET against the
+                    // pre-update document, so `failed_login_attempts` inside the IF
+                    // is the OLD count (before `+= 1`). Compare `+ 1` so the lock
+                    // fires on the Nth failure (when the new count reaches the
+                    // threshold), not the N+1th — otherwise an account gets one
+                    // extra guess past the configured limit.
+                    //
+                    // Lockout duration grows exponentially with each lockout past
+                    // the threshold and is capped at $max_secs (brute-force
+                    // protection): d = min(base * mult^(new_count - threshold), max).
+                    // `duration::from_secs` needs an int, so the float result of the
+                    // math is cast with `<int>`. (SurrealDB v3 renamed the duration
+                    // constructor; `duration::secs` is now an accessor, not a ctor.)
+                    "UPDATE type::record('user', $id) \
+                    SET \
+                    failed_login_attempts += 1, \
+                    last_failed_login_at = time::now(), \
+                    locked_until = IF (failed_login_attempts + 1 >= $threshold) \
+                    THEN time::now() + duration::from_secs(<int> math::min([ \
+                    $base_secs * math::pow($mult, failed_login_attempts + 1 - $threshold), \
+                    $max_secs \
+                    ])) \
+                    ELSE locked_until \
+                    END, \
+                    updated_at = time::now() \
+                    WHERE tenant_id = $tenant_id",
+                )
+                // Cloned per attempt: `bind` takes owned values and this loop
+                // may run more than once, so it cannot move these out.
+                .bind(("id", user_id_str.clone()))
+                .bind(("tenant_id", tenant_id_str.clone()))
+                .bind(("threshold", lockout_threshold))
+                .bind(("base_secs", base_lockout_secs))
+                .bind(("mult", backoff_multiplier))
+                .bind(("max_secs", max_lockout_secs))
+                .await
+                .map_err(DbError::from)
+                .and_then(|r| {
+                    r.check()
+                        .map_err(|e| classify_write_error(e.to_string(), "user"))
+                });
+            match outcome {
+                Err(e)
+                    if attempt < crate::helpers::MAX_WRITE_ATTEMPTS
+                        && crate::helpers::is_write_conflict(&e.to_string()) =>
+                {
+                    tokio::time::sleep(crate::helpers::write_conflict_backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.into()),
+                Ok(_) => return Ok(()),
+            }
+        }
     }
 
     /// Anonymize a user row in-place (D-05).

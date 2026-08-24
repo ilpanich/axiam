@@ -122,6 +122,60 @@ pub fn is_unique_violation(msg: &str) -> bool {
     UNIQUE_VIOLATION_MARKERS.iter().any(|m| msg.contains(m))
 }
 
+// ---------------------------------------------------------------------------
+// Optimistic-concurrency write conflicts — transient, and explicitly retryable
+// ---------------------------------------------------------------------------
+
+/// Substrings that identify a SurrealDB optimistic-concurrency write conflict.
+///
+/// SurrealDB is optimistic: concurrent transactions touching the same record
+/// both proceed, and the loser is aborted at commit with
+/// ``There was a problem with the key-value store: Transaction conflict:
+/// Transaction write conflict. This transaction can be retried`` (some
+/// versions phrase it ``Failed to commit transaction due to a read or write
+/// conflict``). Both phrasings are matched.
+///
+/// **This class of failure is not an error to report — it is an instruction to
+/// retry**, and the datastore says so in the message itself. It is emphatically
+/// NOT a [`is_unique_violation`]: no constraint was broken and nothing about
+/// the caller's request was wrong; the write simply lost a race and never
+/// committed. Because it commits nothing, replaying it cannot double-apply —
+/// which is what makes [`retry_on_write_conflict`] safe even for a
+/// non-idempotent statement like `failed_login_attempts += 1`.
+const WRITE_CONFLICT_MARKERS: [&str; 2] = ["Transaction conflict", "read or write conflict"];
+
+/// Whether a datastore error message reports a retryable write conflict.
+///
+/// Kept beside [`is_unique_violation`] and for the same reason (D-09): the
+/// decision "was this transient?" is made from free error text, so it gets one
+/// definition rather than a `contains(...)` at every hot-row write site.
+pub fn is_write_conflict(msg: &str) -> bool {
+    WRITE_CONFLICT_MARKERS.iter().any(|m| msg.contains(m))
+}
+
+/// How many attempts a contended write gets before its conflict surfaces.
+///
+/// Four is chosen against the shape of the failure rather than as a round
+/// number: a conflict means some other writer *did* commit, so the contended
+/// record is free almost immediately and the overwhelming majority of retries
+/// succeed on the first one. The extra attempts cover a burst of writers
+/// landing on the same record at once; past that, retrying is no longer
+/// masking a race but hiding sustained contention that should surface.
+///
+/// Retrying only ever applies to [`is_write_conflict`]. Every other error — an
+/// outage, a malformed statement, a constraint violation — must return on the
+/// first attempt, so a hard failure is never turned into a slow one.
+pub const MAX_WRITE_ATTEMPTS: u32 = 4;
+
+/// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms).
+///
+/// Not there to wait out the winner — it has already committed by the time the
+/// loser learns it lost — but to stop a burst of contending writers from
+/// re-colliding in lockstep on the retry.
+pub fn write_conflict_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(1u64 << attempt.min(6))
+}
+
 /// Classify a failed single-use `CREATE` on a replay-guard table.
 ///
 /// A UNIQUE violation here is not an error condition — it is the answer. The
@@ -461,6 +515,45 @@ mod tests {
     }
 
     // --- classify_write_error ---
+
+    #[test]
+    fn is_write_conflict_matches_the_real_surrealdb_message() {
+        // Verbatim from a SurrealDB v3 write that lost an optimistic-concurrency
+        // race, captured off the wire from the `grpc_admin_validate` benchmark
+        // cell (it reaches the client as the gRPC INTERNAL message).
+        let msg = "Database error: Migration failed: There was a problem with the \
+                   key-value store: Transaction conflict: Transaction write \
+                   conflict. This transaction can be retried";
+        assert!(is_write_conflict(msg));
+        // A conflict is NOT a constraint violation — misfiling it as one would
+        // answer a transient race with a 409.
+        assert!(!is_unique_violation(msg));
+    }
+
+    #[test]
+    fn is_write_conflict_matches_the_commit_time_phrasing() {
+        assert!(is_write_conflict(
+            "Failed to commit transaction due to a read or write conflict"
+        ));
+    }
+
+    #[test]
+    fn is_write_conflict_ignores_unrelated_failures() {
+        // An outage must never be treated as retryable-and-then-fine.
+        assert!(!is_write_conflict("There was a problem with the datastore"));
+        assert!(!is_write_conflict(
+            "Database index `idx_users_username_unique` already contains ['alice']"
+        ));
+    }
+
+    #[test]
+    fn write_conflict_backoff_grows_and_stays_bounded() {
+        assert_eq!(write_conflict_backoff(1).as_millis(), 2);
+        assert_eq!(write_conflict_backoff(2).as_millis(), 4);
+        assert_eq!(write_conflict_backoff(3).as_millis(), 8);
+        // Never a runaway shift, even if a caller passes a large attempt.
+        assert_eq!(write_conflict_backoff(99).as_millis(), 64);
+    }
 
     #[test]
     fn classify_write_error_maps_index_violation_to_already_exists() {

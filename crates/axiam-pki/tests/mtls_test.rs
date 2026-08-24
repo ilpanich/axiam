@@ -75,6 +75,9 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
             subject: "mTLS Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -161,6 +164,9 @@ async fn mtls_rejects_unknown_fingerprint() {
             subject: "Unknown FP CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -182,6 +188,9 @@ async fn mtls_rejects_unknown_fingerprint() {
             subject: "mTLS Test CA 2".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("second CA generation must succeed");
@@ -289,6 +298,7 @@ async fn mtls_rejects_expired_cert() {
             subject: "Fake CA for expired test".into(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .into(),
+            chain_pem: None,
             fingerprint: "fake-fingerprint".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             not_before: now - Duration::days(2),
@@ -360,6 +370,9 @@ async fn mtls_rejects_revoked_cert() {
             subject: "Revoked Cert CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA must be created");

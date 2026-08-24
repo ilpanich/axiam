@@ -3896,6 +3896,13 @@
                           "created_at"
                         ],
                         "properties": {
+                          "chain_pem": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The issuers above [`Self::public_cert_pem`], concatenated PEM, nearest\nissuer first and the root last.\n\n`None` for a CA that is its own root, which is every CA AXIAM generated\nbefore Vault's PKI engine was an option. Present for a `vault_pki` CA,\nwhere it is the only copy of the root certificate anything outside Vault\nwill ever see — a relying party cannot validate an AXIAM-issued leaf\nwithout it, and `root/generate/internal` returns it exactly once."
+                          },
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
@@ -3940,7 +3947,7 @@
                           },
                           "public_cert_pem": {
                             "type": "string",
-                            "description": "PEM-encoded public certificate."
+                            "description": "PEM-encoded public certificate.\n\nThe certificate that *signs*, which under `vault_pki` custody is the\nintermediate rather than the root beneath which it was created."
                           },
                           "status": {
                             "$ref": "#/components/schemas/CertificateStatus"
@@ -3984,6 +3991,7 @@
           "ca-certificates"
         ],
         "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates`",
+        "description": "Generate a CA. What that means depends on the configured key custodian, and\ndeliberately not on the request:\n\n* Under `database` or `vault` custody, AXIAM generates a self-signed root\n  and returns its private key once, in `private_key_pem`.\n* Under `vault_pki` custody, Vault generates a root and a signing\n  intermediate beneath it, and the response has **no** `private_key_pem`\n  because the key never existed outside Vault. The root's certificate comes\n  back in `chain_pem`, which is the only copy anything outside Vault will\n  see.",
         "operationId": "generate",
         "parameters": [
           {
@@ -4032,7 +4040,7 @@
           "ca-certificates"
         ],
         "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates/import`",
-        "description": "Register a CA an organization already has, instead of generating one.\n\nThe case this exists for: an organization whose root lives offline, in an\nHSM, or in an existing internal PKI, and which wants AXIAM in the chain\nrather than at the top of it. Without it, the only CA AXIAM could use was\none it generated, which means every AXIAM-issued certificate chains to a\nroot nothing else in the estate trusts.\n\nWith a private key, AXIAM takes custody of it — Vault when configured,\notherwise sealed into the row — and can issue against the CA. Without one,\nthe certificate is a trust anchor and `/api/v1/certificates` says so rather\nthan failing at the point of use.\n\nGated on `ca_certificates:generate`: importing a CA is the same act as\ngenerating one from every relying party's point of view — it decides what\nthis organization's certificates chain to.",
+        "description": "Register a CA an organization already has, instead of generating one.\n\nThe case this exists for: an organization whose root lives offline, in an\nHSM, or in an existing internal PKI, and which wants AXIAM in the chain\nrather than at the top of it. Without it, the only CA AXIAM could use was\none it generated, which means every AXIAM-issued certificate chains to a\nroot nothing else in the estate trusts.\n\nWith a private key, AXIAM takes custody of it and can issue against the CA.\nWhere it goes is the configured custodian's business: sealed into the row,\nwritten to Vault's KV engine, or — under `vault_pki` — imported into Vault's\nPKI engine as an issuer, after which AXIAM signs through Vault and holds\nnothing. That last one is the BYOK counterpart to generating in Vault: the\nkey does pass through AXIAM's memory on the way in, because AXIAM is what\nreceived the request, but it is never stored here and every later use of it\nis Vault's.\n\nWithout a private key, the certificate is a trust anchor and\n`/api/v1/certificates` says so rather than failing at the point of use.\n\nGated on `ca_certificates:generate`: importing a CA is the same act as\ngenerating one from every relying party's point of view — it decides what\nthis organization's certificates chain to.",
         "operationId": "import",
         "parameters": [
           {
@@ -9708,6 +9716,13 @@
           "created_at"
         ],
         "properties": {
+          "chain_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The issuers above [`Self::public_cert_pem`], concatenated PEM, nearest\nissuer first and the root last.\n\n`None` for a CA that is its own root, which is every CA AXIAM generated\nbefore Vault's PKI engine was an option. Present for a `vault_pki` CA,\nwhere it is the only copy of the root certificate anything outside Vault\nwill ever see — a relying party cannot validate an AXIAM-issued leaf\nwithout it, and `root/generate/internal` returns it exactly once."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -9752,7 +9767,7 @@
           },
           "public_cert_pem": {
             "type": "string",
-            "description": "PEM-encoded public certificate."
+            "description": "PEM-encoded public certificate.\n\nThe certificate that *signs*, which under `vault_pki` custody is the\nintermediate rather than the root beneath which it was created."
           },
           "status": {
             "$ref": "#/components/schemas/CertificateStatus"
@@ -10095,6 +10110,26 @@
           "validity_days"
         ],
         "properties": {
+          "intermediate_subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Common name for the signing intermediate, under `vault_pki` custody.\n\nIgnored by every other custodian, which generates one self-signed CA and\nhas no second certificate to name. Defaults to the root's subject with\n`Intermediate Authority` appended, which is what HashiCorp's own PKI\nwalkthrough calls it."
+          },
+          "intermediate_validity_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Validity of the signing intermediate, in days. Defaults to the root's.\n\nVault caps it to the root's own expiry regardless, so asking for more\nthan the root has is not an error — it is quietly shortened, and the\nstored record describes what came back rather than what was asked for.",
+            "minimum": 0
+          },
+          "issue_from_root": {
+            "type": "boolean",
+            "description": "Issue directly from the generated root instead of creating an\nintermediate. `vault_pki` custody only.\n\nOff by default, and the default is the safer one: a root that signs only\none intermediate can have that intermediate revoked and replaced without\nredistributing the trust anchor, while a root that signs leaves directly\ncannot be rotated without touching every relying party."
+          },
           "key_algorithm": {
             "$ref": "#/components/schemas/KeyAlgorithm"
           },
@@ -10121,6 +10156,26 @@
           "validity_days"
         ],
         "properties": {
+          "intermediate_subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Common name for the signing intermediate — `vault_pki` custody only.\n\nUnder that custodian Vault generates a root and an intermediate beneath\nit, and this names the second. Defaults to the root's subject with\n`Intermediate Authority` appended. Ignored by every other custodian,\nwhich produces one self-signed CA and has no second certificate to name."
+          },
+          "intermediate_validity_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Validity of the signing intermediate, in days. Defaults to the root's.",
+            "minimum": 0
+          },
+          "issue_from_root": {
+            "type": "boolean",
+            "description": "Issue leaves straight from the generated root instead of creating an\nintermediate. `vault_pki` custody only, and off by default.\n\nThe default is the safer one: a root that signs only an intermediate can\nhave that intermediate revoked and replaced without redistributing the\ntrust anchor, and a root that signs leaves cannot."
+          },
           "key_algorithm": {
             "$ref": "#/components/schemas/KeyAlgorithm"
           },
@@ -11467,18 +11522,18 @@
           },
           {
             "type": "object",
-            "required": [
-              "private_key_pem"
-            ],
             "properties": {
               "private_key_pem": {
-                "type": "string",
-                "description": "PEM-encoded private key — returned only on generation."
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "PEM-encoded private key — returned only on generation, and only when\nthere is one to return.\n\nAbsent under `vault_pki` custody, where the key was generated inside\nVault and no API exports it. The field is omitted rather than sent as\n`null` so a client that has always read it keeps working unchanged for\nevery custodian that does produce a key."
               }
             }
           }
         ],
-        "description": "Response returned when a CA certificate is generated.\n\nIncludes the private key PEM, which is returned **once** and never\nstored or retrievable again."
+        "description": "Response returned when a CA certificate is generated.\n\nIncludes the private key PEM, which is returned **once** and never\nstored or retrievable again — when the custodian produced one at all. Under\n`vault_pki` custody the key was born inside Vault and there is nothing to\nreturn, which is the point of that custodian rather than a shortcoming of\nthis response."
       },
       "GeneratedCertificate": {
         "allOf": [
@@ -11491,6 +11546,13 @@
               "private_key_pem"
             ],
             "properties": {
+              "chain_pem": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The issuing chain, concatenated PEM, nearest issuer first.\n\nPresent only when the signer returned one — which is the `vault_pki`\ncase, where the root's certificate exists nowhere a client could fetch\nit from. For a CA AXIAM signed with itself the chain is the CA\ncertificate, which `GET .../ca-certificates/{id}` already serves, so the\nfield is omitted rather than restating it."
+              },
               "private_key_pem": {
                 "type": "string",
                 "description": "PEM-encoded private key — returned only on generation."

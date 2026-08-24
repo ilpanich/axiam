@@ -25,16 +25,25 @@
 //! a policy that can be scoped and revoked, every read is audited by something
 //! that is not AXIAM, and a database dump on its own is inert.
 //!
-//! # What this port does *not* do
+//! # Custody, and the stronger thing beyond it
 //!
-//! Sign anything. Every implementation here hands back a private key PEM, which
-//! means the key does reach AXIAM's memory to sign with. The stronger property
-//! — a key that never leaves the custodian, with signing done by Vault's PKI
-//! engine or a KMS — needs certificate *issuance* to move there too, not just
-//! custody, which is a change to a different part of the system. Designing the
-//! port around a key reference rather than a key is what leaves room for that:
-//! a future implementation can answer a `sign` call without ever answering a
-//! `load` one.
+//! Most implementations hand back a private key PEM, which means the key does
+//! reach AXIAM's memory to sign with. That is *custody*: the key is somewhere
+//! better than a database column, and reading it is an audited, revocable act
+//! — but AXIAM still reads it.
+//!
+//! One implementation does not. Vault's PKI secrets engine generates the key
+//! inside itself and exposes no API that exports it, so a
+//! [`CaKeyCustody::VaultPki`] CA answers [`CaKeyStore::load`] with a refusal
+//! and answers [`CaKeyStore::sign_csr`] instead. Designing the port around a
+//! key *reference* rather than a key is what left room for that, and the three
+//! capability questions below — [`CaKeyStore::generates_cas`],
+//! [`CaKeyStore::signs_remotely`] — are how a caller finds out which kind of
+//! custodian it is holding without knowing the concrete type.
+//!
+//! The default bodies are the whole point of those methods being on this trait
+//! rather than a second one: a custodian that holds keys the ordinary way
+//! implements none of them and behaves exactly as it did before.
 //!
 //! Nothing here decides *which* custodian a deployment uses. The composition
 //! root picks one and the CA row records which answered, so a deployment that
@@ -47,7 +56,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::error::AxiamResult;
+use crate::error::{AxiamError, AxiamResult};
+use crate::models::certificate::KeyAlgorithm;
 
 /// Which custodian holds a CA's private key.
 ///
@@ -66,6 +76,17 @@ pub enum CaKeyCustody {
     /// A HashiCorp Vault KV v2 secret. The row holds the path and no key
     /// material at all.
     Vault,
+    /// A HashiCorp Vault **PKI secrets engine** issuer. The key is generated
+    /// inside Vault by `root/generate/internal` and
+    /// `intermediate/generate/internal`, and there is no API that exports it —
+    /// so unlike every other variant here, AXIAM never holds this key at all.
+    ///
+    /// Signing therefore moves to Vault too: the leaf key is generated here, a
+    /// CSR goes to `sign-verbatim`, and a certificate comes back. That is the
+    /// difference between *custody* and the stronger property this module's
+    /// header describes, and it is the reason the port is addressed by key
+    /// reference rather than by key.
+    VaultPki,
     /// No private key is held by AXIAM. An imported CA whose key stays with
     /// whoever generated it: the certificate is a trust anchor here and
     /// AXIAM cannot issue against it.
@@ -77,6 +98,7 @@ impl std::fmt::Display for CaKeyCustody {
         match self {
             Self::Database => write!(f, "database"),
             Self::Vault => write!(f, "vault"),
+            Self::VaultPki => write!(f, "vault_pki"),
             Self::External => write!(f, "external"),
         }
     }
@@ -89,6 +111,7 @@ impl std::str::FromStr for CaKeyCustody {
         match s {
             "database" => Ok(Self::Database),
             "vault" => Ok(Self::Vault),
+            "vault_pki" => Ok(Self::VaultPki),
             "external" => Ok(Self::External),
             other => Err(format!("unknown CA key custody: {other}")),
         }
@@ -121,6 +144,80 @@ pub enum StoredCaKey {
     Inline(Vec<u8>),
     /// The key is with the custodian; this is where.
     Referenced(String),
+}
+
+/// What a caller asks a key-generating custodian to create.
+///
+/// Only [`CaKeyCustody::VaultPki`] answers this today. Every field is a
+/// *request*: the row that ends up describing the CA is parsed back out of the
+/// certificate the custodian returns, because Vault caps a TTL to the mount's
+/// `max_lease_ttl` and to the signing root's own expiry without failing the
+/// call. A row built from the request would then claim a validity window the
+/// certificate does not have.
+#[derive(Debug, Clone)]
+pub struct CaGenerationRequest {
+    pub organization_id: Uuid,
+    /// The id the CA row will have. Chosen before the call so the custodian can
+    /// name what it creates after the CA that owns it.
+    pub ca_id: Uuid,
+    /// Common name for the root.
+    pub subject: String,
+    pub key_algorithm: KeyAlgorithm,
+    /// Requested root validity.
+    pub validity_days: u32,
+    /// The signing intermediate to create beneath the root, if any.
+    ///
+    /// `Some` is the ordinary case and what HashiCorp's own PKI walkthrough
+    /// does: the root signs one intermediate and then issues nothing else, so
+    /// a compromised issuer is replaced without redistributing the trust
+    /// anchor. `None` issues straight from the root, which is a smaller thing
+    /// to operate and a worse thing to lose.
+    pub intermediate: Option<IntermediateSpec>,
+}
+
+/// The signing intermediate created beneath a generated root.
+#[derive(Debug, Clone)]
+pub struct IntermediateSpec {
+    pub subject: String,
+    pub validity_days: u32,
+}
+
+/// A CA the custodian generated and still holds the key for.
+#[derive(Debug, Clone)]
+pub struct GeneratedCa {
+    /// The certificate that will sign leaves — the intermediate when one was
+    /// asked for, the root otherwise. PEM.
+    pub certificate_pem: String,
+    /// Everything above it, nearest issuer first, root last. Empty when the
+    /// issuing certificate *is* the root.
+    ///
+    /// Kept because a relying party validating an AXIAM-issued leaf needs it
+    /// and cannot get it from anywhere else: the root's certificate exists only
+    /// inside Vault.
+    pub chain_pem: Vec<String>,
+    /// What to put in the CA row's `key_locator`.
+    pub locator: String,
+}
+
+/// A leaf certificate to be signed by a custodian that holds the CA key.
+#[derive(Debug, Clone)]
+pub struct LeafSigningRequest {
+    /// PEM-encoded PKCS#10 request. The end-entity key is generated by AXIAM
+    /// and never sent — only its public half, inside this.
+    pub csr_pem: String,
+    /// How long the certificate should be valid for, in seconds. Already capped
+    /// to the CA's own remaining validity by the caller; the custodian may cap
+    /// it further, which is why the answer is parsed rather than assumed.
+    pub ttl_seconds: i64,
+}
+
+/// What a remote signer returned.
+#[derive(Debug, Clone)]
+pub struct SignedLeaf {
+    /// The signed certificate, PEM.
+    pub certificate_pem: String,
+    /// The issuing chain, nearest issuer first.
+    pub chain_pem: Vec<String>,
 }
 
 /// A custodian for CA signing keys.
@@ -167,6 +264,78 @@ pub trait CaKeyStore: Send + Sync {
         key_ref: &'a CaKeyRef,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>>;
 
+    /// Whether this custodian creates CA keys itself, rather than being handed
+    /// one AXIAM generated.
+    ///
+    /// A capability question rather than a match on [`Self::custody`], so that
+    /// adding a KMS does not mean revisiting every caller that wanted to know.
+    fn generates_cas(&self) -> bool {
+        false
+    }
+
+    /// Create a CA whose private key is born inside the custodian.
+    ///
+    /// Only called when [`Self::generates_cas`] is true. The default refuses
+    /// rather than silently generating a key here, which would produce exactly
+    /// the property — a CA key that passed through AXIAM — that a caller
+    /// reaching for this method was trying to avoid.
+    fn generate_ca<'a>(
+        &'a self,
+        request: &'a CaGenerationRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<GeneratedCa>> + Send + 'a>> {
+        let _ = request;
+        Box::pin(async {
+            Err(AxiamError::Internal(
+                "this CA key custodian cannot generate a CA: it takes custody of a key \
+                 AXIAM generated"
+                    .into(),
+            ))
+        })
+    }
+
+    /// Take custody of a CA an organization already has — BYOK.
+    ///
+    /// Separate from [`Self::store`] only because the certificate matters to a
+    /// custodian that is a PKI rather than a safe: Vault's PKI engine imports a
+    /// key and the certificate it belongs to as one bundle, and has nowhere to
+    /// put a key on its own. Every other custodian ignores the certificate,
+    /// which is what the default body does.
+    fn import_ca<'a>(
+        &'a self,
+        organization_id: Uuid,
+        ca_id: Uuid,
+        certificate_pem: &'a str,
+        private_key_pem: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<StoredCaKey>> + Send + 'a>> {
+        let _ = certificate_pem;
+        self.store(organization_id, ca_id, private_key_pem)
+    }
+
+    /// Whether signing happens inside the custodian.
+    ///
+    /// True means [`Self::load`] will refuse and [`Self::sign_csr`] is the only
+    /// way to issue against this CA — not a degraded mode but the stronger one,
+    /// where the signing key has never existed in this process.
+    fn signs_remotely(&self) -> bool {
+        false
+    }
+
+    /// Sign a CSR with a CA key the custodian holds and will not hand over.
+    ///
+    /// Only called when [`Self::signs_remotely`] is true.
+    fn sign_csr<'a>(
+        &'a self,
+        key_ref: &'a CaKeyRef,
+        request: &'a LeafSigningRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SignedLeaf>> + Send + 'a>> {
+        let _ = (key_ref, request);
+        Box::pin(async {
+            Err(AxiamError::Internal(
+                "this CA key custodian does not sign: load the key and sign here".into(),
+            ))
+        })
+    }
+
     /// Which custodian this is. Recorded on the CA row at creation.
     fn custody(&self) -> CaKeyCustody;
 
@@ -183,6 +352,7 @@ mod tests {
         for custody in [
             CaKeyCustody::Database,
             CaKeyCustody::Vault,
+            CaKeyCustody::VaultPki,
             CaKeyCustody::External,
         ] {
             let s = custody.to_string();
@@ -208,6 +378,13 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaKeyCustody>("\"external\"").unwrap(),
             CaKeyCustody::External
+        );
+        // `snake_case` on a two-word variant: the wire form, the `Display`
+        // form, the `FromStr` form and the value the schema's ASSERT allows all
+        // have to be the same string, and `vaultPki` would break three of them.
+        assert_eq!(
+            serde_json::to_string(&CaKeyCustody::VaultPki).unwrap(),
+            "\"vault_pki\""
         );
     }
 }

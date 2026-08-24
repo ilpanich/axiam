@@ -115,6 +115,9 @@ async fn ca_generate_with_key_ok() {
             subject: "Test CA with-key".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await;
 

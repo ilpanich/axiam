@@ -267,6 +267,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ca_key_custody",
         sql: SCHEMA_V45,
     },
+    Migration {
+        version: 46,
+        name: "ca_key_custody_vault_pki",
+        sql: SCHEMA_V46,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2551,9 +2556,54 @@ UPDATE ca_certificate SET key_custody = 'external' \
     WHERE key_custody = NONE AND encrypted_private_key = NONE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v46 — a CA whose key was never here, and the chain that proves it
+// -----------------------------------------------------------------------
+//
+// Two changes, both consequences of Vault's PKI secrets engine becoming a
+// custodian.
+//
+// `vault_pki` joins the `key_custody` assertion. It is not a fourth place to
+// keep a key so much as the absence of keeping: Vault generates the key inside
+// itself, exposes no API that exports it, and signs on AXIAM's behalf. The
+// v45 assertion listed three values and would reject the row outright.
+//
+// `chain_pem` exists because such a CA is an *intermediate*. The root that
+// signed it lives only in Vault, and `root/generate/internal` returns its
+// certificate exactly once — so unless AXIAM keeps that copy, nothing outside
+// Vault can ever validate a chain to it again. `option<string>` because every
+// CA AXIAM generated before this is self-signed and its chain is itself.
+//
+// SurrealDB rewrites an existing DEFINE FIELD rather than merging, so the
+// assertion is restated in full rather than extended; `IF NOT EXISTS` would
+// leave the v45 three-value form in place and the new custody unwritable.
+
+const SCHEMA_V46: &str = "\
+DEFINE FIELD OVERWRITE key_custody ON TABLE ca_certificate TYPE string \
+    DEFAULT 'database' \
+    ASSERT $value IN ['database', 'vault', 'vault_pki', 'external'];
+DEFINE FIELD IF NOT EXISTS chain_pem ON TABLE ca_certificate \
+    TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v46_admits_the_custody_v45_would_have_rejected() {
+        // The failure this prevents is a row the service happily builds and the
+        // database refuses, at the end of a CA generation that already created
+        // a root and an intermediate inside Vault.
+        assert!(SCHEMA_V46.contains("vault_pki"));
+        assert!(SCHEMA_V46.contains("OVERWRITE key_custody"));
+        // Restated in full: SurrealDB replaces a field definition rather than
+        // merging, so dropping any of the older values here would strand every
+        // CA that already records one.
+        for existing in ["database", "vault", "external"] {
+            assert!(SCHEMA_V46.contains(existing), "{existing} must survive");
+        }
+    }
 
     #[test]
     fn schema_v1_is_nonempty() {

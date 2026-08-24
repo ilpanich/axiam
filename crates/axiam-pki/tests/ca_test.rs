@@ -58,12 +58,18 @@ async fn ca_generate_ed25519_returns_valid_pem_and_fingerprint() {
             subject: "Test CA Ed25519".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
 
     assert!(
-        !result.private_key_pem.is_empty(),
+        // `Option` since Vault's PKI engine became a custodian: under
+        // `vault_pki` there is no key to return. Under this test's database
+        // custody there is, and its absence would be the bug.
+        !result.private_key_pem.unwrap_or_default().is_empty(),
         "private key PEM must be non-empty"
     );
     assert!(
@@ -97,6 +103,9 @@ async fn ca_generate_rejects_zero_validity() {
             subject: "Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 0,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await;
 
@@ -120,6 +129,9 @@ async fn ca_generate_rejects_validity_above_max() {
             subject: "Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 99_999,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await;
 

@@ -1,5 +1,6 @@
 //! Tenant certificate generation service — signs certificates with a CA key.
 
+use axiam_core::ca_keys::LeafSigningRequest;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
     Certificate, CertificateStatus, CreateCertificate, GeneratedCertificate, StoreCertificate,
@@ -7,15 +8,17 @@ use axiam_core::models::certificate::{
 use axiam_core::repository::{
     CaCertificateRepository, CertificateRepository, PaginatedResult, Pagination,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 use zeroize::Zeroize;
 
 use crate::PkiConfig;
-use crate::ca::CaService;
+use crate::ca::{CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 
@@ -115,12 +118,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // custodian, whose error says it has no private key and therefore
         // cannot issue — rather than the bare "no stored private key" this used
         // to produce for both that case and a genuine decryption failure.
-        let key_ref = CaService::<CA>::key_ref(&ca_cert);
         let store = self.custodians.store_for(ca_cert.key_custody)?;
-        let mut ca_private_key_pem = store
-            .load(&key_ref, ca_cert.encrypted_private_key.as_deref())
-            .await?
-            .to_string();
 
         let not_before = now;
         let requested_not_after = now
@@ -130,6 +128,23 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             })?;
         // Cap leaf validity to CA validity window
         let not_after = std::cmp::min(requested_not_after, ca_cert.not_after);
+
+        // A custodian that signs on AXIAM's behalf never hands the key over, so
+        // there is nothing to load and nothing to sign with here: the leaf key
+        // is generated locally, its public half goes out in a CSR, and a
+        // certificate comes back. See [`axiam_core::ca_keys`].
+        if store.signs_remotely() {
+            return self
+                .generate_remotely(&ca_cert, input, not_before, not_after)
+                .await;
+        }
+
+        // Fetch the signing key from whichever custodian this CA's row named.
+        let key_ref = CaService::<CA>::key_ref(&ca_cert);
+        let mut ca_private_key_pem = store
+            .load(&key_ref, ca_cert.encrypted_private_key.as_deref())
+            .await?
+            .to_string();
 
         // CPU-bound: key generation + certificate signing run in spawn_blocking behind semaphore (CQ-B02).
         let _permit = self
@@ -209,6 +224,99 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         Ok(GeneratedCertificate {
             certificate,
             private_key_pem,
+            // Signed in-process by a CA whose certificate the caller can fetch;
+            // there is no chain here they cannot already assemble.
+            chain_pem: None,
+        })
+    }
+
+    /// Issue against a CA whose key lives in — and stays in — its custodian.
+    ///
+    /// The end-entity key is still generated here and still returned once: what
+    /// moves to the custodian is the *signature*, not the subscriber's key. The
+    /// CSR carries the public half and nothing else.
+    async fn generate_remotely(
+        &self,
+        ca_cert: &axiam_core::models::certificate::CaCertificate,
+        input: CreateCertificate,
+        not_before: DateTime<Utc>,
+        not_after: DateTime<Utc>,
+    ) -> AxiamResult<GeneratedCertificate> {
+        // Only the keygen and CSR are CPU-bound. The permit is dropped before
+        // the call to the custodian: holding it across a network round trip
+        // would let one slow signer block every other issuance in the
+        // deployment, which is the opposite of what the semaphore is for.
+        let (private_key_pem, csr_pem) = {
+            let _permit = self
+                .crypto_semaphore
+                .acquire()
+                .await
+                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+
+            let ee_subject = input.subject.clone();
+            let key_algorithm = input.key_algorithm.clone();
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
+                let ee_key_pair = generate_keypair(&key_algorithm)?;
+                let private_key_pem = ee_key_pair.serialize_pem();
+
+                let mut params = CertificateParams::new(Vec::<String>::new())
+                    .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+                params
+                    .distinguished_name
+                    .push(DnType::CommonName, &ee_subject);
+                params.is_ca = IsCa::NoCa;
+                // No validity window: a PKCS#10 request cannot carry one. The
+                // signer is told the lifetime out of band, as a TTL.
+                let csr = params.serialize_request(&ee_key_pair).map_err(|e| {
+                    AxiamError::Certificate(format!("certificate request failed: {e}"))
+                })?;
+                let csr_pem = csr
+                    .pem()
+                    .map_err(|e| AxiamError::Certificate(format!("CSR encoding failed: {e}")))?;
+                Ok((private_key_pem, csr_pem))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??
+        };
+
+        let key_ref = CaService::<CA>::key_ref(ca_cert);
+        let store = self.custodians.store_for(ca_cert.key_custody)?;
+        let signed = store
+            .sign_csr(
+                &key_ref,
+                &LeafSigningRequest {
+                    csr_pem,
+                    ttl_seconds: (not_after - not_before).num_seconds(),
+                },
+            )
+            .await?;
+
+        // What the signer produced, not what was asked for. A remote signer
+        // caps a TTL to its mount's own maximum without failing the call, so a
+        // row built from the request would claim a window the certificate does
+        // not have — and the fingerprint has to be of the real bytes or every
+        // lookup by fingerprint misses.
+        let issued = parse_issued_leaf(&signed.certificate_pem)?;
+
+        let store_record = StoreCertificate {
+            tenant_id: input.tenant_id,
+            issuer_ca_id: input.issuer_ca_id,
+            subject: input.subject,
+            public_cert_pem: signed.certificate_pem,
+            fingerprint: issued.fingerprint,
+            cert_type: input.cert_type,
+            key_algorithm: input.key_algorithm,
+            not_before: issued.not_before,
+            not_after: issued.not_after,
+            metadata: input.metadata.unwrap_or(serde_json::json!({})),
+        };
+
+        let certificate = self.cert_repo.create(store_record).await?;
+
+        Ok(GeneratedCertificate {
+            certificate,
+            private_key_pem,
+            chain_pem: (!signed.chain_pem.is_empty()).then(|| join_pem(&signed.chain_pem)),
         })
     }
 
@@ -237,6 +345,38 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     ) -> AxiamResult<PaginatedResult<Certificate>> {
         self.cert_repo.list(tenant_id, pagination).await
     }
+}
+
+/// What a certificate a remote signer returned actually says about itself.
+struct IssuedLeaf {
+    fingerprint: String,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+}
+
+/// Read back a signed leaf, so the row describes the certificate rather than
+/// the request that produced it.
+fn parse_issued_leaf(pem: &str) -> AxiamResult<IssuedLeaf> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).map_err(|e| {
+        AxiamError::Certificate(format!(
+            "the signer returned something that is not a PEM certificate: {e}"
+        ))
+    })?;
+    let (_, cert) = X509Certificate::from_der(&block.contents).map_err(|e| {
+        AxiamError::Certificate(format!("the signed certificate could not be parsed: {e}"))
+    })?;
+
+    let to_utc = |t: i64, what: &str| -> AxiamResult<DateTime<Utc>> {
+        DateTime::from_timestamp(t, 0).ok_or_else(|| {
+            AxiamError::Certificate(format!("the signed certificate's {what} is out of range"))
+        })
+    };
+
+    Ok(IssuedLeaf {
+        fingerprint: compute_fingerprint(&block.contents),
+        not_before: to_utc(cert.validity().not_before.timestamp(), "notBefore")?,
+        not_after: to_utc(cert.validity().not_after.timestamp(), "notAfter")?,
+    })
 }
 
 #[cfg(test)]

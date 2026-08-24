@@ -46,7 +46,7 @@ export interface Tenant {
  * - `external` — AXIAM holds no key. An imported trust anchor: certificates it
  *   signed are trusted, and AXIAM cannot issue new ones against it.
  */
-export type CaKeyCustody = "database" | "vault" | "external";
+export type CaKeyCustody = "database" | "vault" | "vault_pki" | "external";
 
 export interface CaCertificate {
   id: string;
@@ -60,6 +60,14 @@ export interface CaCertificate {
   not_after: string;
   /** Optional so a server older than the field does not fail the type. */
   key_custody?: CaKeyCustody;
+  /**
+   * The issuers above `public_cert_pem`, concatenated PEM, root last.
+   *
+   * Present for a `vault_pki` CA, where the certificate that signs is an
+   * intermediate and its root exists only inside Vault. Absent for a CA that is
+   * its own root.
+   */
+  chain_pem?: string;
 }
 
 // ─── Security settings ─────────────────────────────────────────────────────────
@@ -262,8 +270,13 @@ export interface ImportCaCertPayload {
 
 /// Generation response flattens the CA certificate and adds the one-time
 /// PEM-encoded private key (never retrievable again).
+///
+/// `private_key_pem` is optional because under `vault_pki` custody there is no
+/// key to return: Vault generated it and exposes no API that exports it. The
+/// thing to save in that case is `chain_pem` — Vault hands over a generated
+/// root's certificate exactly once.
 export interface GeneratedCaCertificate extends CaCertificate {
-  private_key_pem: string;
+  private_key_pem?: string;
 }
 
 // ─── Organizations service ────────────────────────────────────────────────────

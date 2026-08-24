@@ -85,6 +85,9 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
             subject: "Chain Test CA".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -192,6 +195,9 @@ async fn mtls_chain_reject_forged_leaf_with_matching_fingerprint() {
             subject: "Real CA (forged-leaf test)".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("real CA must be created");
@@ -318,6 +324,9 @@ async fn mtls_rejects_revoked_issuing_ca() {
             subject: "Revoked CA Test".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");
@@ -413,6 +422,9 @@ async fn mtls_rejects_expired_issuing_ca() {
             subject: "Expired CA Test".into(),
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
         })
         .await
         .expect("CA generation must succeed");

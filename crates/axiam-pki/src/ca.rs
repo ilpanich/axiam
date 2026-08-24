@@ -1,6 +1,8 @@
 //! CA certificate generation and management service.
 
-use axiam_core::ca_keys::{CaKeyCustody, CaKeyRef, StoredCaKey};
+use axiam_core::ca_keys::{
+    CaGenerationRequest, CaKeyCustody, CaKeyRef, IntermediateSpec, StoredCaKey,
+};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
     CaCertificate, CreateCaCertificate, GeneratedCaCertificate, ImportCaCertificate, KeyAlgorithm,
@@ -59,10 +61,19 @@ impl<R: CaCertificateRepository> CaService<R> {
         }
     }
 
-    /// Generate a new self-signed CA certificate.
+    /// Generate a new CA certificate.
     ///
-    /// Returns the stored certificate **and** the private key PEM (returned
-    /// once, never stored in plaintext).
+    /// Two shapes, chosen by the configured custodian rather than by the
+    /// caller, because the difference is a property of where keys live and not
+    /// of what was asked for:
+    ///
+    /// * **AXIAM generates it.** A self-signed root, whose private key is
+    ///   handed to the custodian and returned to the caller once. What every
+    ///   custodian but one does.
+    /// * **The custodian generates it.** Under `vault_pki`, Vault creates a
+    ///   root and a signing intermediate beneath it, and there is no private
+    ///   key to return because none ever existed here. [`GeneratedCaCertificate`]
+    ///   omits the field rather than sending an empty one.
     pub async fn generate(
         &self,
         input: CreateCaCertificate,
@@ -74,6 +85,29 @@ impl<R: CaCertificateRepository> CaService<R> {
                      (NIST SP 800-57 max for CA certificates)"
                 ),
             });
+        }
+        if let Some(days) = input.intermediate_validity_days
+            && (days == 0 || days > MAX_CA_VALIDITY_DAYS)
+        {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "intermediate_validity_days must be between 1 and {MAX_CA_VALIDITY_DAYS} \
+                     (NIST SP 800-57 max for CA certificates)"
+                ),
+            });
+        }
+
+        // The id is minted here rather than by the repository because a
+        // custodian outside the database addresses the key *by CA id*: the id
+        // has to exist before the key is stored, and the key has to be stored
+        // before the row. A custodian that refuses therefore stops the CA
+        // existing at all, rather than leaving a certificate whose key is
+        // nowhere and whose failure surfaces at the first issuance.
+        let ca_id = Uuid::new_v4();
+        let store = self.custodians.default_store()?;
+
+        if store.generates_cas() {
+            return self.generate_in_custodian(ca_id, input).await;
         }
 
         // CPU-bound: key generation + self-signing run in spawn_blocking behind semaphore (CQ-B02).
@@ -120,14 +154,6 @@ impl<R: CaCertificateRepository> CaService<R> {
             .await
             .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
-        // The id is minted here rather than by the repository because a
-        // custodian outside the database addresses the key *by CA id*: the id
-        // has to exist before the key is stored, and the key has to be stored
-        // before the row. A custodian that refuses therefore stops the CA
-        // existing at all, rather than leaving a certificate whose key is
-        // nowhere and whose failure surfaces at the first issuance.
-        let ca_id = Uuid::new_v4();
-        let store = self.custodians.default_store()?;
         let stored = store
             .store(input.organization_id, ca_id, &private_key_pem)
             .await?;
@@ -138,6 +164,8 @@ impl<R: CaCertificateRepository> CaService<R> {
             organization_id: input.organization_id,
             subject: input.subject,
             public_cert_pem,
+            // A self-signed root is its own chain.
+            chain_pem: None,
             fingerprint,
             key_algorithm: input.key_algorithm,
             not_before,
@@ -151,7 +179,73 @@ impl<R: CaCertificateRepository> CaService<R> {
 
         Ok(GeneratedCaCertificate {
             certificate,
-            private_key_pem,
+            private_key_pem: Some(private_key_pem),
+        })
+    }
+
+    /// The `vault_pki` path: Vault makes the key, the root and the intermediate.
+    ///
+    /// Nothing here is CPU-bound — no key is generated in this process — so it
+    /// deliberately does not take the crypto semaphore. Holding it across a
+    /// network round trip to Vault would let one slow CA generation block every
+    /// certificate issuance in the deployment, which is the opposite of what
+    /// the semaphore is for.
+    ///
+    /// Everything the row records is parsed back out of the certificate Vault
+    /// returned rather than taken from the request, for the same reason
+    /// [`Self::import`] does it: Vault caps a TTL to the mount's
+    /// `max_lease_ttl` and to the signing root's own expiry without failing the
+    /// call, so a row built from the request would claim a validity window the
+    /// certificate does not have.
+    async fn generate_in_custodian(
+        &self,
+        ca_id: Uuid,
+        input: CreateCaCertificate,
+    ) -> AxiamResult<GeneratedCaCertificate> {
+        let store = self.custodians.default_store()?;
+        let intermediate = (!input.issue_from_root).then(|| IntermediateSpec {
+            subject: input
+                .intermediate_subject
+                .clone()
+                .unwrap_or_else(|| format!("{} Intermediate Authority", input.subject)),
+            validity_days: input
+                .intermediate_validity_days
+                .unwrap_or(input.validity_days),
+        });
+
+        let generated = store
+            .generate_ca(&CaGenerationRequest {
+                organization_id: input.organization_id,
+                ca_id,
+                subject: input.subject,
+                key_algorithm: input.key_algorithm,
+                validity_days: input.validity_days,
+                intermediate,
+            })
+            .await?;
+
+        let parsed = parse_ca_certificate(&generated.certificate_pem)?;
+        let record = StoreCaCertificate {
+            id: ca_id,
+            organization_id: input.organization_id,
+            subject: parsed.subject,
+            public_cert_pem: generated.certificate_pem,
+            chain_pem: (!generated.chain_pem.is_empty()).then(|| join_pem(&generated.chain_pem)),
+            fingerprint: parsed.fingerprint,
+            key_algorithm: parsed.key_algorithm,
+            not_before: parsed.not_before,
+            not_after: parsed.not_after,
+            encrypted_private_key: None,
+            key_custody: store.custody(),
+            key_locator: Some(generated.locator),
+        };
+
+        let certificate = self.repo.create(record).await?;
+        Ok(GeneratedCaCertificate {
+            certificate,
+            // There is nothing to return, and that is the point of this
+            // custodian rather than an omission.
+            private_key_pem: None,
         })
     }
 
@@ -182,7 +276,18 @@ impl<R: CaCertificateRepository> CaService<R> {
         let (encrypted_private_key, key_locator, custody) = match input.private_key_pem {
             Some(ref key_pem) => {
                 let store = self.custodians.default_store()?;
-                let stored = store.store(input.organization_id, ca_id, key_pem).await?;
+                // `import_ca` rather than `store`: a custodian that is itself a
+                // PKI — Vault's engine — takes the key and the certificate it
+                // belongs to as one bundle and has nowhere to put a key alone.
+                // Every other custodian ignores the certificate.
+                let stored = store
+                    .import_ca(
+                        input.organization_id,
+                        ca_id,
+                        &input.public_cert_pem,
+                        key_pem,
+                    )
+                    .await?;
                 let (inline, locator) = split_stored(stored);
                 (inline, locator, store.custody())
             }
@@ -197,6 +302,9 @@ impl<R: CaCertificateRepository> CaService<R> {
             organization_id: input.organization_id,
             subject: parsed.subject,
             public_cert_pem: input.public_cert_pem,
+            // Whatever chain an imported CA has is held by whoever imported it;
+            // AXIAM records what it was given and does not invent the rest.
+            chain_pem: None,
             fingerprint: parsed.fingerprint,
             key_algorithm: parsed.key_algorithm,
             not_before: parsed.not_before,
@@ -271,6 +379,20 @@ fn split_stored(stored: StoredCaKey) -> (Option<Vec<u8>>, Option<String>) {
         StoredCaKey::Inline(ciphertext) => (Some(ciphertext), None),
         StoredCaKey::Referenced(locator) => (None, Some(locator)),
     }
+}
+
+/// Concatenate PEM blocks into the single string a record holds.
+///
+/// Each block already ends in a newline from every producer AXIAM sees, but
+/// trimming and rejoining is what makes that true rather than assumed: two
+/// certificates run together on one line parse as neither.
+pub(crate) fn join_pem(blocks: &[String]) -> String {
+    blocks
+        .iter()
+        .map(|b| b.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 /// What an imported certificate actually says about itself.

@@ -1,13 +1,17 @@
 //! Custodians for CA signing keys — the implementations behind
 //! [`axiam_core::ca_keys::CaKeyStore`].
 //!
-//! Two of them today:
+//! Three of them today:
 //!
 //! * [`DatabaseCaKeyStore`] — AES-256-GCM ciphertext in the `ca_certificate`
 //!   row, sealed under the process-wide `pki_encryption_key`. What AXIAM has
 //!   always done, and still the default.
 //! * [`VaultCaKeyStore`] — a HashiCorp Vault KV v2 secret. The row holds a path
 //!   and no key material.
+//! * [`VaultPkiCaKeyStore`](crate::vault_pki::VaultPkiCaKeyStore) — Vault's PKI
+//!   secrets engine, where the key is *generated* and never leaves. Its own
+//!   module, because it is the one custodian that also generates CAs and signs
+//!   with them.
 //!
 //! A KMS is the next one, and the port is shaped so it slots in beside these
 //! rather than replacing them: a deployment that adopts a new custodian keeps
@@ -25,6 +29,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto::{decrypt_secret, encrypt_secret};
+use crate::vault_pki::{
+    DEFAULT_PKI_INT_MOUNT, DEFAULT_PKI_ROOT_MOUNT, VaultPkiCaKeyStore, VaultPkiConfig,
+};
 
 // ---------------------------------------------------------------------------
 // database
@@ -693,6 +700,7 @@ mod tests {
 pub struct CaKeyCustodians {
     database: Option<DatabaseCaKeyStore>,
     vault: Option<VaultCaKeyStore>,
+    vault_pki: Option<VaultPkiCaKeyStore>,
     external: ExternalCaKeyStore,
     /// `None` when a deployment has configured no custodian at all.
     ///
@@ -709,6 +717,7 @@ impl std::fmt::Debug for CaKeyCustodians {
         f.debug_struct("CaKeyCustodians")
             .field("database", &self.database.is_some())
             .field("vault", &self.vault.is_some())
+            .field("vault_pki", &self.vault_pki.is_some())
             .field("default", &self.default_custody)
             .finish()
     }
@@ -732,12 +741,14 @@ impl CaKeyCustodians {
     pub fn new(
         database: Option<DatabaseCaKeyStore>,
         vault: Option<VaultCaKeyStore>,
+        vault_pki: Option<VaultPkiCaKeyStore>,
         default_custody: Option<CaKeyCustody>,
     ) -> AxiamResult<Self> {
         if let Some(requested) = default_custody {
             let available = match requested {
                 CaKeyCustody::Database => database.is_some(),
                 CaKeyCustody::Vault => vault.is_some(),
+                CaKeyCustody::VaultPki => vault_pki.is_some(),
                 // Never a default: it would mean generating CAs whose keys are
                 // discarded, which is a CA that can sign nothing.
                 CaKeyCustody::External => false,
@@ -746,13 +757,15 @@ impl CaKeyCustodians {
                 return Err(AxiamError::Internal(format!(
                     "CA key custody is set to `{requested}` but that custodian is not \
                      configured: database custody needs AXIAM__PKI__ENCRYPTION_KEY, vault \
-                     custody needs AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN"
+                     and vault_pki custody need AXIAM__PKI__VAULT_ADDR and \
+                     AXIAM__PKI__VAULT_TOKEN"
                 )));
             }
         }
         Ok(Self {
             database,
             vault,
+            vault_pki,
             external: ExternalCaKeyStore,
             default_custody,
         })
@@ -812,6 +825,18 @@ impl CaKeyCustodians {
                             .into(),
                     )
                 }),
+            CaKeyCustody::VaultPki => self
+                .vault_pki
+                .as_ref()
+                .map(|s| s as &dyn CaKeyStore)
+                .ok_or_else(|| {
+                    AxiamError::Internal(
+                        "this CA's key is in Vault's PKI engine, but no Vault is \
+                         configured — set AXIAM__PKI__VAULT_ADDR and \
+                         AXIAM__PKI__VAULT_TOKEN"
+                            .into(),
+                    )
+                }),
             CaKeyCustody::External => Ok(&self.external),
         }
     }
@@ -834,6 +859,58 @@ mod registry_tests {
         )
     }
 
+    fn vault_pki() -> VaultPkiCaKeyStore {
+        VaultPkiCaKeyStore::with_client(
+            Client::new(),
+            VaultPkiConfig {
+                address: "https://vault.internal:8200".into(),
+                token: "t".into(),
+                root_mount: "pki".into(),
+                int_mount: "pki_int".into(),
+                ca_cert_path: None,
+            },
+        )
+    }
+
+    #[test]
+    fn the_two_vault_custodians_are_distinct_choices_not_one() {
+        // Both are built from the same address and token, and an operator who
+        // asked for `vault_pki` must not be served the KV store: the two
+        // differ in whether AXIAM ever holds the key at all.
+        let custodians = CaKeyCustodians::new(
+            None,
+            Some(vault()),
+            Some(vault_pki()),
+            Some(CaKeyCustody::VaultPki),
+        )
+        .unwrap();
+        assert_eq!(
+            custodians.default_store().unwrap().custody(),
+            CaKeyCustody::VaultPki
+        );
+        assert!(custodians.default_store().unwrap().generates_cas());
+        assert!(custodians.default_store().unwrap().signs_remotely());
+        // And the KV rows a deployment already had still resolve to the KV one.
+        assert!(
+            !custodians
+                .store_for(CaKeyCustody::Vault)
+                .unwrap()
+                .signs_remotely()
+        );
+    }
+
+    #[test]
+    fn vault_pki_named_without_a_vault_is_a_startup_failure() {
+        let err = CaKeyCustodians::new(
+            Some(DatabaseCaKeyStore::new([0u8; 32])),
+            None,
+            None,
+            Some(CaKeyCustody::VaultPki),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("VAULT_ADDR"), "{err}");
+    }
+
     #[test]
     fn a_default_that_is_not_configured_is_refused_rather_than_substituted() {
         // Falling back would hand an operator who asked for Vault exactly the
@@ -841,13 +918,14 @@ mod registry_tests {
         let err = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             None,
+            None,
             Some(CaKeyCustody::Vault),
         )
         .unwrap_err();
         assert!(err.to_string().contains("VAULT_ADDR"), "{err}");
 
-        let err =
-            CaKeyCustodians::new(None, Some(vault()), Some(CaKeyCustody::Database)).unwrap_err();
+        let err = CaKeyCustodians::new(None, Some(vault()), None, Some(CaKeyCustody::Database))
+            .unwrap_err();
         assert!(err.to_string().contains("ENCRYPTION_KEY"), "{err}");
     }
 
@@ -858,6 +936,7 @@ mod registry_tests {
             CaKeyCustodians::new(
                 Some(DatabaseCaKeyStore::new([0u8; 32])),
                 Some(vault()),
+                None,
                 Some(CaKeyCustody::External),
             )
             .is_err()
@@ -871,7 +950,7 @@ mod registry_tests {
         // for a feature it never touches — which is exactly what the e2e stack
         // is. The failure belongs where the operator is when they need the
         // message: generating their first CA.
-        let custodians = CaKeyCustodians::new(None, None, None)
+        let custodians = CaKeyCustodians::new(None, None, None, None)
             .expect("a deployment with no PKI key must still start");
         assert_eq!(custodians.default_custody(), None);
 
@@ -894,6 +973,7 @@ mod registry_tests {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             Some(vault()),
+            None,
             Some(CaKeyCustody::Vault),
         )
         .unwrap();
@@ -918,6 +998,7 @@ mod registry_tests {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
             None,
+            None,
             Some(CaKeyCustody::Database),
         )
         .unwrap();
@@ -932,6 +1013,7 @@ mod registry_tests {
     fn an_external_row_resolves_without_any_custodian_configured() {
         let custodians = CaKeyCustodians::new(
             Some(DatabaseCaKeyStore::new([0u8; 32])),
+            None,
             None,
             Some(CaKeyCustody::Database),
         )
@@ -963,6 +1045,13 @@ pub const CA_VAULT_PREFIX_ENV: &str = "AXIAM__PKI__VAULT_PREFIX";
 /// Trust anchor for Vault's listener certificate.
 pub const CA_VAULT_CA_CERT_ENV: &str = "AXIAM__PKI__VAULT_CA_CERT_PATH";
 
+/// PKI mount holding the roots AXIAM generates. Defaults to
+/// [`DEFAULT_PKI_ROOT_MOUNT`].
+pub const CA_VAULT_PKI_ROOT_MOUNT_ENV: &str = "AXIAM__PKI__VAULT_PKI_ROOT_MOUNT";
+/// PKI mount holding the issuing intermediates. Defaults to
+/// [`DEFAULT_PKI_INT_MOUNT`].
+pub const CA_VAULT_PKI_INT_MOUNT_ENV: &str = "AXIAM__PKI__VAULT_PKI_INT_MOUNT";
+
 /// Where CA keys live under the mount when nothing says otherwise.
 pub const DEFAULT_CA_VAULT_PREFIX: &str = "axiam/ca-keys";
 /// Vault's own default KV mount.
@@ -980,6 +1069,12 @@ pub const DEFAULT_CA_VAULT_MOUNT: &str = "secret";
 /// address and token is a startup failure rather than a silent fallback: an
 /// operator who asked for Vault and got the database would have exactly the
 /// property they were trying to stop having.
+///
+/// An address and a token make *both* Vault custodians available, and the
+/// implied default stays `vault` — the KV one. Moving a deployment's new CAs
+/// into Vault's PKI engine changes where their keys are *generated*, which is
+/// not something a version upgrade should do on its own; it takes
+/// `AXIAM__PKI__CA_KEY_STORE=vault_pki` said out loud.
 pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKeyCustodians> {
     let database = encryption_key.map(DatabaseCaKeyStore::new);
 
@@ -1024,6 +1119,40 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         (None, None) => None,
     };
 
+    // The PKI engine reaches the *same* Vault: an operator running one Vault
+    // should not configure its address twice. Only the mounts differ, and both
+    // have Vault's own conventional defaults — so adopting this custodian is one
+    // variable, `CA_KEY_STORE=vault_pki`, on a deployment that already had
+    // Vault custody working.
+    let vault_pki = match (
+        std::env::var(CA_VAULT_ADDR_ENV)
+            .ok()
+            .filter(|v| !v.is_empty()),
+        std::env::var(CA_VAULT_TOKEN_ENV)
+            .ok()
+            .filter(|v| !v.is_empty()),
+    ) {
+        (Some(address), Some(token)) => Some(VaultPkiCaKeyStore::new(VaultPkiConfig {
+            address,
+            token,
+            root_mount: std::env::var(CA_VAULT_PKI_ROOT_MOUNT_ENV)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_PKI_ROOT_MOUNT.to_string()),
+            int_mount: std::env::var(CA_VAULT_PKI_INT_MOUNT_ENV)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_PKI_INT_MOUNT.to_string()),
+            ca_cert_path: std::env::var(CA_VAULT_CA_CERT_ENV)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+        })?),
+        // The half-configured cases are already a hard error above, on the KV
+        // store built from the same two variables.
+        _ => None,
+    };
+
     let default_custody = match std::env::var(CA_KEY_STORE_ENV) {
         // An explicit request. `CaKeyCustodians::new` refuses it when the named
         // custodian is not actually configured — the one case worth stopping
@@ -1031,7 +1160,7 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         Ok(raw) if !raw.trim().is_empty() => {
             Some(raw.trim().parse::<CaKeyCustody>().map_err(|e| {
                 AxiamError::Internal(format!(
-                    "{CA_KEY_STORE_ENV}: {e} — expected `database` or `vault`"
+                    "{CA_KEY_STORE_ENV}: {e} — expected `database`, `vault` or `vault_pki`"
                 ))
             })?)
         }
@@ -1047,5 +1176,5 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         _ => None,
     };
 
-    CaKeyCustodians::new(database, vault, default_custody)
+    CaKeyCustodians::new(database, vault, vault_pki, default_custody)
 }

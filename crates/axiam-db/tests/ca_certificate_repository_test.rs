@@ -35,6 +35,7 @@ fn sample_ca(organization_id: Uuid) -> StoreCaCertificate {
         organization_id,
         subject: "CN=ACME Root CA".into(),
         public_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----".into(),
+        chain_pem: None,
         fingerprint: "sha256:deadbeef".into(),
         key_algorithm: KeyAlgorithm::Rsa4096,
         not_before: Utc::now() - Duration::minutes(1),

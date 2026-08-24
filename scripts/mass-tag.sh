@@ -32,11 +32,28 @@
 # the commits between the previous v* tag reachable from HEAD and HEAD (all
 # commits when the repo has no tags yet) are grouped by their Conventional-
 # Commit type into Keep-a-Changelog sections — `feat` -> Added, `fix` -> Fixed,
-# everything else -> Changed — and prepended as a new `## [<version>] - <date>`
+# everything else -> Changed — and written as a new `## [<version>] - <date>`
 # section. The script's own `chore(release):`/`docs(changelog):` commits are
 # filtered out so re-runs don't echo themselves. A repo with no CHANGELOG.md
 # gets a fresh Keep-a-Changelog file; an existing `[<version>]` section is left
 # untouched (idempotent).
+#
+# THE PENDING `## [Unreleased]` BLOCK IS PART OF THE RELEASE. Keep a Changelog
+# puts it at the top of the file, and what is in it when a release is cut is,
+# by definition, what that release ships — so the new section does not jump
+# over it. Its content is FOLDED INTO the new section, `### Added` into
+# `### Added` and so on, and an EMPTY `## [Unreleased]` is left at the top for
+# the next cycle. Hand-written prose therefore ends up in the release that
+# shipped it, alongside the mechanical one-line summaries of the same commits;
+# a bullet already present in the generated section is not repeated.
+#
+# Getting this wrong is how the fleet's changelogs were corrupted before: an
+# earlier revision inserted the new section before the FIRST `## [` heading,
+# which is the pending block, stranding one orphaned `## [Unreleased]` in the
+# middle of the file per release cut. The invariant now holds unconditionally —
+# after a run there is exactly one `## [Unreleased]`, it is at the top, and it
+# is empty. A file that still carries older orphans is reported (a warning, not
+# a failure) so it can be repaired by hand.
 #
 # What "everywhere the version is declared" means, per repo (see bump_versions):
 #   axiam (platform)   Cargo.toml [workspace.package] version; all axiam-*
@@ -211,7 +228,9 @@ Usage:
   -c, --changelog (optional) summarize the commits since the previous tag into
                  each repo's CHANGELOG.md and commit it (folded into the version
                  -bump commit when there is one, else a dedicated commit) before
-                 tagging.
+                 tagging. Any pending `## [Unreleased]` block is merged into the
+                 new section — it is what the release ships — and an empty one
+                 is left at the top for the next cycle.
       --root DIR (optional) directory containing the repo clones as siblings
                  (default: the parent of this repository).
   -n, --dry-run  (optional) print the mutating actions instead of running them.
@@ -673,10 +692,155 @@ build_changelog_entry() {
   CHANGELOG_ENTRY="$entry"
 }
 
-# Prepend a new section for version $1 to CHANGELOG.md (creating the file with a
-# standard header if absent). Sets CHANGELOG_TOUCHED=true when the file was
-# written. Idempotent: an existing [<version>] section is left alone. Honours
-# --dry-run. Run from inside the repo dir.
+# The rewriter behind write_changelog, kept as perl because the job is text
+# surgery on a structured document, not a substitution. Given the new section in
+# $ENV{ENTRY} it rewrites the CHANGELOG.md named in $ARGV[0] so that:
+#
+#   * a pending `## [Unreleased]` block at the top is FOLDED INTO the new
+#     section, `### Added` into `### Added` and so on — that block is what this
+#     release ships, so it belongs in this release's section and nowhere else;
+#   * an EMPTY `## [Unreleased]` is left at the top for the next cycle;
+#   * the new section follows it, above the previously newest release.
+#
+# Bullet blocks (a `- ` line plus its indented continuation lines, so wrapped
+# multi-paragraph prose survives) are deduplicated by normalized text, so a
+# pending entry that merely restates a generated one-liner is not doubled up.
+#
+# Assigned from a quoted heredoc and passed as `perl -e "$CHANGELOG_REWRITE_PL"`:
+# the heredoc keeps the shell out of the perl sigils, and the expansion of the
+# variable is not rescanned, so `$s` / `@out` reach perl intact.
+CHANGELOG_REWRITE_PL="$(cat <<'PERL'
+use strict;
+use warnings;
+
+my @CANON = qw(added changed deprecated removed fixed security);
+
+sub rstrip { my $s = shift; $s =~ s/\s+\z//; return $s }
+
+sub canon_idx {
+    my $n = lc shift;
+    for my $i (0 .. $#CANON) { return $i if $n eq $CANON[$i] }
+    return scalar @CANON;
+}
+
+# Split a section body into `### Name` subsections, keeping anything before the
+# first one as a preamble.
+sub subsections {
+    my @lines = split /\n/, shift, -1;
+    my (@pre, @subs, $cur);
+    for my $line (@lines) {
+        if ($line =~ /^###[ \t]+(.+?)[ \t]*$/) {
+            $cur = { name => $1, body => [] };
+            push @subs, $cur;
+        } elsif ($cur) {
+            push @{ $cur->{body} }, $line;
+        } elsif ($line =~ /\S/) {
+            push @pre, $line;
+        }
+    }
+    return (\@pre, \@subs);
+}
+
+# Split a subsection body into bullet blocks: a `- ` line plus the lines that
+# continue it, so a wrapped multi-paragraph entry moves as one unit.
+sub blocks {
+    my @lines = @{ +shift };
+    my (@out, $cur);
+    for my $line (@lines) {
+        if    ($line =~ /^[-*][ \t]/) { $cur = [$line]; push @out, $cur }
+        elsif ($cur)                  { push @$cur, $line }
+        elsif ($line =~ /\S/)         { $cur = [$line]; push @out, $cur }
+    }
+    for my $b (@out) { pop @$b while @$b && $b->[-1] !~ /\S/ }
+    return @out;
+}
+
+sub fingerprint {
+    my $s = join ' ', @{ +shift };
+    $s =~ s/\s+/ /g;
+    $s =~ s/^ | $//g;
+    return lc $s;
+}
+
+# Merge the pending body into the entry body; render the result as lines.
+sub merge_bodies {
+    my ($entry_body, $pending_body) = @_;
+    my ($e_pre, $e_subs) = subsections($entry_body);
+    my ($p_pre, $p_subs) = subsections($pending_body);
+
+    my (%by, @order);
+    for my $s (@$e_subs, @$p_subs) {
+        my $k = lc $s->{name};
+        unless (exists $by{$k}) {
+            $by{$k} = { name => $s->{name}, blocks => [], seen => {} };
+            push @order, $k;
+        }
+        for my $b (blocks($s->{body})) {
+            my $f = fingerprint($b);
+            next if !length $f || $by{$k}{seen}{$f}++;
+            push @{ $by{$k}{blocks} }, $b;
+        }
+    }
+    @order = sort {
+        canon_idx($by{$a}{name}) <=> canon_idx($by{$b}{name}) or $a cmp $b
+    } @order;
+
+    my @out = (@$e_pre, @$p_pre);
+    for my $k (@order) {
+        next unless @{ $by{$k}{blocks} };
+        push @out, '', "### $by{$k}{name}", '';
+        push @out, @$_, '' for @{ $by{$k}{blocks} };
+        pop @out while @out && $out[-1] !~ /\S/;
+    }
+    return @out;
+}
+
+my $file  = shift @ARGV or die "mass-tag: no CHANGELOG path given\n";
+my $entry = $ENV{ENTRY} // '';
+
+open my $in, '<', $file or die "mass-tag: cannot read $file: $!\n";
+my $text = do { local $/; <$in> };
+close $in;
+
+my ($header, $body) = ($text, '');
+if ($text =~ /^(.*?)(^##[ \t].*)\z/ms) { ($header, $body) = ($1, $2) }
+
+my @sections = grep { /\S/ } split /(?=^##[ \t])/m, $body;
+
+# Take the pending block off the top, if there is one.
+my $pending = '';
+if (@sections && $sections[0] =~ /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i) {
+    $pending = shift @sections;
+    $pending =~ s/^[^\n]*\n?//;   # drop its heading
+}
+
+# An [Unreleased] anywhere else is damage from the revision of this script that
+# inserted new sections ABOVE the pending block instead of folding it in. Say
+# so; do not silently build on top of it, and do not fail the release for it.
+my $strays = grep { /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i } @sections;
+warn "mass-tag: WARNING: $file has $strays stray [Unreleased] section(s) below "
+   . "the newest release; merge each into the release above it by hand\n" if $strays;
+
+my ($entry_head, @entry_rest) = split /\n/, $entry, -1;
+
+my @out = split /\n/, rstrip($header), -1;
+push @out, '', '## [Unreleased]';
+push @out, '', rstrip($entry_head);
+push @out, merge_bodies(join("\n", @entry_rest), $pending);
+push @out, '', split(/\n/, rstrip($_), -1) for @sections;
+
+open my $fh, '>', $file or die "mass-tag: cannot write $file: $!\n";
+print {$fh} join("\n", @out), "\n";
+close $fh;
+PERL
+)"
+
+# Write a new section for version $1 into CHANGELOG.md (creating the file with a
+# standard header if absent), folding any pending [Unreleased] block into it and
+# leaving an empty one at the top. Sets CHANGELOG_TOUCHED=true when the file was
+# written. Idempotent: an existing [<version>] section is left alone — which is
+# also what stops a re-run from cutting the section twice. Honours --dry-run.
+# Run from inside the repo dir.
 CHANGELOG_TOUCHED=false
 write_changelog() {
   local version="$1" file="CHANGELOG.md"
@@ -689,26 +853,14 @@ write_changelog() {
   fi
 
   if $DRY_RUN; then
-    printf '      [dry-run] prepend new section to CHANGELOG.md:\n'
+    printf '      [dry-run] new CHANGELOG.md section (any pending [Unreleased] block folded in):\n'
     printf '%s\n' "$CHANGELOG_ENTRY" | sed 's/^/        | /'
     return 0
   fi
 
-  if [[ -f "$file" ]]; then
-    if grep -q '^## \[' "$file"; then
-      # Insert before the first existing version section, keeping newest-first.
-      ENTRY="$CHANGELOG_ENTRY" perl -0pi -e '
-        BEGIN { $e = $ENV{ENTRY} }
-        s/^(## \[)/$e\n\n$1/m unless $done++;
-      ' "$file"
-    else
-      # Header-only changelog: append the first entry after the header.
-      printf '\n%s\n' "$CHANGELOG_ENTRY" >> "$file"
-    fi
-  else
-    printf '%s\n\n%s\n' "$CHANGELOG_HEADER" "$CHANGELOG_ENTRY" > "$file"
-  fi
-  printf '      CHANGELOG.md: added [%s] section\n' "$version"
+  [[ -f "$file" ]] || printf '%s\n' "$CHANGELOG_HEADER" > "$file"
+  ENTRY="$CHANGELOG_ENTRY" perl -e "$CHANGELOG_REWRITE_PL" -- "$file"
+  printf '      CHANGELOG.md: added [%s] section; [Unreleased] reset at the top\n' "$version"
   CHANGELOG_TOUCHED=true
 }
 

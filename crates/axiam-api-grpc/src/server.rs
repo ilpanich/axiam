@@ -47,6 +47,7 @@ use uuid::Uuid;
 
 use crate::config::GrpcConfig;
 use crate::middleware::auth::AuthInterceptor;
+use crate::middleware::drain_rejected::DrainRejectedBodyLayer;
 use crate::middleware::rate_limit::{
     GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
 };
@@ -287,6 +288,11 @@ where
         .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
+        // OUTERMOST (added first = runs first): refunds h2's small-DATA-frame
+        // budget for any call the rate limiters below answer without reading
+        // its body. Without it the listener GOAWAYs the connection every ~102
+        // rejections — see `middleware::drain_rejected`.
+        .layer(DrainRejectedBodyLayer)
         .layer(governor_layer)
         .layer(shared_rate_limit_layer)
         .layer(tower::util::option_layer(strict_revocation_layer));

@@ -854,6 +854,7 @@ dependencies = [
  "futures",
  "governor",
  "http 1.5.0",
+ "http-body",
  "http-body-util",
  "prost",
  "rcgen",

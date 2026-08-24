@@ -69,3 +69,4 @@ __pycache__/
 # (docs/conformance/), never the credentials in between.
 conformance/.run/
 conformance/certs/
+stories/

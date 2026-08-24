@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha42] - 2026-08-24
+
+### Changed
+
+- Update .gitignore
+
+### Fixed
+
+- Fold the pending [Unreleased] block into the release being cut
+
+- Drain a rate-limited call's body so h2 stops killing the connection
+
+- Retry the failed-login accrual when it loses a write conflict
+
 ## [1.0.0-alpha41] - 2026-08-24
 
 ### Added

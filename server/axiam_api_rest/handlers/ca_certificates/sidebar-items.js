@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["generate","get","list","revoke"],"struct":["CreateCaCertificateRequest"]};
+window.SIDEBAR_ITEMS = {"fn":["generate","get","import","list","revoke"],"struct":["CreateCaCertificateRequest","ImportCaCertificateRequest"]};

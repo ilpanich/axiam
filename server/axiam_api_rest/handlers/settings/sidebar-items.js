@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["get_org_settings","get_tenant_settings","set_org_settings","set_tenant_settings"]};
+window.SIDEBAR_ITEMS = {"fn":["delete_tenant_override","get_org_settings","get_tenant_override","get_tenant_settings","set_org_settings","set_tenant_override","set_tenant_settings"]};

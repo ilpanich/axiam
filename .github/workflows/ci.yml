@@ -268,28 +268,28 @@ jobs:
 
       # --- Upload all SARIF results to GitHub Security tab (D-07) ---
       - name: Upload hadolint server SARIF
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4
         if: always()
         with:
           sarif_file: hadolint-server.sarif
           category: hadolint-server
 
       - name: Upload hadolint frontend SARIF
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4
         if: always()
         with:
           sarif_file: hadolint-frontend.sarif
           category: hadolint-frontend
 
       - name: Upload trivy filesystem SARIF
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4
         if: always()
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Upload trivy config SARIF
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4
         if: always()
         with:
           sarif_file: trivy-config.sarif

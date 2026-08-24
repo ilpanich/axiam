@@ -237,7 +237,7 @@ jobs:
       contents: read
       id-token: write   # npm Trusted Publishing OIDC (and provenance, which it implies)
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: opaque-wasm-pkg
           path: pkg
@@ -356,7 +356,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: cabi-*
           merge-multiple: true

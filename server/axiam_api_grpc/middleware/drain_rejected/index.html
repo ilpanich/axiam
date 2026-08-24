@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Drain the request body of a call that a layer above tonic rejected outright."><title>axiam_api_grpc::middleware::drain_rejected - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module drain_rejected</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_grpc/index.html">axiam_<wbr>api_<wbr>grpc</a><span class="version">1.0.0-alpha42</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module drain_<wbr>rejected</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-bug-this-exists-to-prevent-h2-goaway-enhance_your_calm" title="The bug this exists to prevent (h2 `GOAWAY: ENHANCE_YOUR_CALM`)">The bug this exists to prevent (h2 <code>GOAWAY: ENHANCE_YOUR_CALM</code>)</a></li><li><a href="#why-that-is-a-real-defect-and-not-a-benchmark-artifact" title="Why that is a real defect and not a benchmark artifact">Why that is a real defect and not a benchmark artifact</a></li><li><a href="#what-this-layer-does" title="What this layer does">What this layer does</a></li><li><a href="#why-the-drain-is-gated-on-a-trailers-only-response" title="Why the drain is gated on a trailers-only response">Why the drain is gated on a trailers-only response</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>grpc::<wbr>middleware</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_grpc</a>::<wbr><a href="../index.html">middleware</a></div><h1>Module <span>drain_<wbr>rejected</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_grpc/middleware/drain_rejected.rs.html#1-335">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Drain the request body of a call that a layer above tonic rejected outright.</p>
+<h2 id="the-bug-this-exists-to-prevent-h2-goaway-enhance_your_calm"><a class="doc-anchor" href="#the-bug-this-exists-to-prevent-h2-goaway-enhance_your_calm">§</a>The bug this exists to prevent (h2 <code>GOAWAY: ENHANCE_YOUR_CALM</code>)</h2>
+<p>The rate-limit layers on this listener reject by returning a
+<code>RESOURCE_EXHAUSTED</code> response and <strong>dropping the request</strong> — they never read
+its body, because they never need it. That is the natural way to write a
+short-circuiting <code>tower</code> layer, and on HTTP/1.1 it would be harmless.</p>
+<p>On HTTP/2 it is not, because of how <code>h2</code> defends itself against DATA-frame
+floods (the CVE-2019-9513 family). Every inbound DATA frame smaller than
+<code>DEFAULT_DATA_FRAME_OVERHEAD_THRESHOLD</code> (256 B) charges the difference
+against a per-connection budget of <code>256 * 100 = 25_600</code>, and that budget is
+replenished <strong>only</strong> when the application actually reads the frame
+(<code>h2::proto::streams::Streams::poll_data</code> → <code>Counts::release_data_frame</code>).
+A body that is dropped unread is never refunded.</p>
+<p>A unary gRPC request body is 5 bytes on the wire (one compression flag plus
+a four-byte length, with an empty message), so each rejected call costs
+<code>256 - 5 = 251</code> and the budget is gone after <code>25_600 / 251 = 102</code> of them.
+At that point <code>h2</code> concludes it is being flooded and kills the whole
+connection with <code>GOAWAY(ENHANCE_YOUR_CALM, "too_many_data_frames")</code>.</p>
+<p>The <code>grpc_infra</code> benchmark cell reproduces this exactly: rejected calls fail
+with <code>UNAVAILABLE</code> at iteration 101, 203, 305, 407, … — one dead connection
+every 102 rejections, like clockwork.</p>
+<h2 id="why-that-is-a-real-defect-and-not-a-benchmark-artifact"><a class="doc-anchor" href="#why-that-is-a-real-defect-and-not-a-benchmark-artifact">§</a>Why that is a real defect and not a benchmark artifact</h2>
+<p>The listener is answering “you are over your quota” by destroying the
+caller’s connection, which is worse than the rejection itself in three ways:</p>
+<ul>
+<li><strong>Collateral damage.</strong> HTTP/2 multiplexes, so the <code>GOAWAY</code> also kills
+every <em>unrelated</em> in-flight RPC on that connection. One throttled
+method takes down calls that were within their quota.</li>
+<li><strong>It inverts the cost of rate limiting.</strong> Each <code>GOAWAY</code> forces the
+client to reconnect, and on this listener that means a fresh TLS
+handshake — orders of magnitude more server CPU than the request that
+was refused. A cheap client-side flood against the unauthenticated
+infrastructure family (reflection / health, which carries the fixed
+<code>INFRA_PER_SEC</code> ceiling precisely because it is unauthenticated) becomes
+an amplified handshake load. The limiter turns into a DoS lever.</li>
+<li><strong>It is indistinguishable from a server fault.</strong> The client sees
+<code>UNAVAILABLE</code>, not <code>RESOURCE_EXHAUSTED</code>, so a correctly-throttled caller
+cannot tell “back off” from “this server is broken”.</li>
+</ul>
+<h2 id="what-this-layer-does"><a class="doc-anchor" href="#what-this-layer-does">§</a>What this layer does</h2>
+<p>It hands the inner stack a body that reads through a slot it keeps a handle
+on. If the inner stack answers without consuming that body, the leftover is
+drained here — which is exactly the <code>poll_data</code> that refunds <code>h2</code>’s budget.
+On the admitted path the body has already been consumed by the time the
+response resolves, so the drain finds nothing and costs a lock and a branch.</p>
+<h2 id="why-the-drain-is-gated-on-a-trailers-only-response"><a class="doc-anchor" href="#why-the-drain-is-gated-on-a-trailers-only-response">§</a>Why the drain is gated on a trailers-only response</h2>
+<p>Draining is only correct when nobody else still wants the body. A response
+that carries <code>grpc-status</code> in its <strong>headers</strong> is a trailers-only gRPC error,
+which is the wire shape produced by <code>tonic::Status::into_http()</code> — the one
+thing both rejection paths on this listener use (this crate’s
+<code>too_many_requests_response</code>, and <code>tower_governor</code>’s own
+<code>From&lt;GovernorError&gt; for Response&lt;tonic::body::Body&gt;</code>). A request that tonic
+actually routed answers with <code>grpc-status</code> in its <em>trailers</em> instead, so the
+two cannot be confused.</p>
+<p>That distinction is what keeps this safe if a <strong>streaming</strong> method is ever
+added. Every RPC on this surface is unary today, but for a client-streaming
+or bidirectional call the handler goes on reading the request body <em>after</em>
+the response future resolves. Draining unconditionally would consume that
+stream out from under the handler and hang the call. Gating on the
+trailers-only shape means this layer only ever touches a request that never
+reached a handler at all.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DrainRejectedBody.html" title="struct axiam_api_grpc::middleware::drain_rejected::DrainRejectedBody">Drain<wbr>Rejected<wbr>Body</a></dt><dd>Drains the request body of any call answered without reading it.</dd><dt><a class="struct" href="struct.DrainRejectedBodyLayer.html" title="struct axiam_api_grpc::middleware::drain_rejected::DrainRejectedBodyLayer">Drain<wbr>Rejected<wbr>Body<wbr>Layer</a></dt><dd>[<code>Layer</code>] producing <a href="struct.DrainRejectedBody.html" title="struct axiam_api_grpc::middleware::drain_rejected::DrainRejectedBody"><code>DrainRejectedBody</code></a>.</dd></dl></section></div></main></body></html>

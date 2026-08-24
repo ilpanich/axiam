@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["auth","rate_limit","strict_revocation"]};
+window.SIDEBAR_ITEMS = {"mod":["auth","drain_rejected","rate_limit","strict_revocation"]};

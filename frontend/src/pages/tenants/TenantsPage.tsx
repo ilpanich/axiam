@@ -24,6 +24,7 @@ import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Enriched tenant type (includes org name for display) ─────────────────────
 
@@ -249,7 +250,7 @@ export function TenantsPage() {
       payload: CreateTenantPayload;
     }) => tenantService.create(orgId, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["tenants"] });
+      invalidateEntity(queryClient, "tenants");
       setCreateOpen(false);
       resetCreateForm();
     },
@@ -309,7 +310,7 @@ export function TenantsPage() {
       payload: UpdateTenantPayload;
     }) => tenantService.update(orgId, tenantId, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["tenants"] });
+      invalidateEntity(queryClient, "tenants");
       setEditTenant(null);
     },
     onError: (err: unknown) => {
@@ -357,7 +358,7 @@ export function TenantsPage() {
     mutationFn: ({ orgId, tenantId }: { orgId: string; tenantId: string }) =>
       tenantService.remove(orgId, tenantId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["tenants"] });
+      invalidateEntity(queryClient, "tenants");
       setDeleteTenant(null);
     },
     // CQ-F09: previously silent on failure — mirrors the create/edit

@@ -23,6 +23,7 @@ import { formatDate } from "@/lib/utils";
 import { ToggleField } from "@/components/shared";
 import { certificateService, type CertificateType } from "@/services/certificates";
 import { usePermissions } from "@/hooks/usePermissions";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Create form fields ───────────────────────────────────────────────────────
 
@@ -157,9 +158,7 @@ export function ServiceAccountsPage() {
     mutationFn: (payload: CreateServiceAccountRequest) =>
       serviceAccountService.create(payload),
     onSuccess: (resp) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["service-accounts"],
-      });
+      invalidateEntity(queryClient, "service-accounts");
       setCreateOpen(false);
       resetCreateForm();
       setRevealedClientId(resp.client_id);
@@ -215,9 +214,7 @@ export function ServiceAccountsPage() {
       payload: UpdateServiceAccountRequest;
     }) => serviceAccountService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["service-accounts"],
-      });
+      invalidateEntity(queryClient, "service-accounts");
       setEditAccount(null);
     },
     onError: (err: unknown) => {
@@ -262,9 +259,7 @@ export function ServiceAccountsPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => serviceAccountService.remove(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["service-accounts"],
-      });
+      invalidateEntity(queryClient, "service-accounts");
       setDeleteAccount(null);
     },
   });
@@ -277,9 +272,7 @@ export function ServiceAccountsPage() {
   const rotateMutation = useMutation({
     mutationFn: (id: string) => serviceAccountService.rotateSecret(id),
     onSuccess: (resp) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["service-accounts"],
-      });
+      invalidateEntity(queryClient, "service-accounts");
       // Rotation returns only the new secret; the client_id is unchanged,
       // so show the rotated account's existing client_id.
       setRevealedClientId(rotateAccount?.client_id ?? "");
@@ -342,7 +335,7 @@ export function ServiceAccountsPage() {
     mutationFn: ({ saId, certId }: { saId: string; certId: string }) =>
       certificateService.bindToServiceAccount(saId, certId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["service-accounts"] });
+      invalidateEntity(queryClient, "service-accounts");
       setBindAccount(null);
       setBindCertId("");
     },

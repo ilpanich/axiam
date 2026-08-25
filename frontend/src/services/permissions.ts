@@ -41,11 +41,35 @@ export function isElevatedPermission(permission: Permission): boolean {
 }
 
 /** A permission together with its scope constraints, as returned by role grants. */
+/**
+ * A scope a grant is constrained to, resolved to something readable.
+ *
+ * The grant edge stores scope ids and nothing else, so a role page could only
+ * ever show "3 scopes" — a count with no way to find out which three. The API
+ * resolves them (`GET /roles/{id}/permissions`) rather than making the client
+ * list every resource in the tenant and then every resource's scopes to turn
+ * three UUIDs into three names.
+ */
+export interface GrantedScope {
+  id: string;
+  name: string;
+  resource_id: string;
+}
+
 export interface PermissionGrant {
   permission: Permission;
   scope_ids: string[];
   /** Absent on grants written before deny-override shipped; absent means allow. */
   effect?: PermissionEffect;
+  /**
+   * The scopes `scope_ids` names.
+   *
+   * Optional because a grant fetched from a server predating scope resolution
+   * carries none. Can be SHORTER than `scope_ids`: a scope deleted while a
+   * grant still referenced it resolves to nothing and is omitted rather than
+   * shown as a placeholder name for something that no longer exists.
+   */
+  scopes?: GrantedScope[];
 }
 
 export interface CreatePermissionPayload {

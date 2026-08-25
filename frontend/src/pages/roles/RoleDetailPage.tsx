@@ -10,6 +10,7 @@ import {
 import {
   permissionService,
   isElevatedPermission,
+  type GrantedScope,
   type Permission,
   type PermissionEffect,
 } from "@/services/permissions";
@@ -44,6 +45,82 @@ import {
   ResourceScopePicker,
 } from "@/components/AssignmentScope";
 import { useResourceNames } from "@/hooks/useResourceNames";
+import { invalidateEntity } from "@/lib/queryInvalidation";
+
+// ─── Scope chips ──────────────────────────────────────────────────────────────
+
+/**
+ * The scopes a grant is narrowed to, named.
+ *
+ * This was a single chip reading "3 scopes" beside a filter icon. It told an
+ * operator their grant was constrained and gave them no way to learn to what:
+ * the only route to the answer was opening the resource, listing its scopes and
+ * matching UUIDs by eye — for a fact the row itself is about.
+ *
+ * Names are shown up to `MAX_VISIBLE`, then a "+N more" chip carrying the rest
+ * in its tooltip. A grant narrowed to a dozen scopes is unusual and rendering
+ * all of them inline would push the description column off the row, but the
+ * information stays reachable without leaving the page.
+ *
+ * When the server resolved nothing — an older API, or every named scope since
+ * deleted — this falls back to the original count chip rather than rendering an
+ * empty row: the grant IS still scoped, and saying nothing would make it look
+ * like a wildcard, which overstates what it allows (or, for a deny, what it
+ * masks).
+ */
+const MAX_VISIBLE_SCOPES = 3;
+
+function ScopeChips({
+  count,
+  scopes,
+}: {
+  count: number;
+  scopes: GrantedScope[];
+}) {
+  const chipClass =
+    "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium tracking-wide bg-white/5 text-muted-foreground border border-white/15";
+
+  if (scopes.length === 0) {
+    return (
+      <span
+        className={cn(chipClass, "uppercase")}
+        title="Constrained to specific scopes of a resource"
+      >
+        <Filter size={9} aria-hidden="true" />
+        {count} scope{count === 1 ? "" : "s"}
+      </span>
+    );
+  }
+
+  const visible = scopes.slice(0, MAX_VISIBLE_SCOPES);
+  const hidden = scopes.slice(MAX_VISIBLE_SCOPES);
+
+  return (
+    <span className="inline-flex items-center gap-1 flex-wrap">
+      <Filter
+        size={9}
+        className="text-muted-foreground"
+        aria-hidden="true"
+      />
+      <span className="sr-only">
+        Constrained to {count} scope{count === 1 ? "" : "s"}:
+      </span>
+      {visible.map((scope) => (
+        <span key={scope.id} className={chipClass} title={`Scope: ${scope.name}`}>
+          <code className="font-mono">{scope.name}</code>
+        </span>
+      ))}
+      {hidden.length > 0 && (
+        <span
+          className={chipClass}
+          title={hidden.map((s) => s.name).join(", ")}
+        >
+          +{hidden.length} more
+        </span>
+      )}
+    </span>
+  );
+}
 
 // ─── Grant Permission dialog ──────────────────────────────────────────────────
 
@@ -556,6 +633,15 @@ export function RoleDetailPage() {
     grantedPermissions.map((g) => [g.permission.id, g.scope_ids?.length ?? 0])
   );
 
+  // The scopes themselves, so a scoped grant can say WHICH scopes it covers.
+  // A bare "3 scopes" chip told an operator their grant was narrowed and gave
+  // them no way to find out to what — they had to go to the resource, list its
+  // scopes, and match ids by eye. The API resolves the names now; this renders
+  // them.
+  const grantScopes = new Map<string, GrantedScope[]>(
+    grantedPermissions.map((g) => [g.permission.id, g.scopes ?? []])
+  );
+
   const grantEffects = new Map<string, PermissionEffect>(
     grantedPermissions.map((g) => [g.permission.id, g.effect ?? "allow"])
   );
@@ -622,9 +708,7 @@ export function RoleDetailPage() {
     mutationFn: (permissionId: string) =>
       roleService.revokePermission(roleId!, permissionId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["role-permissions", roleId],
-      });
+      invalidateEntity(queryClient, "role-permissions");
       setRevokePermission(null);
     },
   });
@@ -633,9 +717,7 @@ export function RoleDetailPage() {
   const [grantOpen, setGrantOpen] = useState(false);
 
   function handlePermissionGranted() {
-    void queryClient.invalidateQueries({
-      queryKey: ["role-permissions", roleId],
-    });
+    invalidateEntity(queryClient, "role-permissions");
   }
 
   // ─── Assignments state ─────────────────────────────────────────────────────
@@ -672,7 +754,7 @@ export function RoleDetailPage() {
     mutationFn: (a: RoleUserAssignment) =>
       roleService.unassignFromUser(roleId!, a.user.id, a.resource_id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+      invalidateEntity(queryClient, "role-users");
       setUnassignUser(null);
     },
     onError: (err: unknown) => {
@@ -684,7 +766,7 @@ export function RoleDetailPage() {
     mutationFn: (a: RoleGroupAssignment) =>
       roleService.unassignFromGroup(roleId!, a.group.id, a.resource_id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
+      invalidateEntity(queryClient, "role-groups");
       setUnassignGroup(null);
     },
     onError: (err: unknown) => {
@@ -716,14 +798,10 @@ export function RoleDetailPage() {
               looked identical to a wildcard grant would overstate what it
               allows (or, for a deny, what it masks). */}
           {(grantScopeCounts.get(row.id) ?? 0) > 0 && (
-            <span
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-white/5 text-muted-foreground border border-white/15"
-              title="Constrained to specific scopes of a resource"
-            >
-              <Filter size={9} aria-hidden="true" />
-              {grantScopeCounts.get(row.id)} scope
-              {grantScopeCounts.get(row.id) === 1 ? "" : "s"}
-            </span>
+            <ScopeChips
+              count={grantScopeCounts.get(row.id) ?? 0}
+              scopes={grantScopes.get(row.id) ?? []}
+            />
           )}
         </div>
       ),
@@ -1002,7 +1080,7 @@ export function RoleDetailPage() {
         onAction={async (user) => {
           try {
             await roleService.assignToUser(roleId!, user.id, assignUserScope);
-            void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+            invalidateEntity(queryClient, "role-users");
           } catch (err) {
             // The dialog swallows the rejection, so the 409 an already-assigned
             // user produces would otherwise look like a click that did nothing.
@@ -1018,7 +1096,7 @@ export function RoleDetailPage() {
         onClose={() => setAssignGroupOpen(false)}
         roleId={roleId!}
         onAssigned={() => {
-          void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
+          invalidateEntity(queryClient, "role-groups");
           setAssignGroupOpen(false);
         }}
       />

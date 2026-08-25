@@ -40,12 +40,30 @@ const certificates = [
     cert_type: "Service",
     status: "Active",
   },
+  // An IoT device certificate is bindable too. The picker used to filter to
+  // `cert_type === "Service"`, so the deployment shape this feature exists for
+  // — a device authenticating by mTLS — found an empty list and no explanation,
+  // even though the bind endpoint has never restricted the type.
+  {
+    id: "cert-active-device",
+    subject: "CN=sensor-42",
+    fingerprint: "1122334455667788",
+    cert_type: "Device",
+    status: "Active",
+  },
   // Filtered out: revoked, and a User cert cannot bind to a service account.
   {
     id: "cert-revoked",
     subject: "CN=old",
     fingerprint: "DEAD",
     cert_type: "Service",
+    status: "Revoked",
+  },
+  {
+    id: "cert-revoked-device",
+    subject: "CN=sensor-old",
+    fingerprint: "F00D",
+    cert_type: "Device",
     status: "Revoked",
   },
   {
@@ -394,7 +412,62 @@ describe("ServiceAccountsPage", () => {
       await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
     );
     expect(
-      await screen.findByText(/No active Service certificates exist yet/)
+      await screen.findByText(
+        /No active Service or IoT Device certificates exist yet/
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("offers IoT Device certificates alongside Service ones", async () => {
+    // The reported bug: "no certificate is shown (even if IoT device
+    // certificates have been already created)".
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(url === "/api/v1/certificates" ? certificates : accounts)
+      )
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    const select = within(dialog).getByLabelText(/Certificate/);
+    const values = Array.from(
+      select.querySelectorAll("option")
+    ).map((o) => (o as HTMLOptionElement).value);
+
+    expect(values).toContain("cert-active-service");
+    expect(values).toContain("cert-active-device");
+    // Revoked ones would bind and then fail every handshake.
+    expect(values).not.toContain("cert-revoked");
+    expect(values).not.toContain("cert-revoked-device");
+    // A User certificate identifies a person; binding one to a machine account
+    // would let a service authenticate as its holder.
+    expect(values).not.toContain("cert-user");
+  });
+
+  it("names each certificate's type in the picker", async () => {
+    // With two types on offer, "CN=x — fingerprint" alone does not say which
+    // kind of principal a certificate was issued for.
+    asCertBinder();
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(url === "/api/v1/certificates" ? certificates : accounts)
+      )
+    );
+    renderWithProviders(<ServiceAccountsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Bind certificate to ci-runner/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByRole("option", { name: /CN=sensor-42.*Device/ })
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("option", { name: /CN=ci-runner.*Service/ })
     ).toBeInTheDocument();
   });
 });

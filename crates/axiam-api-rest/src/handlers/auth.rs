@@ -253,7 +253,29 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            config.access_token_lifetime_secs,
+            // The CSRF cookie's lifetime tracks the SESSION (the refresh
+            // token), not the access token.
+            //
+            // It used to be `access_token_lifetime_secs`, and that was the
+            // random-logout bug. `/api/v1/auth/refresh` is not CSRF-exempt — it
+            // is a state-changing POST made from a browser that does hold a
+            // session, so it must not be — which means renewing an access token
+            // requires the `axiam_csrf` cookie. Giving that cookie the access
+            // token's own 15-minute Max-Age meant the browser dropped the token
+            // needed to refresh at the *exact* moment refreshing became
+            // necessary: the interceptor's refresh POST went out with no
+            // `X-CSRF-Token`, was refused, and the failure path logged the user
+            // out. Anyone idle across one token lifetime was thrown back to the
+            // login page mid-task.
+            //
+            // Nothing is weakened by the longer life. A double-submit token's
+            // security comes from being unguessable and unreadable
+            // cross-origin (`SameSite=Strict`, and an attacker cannot read it
+            // to echo it back), not from expiring quickly, and it is rotated on
+            // every refresh regardless. Outliving the session it protects would
+            // be the real mistake, and it does not: `clear_csrf_cookie` removes
+            // it on logout.
+            config.refresh_token_lifetime_secs,
             config.cookie_secure,
         ))
         // CONTRACT.md §3 "Non-browser SDKs": echo the freshly-minted CSRF
@@ -573,7 +595,10 @@ pub async fn refresh<C: Connection + Clone>(
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            state.auth_config.access_token_lifetime_secs,
+            // See the matching note on the login response: the CSRF cookie
+            // tracks the session, not the access token, or the refresh it
+            // guards expires with the thing it exists to renew.
+            state.auth_config.refresh_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
         // See the matching comment on the login handler above — non-browser

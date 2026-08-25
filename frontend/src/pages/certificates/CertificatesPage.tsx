@@ -25,6 +25,7 @@ import { ShieldPlus } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 /**
  * Map the backend's PascalCase `CertificateStatus` onto the lowercase
@@ -260,7 +261,7 @@ export function CertificatesPage() {
     mutationFn: (payload: GenerateCertificatePayload) =>
       certificateService.generate(payload),
     onSuccess: (resp) => {
-      void queryClient.invalidateQueries({ queryKey: ["certificates"] });
+      invalidateEntity(queryClient, "certificates");
       setGenerateOpen(false);
       resetGenerateForm();
       setPrivateKeyPem(resp.private_key_pem);
@@ -321,7 +322,7 @@ export function CertificatesPage() {
   const revokeMutation = useMutation({
     mutationFn: (id: string) => certificateService.revoke(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["certificates"] });
+      invalidateEntity(queryClient, "certificates");
       setRevokeTarget(null);
     },
     onError: (err: unknown) => {

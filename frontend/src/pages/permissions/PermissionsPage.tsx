@@ -19,6 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { ActionBadge } from "@/components/shared";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Standard actions ─────────────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ export function PermissionsPage() {
     mutationFn: (payload: CreatePermissionPayload) =>
       permissionService.create(payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      invalidateEntity(queryClient, "permissions");
       setCreateOpen(false);
       resetCreateForm();
     },
@@ -167,7 +168,7 @@ export function PermissionsPage() {
       payload: UpdatePermissionPayload;
     }) => permissionService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      invalidateEntity(queryClient, "permissions");
       setEditPermission(null);
     },
     onError: (err: unknown) => {
@@ -216,7 +217,7 @@ export function PermissionsPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => permissionService.remove(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      invalidateEntity(queryClient, "permissions");
       setDeletePermission(null);
     },
     onError: (err: unknown) => {

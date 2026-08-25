@@ -143,7 +143,9 @@ fn webauthn_session_response(
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            config.access_token_lifetime_secs,
+            // Session lifetime, not access-token lifetime — see the note in
+            // `handlers::auth`'s login response.
+            config.refresh_token_lifetime_secs,
             config.cookie_secure,
         ))
         // CONTRACT.md §3 "Non-browser SDKs" — same reason as the password

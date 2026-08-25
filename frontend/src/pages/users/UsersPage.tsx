@@ -24,6 +24,7 @@ import { getApiErrorMessage } from "@/lib/apiError";
 import { ToggleField } from "@/components/shared";
 import { buildEnrollmentForUser } from "@/services/opaque";
 import { useAuthStore } from "@/stores/auth";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Locked Badge ─────────────────────────────────────────────────────────────
 
@@ -228,7 +229,7 @@ export function UsersPage() {
   const createMutation = useMutation({
     mutationFn: (payload: CreateUserPayload) => userService.create(payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setCreateOpen(false);
       resetCreateForm();
     },
@@ -293,7 +294,7 @@ export function UsersPage() {
     mutationFn: ({ id, payload }: { id: string; payload: UpdateUserPayload }) =>
       userService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setEditUser(null);
     },
     onError: (err: unknown) => {
@@ -334,7 +335,7 @@ export function UsersPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => userService.remove(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setDeleteUser(null);
     },
     onError: (err: unknown) => {
@@ -348,7 +349,7 @@ export function UsersPage() {
   const unlockMutation = useMutation({
     mutationFn: (userId: string) => userService.unlock(userId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setUserToUnlock(null);
     },
     onError: (err: unknown) => {

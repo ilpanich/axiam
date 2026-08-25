@@ -8,9 +8,17 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntities } from "@/lib/queryInvalidation";
 
 export interface UseCrudOptions<TCreate, TUpdate> {
-  /** React Query cache key(s) to invalidate on success. */
+  /**
+   * React Query cache key(s) to invalidate on success.
+   *
+   * Everything the invalidation graph says embeds these is invalidated too —
+   * see `@/lib/queryInvalidation`. Invalidating only the mutated entity's own
+   * key is what let a deleted permission stay visible as a live grant on a role
+   * detail page for a full `staleTime` afterwards.
+   */
   queryKey: string[];
   /** Service functions. */
   createFn?: (payload: TCreate) => Promise<unknown>;
@@ -45,7 +53,7 @@ export function useCrudMutations<TCreate = unknown, TUpdate = unknown>({
       return createFn(payload);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey });
+      invalidateEntities(queryClient, queryKey);
       onCreateSuccess?.();
     },
     onError: (err: unknown) => {
@@ -61,7 +69,7 @@ export function useCrudMutations<TCreate = unknown, TUpdate = unknown>({
       return updateFn(id, payload);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey });
+      invalidateEntities(queryClient, queryKey);
       onUpdateSuccess?.();
     },
     onError: (err: unknown) => {
@@ -77,7 +85,7 @@ export function useCrudMutations<TCreate = unknown, TUpdate = unknown>({
       return deleteFn(id);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey });
+      invalidateEntities(queryClient, queryKey);
       onDeleteSuccess?.();
     },
     onError: (err: unknown) => {

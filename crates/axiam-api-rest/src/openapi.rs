@@ -329,6 +329,8 @@ use crate::handlers;
         axiam_core::models::permission::CreatePermission,
         axiam_core::models::permission::UpdatePermission,
         axiam_core::models::permission::PermissionGrant,
+        crate::handlers::permissions::ResolvedPermissionGrant,
+        crate::handlers::permissions::GrantedScope,
         handlers::permissions::CreatePermissionRequest,
         handlers::permissions::GrantPermissionRequest,
         // Resources

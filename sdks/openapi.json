@@ -7031,13 +7031,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Permission grants for role",
+            "description": "Permission grants for role, with scopes resolved",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/PermissionGrant"
+                    "$ref": "#/components/schemas/ResolvedPermissionGrant"
                   }
                 }
               }
@@ -12018,6 +12018,31 @@
           }
         }
       },
+      "GrantedScope": {
+        "type": "object",
+        "description": "A scope named by a grant, resolved to something a human can read.",
+        "required": [
+          "id",
+          "name",
+          "resource_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The scope's id, as it appears in the grant's `scope_ids`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The scope's name, e.g. `invoices`."
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The resource the scope belongs to."
+          }
+        }
+      },
       "Group": {
         "type": "object",
         "description": "A group of users that can access resources based on their roles\nand permissions. Groups simplify role management by allowing roles\nto be assigned to a group rather than individual users.",
@@ -14445,6 +14470,41 @@
                 "description": "The tenant's effective OPAQUE policy, so the client knows whether to\nrun an enrolment at all. Absent when the tenant does not use OPAQUE."
               }
             ]
+          }
+        }
+      },
+      "ResolvedPermissionGrant": {
+        "type": "object",
+        "description": "A permission grant with its scopes resolved.\n\nA superset of [`PermissionGrant`]: `scope_ids` is still present and still\nauthoritative, so a client written before `scopes` existed is unaffected.",
+        "required": [
+          "permission",
+          "scope_ids",
+          "effect",
+          "scopes"
+        ],
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/PermissionEffect",
+            "description": "Whether the grant permits or refuses."
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission",
+            "description": "The permission this grant is about."
+          },
+          "scope_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The scope ids the grant is constrained to. Empty is the wildcard."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantedScope"
+            },
+            "description": "The scopes `scope_ids` names, in the same order where resolvable.\n\nA scope that cannot be resolved is **omitted** rather than represented\nby a placeholder, so this can be shorter than `scope_ids`. That happens\nwhen a scope was deleted while a grant still referenced it, and showing\na name for something that no longer exists would be worse than showing\none fewer chip beside a count that still says how many ids the grant\ncarries."
           }
         }
       },
@@ -17092,7 +17152,8 @@
           "Inactive",
           "Locked",
           "PendingVerification",
-          "Anonymized"
+          "Anonymized",
+          "Deleted"
         ]
       },
       "VerifyEmailRequest": {

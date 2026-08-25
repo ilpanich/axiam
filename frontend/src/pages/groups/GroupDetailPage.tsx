@@ -23,6 +23,7 @@ import { useResourceNames } from "@/hooks/useResourceNames";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { SectionCard, InfoRow } from "@/components/shared";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Edit group form ──────────────────────────────────────────────────────────
 
@@ -105,8 +106,7 @@ export function GroupDetailPage() {
       payload: CreateGroupPayload;
     }) => groupService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["group", groupId] });
-      void queryClient.invalidateQueries({ queryKey: ["groups"] });
+      invalidateEntity(queryClient, "groups");
       setEditOpen(false);
     },
     onError: (err: unknown) => {
@@ -146,9 +146,7 @@ export function GroupDetailPage() {
   const removeMemberMutation = useMutation({
     mutationFn: (userId: string) => groupService.removeMember(groupId!, userId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["group-members", groupId],
-      });
+      invalidateEntity(queryClient, "group-members");
       setRemoveUser(null);
     },
   });
@@ -157,7 +155,7 @@ export function GroupDetailPage() {
   const [addMemberOpen, setAddMemberOpen] = useState(false);
 
   function handleMemberAdded() {
-    void queryClient.invalidateQueries({ queryKey: ["group-members", groupId] });
+    invalidateEntity(queryClient, "group-members");
   }
 
   // ─── Group roles (CQ-F18) ─────────────────────────────────────────────────────
@@ -176,7 +174,7 @@ export function GroupDetailPage() {
     mutationFn: (a: RoleAssignment) =>
       roleService.unassignFromGroup(a.role.id, groupId!, a.resource_id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["group-roles", groupId] });
+      invalidateEntity(queryClient, "group-roles");
       setUnassignRole(null);
     },
     onError: (err: unknown) => {

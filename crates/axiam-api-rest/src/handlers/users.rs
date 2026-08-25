@@ -494,7 +494,11 @@ pub async fn delete<C: Connection + Clone>(
     // nothing. Reporting a completed delete as a failure would invite a retry
     // that 404s on the already-tombstoned row.
     use axiam_core::repository::{GroupRepository as _, RoleRepository as _};
-    match state.group_repo.get_user_groups(user.tenant_id, target_id).await {
+    match state
+        .group_repo
+        .get_user_groups(user.tenant_id, target_id)
+        .await
+    {
         Ok(groups) => {
             for group in groups {
                 if let Err(e) = state

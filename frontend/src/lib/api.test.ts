@@ -23,6 +23,25 @@ function cfg(
   return { headers: {}, ...partial } as InternalAxiosRequestConfig;
 }
 
+/**
+ * A request config whose replay answers 401 — i.e. the session really is dead.
+ *
+ * After a failed refresh the interceptor replays the original request once
+ * before concluding anything, because a refresh can fail for a reason that has
+ * nothing to do with the session being over (another tab consumed the
+ * single-use token first). Only a replay that is ALSO unauthenticated proves
+ * the session is gone, so every test of the logout path has to supply one.
+ */
+function deadSessionRequest(url = "/api/v1/users"): InternalAxiosRequestConfig {
+  return cfg({
+    url,
+    adapter: () =>
+      Promise.reject(
+        Object.assign(new Error("unauthorized"), { response: { status: 401 } })
+      ),
+  });
+}
+
 beforeEach(() => {
   document.cookie = "axiam_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
   useAuthStore.setState({ isAuthenticated: false, user: null });
@@ -166,7 +185,7 @@ describe("response interceptor — silent refresh path", () => {
     useAuthStore.setState({ isAuthenticated: true, user: null });
     const postSpy = vi.spyOn(api, "post");
     const clearSpy = vi.spyOn(queryClient, "clear").mockImplementation(() => {});
-    const err = { config: cfg({ url: "/api/v1/users" }), response: { status: 401 } };
+    const err = { config: deadSessionRequest(), response: { status: 401 } };
     await expect(resHandler.rejected(err)).rejects.toBe(err);
     expect(postSpy).not.toHaveBeenCalled();
     expect(clearSpy).toHaveBeenCalled();
@@ -211,7 +230,7 @@ describe("response interceptor — silent refresh path", () => {
       value: { set href(v: string) { hrefSetter(v); } },
     });
 
-    const err = { config: cfg({ url: "/api/v1/users" }), response: { status: 401 } };
+    const err = { config: deadSessionRequest(), response: { status: 401 } };
     await expect(resHandler.rejected(err)).rejects.toBe(refreshErr);
     expect(clearSpy).toHaveBeenCalled();
     expect(clearAuthSpy).toHaveBeenCalled();
@@ -232,9 +251,104 @@ describe("response interceptor — silent refresh path", () => {
       value: { pathname: "/login", set href(v: string) { hrefSetter(v); } },
     });
 
-    const err = { config: cfg({ url: "/api/v1/users" }), response: { status: 401 } };
+    const err = { config: deadSessionRequest(), response: { status: 401 } };
     await expect(resHandler.rejected(err)).rejects.toBe(refreshErr);
     expect(clearAuthSpy).toHaveBeenCalled();
     expect(hrefSetter).not.toHaveBeenCalled();
+  });
+
+  // ── A failed refresh is not proof the session is over ────────────────────
+  //
+  // The reported symptom was being "randomly disconnected" while working.
+  // Refresh tokens are single-use with rotation and `isRefreshing` is module
+  // state, so it serializes refreshes within one tab and knows nothing about
+  // the others: two tabs both hit a 401 as the access token ages out, both
+  // refresh, and the slower one presents a token the faster one consumed. The
+  // session is alive and the cookies in this browser have already been rotated
+  // — but the old code read that failure as "logged out" and redirected both
+  // tabs to /login.
+
+  it("recovers when another tab already rotated the cookies", async () => {
+    signedIn();
+    vi.spyOn(api, "post").mockRejectedValue(new Error("refresh token already used"));
+    // `mockClear` because `restoreAllMocks` cannot reach these.
+    // `useAuthStore.setState` builds a NEW state object that copies the
+    // function references from the old one, so a spy installed on an earlier
+    // test's state object is carried into this one; `restoreAllMocks` then
+    // restores the *old* object, and `spyOn` here finds the surviving mock and
+    // hands it back with its call history intact. Clearing is what makes
+    // "not called" mean "not called during this test".
+    const clearAuthSpy = vi.spyOn(useAuthStore.getState(), "clearAuth");
+    clearAuthSpy.mockClear();
+    const clearSpy = vi.spyOn(queryClient, "clear").mockImplementation(() => {});
+    clearSpy.mockClear();
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { set href(v: string) { hrefSetter(v); } },
+    });
+
+    // The replay succeeds: the cookie jar is shared, so this request now
+    // carries the access cookie the other tab's refresh installed.
+    const originalRequest = cfg({
+      url: "/api/v1/users",
+      adapter: () =>
+        Promise.resolve({ data: "recovered", status: 200 } as unknown as AxiosResponse),
+    });
+
+    const result = (await resHandler.rejected({
+      config: originalRequest,
+      response: { status: 401 },
+    })) as AxiosResponse;
+
+    expect(result.data).toBe("recovered");
+    expect(clearAuthSpy).not.toHaveBeenCalled();
+    expect(clearSpy).not.toHaveBeenCalled();
+    expect(hrefSetter).not.toHaveBeenCalled();
+  });
+
+  it("does not log out when the replay fails for a reason other than auth", async () => {
+    // A 500 or a dropped connection on the replay says nothing about the
+    // credentials. Reporting it is right; ending the session over it is not.
+    signedIn();
+    vi.spyOn(api, "post").mockRejectedValue(new Error("refresh failed"));
+    // See the note above on why this needs an explicit clear.
+    const clearAuthSpy = vi.spyOn(useAuthStore.getState(), "clearAuth");
+    clearAuthSpy.mockClear();
+    const serverError = Object.assign(new Error("boom"), {
+      response: { status: 500 },
+    });
+
+    const originalRequest = cfg({
+      url: "/api/v1/users",
+      adapter: () => Promise.reject(serverError),
+    });
+
+    await expect(
+      resHandler.rejected({ config: originalRequest, response: { status: 401 } })
+    ).rejects.toBe(serverError);
+    expect(clearAuthSpy).not.toHaveBeenCalled();
+  });
+
+  it("still logs out when the replay is also unauthenticated", async () => {
+    // The complement of the two above: the recovery attempt must not become a
+    // way for a genuinely dead session to linger.
+    signedIn();
+    const refreshErr = new Error("refresh failed");
+    vi.spyOn(api, "post").mockRejectedValue(refreshErr);
+    vi.spyOn(queryClient, "clear").mockImplementation(() => {});
+    const clearAuthSpy = vi.spyOn(useAuthStore.getState(), "clearAuth");
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { set href(_v: string) {} },
+    });
+
+    await expect(
+      resHandler.rejected({
+        config: deadSessionRequest(),
+        response: { status: 401 },
+      })
+    ).rejects.toBe(refreshErr);
+    expect(clearAuthSpy).toHaveBeenCalled();
   });
 });

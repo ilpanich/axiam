@@ -23,6 +23,7 @@ import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Resource type badge ──────────────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ export function ResourcesPage() {
     mutationFn: (payload: CreateResourcePayload) =>
       resourceService.create(payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["resources"] });
+      invalidateEntity(queryClient, "resources");
       setCreateOpen(false);
       resetCreateForm();
     },
@@ -278,7 +279,7 @@ export function ResourcesPage() {
       payload: UpdateResourcePayload;
     }) => resourceService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["resources"] });
+      invalidateEntity(queryClient, "resources");
       setEditResource(null);
     },
     onError: (err: unknown) => {
@@ -331,7 +332,7 @@ export function ResourcesPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => resourceService.remove(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["resources"] });
+      invalidateEntity(queryClient, "resources");
       setDeleteResource(null);
     },
     onError: (err: unknown) => {

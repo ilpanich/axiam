@@ -465,6 +465,25 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
         "ca_certificates:revoke",
     ),
+    // Tenant signing CAs. Creating one and signing a CSR for one are the same
+    // act — both mint a CA beneath the organization's anchor — so both carry
+    // `ca_certificates:generate`. Revocation goes through the CA route above:
+    // a tenant signing CA is a CA certificate and is revoked as one.
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        "ca_certificates:list",
+    ),
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        "ca_certificates:generate",
+    ),
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+        "ca_certificates:generate",
+    ),
     // Users
     ("GET", "/api/v1/users", "users:list"),
     ("POST", "/api/v1/users", "users:create"),

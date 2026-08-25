@@ -125,6 +125,29 @@ describe("CertificatesPage", () => {
     expect(screen.getByText("short")).toBeInTheDocument();
   });
 
+  it("hands over the public certificate for any row, whatever its status", async () => {
+    // The private key is shown once and never again — that is deliberate. The
+    // public certificate is not a secret and is exactly what has to be
+    // distributed, and a revoked or expired one is still the certificate a
+    // relying party is asking about.
+    const user = userEvent.setup();
+    mockGetRoutes();
+    renderWithProviders(<CertificatesPage />);
+    await screen.findByText("CN=device-001");
+
+    await user.click(
+      screen.getByRole("button", { name: "View certificate for CN=user-1" })
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    // Twice over: once under the dialog heading and once in the summary grid.
+    expect(within(dialog).getAllByText("CN=user-1").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("Fingerprint")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /Certificate \(\.crt\)/ })
+    ).toBeInTheDocument();
+  });
+
   it("disables the revoke action for non-active certificates", async () => {
     mockGetRoutes();
     renderWithProviders(<CertificatesPage />);

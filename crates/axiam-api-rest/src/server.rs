@@ -668,6 +668,22 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/organizations/{org_id}/ca-certificates/{id}/revoke")
                     .route(web::post().to(handlers::ca_certificates::revoke::<C>)),
             )
+            .service(
+                // Registered before the two-segment tenant routes would shadow
+                // it: actix matches in registration order, and
+                // `/tenants/{tenant_id}` with a trailing literal is a different
+                // resource from `/tenants/{tenant_id}` alone, so order is what
+                // keeps `signing-cas` from being read as a tenant id.
+                web::resource("/organizations/{org_id}/tenants/{tenant_id}/signing-cas")
+                    .route(web::post().to(handlers::ca_certificates::generate_intermediate::<C>))
+                    .route(web::get().to(handlers::ca_certificates::list_intermediates::<C>)),
+            )
+            .service(
+                web::resource(
+                    "/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+                )
+                .route(web::post().to(handlers::ca_certificates::sign_intermediate_csr::<C>)),
+            )
             // --- Users ---
             //
             // `/users` is deliberately registered as TWO resources, method-

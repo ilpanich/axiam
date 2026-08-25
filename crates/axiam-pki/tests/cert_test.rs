@@ -235,6 +235,8 @@ async fn cert_generate_rejects_expired_ca() {
         .create(StoreCaCertificate {
             id: uuid::Uuid::new_v4(),
             organization_id: org_id,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: "Expired CA Clone".into(),
             public_cert_pem: real_ca.certificate.public_cert_pem.clone(),
             chain_pem: None,
@@ -338,6 +340,8 @@ async fn cert_generate_issuer_dn_matches_real_ca_subject_not_stored_subject_fiel
         .create(StoreCaCertificate {
             id: uuid::Uuid::new_v4(),
             organization_id: org_id,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: "Drifted Subject Inc".into(),
             public_cert_pem: real_ca.certificate.public_cert_pem.clone(),
             chain_pem: None,
@@ -629,6 +633,8 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
         .create(StoreCaCertificate {
             id: uuid::Uuid::new_v4(),
             organization_id: org_id,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: "Keyless CA".into(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .into(),

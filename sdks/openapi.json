@@ -3945,6 +3945,14 @@
                             "format": "uuid",
                             "description": "The organization this CA belongs to."
                           },
+                          "parent_ca_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The CA in this organization that signed this one.\n\n`None` for an organization-level CA, which is either self-signed or\nimported and has no parent inside AXIAM."
+                          },
                           "public_cert_pem": {
                             "type": "string",
                             "description": "PEM-encoded public certificate.\n\nThe certificate that *signs*, which under `vault_pki` custody is the\nintermediate rather than the root beneath which it was created."
@@ -3955,6 +3963,14 @@
                           "subject": {
                             "type": "string",
                             "description": "The certificate subject (e.g., `CN=ACME Corp Root CA`)."
+                          },
+                          "tenant_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The tenant this CA signs for, when it is a tenant signing CA.\n\n`None` for an organization-level CA — the trust anchor, and the only\nkind that existed before tenant signing CAs. `Some` for an intermediate\ncreated under one, which exists so a tenant's user, service and device\ncertificates chain through a CA that can be revoked and replaced\nwithout touching the anchor the rest of the estate trusts."
                           }
                         }
                       }
@@ -4741,6 +4757,317 @@
           },
           "404": {
             "description": "Tenant not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas": {
+      "get": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`GET /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas`",
+        "operationId": "list_intermediates",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of tenant signing CAs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A CA (Certificate Authority) certificate at the organization level.\n\nCA certificates are the root of trust for all tenant certificates\nwithin the organization. Private keys for signing CAs are encrypted\nwith AES-256-GCM and stored separately; non-signing CAs only store\nthe public certificate.",
+                        "required": [
+                          "id",
+                          "organization_id",
+                          "subject",
+                          "public_cert_pem",
+                          "fingerprint",
+                          "key_algorithm",
+                          "not_before",
+                          "not_after",
+                          "status",
+                          "created_at"
+                        ],
+                        "properties": {
+                          "chain_pem": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The issuers above [`Self::public_cert_pem`], concatenated PEM, nearest\nissuer first and the root last.\n\n`None` for a CA that is its own root, which is every CA AXIAM generated\nbefore Vault's PKI engine was an option. Present for a `vault_pki` CA,\nwhere it is the only copy of the root certificate anything outside Vault\nwill ever see — a relying party cannot validate an AXIAM-issued leaf\nwithout it, and `root/generate/internal` returns it exactly once."
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "fingerprint": {
+                            "type": "string",
+                            "description": "SHA-256 fingerprint of the certificate."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "key_algorithm": {
+                            "$ref": "#/components/schemas/KeyAlgorithm"
+                          },
+                          "key_custody": {
+                            "type": "string",
+                            "description": "Which custodian holds this CA's signing key.\n\nRecorded per CA rather than read from configuration, so adopting a new\ncustodian does not strand the CAs that already exist. Not secret — an\noperator needs to see it, and it discloses only where a key is kept.",
+                            "example": "database"
+                          },
+                          "key_locator": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+                          },
+                          "not_after": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Validity end."
+                          },
+                          "not_before": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Validity start."
+                          },
+                          "organization_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The organization this CA belongs to."
+                          },
+                          "parent_ca_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The CA in this organization that signed this one.\n\n`None` for an organization-level CA, which is either self-signed or\nimported and has no parent inside AXIAM."
+                          },
+                          "public_cert_pem": {
+                            "type": "string",
+                            "description": "PEM-encoded public certificate.\n\nThe certificate that *signs*, which under `vault_pki` custody is the\nintermediate rather than the root beneath which it was created."
+                          },
+                          "status": {
+                            "$ref": "#/components/schemas/CertificateStatus"
+                          },
+                          "subject": {
+                            "type": "string",
+                            "description": "The certificate subject (e.g., `CN=ACME Corp Root CA`)."
+                          },
+                          "tenant_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The tenant this CA signs for, when it is a tenant signing CA.\n\n`None` for an organization-level CA — the trust anchor, and the only\nkind that existed before tenant signing CAs. `Some` for an intermediate\ncreated under one, which exists so a tenant's user, service and device\ncertificates chain through a CA that can be revoked and replaced\nwithout touching the anchor the rest of the estate trusts."
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas`",
+        "description": "Create a tenant signing CA beneath one of the organization's CAs, with the\nkey generated by whoever the deployment's custodian is. The private key is\nreturned exactly once — and not at all under `vault_pki`, where it was born\ninside Vault and no API exports it.",
+        "operationId": "generate_intermediate",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIntermediateCaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Tenant signing CA created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneratedCaCertificate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The parent CA is revoked, expired, holds no key, or is itself a tenant signing CA"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr": {
+      "post": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr`",
+        "description": "Sign a certificate signing request the tenant produced elsewhere. The\nresponse has no `private_key_pem` because the key never reached AXIAM: it is\nwherever the CSR was made, and that is the point of this endpoint rather\nthan a shortcoming of it.",
+        "operationId": "sign_intermediate_csr",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignIntermediateCsrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "CSR signed as a tenant signing CA",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaCertificate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not a valid PKCS#10 CSR, its signature does not verify, or the parent CA cannot sign"
           }
         },
         "security": [
@@ -9765,6 +10092,14 @@
             "format": "uuid",
             "description": "The organization this CA belongs to."
           },
+          "parent_ca_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The CA in this organization that signed this one.\n\n`None` for an organization-level CA, which is either self-signed or\nimported and has no parent inside AXIAM."
+          },
           "public_cert_pem": {
             "type": "string",
             "description": "PEM-encoded public certificate.\n\nThe certificate that *signs*, which under `vault_pki` custody is the\nintermediate rather than the root beneath which it was created."
@@ -9775,6 +10110,14 @@
           "subject": {
             "type": "string",
             "description": "The certificate subject (e.g., `CN=ACME Corp Root CA`)."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The tenant this CA signs for, when it is a tenant signing CA.\n\n`None` for an organization-level CA — the trust anchor, and the only\nkind that existed before tenant signing CAs. `Some` for an intermediate\ncreated under one, which exists so a tenant's user, service and device\ncertificates chain through a CA that can be revoked and replaced\nwithout touching the anchor the rest of the estate trusts."
           }
         }
       },
@@ -10358,6 +10701,76 @@
           "metadata": {},
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "CreateIntermediateCa": {
+        "type": "object",
+        "description": "Create a tenant signing CA, with AXIAM generating the key.\n\nThe tenant counterpart to [`CreateCaCertificate`]. The organization CA named\nby `parent_ca_id` signs it, and the resulting intermediate is what the\ntenant's user, service and device certificates are issued from — so a\ntenant's issuance can be revoked, rotated or handed to a different operator\nwithout redistributing the anchor every relying party trusts.\n\n`key_algorithm` is the *intermediate's* own key, not the parent's; the two\nneed not match, and an Ed25519 intermediate under an RSA root is a perfectly\nordinary shape.",
+        "required": [
+          "parent_ca_id",
+          "subject",
+          "key_algorithm",
+          "validity_days"
+        ],
+        "properties": {
+          "key_algorithm": {
+            "$ref": "#/components/schemas/KeyAlgorithm"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Taken from the path, not the body."
+          },
+          "parent_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The organization CA that signs it. Must be Active, in its validity\nwindow, and hold a key AXIAM can sign with."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The intermediate's subject (e.g., `CN=ACME R&D Signing CA`)."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Taken from the path, not the body."
+          },
+          "validity_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Validity duration in days. Capped to the parent's own expiry — an\nintermediate that outlives its issuer is a certificate nothing accepts.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateIntermediateCaRequest": {
+        "type": "object",
+        "description": "Body of `POST .../tenants/{tenant_id}/signing-cas`.",
+        "required": [
+          "parent_ca_id",
+          "subject",
+          "key_algorithm",
+          "validity_days"
+        ],
+        "properties": {
+          "key_algorithm": {
+            "$ref": "#/components/schemas/KeyAlgorithm"
+          },
+          "parent_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The organization CA that signs it."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Subject for the signing CA, e.g. `CN=ACME R&D Signing CA`."
+          },
+          "validity_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Validity duration in days, capped to the parent's own expiry.",
+            "minimum": 0
           }
         }
       },
@@ -14830,6 +15243,68 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "SignIntermediateCsr": {
+        "type": "object",
+        "description": "Sign a certificate signing request the tenant produced elsewhere.\n\nThe BYOK counterpart to [`CreateIntermediateCa`]: the private key is\ngenerated by whoever made the CSR — an offline ceremony, an HSM, a\ntenant-side tool — and never reaches AXIAM at all. What comes back is a\ncertificate and its chain, and the response carries no `private_key_pem`\nbecause there is none to carry.\n\nThe CSR's subject is what the certificate says. Its requested extensions are\nnot: AXIAM decides that this is a CA, and constrains it to sign leaves only.",
+        "required": [
+          "parent_ca_id",
+          "csr_pem",
+          "validity_days"
+        ],
+        "properties": {
+          "csr_pem": {
+            "type": "string",
+            "description": "PEM-encoded PKCS#10 certificate signing request."
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Taken from the path, not the body."
+          },
+          "parent_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The organization CA that signs it."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Taken from the path, not the body."
+          },
+          "validity_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Validity duration in days. Capped to the parent's own expiry.",
+            "minimum": 0
+          }
+        }
+      },
+      "SignIntermediateCsrRequest": {
+        "type": "object",
+        "description": "Body of `POST .../tenants/{tenant_id}/signing-cas/sign-csr`.\n\nDeliberately carries no key algorithm: it is the CSR's, read out of the\nrequest, because a caller who could state it separately could state one the\nkey does not have.",
+        "required": [
+          "parent_ca_id",
+          "csr_pem",
+          "validity_days"
+        ],
+        "properties": {
+          "csr_pem": {
+            "type": "string",
+            "description": "PEM-encoded PKCS#10 certificate signing request."
+          },
+          "parent_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The organization CA that signs it."
+          },
+          "validity_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Validity duration in days, capped to the parent's own expiry.",
+            "minimum": 0
           }
         }
       },

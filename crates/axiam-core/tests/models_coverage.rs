@@ -120,6 +120,8 @@ fn sample_ca() -> CaCertificate {
     CaCertificate {
         id: Uuid::new_v4(),
         organization_id: Uuid::new_v4(),
+        tenant_id: None,
+        parent_ca_id: None,
         subject: "CN=Root".into(),
         public_cert_pem: "-----BEGIN CERTIFICATE-----".into(),
         chain_pem: None,

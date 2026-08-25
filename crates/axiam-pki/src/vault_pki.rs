@@ -47,8 +47,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use axiam_core::ca_keys::{
-    CaGenerationRequest, CaKeyCustody, CaKeyRef, CaKeyStore, GeneratedCa, LeafSigningRequest,
-    SignedLeaf, StoredCaKey,
+    CaGenerationRequest, CaKeyCustody, CaKeyRef, CaKeyStore, CustodiedIntermediate, GeneratedCa,
+    IntermediateCaRequest, IntermediateSigningRequest, LeafSigningRequest, SignedLeaf, StoredCaKey,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::KeyAlgorithm;
@@ -166,6 +166,21 @@ impl VaultPkiLocator {
         serde_json::to_string(self).map_err(|e| {
             AxiamError::Internal(format!("vault pki: could not encode the key locator: {e}"))
         })
+    }
+
+    /// The issuer to sign a *CA* with, which is not the one that signs leaves.
+    ///
+    /// `issuing` is created with `max_path_length: 0` — it may sign leaves and
+    /// nothing else, so a certificate it issued to another CA would be rejected
+    /// by every validator that checked the chain. The root above it has no such
+    /// constraint, and is what a new tier hangs from.
+    ///
+    /// `None` root means there is no second tier: the CA was created with
+    /// `issue_from_root`, or imported, and `issuing` is the top of what AXIAM
+    /// has. Whatever constraints that certificate carries are then the
+    /// operator's own, and Vault will refuse the signature if they forbid it.
+    fn signing_issuer(&self) -> &VaultPkiIssuer {
+        self.root.as_ref().unwrap_or(&self.issuing)
     }
 }
 
@@ -332,6 +347,58 @@ impl VaultPkiCaKeyStore {
         ))
     }
 
+    /// `POST issuer/{id}/sign-intermediate` — the one call that mints a CA.
+    ///
+    /// Shared by the three paths that need it: creating the organization CA's
+    /// own intermediate, creating a tenant signing CA, and signing a CSR a
+    /// tenant produced elsewhere. The constraints are stated here once so those
+    /// three cannot drift into issuing differently-powered CAs.
+    ///
+    /// Returns the certificate and, when Vault named one, the issuing CA's own
+    /// certificate — the chain entry a relying party needs and cannot get from
+    /// anywhere else, because the issuer's certificate lives inside Vault.
+    async fn sign_as_intermediate(
+        &self,
+        signer: &VaultPkiIssuer,
+        csr_pem: &str,
+        subject: &str,
+        ttl: String,
+    ) -> AxiamResult<(String, Option<String>)> {
+        let url = self.url(
+            &signer.mount,
+            &format!("issuer/{}/sign-intermediate", signer.issuer),
+        );
+        let signed = self
+            .post(
+                &url,
+                serde_json::json!({
+                    "csr": csr_pem,
+                    "common_name": subject,
+                    "ttl": ttl,
+                    "format": "pem",
+                    // Signs leaves and nothing else. Without this it inherits an
+                    // unconstrained path length and could mint further CAs — a
+                    // capability nothing in AXIAM uses and everything downstream
+                    // would have to trust.
+                    "max_path_length": 0,
+                    // The CSR's own subject and extensions are ignored in favour
+                    // of what is named here: `use_csr_values` would let the
+                    // request describe its own powers, and AXIAM has already
+                    // decided what they are.
+                    "use_csr_values": false,
+                }),
+            )
+            .await?;
+
+        let certificate = string_field(&signed, "certificate", &url)?;
+        let issuing_ca = signed
+            .get("issuing_ca")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && s.trim() != certificate.trim())
+            .map(str::to_string);
+        Ok((certificate, issuing_ca))
+    }
+
     /// Create the intermediate key and CSR, have the root sign it, and hand the
     /// signed certificate back to the mount that holds its key.
     async fn generate_intermediate(
@@ -358,32 +425,9 @@ impl VaultPkiCaKeyStore {
             .await?;
         let csr = string_field(&generated, "csr", &generate_url)?;
 
-        let sign_url = self.url(
-            &self.config.root_mount,
-            &format!("issuer/{}/sign-intermediate", root.issuer),
-        );
-        let signed = self
-            .post(
-                &sign_url,
-                serde_json::json!({
-                    "csr": csr,
-                    "common_name": subject,
-                    "ttl": ttl_days(validity_days),
-                    "format": "pem",
-                    // The intermediate signs leaves and nothing else. Without
-                    // this it inherits an unconstrained path length and could
-                    // mint further CAs, which is a capability nothing in AXIAM
-                    // uses and everything downstream would have to trust.
-                    "max_path_length": 0,
-                    // The CSR's own subject and extensions are ignored in
-                    // favour of what is named here: `use_csr_values` would let
-                    // the intermediate request describe itself, and AXIAM has
-                    // already decided what it is.
-                    "use_csr_values": false,
-                }),
-            )
+        let (certificate, _issuing_ca) = self
+            .sign_as_intermediate(root, &csr, subject, ttl_days(validity_days))
             .await?;
-        let certificate = string_field(&signed, "certificate", &sign_url)?;
 
         let set_url = self.url(&self.config.int_mount, "intermediate/set-signed");
         let imported = self
@@ -637,6 +681,106 @@ impl CaKeyStore for VaultPkiCaKeyStore {
             Ok(SignedLeaf {
                 certificate_pem,
                 chain_pem,
+            })
+        })
+    }
+
+    /// Create a tenant signing CA whose key is born in — and stays in — Vault.
+    ///
+    /// The same three calls as [`Self::generate_intermediate`], pointed at an
+    /// issuer that already exists rather than one this call just made: Vault
+    /// generates the key and a CSR in the issuing mount, the parent's signing
+    /// issuer signs it, and `intermediate/set-signed` hands the certificate
+    /// back to the mount that holds the key. Vault can then issue this tenant's
+    /// leaves itself, which is the whole point — the key never exists here, so
+    /// there is nothing for AXIAM to lose.
+    fn generate_intermediate_ca<'a>(
+        &'a self,
+        parent: &'a CaKeyRef,
+        request: &'a IntermediateCaRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<CustodiedIntermediate>> + Send + 'a>> {
+        Box::pin(async move {
+            let parent_locator = VaultPkiLocator::parse(&parent.locator)?;
+            let signer = parent_locator.signing_issuer();
+            let (key_type, key_bits) = key_params(&request.key_algorithm);
+
+            let generate_url = self.url(&self.config.int_mount, "intermediate/generate/internal");
+            let generated = self
+                .post(
+                    &generate_url,
+                    serde_json::json!({
+                        "common_name": request.subject,
+                        "key_type": key_type,
+                        "key_bits": key_bits,
+                        "key_name": format!("axiam-tenant-int-{}", request.ca_id),
+                        "format": "pem",
+                    }),
+                )
+                .await?;
+            let csr = string_field(&generated, "csr", &generate_url)?;
+
+            let (certificate, issuing_ca) = self
+                .sign_as_intermediate(
+                    signer,
+                    &csr,
+                    &request.subject,
+                    ttl_days(request.validity_days),
+                )
+                .await?;
+
+            let set_url = self.url(&self.config.int_mount, "intermediate/set-signed");
+            let imported = self
+                .post(&set_url, serde_json::json!({ "certificate": certificate }))
+                .await?;
+            let issuer = first_imported_issuer(&imported, &set_url)?;
+            // The key came from `intermediate/generate/internal`, so
+            // `set-signed` imports no key and `imported_keys` is empty; the id
+            // wanted here is the one that call already returned.
+            let key = string_field(&generated, "key_id", &generate_url)?;
+
+            Ok(CustodiedIntermediate {
+                certificate_pem: certificate,
+                chain_pem: issuing_ca.into_iter().collect(),
+                locator: VaultPkiLocator {
+                    issuing: VaultPkiIssuer {
+                        mount: self.config.int_mount.trim_matches('/').to_string(),
+                        issuer,
+                        key,
+                    },
+                    // No root to clean up on revocation: the root above this one
+                    // belongs to the organization CA and outlives it.
+                    root: None,
+                }
+                .encode()?,
+            })
+        })
+    }
+
+    /// Sign somebody else's CSR as a CA, with `sign-intermediate`.
+    ///
+    /// Not `sign-verbatim`, which is what leaves use: verbatim takes the CSR's
+    /// own extensions, and a request that asked to be an unconstrained CA would
+    /// get to be one. `sign-intermediate` with `use_csr_values: false` means
+    /// AXIAM states what the certificate is and Vault ignores what the request
+    /// wanted.
+    fn sign_intermediate_csr<'a>(
+        &'a self,
+        parent: &'a CaKeyRef,
+        request: &'a IntermediateSigningRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SignedLeaf>> + Send + 'a>> {
+        Box::pin(async move {
+            let parent_locator = VaultPkiLocator::parse(&parent.locator)?;
+            let (certificate_pem, issuing_ca) = self
+                .sign_as_intermediate(
+                    parent_locator.signing_issuer(),
+                    &request.csr_pem,
+                    &request.subject,
+                    format!("{}s", request.ttl_seconds.max(1)),
+                )
+                .await?;
+            Ok(SignedLeaf {
+                certificate_pem,
+                chain_pem: issuing_ca.into_iter().collect(),
             })
         })
     }

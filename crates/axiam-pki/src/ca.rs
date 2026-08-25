@@ -1,16 +1,21 @@
 //! CA certificate generation and management service.
 
 use axiam_core::ca_keys::{
-    CaGenerationRequest, CaKeyCustody, CaKeyRef, IntermediateSpec, StoredCaKey,
+    CaGenerationRequest, CaKeyCustody, CaKeyRef, IntermediateCaRequest, IntermediateSigningRequest,
+    IntermediateSpec, StoredCaKey,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
-    CaCertificate, CreateCaCertificate, GeneratedCaCertificate, ImportCaCertificate, KeyAlgorithm,
+    CaCertificate, CertificateStatus, CreateCaCertificate, CreateIntermediateCa,
+    GeneratedCaCertificate, ImportCaCertificate, KeyAlgorithm, SignIntermediateCsr,
     StoreCaCertificate,
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Duration, Utc};
-use rcgen::{CertificateParams, DnType, IsCa};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType, IsCa, Issuer,
+    KeyPair, KeyUsagePurpose,
+};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -21,6 +26,7 @@ use uuid::Uuid;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 use x509_parser::time::ASN1Time;
+use zeroize::Zeroize;
 
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crypto::{compute_fingerprint, generate_keypair};
@@ -162,6 +168,10 @@ impl<R: CaCertificateRepository> CaService<R> {
         let record = StoreCaCertificate {
             id: ca_id,
             organization_id: input.organization_id,
+            // An organization-level CA: the anchor, not something under a
+            // tenant, and with no parent inside AXIAM.
+            tenant_id: None,
+            parent_ca_id: None,
             subject: input.subject,
             public_cert_pem,
             // A self-signed root is its own chain.
@@ -228,6 +238,8 @@ impl<R: CaCertificateRepository> CaService<R> {
         let record = StoreCaCertificate {
             id: ca_id,
             organization_id: input.organization_id,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: parsed.subject,
             public_cert_pem: generated.certificate_pem,
             chain_pem: (!generated.chain_pem.is_empty()).then(|| join_pem(&generated.chain_pem)),
@@ -300,6 +312,8 @@ impl<R: CaCertificateRepository> CaService<R> {
         let record = StoreCaCertificate {
             id: ca_id,
             organization_id: input.organization_id,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: parsed.subject,
             public_cert_pem: input.public_cert_pem,
             // Whatever chain an imported CA has is held by whoever imported it;
@@ -315,6 +329,401 @@ impl<R: CaCertificateRepository> CaService<R> {
         };
 
         self.repo.create(record).await
+    }
+
+    /// Create a tenant signing CA beneath one of the organization's CAs.
+    ///
+    /// The intermediate that stands between the organization's trust anchor and
+    /// a tenant's user, service and device certificates. AXIAM generates its
+    /// key — or the custodian does, under `vault_pki` — and the parent signs
+    /// it. The private key is returned exactly once, on the same terms as any
+    /// other generated key, and under `vault_pki` there is none to return.
+    ///
+    /// It is constrained to a path length of zero: it signs leaves and cannot
+    /// mint further CAs. Nothing in AXIAM issues a third tier, and an
+    /// unconstrained intermediate would be a capability every relying party
+    /// downstream had to trust for no gain.
+    pub async fn generate_intermediate(
+        &self,
+        input: CreateIntermediateCa,
+    ) -> AxiamResult<GeneratedCaCertificate> {
+        if input.validity_days == 0 || input.validity_days > MAX_CA_VALIDITY_DAYS {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "validity_days must be between 1 and {MAX_CA_VALIDITY_DAYS} \
+                     (NIST SP 800-57 max for CA certificates)"
+                ),
+            });
+        }
+
+        let parent = self
+            .load_signing_parent(input.organization_id, input.parent_ca_id)
+            .await?;
+        let (not_before, not_after) = intermediate_window(&parent, input.validity_days)?;
+
+        let ca_id = Uuid::new_v4();
+        // Two custodians, and they are not always the same one. The parent's is
+        // where its key *is* — recorded per CA, so a deployment that adopted
+        // Vault after generating a root still finds that root's key sealed into
+        // its row. The default is where the deployment keeps keys *now*, and
+        // that is where this new key belongs: an intermediate generated today
+        // under a Vault-configured server goes to Vault, whatever the parent
+        // predates.
+        let parent_store = self.custodians.store_for(parent.key_custody)?;
+        let child_store = self.custodians.default_store()?;
+
+        // A custodian that signs on AXIAM's behalf also *creates* on AXIAM's
+        // behalf: asking it to sign a key generated here would defeat the
+        // property that makes it worth using.
+        if parent_store.signs_remotely() {
+            let parent_ref = Self::key_ref(&parent);
+            let created = parent_store
+                .generate_intermediate_ca(
+                    &parent_ref,
+                    &IntermediateCaRequest {
+                        organization_id: input.organization_id,
+                        ca_id,
+                        subject: input.subject.clone(),
+                        key_algorithm: input.key_algorithm,
+                        validity_days: window_days(not_before, not_after),
+                    },
+                )
+                .await?;
+
+            // What the custodian produced, not what was asked for — Vault caps
+            // a TTL to the mount's maximum and to the signer's own expiry
+            // without failing the call.
+            let parsed = parse_ca_certificate(&created.certificate_pem)?;
+            let certificate = self
+                .repo
+                .create(StoreCaCertificate {
+                    id: ca_id,
+                    organization_id: input.organization_id,
+                    tenant_id: Some(input.tenant_id),
+                    parent_ca_id: Some(parent.id),
+                    subject: parsed.subject,
+                    public_cert_pem: created.certificate_pem,
+                    chain_pem: (!created.chain_pem.is_empty())
+                        .then(|| join_pem(&created.chain_pem)),
+                    fingerprint: parsed.fingerprint,
+                    key_algorithm: parsed.key_algorithm,
+                    not_before: parsed.not_before,
+                    not_after: parsed.not_after,
+                    encrypted_private_key: None,
+                    key_custody: parent_store.custody(),
+                    key_locator: Some(created.locator),
+                })
+                .await?;
+            return Ok(GeneratedCaCertificate {
+                certificate,
+                private_key_pem: None,
+            });
+        }
+
+        let parent_ref = Self::key_ref(&parent);
+        let mut parent_key_pem = parent_store
+            .load(&parent_ref, parent.encrypted_private_key.as_deref())
+            .await?
+            .to_string();
+
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+
+        let parent_cert_pem = parent.public_cert_pem.clone();
+        let subject = input.subject.clone();
+        let key_algorithm = input.key_algorithm.clone();
+        let not_before_ts = not_before.timestamp();
+        let not_after_ts = not_after.timestamp();
+
+        let (private_key_pem, public_cert_pem, fingerprint) =
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
+                let parent_key = KeyPair::from_pem(&parent_key_pem).map_err(|e| {
+                    AxiamError::Certificate(format!("invalid parent CA private key: {e}"))
+                })?;
+                // Scrubbed as soon as it is parsed, the same as the leaf path.
+                parent_key_pem.zeroize();
+
+                // The issuer DN comes from the parent's stored certificate, not
+                // its mutable `subject` column, so what the child names as its
+                // issuer can never drift from what the parent actually is.
+                let issuer =
+                    Issuer::from_ca_cert_pem(&parent_cert_pem, parent_key).map_err(|e| {
+                        AxiamError::Certificate(format!("invalid parent CA certificate PEM: {e}"))
+                    })?;
+
+                let key_pair = generate_keypair(&key_algorithm)?;
+                let private_key_pem = key_pair.serialize_pem();
+
+                let mut params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
+                params.use_authority_key_identifier_extension = true;
+
+                let cert = params.signed_by(&key_pair, &issuer).map_err(|e| {
+                    AxiamError::Certificate(format!("intermediate CA signing failed: {e}"))
+                })?;
+                let public_cert_pem = cert.pem();
+                let fingerprint = compute_fingerprint(cert.der());
+                Ok((private_key_pem, public_cert_pem, fingerprint))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
+
+        // `import_ca` rather than `store`, because the certificate and the key
+        // are both in hand and a custodian that is itself a PKI takes them
+        // together: under `vault_pki` this imports the intermediate into Vault
+        // as an issuer Vault can then sign leaves with, and under `vault` it
+        // falls through to `store` and the key goes to Vault's KV engine. The
+        // one custodian that keeps it here is `database`, and only because that
+        // is what the deployment asked for.
+        let stored = child_store
+            .import_ca(
+                input.organization_id,
+                ca_id,
+                &public_cert_pem,
+                &private_key_pem,
+            )
+            .await?;
+        let (encrypted_private_key, key_locator) = split_stored(stored);
+
+        let certificate = self
+            .repo
+            .create(StoreCaCertificate {
+                id: ca_id,
+                organization_id: input.organization_id,
+                tenant_id: Some(input.tenant_id),
+                parent_ca_id: Some(parent.id),
+                subject: input.subject,
+                public_cert_pem,
+                chain_pem: Some(chain_below(&parent)),
+                fingerprint,
+                key_algorithm: input.key_algorithm,
+                not_before,
+                not_after,
+                encrypted_private_key,
+                key_custody: child_store.custody(),
+                key_locator,
+            })
+            .await?;
+
+        Ok(GeneratedCaCertificate {
+            certificate,
+            private_key_pem: Some(private_key_pem),
+        })
+    }
+
+    /// Sign a tenant's own certificate signing request as a signing CA.
+    ///
+    /// The BYOK counterpart to [`Self::generate_intermediate`]. The key behind
+    /// the CSR was generated by whoever produced it and never reaches AXIAM, so
+    /// there is nothing to return once and nothing to take custody of: the row
+    /// records custody `External`, and issuance against this CA happens
+    /// wherever the key actually lives.
+    ///
+    /// The CSR's subject is honoured; its requested extensions are not. A
+    /// request that asked to be an unconstrained CA, or a TLS server, would
+    /// otherwise decide its own powers — AXIAM decides them, and they are
+    /// exactly "sign leaves".
+    pub async fn sign_intermediate_csr(
+        &self,
+        input: SignIntermediateCsr,
+    ) -> AxiamResult<CaCertificate> {
+        if input.validity_days == 0 || input.validity_days > MAX_CA_VALIDITY_DAYS {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "validity_days must be between 1 and {MAX_CA_VALIDITY_DAYS} \
+                     (NIST SP 800-57 max for CA certificates)"
+                ),
+            });
+        }
+
+        let parent = self
+            .load_signing_parent(input.organization_id, input.parent_ca_id)
+            .await?;
+        let (not_before, not_after) = intermediate_window(&parent, input.validity_days)?;
+
+        // Parsed here rather than inside the signing task so that a malformed
+        // CSR — by far the likeliest failure on this endpoint — is a 400 naming
+        // the request, not a 500 out of a custodian.
+        let csr_subject = csr_common_name(&input.csr_pem)?;
+
+        let ca_id = Uuid::new_v4();
+        let parent_store = self.custodians.store_for(parent.key_custody)?;
+
+        if parent_store.signs_remotely() {
+            let parent_ref = Self::key_ref(&parent);
+            let signed = parent_store
+                .sign_intermediate_csr(
+                    &parent_ref,
+                    &IntermediateSigningRequest {
+                        csr_pem: input.csr_pem,
+                        subject: csr_subject,
+                        ttl_seconds: (not_after - not_before).num_seconds(),
+                    },
+                )
+                .await?;
+
+            let parsed = parse_ca_certificate(&signed.certificate_pem)?;
+            return self
+                .repo
+                .create(StoreCaCertificate {
+                    id: ca_id,
+                    organization_id: input.organization_id,
+                    tenant_id: Some(input.tenant_id),
+                    parent_ca_id: Some(parent.id),
+                    subject: parsed.subject,
+                    public_cert_pem: signed.certificate_pem,
+                    chain_pem: (!signed.chain_pem.is_empty()).then(|| join_pem(&signed.chain_pem)),
+                    fingerprint: parsed.fingerprint,
+                    key_algorithm: parsed.key_algorithm,
+                    not_before: parsed.not_before,
+                    not_after: parsed.not_after,
+                    encrypted_private_key: None,
+                    // AXIAM never held this key and never will. `External` is
+                    // what stops the issuance path offering to sign with a key
+                    // that is not here.
+                    key_custody: CaKeyCustody::External,
+                    key_locator: None,
+                })
+                .await;
+        }
+
+        let parent_ref = Self::key_ref(&parent);
+        let mut parent_key_pem = parent_store
+            .load(&parent_ref, parent.encrypted_private_key.as_deref())
+            .await?
+            .to_string();
+
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+
+        let parent_cert_pem = parent.public_cert_pem.clone();
+        let csr_pem = input.csr_pem.clone();
+        let subject = csr_subject.clone();
+        let not_before_ts = not_before.timestamp();
+        let not_after_ts = not_after.timestamp();
+
+        let (public_cert_pem, fingerprint) =
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
+                let parent_key = KeyPair::from_pem(&parent_key_pem).map_err(|e| {
+                    AxiamError::Certificate(format!("invalid parent CA private key: {e}"))
+                })?;
+                parent_key_pem.zeroize();
+
+                let issuer =
+                    Issuer::from_ca_cert_pem(&parent_cert_pem, parent_key).map_err(|e| {
+                        AxiamError::Certificate(format!("invalid parent CA certificate PEM: {e}"))
+                    })?;
+
+                // `from_pem` verifies the request's own signature, which is the
+                // only proof that whoever sent it holds the matching private
+                // key. Without that check a caller could have a CA minted for
+                // somebody else's public key.
+                let mut request =
+                    CertificateSigningRequestParams::from_pem(&csr_pem).map_err(|e| {
+                        AxiamError::Validation {
+                            message: format!("the certificate signing request was rejected: {e}"),
+                        }
+                    })?;
+                // Everything the request asked to be, overwritten by what AXIAM
+                // has decided it is — the DN included, so the row and the
+                // certificate cannot disagree.
+                request.params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
+                request.params.use_authority_key_identifier_extension = true;
+
+                let cert = request.signed_by(&issuer).map_err(|e| {
+                    AxiamError::Certificate(format!("intermediate CA signing failed: {e}"))
+                })?;
+                let public_cert_pem = cert.pem();
+                let fingerprint = compute_fingerprint(cert.der());
+                Ok((public_cert_pem, fingerprint))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
+
+        // Read back out of the certificate that was produced: the key algorithm
+        // is the CSR's, not anything the caller stated, and the row must say
+        // what the certificate says.
+        let parsed = parse_ca_certificate(&public_cert_pem)?;
+
+        self.repo
+            .create(StoreCaCertificate {
+                id: ca_id,
+                organization_id: input.organization_id,
+                tenant_id: Some(input.tenant_id),
+                parent_ca_id: Some(parent.id),
+                subject: parsed.subject,
+                public_cert_pem,
+                chain_pem: Some(chain_below(&parent)),
+                fingerprint,
+                key_algorithm: parsed.key_algorithm,
+                not_before: parsed.not_before,
+                not_after: parsed.not_after,
+                encrypted_private_key: None,
+                key_custody: CaKeyCustody::External,
+                key_locator: None,
+            })
+            .await
+    }
+
+    /// Load the CA that is about to sign, refusing every state it cannot sign in.
+    ///
+    /// Each refusal exists because the alternative is a certificate that looks
+    /// issued and is not trusted: an expired parent produces a chain no
+    /// validator accepts, a revoked one produces a chain every validator
+    /// rejects on purpose, and a parent AXIAM holds no key for produces a
+    /// failure several layers down that names a decryption error rather than
+    /// the missing key.
+    async fn load_signing_parent(
+        &self,
+        organization_id: Uuid,
+        parent_ca_id: Uuid,
+    ) -> AxiamResult<CaCertificate> {
+        let parent = self.repo.get_by_id(organization_id, parent_ca_id).await?;
+
+        if parent.tenant_id.is_some() {
+            return Err(AxiamError::Validation {
+                message: "that CA is itself a tenant signing CA, which is constrained to a \
+                          path length of zero and cannot sign another CA: choose an \
+                          organization CA as the parent"
+                    .into(),
+            });
+        }
+        if parent.status != CertificateStatus::Active {
+            return Err(AxiamError::Validation {
+                message: "the parent CA is not active".into(),
+            });
+        }
+        let now = Utc::now();
+        if now < parent.not_before || now > parent.not_after {
+            return Err(AxiamError::Validation {
+                message: "the parent CA is expired or not yet valid".into(),
+            });
+        }
+        if parent.key_custody == CaKeyCustody::External {
+            return Err(AxiamError::Validation {
+                message: "AXIAM holds no private key for that CA — it was imported as a trust \
+                          anchor only, so it can be trusted but cannot sign"
+                    .into(),
+            });
+        }
+        Ok(parent)
+    }
+
+    /// The signing CAs belonging to one tenant.
+    pub async fn list_by_tenant(
+        &self,
+        organization_id: Uuid,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<CaCertificate>> {
+        self.repo
+            .list_by_tenant(organization_id, tenant_id, pagination)
+            .await
     }
 
     /// A [`CaKeyRef`] for one CA, for the signing path to load its key with.
@@ -393,6 +802,104 @@ pub(crate) fn join_pem(blocks: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+/// The certificate a tenant signing CA gets, whoever generated its key.
+///
+/// One place, so the generate path and the sign-a-CSR path cannot produce two
+/// differently-powered CAs from the same endpoint pair. Path length zero and
+/// `keyCertSign`/`cRLSign` and nothing else: it signs leaves and revokes them,
+/// and cannot mint a further tier. RFC 5280 §4.2.1.3 wants Key Usage marked
+/// critical on a CA, which rcgen does whenever the list is non-empty — leaving
+/// it empty omits the extension entirely and produces a CA whose powers are
+/// unstated.
+fn intermediate_params(
+    subject: &str,
+    not_before_ts: i64,
+    not_after_ts: i64,
+) -> AxiamResult<CertificateParams> {
+    let mut params = CertificateParams::new(Vec::<String>::new())
+        .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+    params.distinguished_name.push(DnType::CommonName, subject);
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
+        .map_err(|e| AxiamError::Certificate(format!("invalid notBefore: {e}")))?;
+    params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
+        .map_err(|e| AxiamError::Certificate(format!("invalid notAfter: {e}")))?;
+    Ok(params)
+}
+
+/// The chain a certificate signed by `parent` needs: the parent, then whatever
+/// the parent itself chains to.
+fn chain_below(parent: &CaCertificate) -> String {
+    let mut blocks = vec![parent.public_cert_pem.clone()];
+    if let Some(ref above) = parent.chain_pem {
+        blocks.push(above.clone());
+    }
+    join_pem(&blocks)
+}
+
+/// The validity window for a certificate signed by `parent`.
+///
+/// Capped to the parent's own expiry, because a certificate that outlives its
+/// issuer is one every validator rejects for the whole of its extra life —
+/// silently, and long after anybody remembers asking for it.
+fn intermediate_window(
+    parent: &CaCertificate,
+    validity_days: u32,
+) -> AxiamResult<(DateTime<Utc>, DateTime<Utc>)> {
+    let not_before = Utc::now();
+    let requested = not_before
+        .checked_add_signed(Duration::days(i64::from(validity_days)))
+        .ok_or_else(|| AxiamError::Validation {
+            message: "validity_days produces a date out of range".into(),
+        })?;
+    Ok((not_before, std::cmp::min(requested, parent.not_after)))
+}
+
+/// A window expressed back in whole days, for a custodian whose API takes a TTL.
+///
+/// Rounded up, and floored at one: a window shorter than a day would otherwise
+/// become a TTL of zero, which Vault reads as "the mount's default" rather than
+/// "no time at all".
+fn window_days(not_before: DateTime<Utc>, not_after: DateTime<Utc>) -> u32 {
+    let hours = (not_after - not_before).num_hours().max(1);
+    u32::try_from((hours + 23) / 24).unwrap_or(u32::MAX).max(1)
+}
+
+/// The common name a CSR asks for.
+///
+/// Read here rather than inside the signing task so a malformed request — the
+/// likeliest failure on an endpoint whose input is pasted by hand — is a 400
+/// naming the CSR rather than a 500 out of a custodian. A request with no
+/// common name is refused: the subject is what distinguishes one tenant signing
+/// CA from another in every list that shows them.
+fn csr_common_name(pem: &str) -> AxiamResult<String> {
+    let block = pem::parse(pem).map_err(|e| AxiamError::Validation {
+        message: format!("the certificate signing request is not PEM-encoded: {e}"),
+    })?;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(block.contents())
+            .map_err(|e| AxiamError::Validation {
+                message: format!("the certificate signing request could not be parsed: {e}"),
+            })?;
+    csr.verify_signature().map_err(|_| AxiamError::Validation {
+        message: "the certificate signing request's signature does not verify against the \
+                  public key it carries, so nothing proves the sender holds the matching \
+                  private key"
+            .into(),
+    })?;
+    csr.certification_request_info
+        .subject
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(str::to_string)
+        .filter(|cn| !cn.trim().is_empty())
+        .ok_or_else(|| AxiamError::Validation {
+            message: "the certificate signing request has no common name in its subject".into(),
+        })
 }
 
 /// What an imported certificate actually says about itself.

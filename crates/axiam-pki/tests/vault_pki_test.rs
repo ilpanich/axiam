@@ -548,3 +548,250 @@ async fn issuing_a_leaf_sends_a_csr_and_records_the_certificate_that_came_back()
         .expect("the stored fingerprint must be of the real certificate");
     assert_eq!(fetched.id, issued.certificate.id);
 }
+
+// ---------------------------------------------------------------------------
+// tenant signing CAs
+// ---------------------------------------------------------------------------
+//
+// The property these protect is not obvious from the endpoint names. The
+// organization CA's *issuing* certificate is created with `max_path_length: 0`
+// — it may sign leaves and nothing else — so a tenant signing CA hung beneath
+// it would be signed happily by Vault and rejected by every relying party that
+// walked the chain. It has to be signed by the root above it, and nothing in
+// the response distinguishes the two.
+
+/// Mount the four calls that create the organization CA, leaving the shared
+/// `pki_int` mounts free for a second intermediate to follow.
+///
+/// Each mock is pinned to exactly one call and wiremock serves the earliest
+/// still-hungry match, so a test that needs a second signature registers its
+/// own mock afterwards and gets a distinct certificate back — which real Vault
+/// would also return, and which the unique `(organization, fingerprint)` index
+/// requires.
+async fn mount_org_ca(server: &MockServer, root: &(String, String), int: &(String, String)) {
+    Mock::given(method("POST"))
+        .and(path("/v1/pki/root/generate/internal"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "certificate": root.1,
+                "issuer_id": "root-issuer-id",
+                "key_id": "root-key-id",
+            }
+        })))
+        // `expect` only verifies a count; without this the mock keeps matching
+        // and a second signature is served the first certificate — which the
+        // unique (organization, fingerprint) index then rejects.
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+
+    mount_intermediate_generate(server, "int-key-id").await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/pki/issuer/root-issuer-id/sign-intermediate"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            // Stated on every CA AXIAM mints, and asserted here because the
+            // absence of it is invisible until a relying party refuses a
+            // certificate months later.
+            "max_path_length": 0,
+            "use_csr_values": false,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "certificate": int.1, "issuing_ca": root.1, "ca_chain": [root.1] }
+        })))
+        // `expect` only verifies a count; without this the mock keeps matching
+        // and a second signature is served the first certificate — which the
+        // unique (organization, fingerprint) index then rejects.
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+
+    mount_intermediate_set_signed(server, "int-issuer-id").await;
+
+    // Never asked: the organization's issuing intermediate has a path length of
+    // zero and cannot sign a CA. Mounted so that reaching for it is a failed
+    // assertion rather than a 404 the custodian reports as a Vault outage.
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-intermediate"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(server)
+        .await;
+}
+
+async fn mount_intermediate_generate(server: &MockServer, key_id: &str) {
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/intermediate/generate/internal"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "csr": "-----BEGIN CERTIFICATE REQUEST-----\nfake\n-----END CERTIFICATE REQUEST-----\n",
+                "key_id": key_id,
+            }
+        })))
+        // `expect` only verifies a count; without this the mock keeps matching
+        // and a second signature is served the first certificate — which the
+        // unique (organization, fingerprint) index then rejects.
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+async fn mount_intermediate_set_signed(server: &MockServer, issuer_id: &str) {
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/intermediate/set-signed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "imported_issuers": [issuer_id], "imported_keys": [] }
+        })))
+        // `expect` only verifies a count; without this the mock keeps matching
+        // and a second signature is served the first certificate — which the
+        // unique (organization, fingerprint) index then rejects.
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+/// Mount the root signature that mints a tenant signing CA.
+async fn mount_tenant_signature(
+    server: &MockServer,
+    common_name: &str,
+    root: &(String, String),
+    tenant_ca: &(String, String),
+) {
+    Mock::given(method("POST"))
+        .and(path("/v1/pki/issuer/root-issuer-id/sign-intermediate"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "common_name": common_name,
+            "max_path_length": 0,
+            "use_csr_values": false,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "certificate": tenant_ca.1, "issuing_ca": root.1 }
+        })))
+        // `expect` only verifies a count; without this the mock keeps matching
+        // and a second signature is served the first certificate — which the
+        // unique (organization, fingerprint) index then rejects.
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_tenant_signing_ca_is_signed_by_the_root_not_the_leaf_issuer() {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    let tenant_int = ca_pair("Acme R&D Signing CA", Some(&root));
+    mount_org_ca(&server, &root, &int).await;
+
+    let svc = ca_service(setup_db().await, &server);
+    let org = Uuid::new_v4();
+    let tenant = Uuid::new_v4();
+    let parent = svc
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap()
+        .certificate;
+
+    mount_intermediate_generate(&server, "tenant-key-id").await;
+    mount_tenant_signature(&server, "Acme R&D Signing CA", &root, &tenant_int).await;
+    mount_intermediate_set_signed(&server, "tenant-issuer-id").await;
+
+    let generated = svc
+        .generate_intermediate(axiam_core::models::certificate::CreateIntermediateCa {
+            organization_id: org,
+            tenant_id: tenant,
+            parent_ca_id: parent.id,
+            subject: "Acme R&D Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("tenant signing CA");
+
+    assert_eq!(generated.certificate.tenant_id, Some(tenant));
+    assert_eq!(generated.certificate.parent_ca_id, Some(parent.id));
+    // Born inside Vault, so there is nothing to return once — the whole reason
+    // this custodian is worth the extra moving parts.
+    assert_eq!(generated.certificate.key_custody, CaKeyCustody::VaultPki);
+    assert!(generated.private_key_pem.is_none());
+
+    let locator = VaultPkiLocator::parse(
+        generated
+            .certificate
+            .key_locator
+            .as_deref()
+            .expect("the key is in Vault, so the row records where"),
+    )
+    .expect("readable locator");
+    assert_eq!(locator.issuing.mount, "pki_int");
+    assert_eq!(locator.issuing.issuer, "tenant-issuer-id");
+    assert_eq!(locator.issuing.key, "tenant-key-id");
+    // No root recorded: the root above this CA belongs to the organization and
+    // must outlive it, so revoking a tenant signing CA must not delete it.
+    assert!(locator.root.is_none());
+
+    // The chain is the issuing CA Vault named. Without it nothing outside Vault
+    // can validate a leaf this tenant CA signs.
+    assert!(
+        generated
+            .certificate
+            .chain_pem
+            .as_deref()
+            .is_some_and(|c| c.contains("BEGIN CERTIFICATE"))
+    );
+}
+
+#[tokio::test]
+async fn signing_a_tenant_csr_uses_sign_intermediate_not_sign_verbatim() {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    let tenant_ca = ca_pair("Offline Tenant CA", Some(&root));
+    mount_org_ca(&server, &root, &int).await;
+
+    let svc = ca_service(setup_db().await, &server);
+    let org = Uuid::new_v4();
+    let parent = svc
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap()
+        .certificate;
+
+    // The tenant's own CSR, over a key AXIAM never sees. No
+    // `intermediate/generate/internal` follows: there is nothing for Vault to
+    // create, only something for it to sign.
+    let tenant_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut csr_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    csr_params
+        .distinguished_name
+        .push(DnType::CommonName, "Offline Tenant CA");
+    let csr_pem = csr_params
+        .serialize_request(&tenant_key)
+        .unwrap()
+        .pem()
+        .unwrap();
+
+    mount_tenant_signature(&server, "Offline Tenant CA", &root, &tenant_ca).await;
+
+    let signed = svc
+        .sign_intermediate_csr(axiam_core::models::certificate::SignIntermediateCsr {
+            organization_id: org,
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: parent.id,
+            csr_pem,
+            validity_days: 365,
+        })
+        .await
+        .expect("signed tenant CSR");
+
+    // AXIAM signed it and holds nothing: the key is wherever the CSR was made.
+    assert_eq!(signed.key_custody, CaKeyCustody::External);
+    assert!(signed.key_locator.is_none());
+    assert!(signed.encrypted_private_key.is_none());
+    assert_eq!(signed.subject, "Offline Tenant CA");
+}

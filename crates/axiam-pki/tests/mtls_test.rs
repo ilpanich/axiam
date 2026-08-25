@@ -295,6 +295,8 @@ async fn mtls_rejects_expired_cert() {
         .create(axiam_core::models::certificate::StoreCaCertificate {
             id: uuid::Uuid::new_v4(),
             organization_id: fake_ca_org,
+            tenant_id: None,
+            parent_ca_id: None,
             subject: "Fake CA for expired test".into(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .into(),

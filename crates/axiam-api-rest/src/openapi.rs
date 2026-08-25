@@ -115,6 +115,9 @@ use crate::handlers;
         handlers::ca_certificates::list,
         handlers::ca_certificates::get,
         handlers::ca_certificates::revoke,
+        handlers::ca_certificates::generate_intermediate,
+        handlers::ca_certificates::sign_intermediate_csr,
+        handlers::ca_certificates::list_intermediates,
         // Certificates
         handlers::certificates::generate,
         handlers::certificates::list,
@@ -351,6 +354,10 @@ use crate::handlers;
         axiam_core::models::certificate::ImportCaCertificate,
         axiam_core::models::certificate::CreateCaCertificate,
         axiam_core::models::certificate::GeneratedCaCertificate,
+        axiam_core::models::certificate::CreateIntermediateCa,
+        axiam_core::models::certificate::SignIntermediateCsr,
+        handlers::ca_certificates::CreateIntermediateCaRequest,
+        handlers::ca_certificates::SignIntermediateCsrRequest,
         axiam_core::models::certificate::CertificateStatus,
         axiam_core::models::certificate::KeyAlgorithm,
         // Certificates

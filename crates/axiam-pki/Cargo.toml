@@ -24,6 +24,13 @@ aes-gcm = { workspace = true }
 rand = { workspace = true }
 # Required: pgp/rsa crate uses rand_core 0.6 CryptoRng; do not upgrade until upstream
 rand_core = { version = "0.6", features = ["getrandom"] }
+# RSA-4096 certificate key generation. rcgen delegates to *ring*, which
+# implements RSA signing but deliberately implements no RSA key *generation*, so
+# `KeyPair::generate_for(&PKCS_RSA_SHA256)` fails outright. This supplies the
+# missing half: the key is generated here and handed to rcgen as PKCS#8 DER
+# (see `crypto::generate_keypair`). Already in Cargo.lock via `pgp`, so this
+# promotes an existing dependency edge rather than adding a crate.
+rsa = { version = "0.9", features = ["pem"] }
 base64 = { workspace = true }
 pgp = { workspace = true }
 zeroize = { workspace = true }
@@ -42,11 +49,6 @@ pem = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }
-# Test-only: generates the throwaway RSA key the MDS BLOB vectors sign with,
-# so no private key is committed to the repository. Already in Cargo.lock via
-# `pgp`, so this adds a dependency edge, not a new crate.
-rsa = "0.9"
-
 # Test-only: a real HTTP server for the Vault CA key store's request paths, so
 # the URL, headers, body shape and status handling are exercised rather than
 # only the string that builds the URL. Already a dev-dependency of five other

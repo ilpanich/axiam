@@ -33,6 +33,41 @@ pub const MAX_LEAF_CERT_VALIDITY_DAYS: u32 = 825;
 /// Default leaf certificate validity when no tenant override is set: 365 days.
 pub const DEFAULT_LEAF_CERT_VALIDITY_DAYS: u32 = 365;
 
+/// The longest validity, in whole days, an issuer expiring at `issuer_not_after`
+/// can still grant to something issued at `now`.
+///
+/// A certificate must not outlive the CA that signed it — past the issuer's
+/// notAfter the chain stops validating, so the extra days are not merely
+/// useless, they are days the holder believes they have and does not. Both the
+/// leaf path ([`CertService::generate`]) and the intermediate path
+/// (`ca::generate_intermediate`) refuse a request above this number and quote it
+/// back, and the certificates API returns it per CA so the admin UI can cap its
+/// own input rather than discovering the limit on submit.
+///
+/// Rounded **down** to whole days, and floored at zero: an issuer with 36 hours
+/// left can grant one day, not two, and an expired issuer can grant nothing.
+/// (Callers reject an expired or not-yet-valid issuer before reaching here; the
+/// zero is a total function's answer, not a code path anyone rides.)
+///
+/// # Examples
+///
+/// ```
+/// use axiam_pki::cert::issuer_bounded_validity_days;
+/// use chrono::{Duration, Utc};
+///
+/// let now = Utc::now();
+/// // A CA with 90 days and 12 hours left grants 90 days, never 91.
+/// let ca_expiry = now + Duration::days(90) + Duration::hours(12);
+/// assert_eq!(issuer_bounded_validity_days(now, ca_expiry), 90);
+///
+/// // An issuer already past its notAfter grants nothing.
+/// assert_eq!(issuer_bounded_validity_days(now, now - Duration::days(1)), 0);
+/// ```
+pub fn issuer_bounded_validity_days(now: DateTime<Utc>, issuer_not_after: DateTime<Utc>) -> u32 {
+    let remaining = (issuer_not_after - now).num_days();
+    u32::try_from(remaining.max(0)).unwrap_or(u32::MAX)
+}
+
 /// Service for tenant-level certificate operations.
 #[derive(Clone)]
 pub struct CertService<CA, CR> {
@@ -126,8 +161,32 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .ok_or_else(|| AxiamError::Validation {
                 message: "validity_days produces a date out of range".into(),
             })?;
-        // Cap leaf validity to CA validity window
-        let not_after = std::cmp::min(requested_not_after, ca_cert.not_after);
+        // A leaf must not outlive the CA that signed it: a relying party stops
+        // trusting the chain the moment the issuer expires, so the extra days
+        // buy nothing and the certificate would fail every handshake made after
+        // the issuer's notAfter.
+        //
+        // This used to be a silent `min(requested, ca_cert.not_after)`. Silent
+        // was the wrong call: an operator asking for two years against a CA with
+        // three months left got a three-month certificate, no warning, and a
+        // renewal calendar built on a date the certificate does not carry. Say
+        // no and name the number they can actually have — see
+        // `issuer_bounded_validity_days`, which the API also exposes so the
+        // form can cap its own input before anyone submits it.
+        let not_after = requested_not_after;
+        if requested_not_after > ca_cert.not_after {
+            let available = issuer_bounded_validity_days(now, ca_cert.not_after);
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "validity_days is {} but the issuing CA expires on {} — a certificate \
+                     cannot outlive its issuer. The most this CA can grant today is {} day{}.",
+                    input.validity_days,
+                    ca_cert.not_after.format("%Y-%m-%d"),
+                    available,
+                    if available == 1 { "" } else { "s" },
+                ),
+            });
+        }
 
         // A custodian that signs on AXIAM's behalf never hands the key over, so
         // there is nothing to load and nothing to sign with here: the leaf key

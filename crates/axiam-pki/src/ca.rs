@@ -855,7 +855,24 @@ fn intermediate_window(
         .ok_or_else(|| AxiamError::Validation {
             message: "validity_days produces a date out of range".into(),
         })?;
-    Ok((not_before, std::cmp::min(requested, parent.not_after)))
+    // Same rule, and the same reasoning, as the leaf path in `cert.rs`: an
+    // intermediate that outlives its parent stops validating the day the parent
+    // expires, so the surplus is time the operator thinks they have and does
+    // not. This used to silently truncate to the parent's notAfter; refusing and
+    // naming the achievable number is what lets them pick a real one.
+    if requested > parent.not_after {
+        let available = crate::cert::issuer_bounded_validity_days(not_before, parent.not_after);
+        return Err(AxiamError::Validation {
+            message: format!(
+                "validity_days is {validity_days} but the parent CA expires on {} — an \
+                 intermediate cannot outlive the CA that signs it. The most this parent can \
+                 grant today is {available} day{}.",
+                parent.not_after.format("%Y-%m-%d"),
+                if available == 1 { "" } else { "s" },
+            ),
+        });
+    }
+    Ok((not_before, requested))
 }
 
 /// A window expressed back in whole days, for a custodian whose API takes a TTL.

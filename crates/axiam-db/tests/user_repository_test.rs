@@ -202,8 +202,14 @@ async fn update_user() {
     assert_eq!(updated.email, "frank@example.com"); // unchanged
 }
 
+/// Delete tombstones the row and strips its credentials.
+///
+/// The regression: this used to set `status = 'Inactive'` — exactly what the
+/// admin UI's Active/Inactive toggle does — so a deleted user stayed in the
+/// list, kept their password hash and MFA secret, and was indistinguishable
+/// from a suspended one. Delete looked like it did nothing.
 #[tokio::test]
-async fn soft_delete_user() {
+async fn delete_tombstones_the_user_and_strips_its_credentials() {
     let (db, tenant_id) = setup().await;
     let repo = SurrealUserRepository::new(db);
 
@@ -217,12 +223,94 @@ async fn soft_delete_user() {
         })
         .await
         .unwrap();
+    assert!(!user.password_hash.is_empty());
 
     repo.delete(tenant_id, user.id).await.unwrap();
 
-    // User should still exist but with Inactive status.
+    // The row survives, so audit entries naming this actor still resolve.
     let fetched = repo.get_by_id(tenant_id, user.id).await.unwrap();
-    assert_eq!(fetched.status, UserStatus::Inactive);
+    assert_eq!(fetched.status, UserStatus::Deleted);
+    assert_ne!(
+        fetched.status,
+        UserStatus::Inactive,
+        "Deleted must be distinguishable from the reversible suspended state"
+    );
+
+    // Nothing left to authenticate with. Argon2 output is never empty, so an
+    // empty hash cannot be satisfied by any password even if some future path
+    // skipped the status check.
+    assert!(fetched.password_hash.is_empty());
+    assert!(fetched.mfa_secret.is_none());
+    assert!(!fetched.mfa_enabled);
+}
+
+/// A deleted user is gone from the list — the actual user-visible symptom.
+#[tokio::test]
+async fn a_deleted_user_disappears_from_the_listing() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+
+    for name in ["heidi", "ivan", "judy"] {
+        repo.create(CreateUser {
+            tenant_id,
+            username: name.into(),
+            email: format!("{name}@example.com"),
+            password: "pass123".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    let before = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    assert_eq!(before.total, 3);
+
+    let ivan = repo.get_by_username(tenant_id, "ivan").await.unwrap();
+    repo.delete(tenant_id, ivan.id).await.unwrap();
+
+    let after = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    assert_eq!(after.items.len(), 2);
+    assert!(after.items.iter().all(|u| u.username != "ivan"));
+    // The count must agree with the page. A total that still said 3 would give
+    // the admin UI a page it can never fill.
+    assert_eq!(
+        after.total, 2,
+        "the count and the page must exclude the same rows"
+    );
+}
+
+/// The credential lookups exclude tombstones, so the username and email are
+/// free again and no login can resolve to a deleted account.
+#[tokio::test]
+async fn a_deleted_users_username_and_email_stop_resolving() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+
+    let user = repo
+        .create(CreateUser {
+            tenant_id,
+            username: "mallory".into(),
+            email: "mallory@example.com".into(),
+            password: "pass123".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    repo.delete(tenant_id, user.id).await.unwrap();
+
+    assert!(
+        repo.get_by_username(tenant_id, "mallory").await.is_err(),
+        "login resolves users by username; a tombstone must not be findable"
+    );
+    assert!(
+        repo.get_by_email(tenant_id, "mallory@example.com")
+            .await
+            .is_err(),
+        "password reset resolves users by email; likewise"
+    );
+    // But by id it still resolves, which is what keeps the audit trail readable.
+    assert!(repo.get_by_id(tenant_id, user.id).await.is_ok());
 }
 
 #[tokio::test]

@@ -21,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDate } from "@/lib/utils";
 import { ToggleField } from "@/components/shared";
-import { certificateService } from "@/services/certificates";
+import { certificateService, type CertificateType } from "@/services/certificates";
 import { usePermissions } from "@/hooks/usePermissions";
 
 // ─── Create form fields ───────────────────────────────────────────────────────
@@ -304,16 +304,32 @@ export function ServiceAccountsPage() {
   const [bindCertId, setBindCertId] = useState("");
   const [bindError, setBindError] = useState("");
 
-  // Only Service-type certificates can meaningfully bind to a service account,
-  // and a revoked or expired one would bind and then fail every handshake.
+  // A revoked or expired certificate would bind and then fail every handshake,
+  // so only Active ones are offered.
   const { data: allCertificates = [] } = useQuery({
     queryKey: ["certificates"],
     queryFn: () => certificateService.list(),
     enabled: canBindCertificate && bindAccount !== null,
   });
 
+  // Device certificates belong here as much as Service ones. An IoT device
+  // authenticating by mTLS *is* a machine principal, and binding its
+  // certificate to a service account is how it gets an identity to carry —
+  // it is the deployment shape this feature was built for. Filtering to
+  // `cert_type === "Service"` left the picker empty for exactly those
+  // deployments, with no explanation and nothing to select.
+  //
+  // The backend never had this restriction: `POST /service-accounts/{id}
+  // /bind-certificate` checks tenant ownership and nothing about the type. This
+  // was a client-side filter with no server-side counterpart, which is the
+  // shape a restriction takes when it was assumed rather than decided.
+  //
+  // `User` certificates stay out: those identify a person, and binding one to a
+  // machine account would let a service authenticate as its holder.
+  const BINDABLE_CERT_TYPES: CertificateType[] = ["Service", "Device"];
+
   const bindableCertificates = allCertificates.filter(
-    (c) => c.status === "Active" && c.cert_type === "Service"
+    (c) => c.status === "Active" && BINDABLE_CERT_TYPES.includes(c.cert_type)
   );
 
   function openBind(account: ServiceAccount) {
@@ -575,20 +591,22 @@ export function ServiceAccountsPage() {
             <option value="">Select a certificate…</option>
             {bindableCertificates.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.subject} — {c.fingerprint.slice(0, 16)}…
+                {c.subject} — {c.cert_type} — {c.fingerprint.slice(0, 16)}…
               </option>
             ))}
           </select>
           {bindableCertificates.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              No active Service certificates exist yet. Issue one from the{" "}
-              <span className="text-primary">Certificates</span> page first.
+              No active Service or IoT Device certificates exist yet. Issue one
+              from the <span className="text-primary">Certificates</span> page
+              first.
             </p>
           )}
           <p className="text-xs text-muted-foreground">
             The service account will be able to authenticate with this
-            certificate over mTLS. Only active certificates of type{" "}
-            <code>Service</code> are listed.
+            certificate over mTLS. Active <code>Service</code> and{" "}
+            <code>Device</code> (IoT) certificates are listed; <code>User</code>{" "}
+            certificates are not, because those identify a person.
           </p>
         </div>
       </FormDialog>

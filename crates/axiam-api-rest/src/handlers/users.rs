@@ -464,7 +464,88 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let target_id = path.into_inner();
+
+    // Kill every live session BEFORE the row is tombstoned.
+    //
+    // `check_user_status` runs at login, and only at login: an already-issued
+    // access token keeps working on its own claims until it expires. Deleting
+    // the row without this left a "deleted" administrator holding a valid
+    // session for the rest of the token's lifetime — the single most important
+    // thing a delete is supposed to stop.
+    //
+    // Before the tombstone, because a failure here must abort the delete rather
+    // than leave a removed account with live sessions. `revoke_all_sessions`
+    // covers session-flow refresh tokens and OAuth2 refresh tokens alike.
+    state
+        .auth_service
+        .revoke_all_sessions(user.tenant_id, target_id)
+        .await?;
+
     state.user_repo.delete(user.tenant_id, target_id).await?;
+
+    // Strip the authorization graph: group memberships first, then the direct
+    // role assignments that remain once inherited ones have gone with the
+    // membership. A tombstone still reachable through `member_of` would keep
+    // appearing in group-member listings and, worse, keep contributing live
+    // authorization paths.
+    //
+    // Best-effort, unlike the session revocation above: the account can no
+    // longer authenticate at all by this point, so a leftover edge grants
+    // nothing. Reporting a completed delete as a failure would invite a retry
+    // that 404s on the already-tombstoned row.
+    use axiam_core::repository::{GroupRepository as _, RoleRepository as _};
+    match state.group_repo.get_user_groups(user.tenant_id, target_id).await {
+        Ok(groups) => {
+            for group in groups {
+                if let Err(e) = state
+                    .group_repo
+                    .remove_member(user.tenant_id, target_id, group.id)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        tenant_id = %user.tenant_id,
+                        user_id = %target_id,
+                        group_id = %group.id,
+                        "could not remove a deleted user from a group"
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            user_id = %target_id,
+            "could not list the deleted user's groups"
+        ),
+    }
+    match state
+        .role_repo
+        .get_user_role_assignments(user.tenant_id, target_id)
+        .await
+    {
+        Ok(assignments) => {
+            for a in assignments {
+                if let Err(e) = state
+                    .role_repo
+                    .unassign_from_user(user.tenant_id, target_id, a.role.id, a.resource_id)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        tenant_id = %user.tenant_id,
+                        user_id = %target_id,
+                        role_id = %a.role.id,
+                        "could not unassign a role from a deleted user"
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            user_id = %target_id,
+            "could not list the deleted user's role assignments"
+        ),
+    }
 
     // A SCIM provisioning token authenticates *as* this user, so deleting them
     // without clearing their tokens would leave a year-long credential naming a

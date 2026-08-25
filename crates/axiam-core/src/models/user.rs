@@ -12,6 +12,22 @@ pub enum UserStatus {
     PendingVerification,
     /// User has been anonymized in-place following Art. 17 erasure (D-05).
     Anonymized,
+    /// Removed by an administrator through `DELETE /api/v1/users/{id}`.
+    ///
+    /// A tombstone, not a row deletion. The audit trail is append-only and
+    /// references actors by id, so hard-deleting the row would leave every
+    /// entry the user ever produced pointing at nothing — and an audit log you
+    /// cannot resolve to a person is not an audit log. The row stays, stripped
+    /// of every capability, and is excluded from listings and lookups so the
+    /// account is gone everywhere an operator can see it.
+    ///
+    /// Distinct from [`Self::Inactive`], which is the reversible "suspended"
+    /// state an administrator sets from the edit dialog, and from
+    /// [`Self::Anonymized`], which is GDPR Art. 17 erasure and additionally
+    /// scrubs the PII columns. Reusing `Inactive` for deletion is what made
+    /// `DELETE` look like it did nothing: the user stayed in the list, in their
+    /// groups, holding their roles, with live sessions.
+    Deleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

@@ -1,4 +1,9 @@
-import { NavLink, useLocation } from "react-router";
+// `Link`, not `NavLink`, on purpose. `NavLink` sets `aria-current="page"`
+// itself from its own internal prefix match, which cannot be told about
+// `alsoMatches` and silently overrode the value computed here — a tenant detail
+// page lit Organizations however `activeNavPath` answered. With `Link` the
+// active state has exactly one source.
+import { Link, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 import { usePermissions } from "@/hooks/usePermissions";
 import {
@@ -37,6 +42,89 @@ interface NavItem {
    * Logs, Profile).
    */
   requiredPermission: string | null;
+  /**
+   * Extra path prefixes this item owns, for detail pages that do not live
+   * under `to`.
+   *
+   * Tenant detail is the case that forced this: it is routed as
+   * `/organizations/:orgId/tenants/:tenantId` (a tenant is only meaningful
+   * inside its organization), so opening one from the Tenants list highlighted
+   * **Organizations** and the sidebar disagreed with the page the user was
+   * looking at.
+   */
+  alsoMatches?: string[];
+}
+
+/**
+ * Whether `pathname` is inside `base`, comparing path **segments**.
+ *
+ * Two things a `pathname.startsWith(base)` test gets wrong, both of which this
+ * replaces:
+ *
+ * 1. A raw string prefix does not know where a segment ends, so `/tenants`
+ *    would claim `/tenants-archive`. Comparing segment by segment cannot.
+ * 2. It has no notion of a route parameter. `alsoMatches` entries carry them —
+ *    tenant detail is `/organizations/:orgId/tenants/:tenantId` — and a
+ *    literal `:orgId` matches no real URL. A segment beginning with `:` is
+ *    treated as a wildcard that matches exactly one non-empty segment.
+ *
+ * `base` matches when it is a segment-wise prefix of `pathname`, so
+ * `/organizations/:orgId/tenants` matches `/organizations/abc/tenants/xyz`
+ * (and `/organizations/abc/tenants`) but not `/organizations/abc`.
+ */
+function isUnder(pathname: string, base: string): boolean {
+  const path = pathname.split("/").filter(Boolean);
+  const pattern = base.split("/").filter(Boolean);
+  if (pattern.length > path.length) return false;
+  return pattern.every(
+    (seg, i) => (seg.startsWith(":") ? path[i].length > 0 : seg === path[i]),
+  );
+}
+
+/**
+ * How specific a `base` is, for picking a winner among several matches.
+ *
+ * Segment count rather than string length: `/organizations/:orgId/tenants` is
+ * three segments and must beat `/organizations`'s one, even though a literal
+ * `:orgId` makes the two strings a similar length and a real URL's id would make
+ * the comparison depend on how long that particular UUID happens to be.
+ */
+function specificity(base: string): number {
+  return base.split("/").filter(Boolean).length;
+}
+
+/**
+ * The nav item, if any, that owns `pathname`.
+ *
+ * The **longest** matching prefix wins, so a more specific item beats a more
+ * general one regardless of the order they are declared in. Without that,
+ * `/organizations` and `/organizations/:orgId/tenants/:id` would both match a
+ * tenant detail page and the answer would depend on which section happened to
+ * be listed first.
+ *
+ * Exported for the test that walks every route in the router and asserts each
+ * one lights exactly one sidebar entry.
+ */
+export function activeNavPath(pathname: string): string | null {
+  let best: string | null = null;
+  let bestSpecificity = -1;
+  for (const section of navSections) {
+    for (const item of section.items) {
+      for (const base of [item.to, ...(item.alsoMatches ?? [])]) {
+        // Dashboard is the fallback route ("/" redirects to it) and owns
+        // nothing below itself, so it matches exactly and never by prefix.
+        const matches =
+          item.to === "/dashboard"
+            ? pathname === base
+            : isUnder(pathname, base);
+        if (matches && specificity(base) > bestSpecificity) {
+          best = item.to;
+          bestSpecificity = specificity(base);
+        }
+      }
+    }
+  }
+  return best;
 }
 
 interface NavSection {
@@ -123,6 +211,8 @@ const navSections: NavSection[] = [
         label: "Tenants",
         icon: <Network size={18} />,
         requiredPermission: "tenants:list",
+        // Tenant detail is routed under its organization — see `alsoMatches`.
+        alsoMatches: ["/organizations/:orgId/tenants"],
       },
       {
         to: "/certificates",
@@ -217,6 +307,11 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
   const location = useLocation();
   const { can } = usePermissions();
 
+  // Exactly one entry is active, chosen by longest matching prefix — see
+  // `activeNavPath`. Computing it once per render also means two entries can
+  // never both light up, which the old per-item `startsWith` allowed.
+  const activePath = activeNavPath(location.pathname);
+
   return (
     <aside
       className={cn(
@@ -257,16 +352,13 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
             </p>
             <ul className="space-y-0.5" role="list">
               {section.items.map((item) => {
-                const isActive =
-                  location.pathname === item.to ||
-                  (item.to !== "/dashboard" &&
-                    location.pathname.startsWith(item.to));
+                const isActive = activePath === item.to;
                 const isDisabled =
                   item.requiredPermission !== null &&
                   !can(item.requiredPermission);
                 return (
                   <li key={item.to}>
-                    <NavLink
+                    <Link
                       to={item.to}
                       onClick={
                         isDisabled
@@ -306,7 +398,7 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
                           aria-hidden="true"
                         />
                       )}
-                    </NavLink>
+                    </Link>
                   </li>
                 );
               })}

@@ -82,6 +82,7 @@ fn parse_status(s: &str) -> Result<UserStatus, DbError> {
         "Locked" => Ok(UserStatus::Locked),
         "PendingVerification" => Ok(UserStatus::PendingVerification),
         "Anonymized" => Ok(UserStatus::Anonymized),
+        "Deleted" => Ok(UserStatus::Deleted),
         other => Err(DbError::Migration(format!("unknown user status: {other}"))),
     }
 }

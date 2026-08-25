@@ -99,6 +99,7 @@ fn status_to_string(status: &UserStatus) -> String {
         UserStatus::PendingVerification => "pending_verification".into(),
         // D-05: anonymized users have their account permanently disabled.
         UserStatus::Anonymized => "anonymized".into(),
+        UserStatus::Deleted => "deleted".into(),
     }
 }
 

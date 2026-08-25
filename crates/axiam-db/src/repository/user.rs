@@ -146,6 +146,7 @@ fn parse_status(s: &str) -> Result<UserStatus, DbError> {
         "Locked" => Ok(UserStatus::Locked),
         "PendingVerification" => Ok(UserStatus::PendingVerification),
         "Anonymized" => Ok(UserStatus::Anonymized),
+        "Deleted" => Ok(UserStatus::Deleted),
         other => Err(DbError::Migration(format!("unknown user status: {other}"))),
     }
 }
@@ -157,6 +158,7 @@ fn status_to_string(s: &UserStatus) -> &'static str {
         UserStatus::Locked => "Locked",
         UserStatus::PendingVerification => "PendingVerification",
         UserStatus::Anonymized => "Anonymized",
+        UserStatus::Deleted => "Deleted",
     }
 }
 
@@ -331,7 +333,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
-                 WHERE tenant_id = $tenant_id AND username = $username",
+                 WHERE tenant_id = $tenant_id AND username = $username \
+                   AND status != 'Deleted'",
             )
             .bind(("tenant_id", tenant_id_str))
             .bind(("username", username.to_string()))
@@ -355,7 +358,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
-                 WHERE tenant_id = $tenant_id AND email = $email",
+                 WHERE tenant_id = $tenant_id AND email = $email \
+                   AND status != 'Deleted'",
             )
             .bind(("tenant_id", tenant_id_str))
             .bind(("email", email.to_string()))
@@ -480,7 +484,27 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
-        // Soft-delete: set status to Inactive.
+        // Tombstone the row and strip every credential on it.
+        //
+        // This used to set `status = 'Inactive'` and stop there, which is the
+        // same thing the edit dialog's Active/Inactive toggle does — so a
+        // "deleted" user stayed in the user list, kept their password hash and
+        // MFA secret, and was indistinguishable from a suspended one. From the
+        // administrator's side, Delete did nothing.
+        //
+        // The row itself is kept on purpose. Audit entries are append-only and
+        // reference their actor by id; hard-deleting the row would leave every
+        // entry the user ever produced pointing at nothing, and an audit trail
+        // that cannot be resolved to a person is not an audit trail. `list` and
+        // the credential lookups exclude `Deleted`, so the account is gone
+        // everywhere an operator or a login can observe it.
+        //
+        // GDPR Art. 17 erasure is the stronger, separate operation: it also
+        // scrubs the PII columns and writes an erasure proof (see
+        // `anonymize_user` and `axiam-server`'s purge pipeline). Deleting a
+        // user here is an administrative removal, not a certified erasure, and
+        // conflating the two would let an operator believe they had performed
+        // one by doing the other.
         let id_str = id.to_string();
         let tenant_id_str = tenant_id.to_string();
 
@@ -488,8 +512,19 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .db
             .current()
             .query(
+                // `password_hash` is TYPE string (not nullable), so the empty
+                // string is the tombstone — Argon2 output is never empty, so no
+                // password can ever verify against it even if some future code
+                // path skipped the status check.
                 "UPDATE type::record('user', $id) SET \
-                 status = 'Inactive', updated_at = time::now() \
+                 status = 'Deleted', \
+                 password_hash = '', \
+                 mfa_secret = NONE, \
+                 mfa_enabled = false, \
+                 totp_last_used_step = NONE, \
+                 locked_until = NONE, \
+                 failed_login_attempts = 0, \
+                 updated_at = time::now() \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
             )
             .bind(("id", id_str.clone()))
@@ -550,12 +585,17 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     ) -> AxiamResult<PaginatedResult<User>> {
         let tenant_id_str = tenant_id.to_string();
 
+        // `status != 'Deleted'` here and in the page query below, and the two
+        // MUST agree: a count that includes tombstones with a page that excludes
+        // them gives the admin UI a total it can never fill, so the last page
+        // renders empty and the pagination controls promise rows that do not
+        // exist. See `UserStatus::Deleted` for why the rows stay at all.
         let mut count_result = self
             .db
             .current()
             .query(
                 "SELECT count() AS total FROM user \
-                 WHERE tenant_id = $tenant_id GROUP ALL",
+                 WHERE tenant_id = $tenant_id AND status != 'Deleted' GROUP ALL",
             )
             .bind(("tenant_id", tenant_id_str.clone()))
             .await
@@ -578,7 +618,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         deletion_pending, scheduled_purge_at, \
                         metadata, created_at, updated_at \
                  FROM user \
-                 WHERE tenant_id = $tenant_id \
+                 WHERE tenant_id = $tenant_id AND status != 'Deleted' \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",
             )

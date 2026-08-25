@@ -6,7 +6,73 @@
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build the React frontend
+# Stage 1: Build the OPAQUE (RFC 9807) WebAssembly client from source
+# ---------------------------------------------------------------------------
+# The admin UI signs in with a WebAssembly build of crates/axiam-opaque, because
+# CONTRACT §23.1 allows exactly one OPAQUE implementation per platform and
+# forbids a client from writing its own. It is built HERE, from this commit,
+# rather than installed from npm as `@axiam/opaque-wasm`.
+#
+# That is the whole point of this stage. The wasm is baked into the image, so an
+# npm version pin would be frozen at build time for the life of every deployment
+# running that tag — a fix to the cryptography would reach the admin UI only
+# when somebody remembered to raise the pin. Building from source gives the
+# frontend the same property axiam-server already has through its workspace path
+# dependency: fix the crate, rebuild, done. It also removes the release-ordering
+# hazard, since `release.yml` (tag `v*`) no longer needs anything published by
+# `release-opaque.yml` (tag `axiam-opaque-v*`).
+#
+# The npm package is still published and still consumed — by the TypeScript SDK
+# and by third parties, which are libraries and correctly resolve a range at
+# their consumer's install time. Only the admin UI stops going through it.
+#
+# `--platform=$BUILDPLATFORM` pins this stage to the build host: wasm32 output
+# is byte-identical regardless of which machine emits it, so compiling it once
+# natively is both faster than and equivalent to compiling it per target arch.
+FROM --platform=$BUILDPLATFORM rust:1.97-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a AS wasm
+
+# Same version release-opaque.yml installs, so the artifact this image ships and
+# the one published to npm come out of the same tool. Fetched as a release
+# binary rather than `cargo install`ed (which would compile wasm-pack itself,
+# for minutes, on every cache miss) and checksummed, because an unverified
+# download here would land inside the OPAQUE build.
+ARG WASM_PACK_VERSION=0.13.1
+ARG BUILDARCH
+RUN set -eux; \
+    case "${BUILDARCH:-amd64}" in \
+      amd64) arch=x86_64; sha=c539d91ccab2591a7e975bcf82c82e1911b03335c80aa83d67ad25ed2ad06539 ;; \
+      arm64) arch=aarch64; sha=2e65038769f8bbaa5fc237ad4bb523e692df99458cbd3e3d92525b89d8762379 ;; \
+      *) echo "unsupported BUILDARCH: ${BUILDARCH}" >&2; exit 1 ;; \
+    esac; \
+    tarball="wasm-pack-v${WASM_PACK_VERSION}-${arch}-unknown-linux-musl.tar.gz"; \
+    curl -fsSLO "https://github.com/rustwasm/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${tarball}"; \
+    printf '%s  %s\n' "${sha}" "${tarball}" > wasm-pack.sha256; \
+    sha256sum -c wasm-pack.sha256; \
+    rm -f wasm-pack.sha256; \
+    tar -xzf "${tarball}" --strip-components=1 -C /usr/local/bin \
+        "wasm-pack-v${WASM_PACK_VERSION}-${arch}-unknown-linux-musl/wasm-pack"; \
+    rm -f "${tarball}"; \
+    rustup target add wasm32-unknown-unknown
+
+WORKDIR /src
+
+# crates/axiam-opaque declares `version.workspace = true`, so cargo has to load
+# the root workspace to build it — and loading a workspace validates that every
+# manifest in its explicit `members` list exists. Hence the whole crates/ tree
+# rather than just the two directories this actually compiles. Only
+# axiam-opaque-wasm's own dependency graph is built (it declares its own
+# `[workspace]`), which is a handful of crates, not the server.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+RUN wasm-pack build crates/axiam-opaque-wasm \
+        --target web --release \
+        --out-dir /out/opaque-wasm \
+        --out-name axiam_opaque \
+    && test -f /out/opaque-wasm/axiam_opaque_bg.wasm
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build the React frontend
 # ---------------------------------------------------------------------------
 FROM node:24-alpine@sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14 AS builder
 
@@ -20,8 +86,21 @@ RUN npm ci
 # Copy the rest of the frontend source
 COPY frontend/ .
 
+# Where vite.config.ts probes for the OPAQUE client. Present, so the alias
+# resolves to the real module rather than the stub — a released image must never
+# ship the degraded build, and the guard below is what makes that a build
+# failure instead of a login page that quietly cannot do OPAQUE. That silent
+# degradation is exactly how the admin UI shipped a non-functional OPAQUE client
+# for several releases.
+COPY --from=wasm /out/opaque-wasm ./vendor/opaque-wasm
+
 # Build the Vite project (outputs to dist/)
 RUN npm run build
+
+# Kept a separate RUN so a failed build reports itself rather than being
+# reported as a missing artifact.
+RUN test -n "$(find dist/assets -name 'axiam_opaque_bg-*.wasm' -print -quit)" \
+    || { echo "OPAQUE wasm missing from the bundle — the stub was used" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Stage 2: Serve with unprivileged nginx (listens on 8080, runs as uid 101)

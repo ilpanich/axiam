@@ -12,30 +12,36 @@
  *
  * # Loading
  *
- * `@axiam/opaque-wasm` is built from `crates/axiam-opaque-wasm` and resolved at
- * runtime rather than bundled, so a checkout that has not run the Rust
- * toolchain still builds and tests. When it is absent, {@link opaqueAvailable}
- * reports `false` and callers fall back to password login — the same posture
- * CONTRACT §23.1 requires of an SDK whose native library failed to load, and
- * the reason it must report rather than throw at login time.
+ * The specifier below is a **literal**, which is what lets the bundler resolve
+ * it, emit the glue and the `.wasm` as first-party assets, and serve them from
+ * this origin. It is not a `package.json` dependency: `vite.config.ts` aliases
+ * it to `frontend/vendor/opaque-wasm/`, built from `crates/axiam-opaque-wasm`
+ * in this repository — see that file for why the admin UI compiles its OPAQUE
+ * client from source instead of installing `@axiam/opaque-wasm` from npm.
+ *
+ * The specifier used to be held in a *variable*, so the bundler would not
+ * resolve it, back when the artifact was expected to be produced locally by
+ * `wasm-pack` and found at runtime. That left a bare
+ * `import("@axiam/opaque-wasm")` in the shipped bundle, which no browser can
+ * resolve without an import map — so the load threw, the `catch` below
+ * swallowed it, and {@link opaqueAvailable} was permanently `false` in every
+ * browser. Under `optional` that silently degraded every sign-in to the
+ * password path; under `required` it locked the tenant out entirely. Nothing
+ * reported it, in either mode, which is why both the image build and the E2E
+ * job now assert the `.wasm` is present in `dist/` rather than trusting it.
+ *
+ * The degradation itself is still real and still required: when the module
+ * cannot instantiate — a browser without WebAssembly, a CSP without
+ * `'wasm-unsafe-eval'`, or a checkout that has not run `just build-opaque-wasm`
+ * — {@link opaqueAvailable} reports `false` and callers fall back to password
+ * login. That is the posture CONTRACT §23.1 requires of a client whose OPAQUE
+ * implementation failed to load, and the reason it must report rather than
+ * throw at login time.
  */
 
 type OpaqueModule = typeof import("@axiam/opaque-wasm");
 
 let modulePromise: Promise<OpaqueModule | null> | null = null;
-
-/**
- * The package specifier, held in a variable so the bundler does not resolve it
- * statically.
- *
- * This is the mechanism behind the graceful degradation above: a static
- * `import("@axiam/opaque-wasm")` is a build error in a checkout where the Rust
- * artifact has not been built, which would make every developer who has not run
- * `wasm-pack` unable to build the admin UI at all. Deferring resolution to
- * runtime turns that into the `false` from {@link opaqueAvailable} that
- * CONTRACT §23.1 asks for.
- */
-const WASM_PACKAGE = "@axiam/opaque-wasm";
 
 /**
  * Load the WASM module once per page.
@@ -48,7 +54,7 @@ const WASM_PACKAGE = "@axiam/opaque-wasm";
 async function loadModule(): Promise<OpaqueModule | null> {
   modulePromise ??= (async () => {
     try {
-      const mod = (await import(/* @vite-ignore */ WASM_PACKAGE)) as OpaqueModule;
+      const mod = await import("@axiam/opaque-wasm");
       await mod.default();
       return mod;
     } catch {
@@ -66,8 +72,9 @@ export function __resetOpaqueModuleForTests(): void {
 /**
  * Inject a module, bypassing the loader. Test-only.
  *
- * Exists because the dynamic specifier above is deliberately unresolvable at
- * build time, which also puts it out of reach of `vi.mock`.
+ * Kept in preference to `vi.mock` because it swaps the *instantiated* module,
+ * so a test never depends on whether the real `.wasm` can be fetched under the
+ * test environment's module loader.
  */
 export function __setOpaqueModuleForTests(mod: unknown): void {
   modulePromise = Promise.resolve(mod as OpaqueModule);

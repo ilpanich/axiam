@@ -225,6 +225,33 @@ run-local:
     export AXIAM__AMQP__TLS__CA_CERT_PATH="${AXIAM__AMQP__TLS__CA_CERT_PATH:-$SECRETS_DIR/broker-tls/ca.pem}"
     RUST_LOG="${RUST_LOG:-axiam=debug}" cargo run --bin axiam-server --no-default-features
 
+# Build the OPAQUE WebAssembly client the admin UI signs in with.
+#
+# Optional for everything except OPAQUE: without it `frontend/vite.config.ts`
+# falls back to a stub, the UI builds and tests normally, and
+# `opaqueAvailable()` reports false — so password login still works and a
+# checkout with no Rust toolchain is not blocked. Run it when you need to
+# exercise an OPAQUE sign-in locally, or after changing crates/axiam-opaque.
+#
+# Released images never rely on this recipe: docker/Dockerfile.frontend builds
+# the same artifact from the same source in its own stage.
+build-opaque-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v wasm-pack >/dev/null 2>&1 || {
+      echo "wasm-pack not found — install it with:" >&2
+      echo "  cargo install wasm-pack --version 0.13.1" >&2
+      exit 1
+    }
+    # `--out-name axiam_opaque` matches what release-opaque.yml publishes to
+    # npm, so the entry filename vite.config.ts probes for is the same whether
+    # the package came from here or from the registry.
+    wasm-pack build crates/axiam-opaque-wasm \
+      --target web --release \
+      --out-dir "$PWD/frontend/vendor/opaque-wasm" \
+      --out-name axiam_opaque
+    echo "built -> frontend/vendor/opaque-wasm (gitignored)"
+
 # Start frontend dev server
 frontend-dev:
     cd frontend && npm run dev

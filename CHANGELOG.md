@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha44] - 2026-08-25
+
+### Added
+
+- Hand over the certificate, and manage a tenant's signing CAs
+
+- Tenant signing CAs, signed by the org CA and kept in Vault
+
+- Sdk-dry-run — rehearse all eleven SDK benches in minutes
+
+### Changed
+
+- Cover the copy, focus-trap and revoke paths; sync openapi.json
+
+- Bump scrypt from 0.11.0 to 0.12.0
+
+- Bump the minor-patch group with 3 updates
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump the minor-patch group in /frontend with 7 updates
+
+- Bump softprops/action-gh-release from 2 to 3
+
+- Bump actions/download-artifact from 4 to 8
+
+- Bump actions/upload-artifact from 4 to 7
+
+- Bump actions/setup-node from 6 to 7
+
+### Fixed
+
+- OPAQUE never ran in the browser; build the wasm from source
+
+- A tty stdin let the Kotlin bench hang the whole SDK sweep
+
+- Empty BENCH_ORG_ID made every token_refresh call a 400
+
+- Box the DPoP error so the token path clears result_large_err
+
+- Exempt the three form-seeding effects from set-state-in-effect
+
+- Drop the removed length argument from scrypt::Params::new
+
 ## [1.0.0-alpha43] - 2026-08-24
 
 ### Changed

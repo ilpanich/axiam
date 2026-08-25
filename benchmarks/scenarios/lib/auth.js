@@ -146,10 +146,23 @@ export function mintUserToken() {
 //     there is no body/header alternative),
 //   - the CSRF double-submit header `X-CSRF-Token` matching the `axiam_csrf`
 //     cookie (this path is NOT in `CSRF_EXEMPT_SUFFIXES`, middleware/csrf.rs),
-//   - a JSON body `{ tenant_id, org_id }` (`RefreshRequest`, handlers/auth.rs)
-//     — `org_id` is required to deserialize but is not actually trusted
-//     (the handler re-derives it from `tenant_id`, L449-451), so any
-//     well-formed UUID satisfies it.
+//   - a JSON body `{ tenant_id, org_id? }` (`RefreshRequest`, handlers/auth.rs)
+//     — `org_id` is `Option<Uuid>` with `#[serde(default)]` and is never
+//     trusted (the handler re-derives it from the tenant record, NEW-1), so
+//     the correct thing to send is *nothing at all*.
+//
+//     N4: this used to interpolate `cfg.orgId` unconditionally. `BENCH_ORG_ID`
+//     is empty whenever `seed.sh` re-seeds onto a volume that is already
+//     bootstrapped (bootstrap answers 409 and the recovery probe could not
+//     fill it — fixed separately in seed.sh), so the body went out as
+//     `{"tenant_id":"...","org_id":""}`. `""` is not `null`: serde hands it to
+//     `Uuid`'s deserializer, which rejects it, so actix answered **400 before
+//     the handler ever ran** — every refresh failed in ~1 ms with a healthy
+//     server and a valid token, and the whole cell read as
+//     "the k6 client could not reach the target". Guard the field exactly the
+//     way every other org-scoped body in this harness already does
+//     (`targets.js`, `nested.js`, `authz_check_rest.js`,
+//     `uma_ticket_grant.js`: `if (cfg.orgId) body.org_id = cfg.orgId`).
 // The response rotates all three cookies (new access/refresh/csrf) but its
 // JSON body carries only `{ expires_in }` — no tokens — so the new
 // refresh/csrf values must be read back out of the jar (see
@@ -160,10 +173,12 @@ export function mintUserToken() {
 // targets.js is out of scope for this change (see
 // claude_dev/refresh-harness-diagnosis.md for the exact diff to make there).
 export function axiamRefreshOp(refreshToken, csrfToken) {
+  const body = { tenant_id: cfg.tenantId };
+  if (cfg.orgId) body.org_id = cfg.orgId;
   return {
     method: 'POST',
     url: `${baseUrl()}/api/v1/auth/refresh`,
-    body: JSON.stringify({ tenant_id: cfg.tenantId, org_id: cfg.orgId }),
+    body: JSON.stringify(body),
     params: {
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken || '' },
       cookies: { axiam_refresh: refreshToken, axiam_csrf: csrfToken || '' },

@@ -45,6 +45,19 @@ set -a; . "$SEED_ENV"; set +a
 # (~20 ops/s) can never be confused with a harness limit.
 R="${H2_REPEAT:-25}"
 
+# N4: `LoginRequest.org_id` is `Option<Uuid>`, so an EMPTY `BENCH_ORG_ID`
+# interpolated into the body is not "absent" — serde hands `""` to `Uuid` and
+# actix answers 400 before the handler runs. That is fast and uniform, which is
+# exactly what a clamp probe must never mistake for a server characteristic.
+# Send the org UUID when the seed has one and fall back to the slug (login
+# accepts either; a tenant slug is only unique within an org) when it does not.
+if [ -n "${BENCH_ORG_ID:-}" ]; then
+  LOGIN_ORG="\"org_id\":\"$BENCH_ORG_ID\""
+else
+  LOGIN_ORG="\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\""
+fi
+LOGIN_BODY="{$LOGIN_ORG,\"tenant_id\":\"$BENCH_TENANT_ID\",\"username_or_email\":\"$BENCH_USERNAME\",\"password\":\"$BENCH_PASSWORD\"}"
+
 STATE="${H2_STATE:-${TMPDIR:-/tmp}/h2-clamp-probe}"
 mkdir -p "$STATE"
 # Session cookies and access tokens expire in 900 s. A burst run with an
@@ -61,7 +74,7 @@ mint() {
   if [ ! -s "$STATE/user.jar" ]; then
     curl -sSk -c "$STATE/user.jar" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
       -H 'Content-Type: application/json' \
-      -d "{\"org_id\":\"$BENCH_ORG_ID\",\"tenant_id\":\"$BENCH_TENANT_ID\",\"username_or_email\":\"$BENCH_USERNAME\",\"password\":\"$BENCH_PASSWORD\"}"
+      -d "$LOGIN_BODY"
     awk -F'\t' '$6=="axiam_access"{print $7}' "$STATE/user.jar" > "$STATE/user.tok"
     awk -F'\t' '$6=="axiam_csrf"{print $7}'   "$STATE/user.jar" > "$STATE/user.csrf"
   fi
@@ -107,7 +120,7 @@ req() { # R requests on one kept-alive connection; appends "<code> <secs>" lines
                   $(rep "$BASE/oauth2/revoke?tenant_id=$BENCH_TENANT_ID") ;;
     login)      curl -sSk --max-time "$SECS" -w '%{http_code} %{time_total}\n' -X POST \
                   -H 'Content-Type: application/json' \
-                  -d "{\"org_id\":\"$BENCH_ORG_ID\",\"tenant_id\":\"$BENCH_TENANT_ID\",\"username_or_email\":\"$BENCH_USERNAME\",\"password\":\"$BENCH_PASSWORD\"}" \
+                  -d "$LOGIN_BODY" \
                   $(rep "$BASE/api/v1/auth/login") ;;
     *) echo "[h2-probe] unknown op '$OP' (health jwks discovery userinfo resources roles users authz cc introspect revoke login)" >&2; exit 2 ;;
   esac >> "$out" 2>/dev/null

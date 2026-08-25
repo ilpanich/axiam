@@ -1872,7 +1872,17 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
+    // Notification rules reach the audit stream here, and only here. Without
+    // this sink `NotificationDispatcher` is constructed nowhere and every rule an
+    // administrator configures is inert — stored, listed by the API, shown in the
+    // admin UI, and consulted by nothing.
+    let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
+        Arc::new(axiam_audit::NotificationSink::new(
+            notification_rule_repo.clone(),
+            mail_outbound_publisher.clone(),
+        ));
+    let audit_middleware =
+        AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so

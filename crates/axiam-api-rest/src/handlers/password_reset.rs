@@ -3,7 +3,7 @@
 //! These endpoints allow users to request a password reset via email
 //! and confirm the reset with a new password.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
@@ -117,6 +117,7 @@ where
     )
 )]
 pub async fn request_reset<C: Connection + Clone>(
+    http_req: HttpRequest,
     state: web::Data<AppState<C>>,
     body: web::Json<RequestResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -146,6 +147,24 @@ pub async fn request_reset<C: Connection + Clone>(
         );
         return Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })));
     };
+
+    // Attribute the audit entry to the tenant just resolved, so a
+    // `password_reset_requested` notification rule can match it. Set here rather
+    // than in the unresolved branch above on purpose: an unresolvable tenant
+    // must stay indistinguishable from an unknown account (D-05), and that
+    // includes leaving no attributed audit trail behind for one and not the
+    // other.
+    http_req
+        .extensions_mut()
+        .insert(axiam_audit::AuditAttribution {
+            tenant_id,
+            org_id: state
+                .tenant_repo
+                .get_by_id(tenant_id)
+                .await
+                .map(|t| t.organization_id)
+                .unwrap_or_else(|_| Uuid::nil()),
+        });
 
     // QUAL-07: PasswordResetService is now a hoisted AppState singleton
     // (was constructed per-request here).
@@ -245,6 +264,7 @@ pub async fn request_reset<C: Connection + Clone>(
     )
 )]
 pub async fn confirm_reset<C: Connection + Clone>(
+    http_req: HttpRequest,
     state: web::Data<AppState<C>>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -254,6 +274,17 @@ pub async fn confirm_reset<C: Connection + Clone>(
 
     // Resolve the tenant to get its org_id for settings.
     let tenant = state.tenant_repo.get_by_id(req.tenant_id).await?;
+
+    // Attribute the audit entry, so a `password_changed` notification rule can
+    // match it. This endpoint is unauthenticated by nature — the caller proves
+    // themselves with the reset token, not a session — so the middleware has no
+    // JWT to read the tenant from. See `axiam_audit::AuditAttribution`.
+    http_req
+        .extensions_mut()
+        .insert(axiam_audit::AuditAttribution {
+            tenant_id: req.tenant_id,
+            org_id: tenant.organization_id,
+        });
 
     // Resolve effective password policy.
     let settings = state

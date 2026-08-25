@@ -1,6 +1,6 @@
 //! Authentication endpoints — login, logout, refresh, and MFA.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
 use axiam_auth::token::{issue_service_account_token, validate_access_token};
@@ -364,6 +364,17 @@ pub async fn login<C: Connection + Clone>(
         }));
     }
     let org_id = tenant.organization_id;
+
+    // Tell the audit middleware which tenant this request is about.
+    //
+    // A login carries no access token — proving an identity is the point — so
+    // the middleware would otherwise write the entry with a nil tenant, under
+    // `ActorType::System`. Notification rules are looked up by tenant, which is
+    // why `login_failure` and `account_locked` rules matched nothing however
+    // they were configured. The pair below is the one this handler just proved
+    // consistent (see the NEW-1 check above), not anything the client claimed.
+    req.extensions_mut()
+        .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
 
     // Fetch the effective security policy for the tenant.
     // Propagate errors instead of silently falling back to no-enforcement,

@@ -233,6 +233,26 @@ pub async fn create<C: Connection + Clone>(
     )
     .await?;
 
+    // The account is written as `PendingVerification`, so without this the user
+    // has no way to activate it: nothing told them it exists, and the only path
+    // to a token was an administrator knowing to call
+    // `POST /auth/resend-verification` by hand. Creating an account and sending
+    // its activation link are one act from the operator's point of view, and
+    // this is where they are joined.
+    //
+    // Best-effort, deliberately: the user row and its consent record are already
+    // committed. A mail queue outage must not turn a successful creation into a
+    // 500 the caller retries — that would try to create the user a second time
+    // and fail on the unique index. The account stays activatable through
+    // `resend-verification`, which mints a fresh token.
+    crate::handlers::email_verification::enqueue_verification_email(
+        &state,
+        created.tenant_id,
+        created.id,
+        &created.email,
+    )
+    .await;
+
     // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort;
     // never blocks or fails the response).
     state

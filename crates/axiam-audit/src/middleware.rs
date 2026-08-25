@@ -21,6 +21,80 @@ use uuid::Uuid;
 /// Paths that should not generate audit entries.
 const SKIP_PATHS: &[&str] = &["/health", "/ready"];
 
+/// Which tenant and organization a request concerns, for a request that carries
+/// no usable access token.
+///
+/// The middleware normally learns this from the verified JWT. The requests that
+/// matter most to a security notification rule — a failed login, a lockout, a
+/// password reset — have no token by definition: the whole point is that the
+/// caller did not authenticate. Those entries were therefore written with
+/// `ActorType::System` and a **nil** tenant id, which is why a notification rule
+/// for `login_failure` or `account_locked` could never match one: rules are
+/// looked up by tenant.
+///
+/// A handler that has established which tenant a request is about — `/auth/login`
+/// proves the tenant∈organization binding before it touches a credential —
+/// inserts one of these into the request extensions. The value comes from the
+/// handler's own verified lookup, never from the request body, so it is not a
+/// client-supplied tenant id being trusted.
+///
+/// The verified token still wins where both are present.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Inside an unauthenticated handler, once the tenant is proven:
+/// use actix_web::HttpMessage;
+/// req.extensions_mut()
+///     .insert(AuditAttribution { tenant_id, org_id });
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditAttribution {
+    /// The tenant the request concerns.
+    pub tenant_id: Uuid,
+    /// That tenant's organization.
+    pub org_id: Uuid,
+}
+
+/// One audit entry plus the organization it belongs to.
+///
+/// `CreateAuditLogEntry` carries a tenant but no organization, and the
+/// notification dispatcher needs both: the tenant to find matching rules, the
+/// organization to resolve the effective email configuration the mail consumer
+/// will send with. Rather than widening the persisted audit row — the
+/// organization is derivable from the tenant and storing it would be a second
+/// copy that can disagree — it travels beside the entry on the channel and is
+/// dropped before the write.
+#[derive(Debug, Clone)]
+pub struct AuditEvent {
+    /// The entry to append.
+    pub entry: CreateAuditLogEntry,
+    /// The organization owning `entry.tenant_id`, or nil when unknown.
+    pub org_id: Uuid,
+}
+
+/// Something that reacts to an audit event after it has been recorded.
+///
+/// Exactly one implementation today — the notification-rule dispatcher, which
+/// turns "a certificate was revoked" into email to the addresses an
+/// administrator listed. It is a trait rather than a direct call because the
+/// dispatcher is generic over its rule repository and its mail publisher, and
+/// `AuditMiddleware` is deliberately not generic over anything: it wraps every
+/// route in the application, so a type parameter here would spread through the
+/// whole server builder.
+///
+/// Runs **after** the append and never blocks the response — the worker is
+/// already off the request path. An implementation must not propagate errors;
+/// audit recording is the guarantee here, and notification is best-effort on top
+/// of it.
+pub trait AuditEventSink: Send + Sync {
+    /// React to `event`. Errors must be logged and swallowed, not returned.
+    fn on_event<'a>(
+        &'a self,
+        event: &'a AuditEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
 /// Default capacity for the audit write channel.
 const CHANNEL_CAPACITY: usize = 4096;
 
@@ -31,7 +105,7 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// background worker task.
 #[derive(Clone)]
 pub struct AuditMiddleware {
-    tx: mpsc::Sender<CreateAuditLogEntry>,
+    tx: mpsc::Sender<AuditEvent>,
 }
 
 impl AuditMiddleware {
@@ -41,17 +115,43 @@ impl AuditMiddleware {
     /// given `AuditLogRepository`. The channel capacity defaults to
     /// [`CHANNEL_CAPACITY`]; when full, new audit entries are dropped
     /// (with a warning) to avoid blocking request handling.
+    ///
+    /// No [`AuditEventSink`], so no notification rules fire. Use
+    /// [`Self::spawn_with_sink`] in the composition root.
     pub fn spawn<A: AuditLogRepository + 'static>(repo: A) -> Self {
+        Self::spawn_with_sink(repo, None)
+    }
+
+    /// As [`Self::spawn`], plus a sink that reacts to every recorded event.
+    ///
+    /// This is how notification rules reach the audit stream. Without a sink
+    /// the rules an administrator configures are stored, listed by the API,
+    /// shown in the admin UI — and consulted by nothing.
+    pub fn spawn_with_sink<A: AuditLogRepository + 'static>(
+        repo: A,
+        sink: Option<Arc<dyn AuditEventSink>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        tokio::spawn(audit_worker(rx, repo));
+        tokio::spawn(audit_worker(rx, repo, sink));
         Self { tx }
     }
 }
 
-async fn audit_worker<A: AuditLogRepository>(mut rx: mpsc::Receiver<CreateAuditLogEntry>, repo: A) {
-    while let Some(entry) = rx.recv().await {
-        if let Err(e) = repo.append(entry).await {
+async fn audit_worker<A: AuditLogRepository>(
+    mut rx: mpsc::Receiver<AuditEvent>,
+    repo: A,
+    sink: Option<Arc<dyn AuditEventSink>>,
+) {
+    while let Some(event) = rx.recv().await {
+        // Append first. The audit record is the guarantee; a notification is
+        // best-effort on top of it, and an event nobody was emailed about is a
+        // far smaller failure than one that was never recorded.
+        if let Err(e) = repo.append(event.entry.clone()).await {
             tracing::warn!(error = %e, "Failed to write audit log entry");
+        }
+
+        if let Some(ref sink) = sink {
+            sink.on_event(&event).await;
         }
     }
     tracing::warn!("Audit worker channel closed — no more entries will be written");
@@ -78,7 +178,7 @@ where
 
 pub struct AuditMiddlewareService<S> {
     service: S,
-    tx: mpsc::Sender<CreateAuditLogEntry>,
+    tx: mpsc::Sender<AuditEvent>,
 }
 
 impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
@@ -115,18 +215,27 @@ where
         // extractor) or try to validate the JWT now and cache the result.
         let user_info = extract_or_cache_user_info(&req);
 
+        // A handler may name the tenant an unauthenticated request concerns —
+        // see [`AuditAttribution`]. It can only do so *while running*, so this
+        // is read from the response's extensions after the call, not from the
+        // request's before it.
         let tx = self.tx.clone();
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result) = match fut.await {
+            let (status, result, attribution) = match fut.await {
                 Ok(res) => {
                     let s = res.status().as_u16();
-                    (s, Ok(res))
+                    let attribution = res
+                        .request()
+                        .extensions()
+                        .get::<AuditAttribution>()
+                        .copied();
+                    (s, Ok(res), attribution)
                 }
                 Err(err) => {
                     let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err))
+                    (s, Err(err), None)
                 }
             };
 
@@ -138,9 +247,15 @@ where
                 AuditOutcome::Failure
             };
 
-            let (actor_id, tenant_id, actor_type) = match user_info {
-                Some((uid, tid)) => (uid, tid, ActorType::User),
-                None => (Uuid::nil(), Uuid::nil(), ActorType::System),
+            // The verified token first: it is proof, where an attribution is a
+            // handler's assertion. They agree in practice; where they cannot
+            // both exist, whichever is present is used.
+            let (actor_id, tenant_id, org_id, actor_type) = match user_info {
+                Some((uid, tid, oid)) => (uid, tid, oid, ActorType::User),
+                None => match attribution {
+                    Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System),
+                    None => (Uuid::nil(), Uuid::nil(), Uuid::nil(), ActorType::System),
+                },
             };
 
             let entry = CreateAuditLogEntry {
@@ -157,7 +272,7 @@ where
                 })),
             };
 
-            if tx.try_send(entry).is_err() {
+            if tx.try_send(AuditEvent { entry, org_id }).is_err() {
                 tracing::error!(
                     audit_dropped = true,
                     method = %method,
@@ -171,15 +286,20 @@ where
     }
 }
 
-/// Extract user info from cached extensions, or validate JWT and cache it.
-fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
+/// Extract `(user_id, tenant_id, org_id)` from cached extensions, or validate
+/// the JWT and cache it.
+///
+/// The organization is returned as well as the tenant because the notification
+/// dispatcher needs it to resolve the effective email configuration — it was
+/// already being parsed here for the cache and then thrown away.
+fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid)> {
     use actix_web::web;
     use axiam_auth::config::AuthConfig;
     use axiam_auth::token::{CachedUserIdentity, validate_access_token};
 
     // Check cache first.
     if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
-        return Some((cached.user_id, cached.tenant_id));
+        return Some((cached.user_id, cached.tenant_id, cached.org_id));
     }
 
     let config = req.app_data::<web::Data<AuthConfig>>()?;
@@ -221,5 +341,5 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
 
     req.extensions_mut().insert(identity);
 
-    Some((user_id, tenant_id))
+    Some((user_id, tenant_id, org_id))
 }

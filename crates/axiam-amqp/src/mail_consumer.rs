@@ -192,18 +192,36 @@ where
 
     // 5. SEC-055: Resolve recipient from user repository instead of trusting to_address.
     //    This prevents recipient hijacking if the AMQP message is tampered with.
-    let resolved_address = user_repo
-        .get_by_id(msg.tenant_id, msg.user_id)
-        .await
-        .map(|u| u.email)
-        .unwrap_or_else(|_| {
-            warn!(
-                user_id = %msg.user_id,
-                tenant_id = %msg.tenant_id,
-                "SEC-055: could not resolve user email — falling back to message to_address"
-            );
-            msg.to_address.clone()
-        });
+    //
+    //    Notification mail is the one exception, and must be: its recipients are
+    //    addresses an administrator typed into a notification rule — a security
+    //    distribution list, an on-call alias — and are not users of the tenant at
+    //    all. Resolving them "back" to a user would have sent every rule's mail to
+    //    whoever happened to trigger the event (`user_id` there is the *actor*),
+    //    telling the person who just failed a login that someone failed a login,
+    //    and telling the administrators who asked to be told nothing.
+    //
+    //    The hijacking SEC-055 defends against does not apply to this type: the
+    //    address is not derived from a user record on either side, so there is no
+    //    authoritative value to prefer over the message's. What protects it is
+    //    that only `NotificationDispatcher` produces `MailType::Notification`, and
+    //    it reads the address straight from the rule row.
+    let resolved_address = if msg.mail_type == MailType::Notification {
+        msg.to_address.clone()
+    } else {
+        user_repo
+            .get_by_id(msg.tenant_id, msg.user_id)
+            .await
+            .map(|u| u.email)
+            .unwrap_or_else(|_| {
+                warn!(
+                    user_id = %msg.user_id,
+                    tenant_id = %msg.tenant_id,
+                    "SEC-055: could not resolve user email — falling back to message to_address"
+                );
+                msg.to_address.clone()
+            })
+    };
 
     // 6. Render HTML-safe email (D-18).
     let email_message = render_email(&template, &resolved_address, &ctx);

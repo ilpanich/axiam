@@ -17,6 +17,7 @@ import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SecretRevealModal } from "@/components/SecretRevealModal";
+import { CertificateViewDialog } from "@/components/CertificateViewDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -247,6 +248,14 @@ export function CertificatesPage() {
   const [secretOpen, setSecretOpen] = useState(false);
   const [privateKeyPem, setPrivateKeyPem] = useState("");
 
+  // ─── View state ────────────────────────────────────────────────────────────
+  // The public certificate, which is not a secret and is the thing that has to
+  // be distributed. The list endpoint already returns `public_cert_pem` for
+  // every row, so this needs no extra request.
+  const [viewCert, setViewCert] = useState<Certificate | null>(null);
+  /** Shown as soon as the private-key reveal is acknowledged. */
+  const [pendingView, setPendingView] = useState<Certificate | null>(null);
+
   const generateMutation = useMutation({
     mutationFn: (payload: GenerateCertificatePayload) =>
       certificateService.generate(payload),
@@ -256,6 +265,11 @@ export function CertificatesPage() {
       resetGenerateForm();
       setPrivateKeyPem(resp.private_key_pem);
       setSecretOpen(true);
+      // Queued behind the one-time key reveal: once the operator acknowledges
+      // that, they land on the certificate itself with a download button —
+      // which is what they came here to obtain and what the key is useless
+      // without.
+      setPendingView(resp);
     },
     onError: (err: unknown) => {
       const msg = getApiErrorMessage(err);
@@ -384,21 +398,33 @@ export function CertificatesPage() {
     {
       key: "actions",
       header: "Actions",
-      width: "w-24",
+      width: "w-40",
       render: (row) => (
-        <button
-          aria-label={`Revoke certificate for ${row.subject}`}
-          disabled={row.status !== "Active"}
-          onClick={() => setRevokeTarget(row)}
-          className={cn(
-            "px-2.5 py-1 rounded text-xs font-medium border transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary/40",
-            row.status !== "Active"
-              ? "border-white/5 text-muted-foreground/40 cursor-not-allowed"
-              : "border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
-          )}
-        >
-          Revoke
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Available whatever the status: a revoked or expired certificate is
+              still the one a relying party is asking about, and refusing to
+              show it is what sends an operator to the database. */}
+          <button
+            aria-label={`View certificate for ${row.subject}`}
+            onClick={() => setViewCert(row)}
+            className="px-2.5 py-1 rounded text-xs font-medium border border-white/10 text-muted-foreground transition-colors hover:text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+          >
+            View
+          </button>
+          <button
+            aria-label={`Revoke certificate for ${row.subject}`}
+            disabled={row.status !== "Active"}
+            onClick={() => setRevokeTarget(row)}
+            className={cn(
+              "px-2.5 py-1 rounded text-xs font-medium border transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary/40",
+              row.status !== "Active"
+                ? "border-white/5 text-muted-foreground/40 cursor-not-allowed"
+                : "border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+            )}
+          >
+            Revoke
+          </button>
+        </div>
       ),
     },
   ];
@@ -460,10 +486,54 @@ export function CertificatesPage() {
         onClose={() => {
           setSecretOpen(false);
           setPrivateKeyPem("");
+          if (pendingView) {
+            setViewCert(pendingView);
+            setPendingView(null);
+          }
         }}
         title="Certificate Generated"
-        description="Your certificate has been generated. Save the private key now — it will not be shown again."
+        description="Your certificate has been generated. Save the private key now — it will not be shown again. The certificate itself stays available from the list."
         secrets={[{ label: "Private Key (PEM)", value: privateKeyPem, mono: true }]}
+      />
+
+      {/* The public certificate — readable and downloadable at any time */}
+      <CertificateViewDialog
+        open={viewCert !== null}
+        onClose={() => setViewCert(null)}
+        subject={viewCert?.subject ?? ""}
+        publicCertPem={viewCert?.public_cert_pem ?? ""}
+        details={
+          viewCert
+            ? [
+                { label: "Subject", value: viewCert.subject },
+                { label: "Type", value: viewCert.cert_type },
+                {
+                  label: "Key algorithm",
+                  value: (
+                    <code className="text-xs">{viewCert.key_algorithm}</code>
+                  ),
+                },
+                {
+                  label: "Status",
+                  value: <StatusBadge status={badgeStatus(viewCert.status)} />,
+                },
+                { label: "Valid from", value: formatDate(viewCert.not_before) },
+                { label: "Expires", value: formatDate(viewCert.not_after) },
+                {
+                  label: "Fingerprint",
+                  value: (
+                    <code className="text-xs">{viewCert.fingerprint}</code>
+                  ),
+                },
+                {
+                  label: "Issuing CA",
+                  value: (
+                    <code className="text-xs">{viewCert.issuer_ca_id}</code>
+                  ),
+                },
+              ]
+            : []
+        }
       />
 
       {/* Revoke confirm */}

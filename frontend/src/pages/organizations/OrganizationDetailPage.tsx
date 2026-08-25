@@ -27,6 +27,7 @@ import { OrgEmailConfigPanel } from "./EmailConfigPanel";
 import { usePermissions } from "@/hooks/usePermissions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SecretRevealModal } from "@/components/SecretRevealModal";
+import { CertificateViewDialog } from "@/components/CertificateViewDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -570,6 +571,12 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
     });
   }
 
+  // View — the public certificate and its chain, which are not secret and are
+  // exactly what has to be distributed to anything that validates a chain to
+  // this CA. Under `vault_pki` the chain is the only copy of the root outside
+  // Vault, so a UI that could not show it stranded the operator.
+  const [viewCert, setViewCert] = useState<CaCertificate | null>(null);
+
   // Revoke
   const [revokeCert, setRevokeCert] = useState<CaCertificate | null>(null);
   const revokeMutation = useMutation({
@@ -635,21 +642,30 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
     {
       key: "actions",
       header: "Actions",
-      width: "w-24",
+      width: "w-40",
       render: (row) => (
-        <button
-          aria-label={`Revoke ${row.subject}`}
-          onClick={() => setRevokeCert(row)}
-          disabled={row.status === "Revoked"}
-          className={cn(
-            "px-2.5 py-1 rounded text-xs font-medium transition-colors",
-            row.status === "Revoked"
-              ? "opacity-40 cursor-not-allowed text-muted-foreground"
-              : "text-red-400 hover:bg-red-500/20 hover:text-red-300"
-          )}
-        >
-          Revoke
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            aria-label={`View ${row.subject}`}
+            onClick={() => setViewCert(row)}
+            className="px-2.5 py-1 rounded text-xs font-medium border border-white/10 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            View
+          </button>
+          <button
+            aria-label={`Revoke ${row.subject}`}
+            onClick={() => setRevokeCert(row)}
+            disabled={row.status === "Revoked"}
+            className={cn(
+              "px-2.5 py-1 rounded text-xs font-medium transition-colors",
+              row.status === "Revoked"
+                ? "opacity-40 cursor-not-allowed text-muted-foreground"
+                : "text-red-400 hover:bg-red-500/20 hover:text-red-300"
+            )}
+          >
+            Revoke
+          </button>
+        </div>
       ),
     },
   ];
@@ -815,8 +831,52 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         open={revealedSecrets !== null}
         onClose={() => setRevealedSecrets(null)}
         title="CA Certificate Generated"
-        description="Save this now — it is never shown again and cannot be recovered."
+        description="Save this now — it is never shown again and cannot be recovered. The CA certificate itself stays available from this list."
         secrets={revealedSecrets ?? []}
+      />
+
+      <CertificateViewDialog
+        open={viewCert !== null}
+        onClose={() => setViewCert(null)}
+        title="CA Certificate"
+        subject={viewCert?.subject ?? ""}
+        publicCertPem={viewCert?.public_cert_pem ?? ""}
+        chainPem={viewCert?.chain_pem}
+        details={
+          viewCert
+            ? [
+                { label: "Subject", value: viewCert.subject },
+                {
+                  label: "Scope",
+                  value: viewCert.tenant_id
+                    ? "Tenant signing CA"
+                    : "Organization CA",
+                },
+                {
+                  label: "Key algorithm",
+                  value: (
+                    <code className="text-xs">{viewCert.key_algorithm}</code>
+                  ),
+                },
+                {
+                  label: "Status",
+                  value: <StatusBadge status={caBadgeStatus(viewCert.status)} />,
+                },
+                {
+                  label: "Key custody",
+                  value: CA_CUSTODY_LABEL[viewCert.key_custody ?? "database"],
+                },
+                { label: "Valid from", value: formatDate(viewCert.not_before) },
+                { label: "Expires", value: formatDate(viewCert.not_after) },
+                {
+                  label: "Fingerprint",
+                  value: (
+                    <code className="text-xs">{viewCert.fingerprint}</code>
+                  ),
+                },
+              ]
+            : []
+        }
       />
     </div>
   );

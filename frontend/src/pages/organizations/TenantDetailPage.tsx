@@ -4,6 +4,7 @@ import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { TenantEmailConfigPanel } from "./EmailConfigPanel";
 import { TenantSecurityOverridePanel } from "./SecurityOverridePanel";
+import { SigningCaPanel } from "./SigningCaPanel";
 import { usePermissions } from "@/hooks/usePermissions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -136,6 +137,19 @@ export function TenantDetailPage() {
         </div>
       ) : (
         <p className="text-muted-foreground">Tenant not found.</p>
+      )}
+
+      {/* The tenant's own signing CAs. Gated on the CA list permission rather
+          than rendered and left to 403, so an operator without it sees no
+          half-loaded panel — the same rule the two panels below follow. */}
+      {tenant && can("ca_certificates:list") && (
+        <div className="mt-6">
+          <SigningCaPanel
+            orgId={orgId}
+            tenantId={tenantId}
+            tenantName={tenant.name}
+          />
+        </div>
       )}
 
       {/* The tenant's partial overrides on the org baselines — security first,

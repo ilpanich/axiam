@@ -373,7 +373,7 @@ pub async fn token<C: Connection + Clone>(
     let ctx = token_request_context(&req).with_assertion_from(&form);
     let ctx = match dpop_from_request(&req, &state, tenant_id, ctx).await {
         Ok(ctx) => ctx,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // B3 / RFC 8693. Like the device grant, its own service behind one match
@@ -572,7 +572,7 @@ async fn dpop_from_request<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
     mut ctx: TokenRequestContext,
-) -> Result<TokenRequestContext, HttpResponse> {
+) -> Result<TokenRequestContext, Box<HttpResponse>> {
     use axiam_core::repository::{ProofKind, ProofReplayRepository};
     use axiam_oauth2::dpop::{self, DpopExpectation};
 
@@ -681,7 +681,11 @@ async fn dpop_from_request<C: Connection + Clone>(
 }
 
 /// RFC 9449 §7.1 error response, optionally carrying a nonce challenge.
-fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) -> HttpResponse {
+///
+/// Boxed because it is only ever the `Err` of `dpop_from_request`, whose `Ok`
+/// is a handful of words: an inline `HttpResponse` there makes every caller
+/// carry the error's width on the success path (`clippy::result_large_err`).
+fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) -> Box<HttpResponse> {
     let mut builder = HttpResponse::BadRequest();
     builder
         .append_header(("Cache-Control", "no-store"))
@@ -689,10 +693,10 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
     if let Some(nonce) = nonce {
         builder.append_header((DPOP_NONCE_HEADER, nonce));
     }
-    builder.json(serde_json::json!({
+    Box::new(builder.json(serde_json::json!({
         "error": error,
         "error_description": description,
-    }))
+    })))
 }
 
 /// Append an `oauth2.client_auth_failed` audit entry, fire-and-forget.

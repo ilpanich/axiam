@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["generate","get","import","list","revoke"],"struct":["CreateCaCertificateRequest","ImportCaCertificateRequest"]};
+window.SIDEBAR_ITEMS = {"fn":["generate","generate_intermediate","get","import","list","list_intermediates","revoke","sign_intermediate_csr"],"struct":["CreateCaCertificateRequest","CreateIntermediateCaRequest","ImportCaCertificateRequest","SignIntermediateCsrRequest"]};

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CaKeyCustody","StoredCaKey"],"struct":["CaGenerationRequest","CaKeyRef","GeneratedCa","IntermediateSpec","LeafSigningRequest","SignedLeaf"],"trait":["CaKeyStore"]};
+window.SIDEBAR_ITEMS = {"enum":["CaKeyCustody","StoredCaKey"],"struct":["CaGenerationRequest","CaKeyRef","CustodiedIntermediate","GeneratedCa","IntermediateCaRequest","IntermediateSigningRequest","IntermediateSpec","LeafSigningRequest","SignedLeaf"],"trait":["CaKeyStore"]};

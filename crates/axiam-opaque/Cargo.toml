@@ -31,7 +31,7 @@ opaque-ke = { version = "4.0.1", default-features = false, features = ["ristrett
 # unambiguous which is meant at each use site.
 sha2_v10 = { version = "0.10", package = "sha2" }
 argon2 = { workspace = true }
-scrypt = "0.11"
+scrypt = "0.12"
 hex = { workspace = true }
 thiserror = { workspace = true }
 rand08 = { version = "0.8", package = "rand", features = ["getrandom"] }

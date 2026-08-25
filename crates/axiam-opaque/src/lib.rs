@@ -249,7 +249,7 @@ impl Ksf for AxiamKsf {
                     .map_err(|_| opaque_ke::errors::InternalError::KsfError)?;
             }
             Self::Scrypt { log_n, r, p } => {
-                let params = scrypt::Params::new(log_n, r, p, output.len())
+                let params = scrypt::Params::new(log_n, r, p)
                     .map_err(|_| opaque_ke::errors::InternalError::KsfError)?;
                 scrypt::scrypt(&input, &[0u8; 32], &params, &mut output)
                     .map_err(|_| opaque_ke::errors::InternalError::KsfError)?;

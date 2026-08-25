@@ -436,6 +436,13 @@ export function OrgEmailConfigPanel({ orgId }: { orgId: string }) {
     if (seeded.current || isLoading) return;
     seeded.current = true;
     if (!config) return;
+    // Seeding an editable form from server data is a one-shot copy, not a derived
+    // value: the `seeded` guard is what stops a background refetch from
+    // overwriting edits in progress, and it is re-armed by the delete handler so
+    // the form re-seeds from whatever the server reports next. Deriving during
+    // render instead would re-seed from the stale query result the moment the
+    // guard is re-armed, before the refetch lands.
+    // oxlint-disable-next-line react/set-state-in-effect
     setForm(
       formFromProvider(
         {
@@ -690,6 +697,13 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
     if (seeded.current || isLoading) return;
     seeded.current = true;
     if (!override) return;
+    // Seeding an editable form from server data is a one-shot copy, not a derived
+    // value: the `seeded` guard is what stops a background refetch from
+    // overwriting edits in progress, and it is re-armed by the delete handler so
+    // the form re-seeds from whatever the server reports next. Deriving during
+    // render instead would re-seed from the stale query result the moment the
+    // guard is re-armed, before the refetch lands.
+    // oxlint-disable-next-line react/set-state-in-effect
     setToggles({
       sender:
         override.from_name !== undefined ||

@@ -336,6 +336,13 @@ export function TenantSecurityOverridePanel({
     if (seeded.current || overrideLoading || effectiveLoading) return;
     if (!effective) return;
     seeded.current = true;
+    // Seeding an editable form from server data is a one-shot copy, not a derived
+    // value: the `seeded` guard is what stops a background refetch from
+    // overwriting edits in progress, and it is re-armed by the delete handler so
+    // the form re-seeds from whatever the server reports next. Deriving during
+    // render instead would re-seed from the stale query result the moment the
+    // guard is re-armed, before the refetch lands.
+    // oxlint-disable-next-line react/set-state-in-effect
     setForm(formFromEffective(effective));
     setGroups(override ? groupsFromOverride(override) : NO_GROUPS);
   }, [override, effective, overrideLoading, effectiveLoading]);

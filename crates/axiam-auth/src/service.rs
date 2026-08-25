@@ -6,7 +6,7 @@ use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
 };
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::settings::{MfaPolicy, PasswordPolicy};
+use axiam_core::models::settings::{LockoutPolicy, MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
@@ -43,6 +43,16 @@ pub struct LoginInput {
     /// true, users without MFA will be asked to set it up before
     /// completing login.
     pub mfa_policy: Option<MfaPolicy>,
+    /// Tenant-effective lockout policy — the `max_failed_login_attempts` and
+    /// backoff an administrator set on the organization (optionally narrowed by
+    /// the tenant).
+    ///
+    /// `None` falls back to the deployment-wide [`AuthConfig`] defaults, which
+    /// is right only where no tenant policy can be resolved. Leaving this `None`
+    /// on the ordinary login path is how the organization's configured threshold
+    /// stops being the one that applies — the exact bug this field exists to
+    /// close.
+    pub lockout_policy: Option<LockoutPolicy>,
 }
 
 /// Successful login result (no MFA required).
@@ -309,7 +319,8 @@ impl<
         .map_err(|e| AxiamError::Crypto(e.to_string()))?;
 
         if !valid {
-            self.record_failed_login(input.tenant_id, &user).await?;
+            self.record_failed_login(input.tenant_id, &user, input.lockout_policy.as_ref())
+                .await?;
             return Err(AuthError::InvalidCredentials.into());
         }
 
@@ -1435,20 +1446,34 @@ impl<
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+        policy: Option<&LockoutPolicy>,
     ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
-        self.record_failed_login(tenant_id, &user).await
+        self.record_failed_login(tenant_id, &user, policy).await
     }
 
     async fn record_failed_login(
         &self,
         tenant_id: Uuid,
         user: &axiam_core::models::user::User,
+        policy: Option<&LockoutPolicy>,
     ) -> AxiamResult<()> {
         // D-06: delegate to the shared lockout helper — the single source of
         // truth for failed-attempt accrual, also called by gRPC
         // `UserService::validate_credentials` (SEC-026b).
-        crate::lockout::record_failed_login(&self.user_repo, &self.config, tenant_id, user).await
+        //
+        // The tenant's own policy when the caller resolved one; the deployment
+        // default only when it could not. Never no accrual at all: an
+        // unresolvable policy must not be a way to switch lockout off.
+        let fallback;
+        let policy = match policy {
+            Some(p) => p,
+            None => {
+                fallback = crate::lockout::policy_from_config(&self.config);
+                &fallback
+            }
+        };
+        crate::lockout::record_failed_login(&self.user_repo, policy, tenant_id, user).await
     }
 
     async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

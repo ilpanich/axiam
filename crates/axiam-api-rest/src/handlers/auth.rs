@@ -390,6 +390,13 @@ pub async fn login<C: Connection + Clone>(
     }
 
     let mfa_policy = Some(settings.mfa);
+    // The organization's `max_failed_login_attempts` and backoff, narrowed by
+    // any tenant override. These settings were already being fetched here for
+    // OPAQUE and MFA and then dropped on the floor, so `AuthService::login`
+    // metered failures against the deployment-wide `AuthConfig` instead: an
+    // administrator lowering the threshold in the admin UI saw no change,
+    // because the login path never read what they set.
+    let lockout_policy = Some(settings.lockout);
 
     let input = LoginInput {
         tenant_id,
@@ -399,6 +406,7 @@ pub async fn login<C: Connection + Clone>(
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),
         mfa_policy,
+        lockout_policy,
     };
 
     let result = state.auth_service.login(input).await?;

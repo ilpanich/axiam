@@ -175,6 +175,7 @@ async fn login_alice(
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap()
@@ -236,6 +237,7 @@ async fn login_by_email() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await;
 
@@ -264,6 +266,7 @@ async fn login_wrong_password() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -296,6 +299,7 @@ async fn login_user_not_found() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -338,6 +342,7 @@ async fn login_locked_user() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -388,6 +393,7 @@ async fn login_inactive_user() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -723,6 +729,7 @@ async fn mfa_login_challenge_flow() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -794,6 +801,7 @@ async fn mfa_wrong_code_rejected() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -862,6 +870,7 @@ async fn login_without_mfa_still_returns_success() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -872,6 +881,37 @@ async fn login_without_mfa_still_returns_success() {
 // -----------------------------------------------------------------------
 // T2.4 — Brute force protection tests
 // -----------------------------------------------------------------------
+
+/// Helper: attempt a bad login carrying an explicit tenant lockout policy.
+///
+/// The policy is the whole point of these tests: it is what an administrator
+/// sets on the organization, and until it was threaded into `LoginInput` the
+/// login path metered against the deployment-wide `AuthConfig` instead — so a
+/// threshold lowered in the admin UI changed nothing.
+async fn bad_login_with_policy(
+    svc: &AuthService<
+        SurrealUserRepository<surrealdb::engine::local::Db>,
+        SurrealSessionRepository<surrealdb::engine::local::Db>,
+        SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+    >,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    policy: Option<axiam_core::models::settings::LockoutPolicy>,
+) {
+    let _ = svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: "wrong-password".into(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: None,
+            lockout_policy: policy,
+        })
+        .await;
+}
 
 /// Helper: attempt a bad login.
 async fn bad_login(
@@ -893,6 +933,7 @@ async fn bad_login(
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await;
 }
@@ -955,6 +996,7 @@ async fn account_locks_after_max_attempts() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -1169,6 +1211,7 @@ async fn login_mfa_enforced_no_mfa_configured_returns_setup_required() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1209,6 +1252,7 @@ async fn login_mfa_enforced_mfa_already_configured_returns_mfa_challenge() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1246,6 +1290,7 @@ async fn login_mfa_not_enforced_no_mfa_returns_success() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_not_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1309,6 +1354,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1342,6 +1388,7 @@ async fn enroll_mfa_with_setup_token_succeeds() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap()
@@ -1380,6 +1427,7 @@ async fn confirm_mfa_with_setup_token_returns_login_tokens() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap()
@@ -1435,6 +1483,7 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1540,6 +1589,7 @@ async fn login_after_reset_requires_setup_again() {
             ip_address: None,
             user_agent: None,
             mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1794,3 +1844,10 @@ async fn ensure_can_sign_in_admits_a_user_whose_lockout_has_expired() {
     svc.ensure_can_sign_in(&user)
         .expect("an elapsed lockout must not keep locking the account out");
 }
+
+// -----------------------------------------------------------------------
+// The lockout threshold is the ORGANIZATION's, not the deployment default
+// -----------------------------------------------------------------------
+//
+// `LoginInput::lockout_policy` exists because it did not. `AuthService::login`
+// metered every failed attempt against `A

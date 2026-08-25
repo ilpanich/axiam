@@ -239,7 +239,7 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
     // SECFIX-01: UserService and TokenService are registered behind the same
     // AuthInterceptor chokepoint as AuthorizationService — mirrors server.rs.
     let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(
+        UserServiceImpl::with_static_lockout_policy(
             user_repo,
             auth_config.clone(),
             // B1: in production this is a clone of `AppState`'s process-wide

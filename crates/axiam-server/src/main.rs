@@ -1835,6 +1835,18 @@ async fn main() -> std::io::Result<()> {
     // bounds peak concurrent ~19 MiB Argon2id arenas process-wide, and
     // `UserService/ValidateCredentials` verifies passwords just like REST login.
     let grpc_crypto_semaphore = Arc::clone(&crypto_semaphore);
+    // The tenant-effective lockout policy, resolved from the SAME settings and
+    // tenant repositories the REST login handler reads. Both transports check
+    // credentials, so both must meter failures against the administrator's
+    // configured `max_failed_login_attempts` — a gRPC path still counting to the
+    // deployment default would be a brute-force budget the admin UI does not
+    // show and cannot lower.
+    let grpc_lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource> =
+        Arc::new(axiam_auth::lockout::SettingsLockoutPolicy::new(
+            settings_repo.clone(),
+            tenant_repo.clone(),
+            axiam_auth::lockout::policy_from_config(&config.auth),
+        ));
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -1851,6 +1863,7 @@ async fn main() -> std::io::Result<()> {
             grpc_reactor_routing_invalidator,
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
+            grpc_lockout_policy,
         )
         .await
         {

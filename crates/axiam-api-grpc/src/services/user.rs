@@ -30,18 +30,58 @@ pub struct UserServiceImpl<U: UserRepository> {
     /// would bound gRPC in isolation while letting REST + gRPC together
     /// exceed the memory bound the permit count exists to enforce.
     crypto_semaphore: Arc<Semaphore>,
+    /// Where the tenant's `max_failed_login_attempts` and backoff come from.
+    ///
+    /// Held as a trait object rather than as two more repository type
+    /// parameters: this service is generic over `U: UserRepository` alone, and
+    /// threading a settings repo and a tenant repo through that signature for
+    /// one field would reach every call site and every test double.
+    ///
+    /// Before this existed, `validate_credentials` metered against the
+    /// deployment-wide `AuthConfig` while an administrator's organization-level
+    /// threshold sat in the database unread — so lowering the threshold in the
+    /// admin UI changed nothing on this path.
+    lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
 }
 
 impl<U: UserRepository> UserServiceImpl<U> {
     /// `crypto_semaphore` MUST be a clone of the one `Arc<Semaphore>` built at
     /// the composition root (`axiam-server`'s `main`), the same handle
     /// `AppState` holds — see the field docs.
-    pub fn new(user_repo: U, auth_config: AuthConfig, crypto_semaphore: Arc<Semaphore>) -> Self {
+    ///
+    /// `lockout_policy` should be a
+    /// [`axiam_auth::lockout::SettingsLockoutPolicy`] over the same settings
+    /// and tenant repositories REST's login handler reads, so both transports
+    /// lock accounts on the same numbers. [`Self::with_static_lockout_policy`]
+    /// is the deployment-default shorthand.
+    pub fn new(
+        user_repo: U,
+        auth_config: AuthConfig,
+        crypto_semaphore: Arc<Semaphore>,
+        lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
+    ) -> Self {
         Self {
             user_repo,
             auth_config,
             crypto_semaphore,
+            lockout_policy,
         }
+    }
+
+    /// Build with the deployment-wide lockout defaults, for a composition root
+    /// with no settings store to consult (and for tests).
+    pub fn with_static_lockout_policy(
+        user_repo: U,
+        auth_config: AuthConfig,
+        crypto_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        let policy = axiam_auth::lockout::policy_from_config(&auth_config);
+        Self::new(
+            user_repo,
+            auth_config,
+            crypto_semaphore,
+            Arc::new(axiam_auth::lockout::StaticLockoutPolicy(policy)),
+        )
     }
 }
 
@@ -241,9 +281,10 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             // SEC-026b / D-06: meter every failed credential check via the
             // shared lockout helper — the single source of truth for
             // failed-attempt accrual, no unmetered credential-check path.
+            let policy = self.lockout_policy.policy_for(claims_tenant_id).await;
             axiam_auth::lockout::record_failed_login(
                 &self.user_repo,
-                &self.auth_config,
+                &policy,
                 claims_tenant_id,
                 &user,
             )

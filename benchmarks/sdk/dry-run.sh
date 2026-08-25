@@ -179,8 +179,13 @@ for sdk in "${SDKS[@]}"; do
   printf '[sdk-dry-run] %-11s ... ' "$sdk"
   rec="$OUT/$sdk.json"
   log="$OUT/$sdk.dryrun.log"
+  # Every bench runs with stdin closed. A bench that inherits an interactive terminal's
+  # stdin can wedge the whole sweep: the Gradle daemon client (sdk/kotlin) forwards
+  # System.in and only sends its `CloseInput`/`Finished` shutdown handshake once that
+  # stream hits EOF, so on a tty it hangs AFTER a successful build. No bench reads stdin,
+  # so this costs nothing and removes the failure mode for all eleven languages at once.
   t0=$(date +%s)
-  timeout --signal=TERM --kill-after=30 "$PER_SDK_TIMEOUT" bash "$run" > "$rec" 2>"$log"
+  timeout --signal=TERM --kill-after=30 "$PER_SDK_TIMEOUT" bash "$run" > "$rec" 2>"$log" </dev/null
   rc=$?
   secs=$(( $(date +%s) - t0 ))
 

@@ -14,6 +14,18 @@
 # If neither Gradle path works, or the build itself fails (most likely: Maven Central /
 # Gradle Plugin Portal dependency resolution blocked — see TODO.md), this degrades to a
 # 'pending' record instead of crashing, per HARNESS-SPEC.md.
+#
+# Both Gradle invocations take stdin from /dev/null. This is not cosmetic: the Gradle
+# daemon CLIENT runs a DaemonClientInputForwarder thread that reads System.in and, on
+# EOF, sends the daemon a `CloseInput` message. That message is part of the shutdown
+# handshake — without it the client never sends `Finished`, never exits, and the `$( )`
+# capture below blocks forever even though the build already SUCCEEDED. Inherit an
+# interactive terminal's stdin (which never reaches EOF) and that is exactly what
+# happens: on 2026-08-25 a p0-plaintext dry run hung here with a complete, status:ok
+# record sitting in the daemon log, and the daemon logging
+# "Timed out waiting for finished message from client" 60s after dispatching Success.
+# No bench in this harness reads stdin, so closing it costs nothing and removes the
+# only way a language bench can wedge a sweep.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
@@ -28,9 +40,9 @@ command -v java >/dev/null || { source "$HERE/../_pending.sh"; emit_pending kotl
 
 OUT=""
 OK=0
-if [ -x "$HERE/gradlew" ] && OUT="$("$HERE/gradlew" -q --console=plain run)"; then
+if [ -x "$HERE/gradlew" ] && OUT="$("$HERE/gradlew" -q --console=plain run </dev/null)"; then
   OK=1
-elif command -v gradle >/dev/null && OUT="$(gradle -q --console=plain run)"; then
+elif command -v gradle >/dev/null && OUT="$(gradle -q --console=plain run </dev/null)"; then
   OK=1
 fi
 

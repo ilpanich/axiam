@@ -43,12 +43,17 @@ else
   mapfile -t SDKS < <(find "$HERE" -mindepth 2 -maxdepth 2 -name run.sh -printf '%h\n' | xargs -n1 basename | sort)
 fi
 
+# Every bench runs with stdin closed. A bench that inherits an interactive terminal's
+# stdin can wedge the whole sweep: the Gradle daemon client (sdk/kotlin) forwards
+# System.in and only sends its `CloseInput`/`Finished` shutdown handshake once that
+# stream hits EOF, so on a tty it hangs AFTER a successful build. No bench reads stdin,
+# so this costs nothing and removes the failure mode for all eleven languages at once.
 for sdk in "${SDKS[@]}"; do
   run="$HERE/$sdk/run.sh"
   [ -f "$run" ] || { echo "[sdk] no run.sh for $sdk — skipping"; continue; }
   echo "[sdk] running $sdk bench"
   out="$RESULTS/$sdk.json"
-  if bash "$run" > "$out" 2>"$RESULTS/$sdk.log"; then
+  if bash "$run" > "$out" 2>"$RESULTS/$sdk.log" </dev/null; then
     status=$(sed -n 's/.*"status": *"\([^"]*\)".*/\1/p' "$out" | head -1)
     echo "[sdk] $sdk -> $out (status=${status:-?})"
   else

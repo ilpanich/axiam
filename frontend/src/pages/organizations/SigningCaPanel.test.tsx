@@ -220,4 +220,204 @@ describe("SigningCaPanel", () => {
       await screen.findByText(/This organization has no CA that can sign/)
     ).toBeInTheDocument();
   });
+  it("hands over an existing signing CA's certificate and its chain", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(
+      screen.getByRole("button", { name: "View CN=Acme R&D Signing CA" })
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Signing CA Certificate/,
+    });
+    // The summary says where the key is, which is the question an operator
+    // looking at an intermediate actually has.
+    expect(within(dialog).getByText("Held by AXIAM's custodian")).toBeInTheDocument();
+    expect(within(dialog).getByText("ca-fp")).toBeInTheDocument();
+    // A chain is present, so the bundle download is offered alongside the leaf.
+    expect(
+      within(dialog).getByRole("button", { name: /Full chain/ })
+    ).toBeInTheDocument();
+  });
+
+  it("revokes a signing CA through the CA-certificate endpoint", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(
+      screen.getByRole("button", { name: "Revoke CN=Acme R&D Signing CA" })
+    );
+    // Revoking an intermediate invalidates everything under it, so it is
+    // confirmed rather than done on one click.
+    expect(
+      await screen.findByRole("dialog", { name: /Revoke Signing CA/ })
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Revoke" }));
+
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    // A tenant signing CA *is* a CA certificate, and is revoked as one.
+    expect(apiMock.post.mock.calls[0][0]).toBe(
+      "/api/v1/organizations/org1/ca-certificates/sca1/revoke"
+    );
+  });
+
+  it("will not offer to revoke one that already is", async () => {
+    mockRoutes({
+      signingCas: [{ ...existingSigningCa, status: "Revoked" }],
+    });
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    expect(
+      screen.getByRole("button", { name: "Revoke CN=Acme R&D Signing CA" })
+    ).toBeDisabled();
+    // Still viewable: a revoked certificate is often exactly the one somebody
+    // is asking about.
+    expect(
+      screen.getByRole("button", { name: "View CN=Acme R&D Signing CA" })
+    ).toBeEnabled();
+  });
+
+  it("distinguishes an expired signing CA from a revoked one", async () => {
+    mockRoutes({
+      signingCas: [
+        { ...existingSigningCa, status: "Expired" },
+        { ...existingSigningCa, id: "sca9", subject: "CN=Gone", status: "Revoked" },
+      ],
+    });
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+    // Expired and revoked are different facts — one lapsed, the other was
+    // withdrawn — and the badge must not conflate them. An expired CA reads as
+    // inactive, which is the badge vocabulary the rest of the console uses.
+    expect(screen.getByText("Inactive")).toBeInTheDocument();
+    expect(screen.getByText("Revoked")).toBeInTheDocument();
+  });
+
+  it("says a CA whose key the tenant holds is not one AXIAM can issue against", async () => {
+    mockRoutes({
+      signingCas: [{ ...existingSigningCa, key_custody: "external" }],
+    });
+    renderPanel();
+    expect(await screen.findByText("Held by tenant")).toBeInTheDocument();
+  });
+
+  it("asks for a subject rather than posting a blank one", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    // Whitespace satisfies the `required` attribute the browser enforces, so
+    // this guard is the one that stops a CA being minted with an empty name.
+    await user.type(screen.getByLabelText(/Subject/), "   ");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Subject is required/
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("refuses to submit either dialog with no CA to sign under", async () => {
+    const user = userEvent.setup();
+    mockRoutes({ signingCas: [], caCertificates: [anchorOnlyCa] });
+    renderPanel();
+    await screen.findByText(/No signing CAs yet/);
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    await user.type(screen.getByLabelText(/Subject/), "CN=Nowhere");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /active organization CA is required/
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("carries the chosen key algorithm and validity through to the request", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    apiMock.post.mockResolvedValue(
+      res({ ...existingSigningCa, id: "sca5", subject: "CN=RSA Signing CA" })
+    );
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    await user.type(screen.getByLabelText(/Subject/), "CN=RSA Signing CA");
+    await user.selectOptions(
+      screen.getByLabelText(/Key Algorithm/),
+      "Rsa4096"
+    );
+    const validity = screen.getByLabelText(/Validity/);
+    await user.clear(validity);
+    await user.type(validity, "365");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.post.mock.calls[0][1]).toMatchObject({
+      key_algorithm: "Rsa4096",
+      validity_days: 365,
+    });
+  });
+
+  it("surfaces the server's refusal instead of a generic failure", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    // The server has the last word on whether a parent can sign — it knows the
+    // custody and the validity window. Replacing its sentence with a generic
+    // one would throw away the only explanation the operator gets.
+    apiMock.post.mockRejectedValue({
+      response: { data: { message: "Parent CA is revoked." } },
+    });
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    await user.type(screen.getByLabelText(/Subject/), "CN=Doomed");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Parent CA is revoked."
+    );
+  });
+
+  it("clears a dialog it was closed on rather than reopening it half-filled", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    await user.type(screen.getByLabelText(/Subject/), "CN=Abandoned");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await user.click(screen.getByRole("button", { name: /Create Signing CA/ }));
+    expect(await screen.findByLabelText(/Subject/)).toHaveValue("");
+  });
+
+  it("clears an abandoned CSR paste too", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Sign a CSR/ }));
+    await user.type(
+      screen.getByLabelText(/Certificate signing request/),
+      "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----"
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await user.click(screen.getByRole("button", { name: /Sign a CSR/ }));
+    expect(
+      await screen.findByLabelText(/Certificate signing request/)
+    ).toHaveValue("");
+  });
 });

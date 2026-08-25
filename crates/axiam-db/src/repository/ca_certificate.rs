@@ -42,6 +42,9 @@ struct CaCertificateRow {
     /// deserializes; `decode_custody` resolves it the way the backfill does.
     key_custody: Option<String>,
     key_locator: Option<String>,
+    /// Schema v49. `None` for every row written before it, which means `false`:
+    /// a CA nobody has flagged is not a trust anchor.
+    mtls_trust_anchor: Option<bool>,
     created_at: DateTime<Utc>,
 }
 
@@ -69,6 +72,9 @@ struct CaCertificateRowWithId {
     /// deserializes; `decode_custody` resolves it the way the backfill does.
     key_custody: Option<String>,
     key_locator: Option<String>,
+    /// Schema v49. `None` for every row written before it, which means `false`:
+    /// a CA nobody has flagged is not a trust anchor.
+    mtls_trust_anchor: Option<bool>,
     created_at: DateTime<Utc>,
 }
 
@@ -172,6 +178,7 @@ impl CaCertificateRow {
                 self.encrypted_private_key.is_some(),
             ),
             key_locator: self.key_locator,
+            mtls_trust_anchor: self.mtls_trust_anchor.unwrap_or(false),
             encrypted_private_key: self.encrypted_private_key.map(|b| b.into_inner().to_vec()),
             created_at: self.created_at,
         })
@@ -202,6 +209,7 @@ impl CaCertificateRowWithId {
                 self.encrypted_private_key.is_some(),
             ),
             key_locator: self.key_locator,
+            mtls_trust_anchor: self.mtls_trust_anchor.unwrap_or(false),
             encrypted_private_key: self.encrypted_private_key.map(|b| b.into_inner().to_vec()),
             created_at: self.created_at,
         })
@@ -251,7 +259,8 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                  status = $status, \
                  encrypted_private_key = $encrypted_private_key, \
                  key_custody = $key_custody, \
-                 key_locator = $key_locator",
+                 key_locator = $key_locator, \
+                 mtls_trust_anchor = false",
             )
             .bind(("id", id_str))
             .bind(("org_id", input.organization_id.to_string()))
@@ -466,5 +475,109 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
         })?;
 
         Ok(row.into_entry(id)?)
+    }
+
+    async fn set_mtls_trust_anchor(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        enabled: bool,
+    ) -> AxiamResult<CaCertificate> {
+        // The organization guard is on the UPDATE itself, not a read-then-write:
+        // a caller supplying another organization's CA id must match zero rows
+        // and get a not-found, not flip a flag on a CA they cannot see.
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('ca_certificate', $id) SET \
+                 mtls_trust_anchor = $enabled \
+                 WHERE organization_id = $org_id",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("org_id", organization_id.to_string()))
+            .bind(("enabled", enabled))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaCertificateRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "ca_certificate".into(),
+            id: id.to_string(),
+        })?;
+
+        Ok(row.into_entry(id)?)
+    }
+
+    async fn update_key_custody(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        custody: CaKeyCustody,
+        key_locator: Option<String>,
+    ) -> AxiamResult<CaCertificate> {
+        // `encrypted_private_key = NONE` in the same statement as the new
+        // custody. Two statements would leave a window in which the row names
+        // Vault *and* still holds the ciphertext — a key that is in both places
+        // is not a key that has been moved.
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('ca_certificate', $id) SET \
+                 key_custody = $custody, \
+                 key_locator = $key_locator, \
+                 encrypted_private_key = NONE \
+                 WHERE organization_id = $org_id",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("org_id", organization_id.to_string()))
+            .bind(("custody", custody.to_string()))
+            .bind(("key_locator", key_locator))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaCertificateRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "ca_certificate".into(),
+            id: id.to_string(),
+        })?;
+
+        Ok(row.into_entry(id)?)
+    }
+
+    async fn list_mtls_trust_anchors(&self) -> AxiamResult<Vec<CaCertificate>> {
+        // Not organization-scoped, by design — see the trait's doc comment.
+        //
+        // `status = 'Active'` and the notAfter guard are the security-relevant
+        // half: a revoked CA in the client trust store would let a certificate
+        // the operator has already disowned authenticate a client, and an
+        // expired one is a root whose own chain no longer validates.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM ca_certificate \
+                 WHERE mtls_trust_anchor = true \
+                   AND status = 'Active' \
+                   AND not_after > time::now() \
+                 ORDER BY created_at ASC",
+            )
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaCertificateRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_entry().map_err(Into::into))
+            .collect()
     }
 }

@@ -132,6 +132,27 @@ pub struct TlsConfig {
     /// (and must be readable) when `client_auth` is `optional` or `required`;
     /// ignored when `off`.
     pub client_ca_path: Option<PathBuf>,
+    /// Where to write the client-CA bundle built from the organization CAs an
+    /// operator flagged as mTLS trust anchors.
+    ///
+    /// The flag lives on the CA
+    /// ([`axiam_core::models::certificate::CaCertificate::mtls_trust_anchor`]),
+    /// set through the admin UI or the API. At startup the server collects every
+    /// flagged CA's **public** certificate, writes them here as one PEM bundle,
+    /// and — only if the operator has not set [`Self::client_auth`] and
+    /// [`Self::client_ca_path`] themselves — points client-certificate
+    /// verification at it in `optional` mode.
+    ///
+    /// A deployment that flags no CA never writes this file and is unaffected.
+    /// An operator who configures `client_auth` and `client_ca_path` explicitly
+    /// keeps exactly what they configured: a value someone typed is a decision,
+    /// and quietly overriding it is how a trust store ends up containing
+    /// something nobody chose.
+    ///
+    /// Defaults to `client-ca-bundle.pem` beside the server's other TLS
+    /// material when `cert_path` is set, and is otherwise required for the
+    /// feature to do anything.
+    pub client_ca_bundle_path: Option<PathBuf>,
 }
 
 impl Default for TlsConfig {
@@ -143,6 +164,7 @@ impl Default for TlsConfig {
             http2: true,
             client_auth: ClientAuth::Off,
             client_ca_path: None,
+            client_ca_bundle_path: None,
         }
     }
 }

@@ -1189,7 +1189,70 @@ async fn main() -> std::io::Result<()> {
     // Direct-TLS is opt-in (default: terminate at the proxy layer). Cloned out
     // of `config.server` before `server_config` is moved into the App factory
     // closure below so the bind decision can still read it (F-04).
-    let tls_config = config.server.tls.clone();
+    let mut tls_config = config.server.tls.clone();
+
+    // Build the mTLS client trust store from the organization CAs an operator
+    // flagged in the admin UI (`mtls_trust_anchor`). Only their PUBLIC
+    // certificates are exported; the signing keys stay with their custodian.
+    // See `axiam_server::mtls_anchors` for the whole argument, including why an
+    // operator's own `client_auth` / `client_ca_path` is never overridden.
+    //
+    // Read here rather than at the bind below because rustls builds its
+    // `RootCertStore` once, from this config — and because a flagged CA has to
+    // reach `tls_config` before it is moved into the App factory.
+    let anchor_result = {
+        use axiam_core::repository::CaCertificateRepository as _;
+        // A fresh handle: `ca_cert_repo` was moved into the CA service above,
+        // and the repositories are cheap clones over one shared pool.
+        SurrealCaCertificateRepository::new(pool.handle_for_repo())
+            .list_mtls_trust_anchors()
+            .await
+    };
+    match anchor_result {
+        Ok(anchors) => {
+            let plan = axiam_server::mtls_anchors::plan(&tls_config, &anchors);
+            match &plan {
+                axiam_server::mtls_anchors::AnchorPlan::NoAnchors => {}
+                axiam_server::mtls_anchors::AnchorPlan::NoBundlePath => {
+                    tracing::warn!(
+                        anchors = anchors.len(),
+                        "CA certificates are flagged as mTLS trust anchors but there is \
+                         nowhere to write the bundle — set \
+                         AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH (or \
+                         AXIAM__SERVER__TLS__CERT_PATH, beside which it defaults). \
+                         Client-certificate authentication is NOT enabled."
+                    );
+                }
+                axiam_server::mtls_anchors::AnchorPlan::Write { anchor_count, .. } => {
+                    match axiam_server::mtls_anchors::apply(&mut tls_config, &plan) {
+                        Ok(Some(path)) => tracing::info!(
+                            anchors = anchor_count,
+                            bundle = %path.display(),
+                            client_auth = ?tls_config.client_auth,
+                            "mTLS client trust store built from flagged organization CAs"
+                        ),
+                        Ok(None) => {}
+                        // Warn rather than refuse to boot. The flag is set at
+                        // runtime through the API, so failing startup here would
+                        // let one admin request brick the next restart. The
+                        // failure is permissive (client auth stays off), not a
+                        // hole: `optional` rejects nobody it would otherwise
+                        // have admitted.
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "could not write the mTLS client-CA bundle — \
+                             client-certificate authentication is NOT enabled"
+                        ),
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "could not read the mTLS trust anchors — \
+             client-certificate authentication is left as configured"
+        ),
+    }
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = pool;
@@ -2056,6 +2119,7 @@ async fn main() -> std::io::Result<()> {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),
             cert_repo: cert_repo.clone(),
+            ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),
             device_auth_service: device_auth_service.clone(),
         },

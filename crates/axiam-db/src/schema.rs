@@ -282,6 +282,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_status_deleted",
         sql: SCHEMA_V48,
     },
+    Migration {
+        version: 49,
+        name: "ca_mtls_trust_anchor",
+        sql: SCHEMA_V49,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2649,9 +2654,47 @@ DEFINE FIELD OVERWRITE status ON TABLE user TYPE string
                       'Anonymized', 'Deleted'];
 ";
 
+// -----------------------------------------------------------------------
+// Schema v49 — an organization CA can be an mTLS trust anchor
+// -----------------------------------------------------------------------
+//
+// Opt-in per CA. When set, the server exports that CA's PUBLIC certificate to
+// the client-CA bundle at startup and enables client-certificate
+// authentication, so an IoT device or service account holding a certificate
+// this CA issued is verified by the TLS layer itself.
+//
+// The private key is not involved and is never copied out of its custodian — a
+// trust anchor is the certificate, which the server already hands to every
+// client during the handshake.
+//
+// `DEFAULT false` with no backfill: every CA that already exists is not an
+// anchor, which is exactly the posture the deployment has today.
+//
+// The index makes the startup read — "every anchor, across all organizations" —
+// a lookup rather than a scan of every CA in the deployment.
+const SCHEMA_V49: &str = "\
+DEFINE FIELD IF NOT EXISTS mtls_trust_anchor ON TABLE ca_certificate TYPE bool
+    DEFAULT false;
+DEFINE INDEX IF NOT EXISTS idx_ca_cert_mtls_anchor ON TABLE ca_certificate \
+    COLUMNS mtls_trust_anchor;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v49_defaults_the_anchor_flag_off_and_backfills_nothing() {
+        // Default false is the whole compatibility story: every CA that exists
+        // today is not an anchor, so the deployment's TLS posture is unchanged
+        // until an operator flags one.
+        assert!(SCHEMA_V49.contains("mtls_trust_anchor ON TABLE ca_certificate TYPE bool"));
+        assert!(SCHEMA_V49.contains("DEFAULT false"));
+        assert!(!SCHEMA_V49.contains("UPDATE"));
+        // The startup read asks for every anchor across all organizations, so
+        // without this index it scans every CA in the deployment.
+        assert!(SCHEMA_V49.contains("idx_ca_cert_mtls_anchor"));
+    }
 
     #[test]
     fn schema_v48_extends_the_status_assert_without_dropping_a_value() {

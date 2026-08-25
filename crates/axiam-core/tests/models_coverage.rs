@@ -133,6 +133,7 @@ fn sample_ca() -> CaCertificate {
         encrypted_private_key: Some(vec![1, 2, 3, 4]),
         key_custody: CaKeyCustody::Database,
         key_locator: None,
+        mtls_trust_anchor: false,
         created_at: Utc::now(),
     }
 }

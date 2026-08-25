@@ -211,3 +211,146 @@ async fn get_by_issuer_id_missing_returns_not_found() {
 
     assert!(repo.get_by_issuer_id(missing).await.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// mTLS trust anchors (schema v49)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_new_ca_is_not_an_mtls_trust_anchor() {
+    // The compatibility property the whole feature rests on: flagging is opt-in,
+    // so every CA a deployment already has leaves its TLS posture unchanged.
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let created = repo.create(sample_ca(org_id)).await.unwrap();
+    assert!(!created.mtls_trust_anchor);
+    assert!(repo.list_mtls_trust_anchors().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn flagging_a_ca_makes_it_an_anchor_and_unflagging_removes_it() {
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let ca = repo.create(sample_ca(org_id)).await.unwrap();
+
+    let on = repo
+        .set_mtls_trust_anchor(org_id, ca.id, true)
+        .await
+        .unwrap();
+    assert!(on.mtls_trust_anchor);
+    let anchors = repo.list_mtls_trust_anchors().await.unwrap();
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0].id, ca.id);
+    // The certificate travels with it — it is what gets written to the bundle.
+    assert!(anchors[0].public_cert_pem.contains("BEGIN CERTIFICATE"));
+
+    let off = repo
+        .set_mtls_trust_anchor(org_id, ca.id, false)
+        .await
+        .unwrap();
+    assert!(!off.mtls_trust_anchor);
+    assert!(repo.list_mtls_trust_anchors().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_revoked_ca_is_dropped_from_the_trust_store() {
+    // Security-relevant: a revoked CA left in the client trust store would let a
+    // certificate the operator has already disowned authenticate a client —
+    // the one outcome revocation exists to prevent.
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let ca = repo.create(sample_ca(org_id)).await.unwrap();
+    repo.set_mtls_trust_anchor(org_id, ca.id, true)
+        .await
+        .unwrap();
+    assert_eq!(repo.list_mtls_trust_anchors().await.unwrap().len(), 1);
+
+    repo.revoke(org_id, ca.id).await.unwrap();
+    assert!(
+        repo.list_mtls_trust_anchors().await.unwrap().is_empty(),
+        "a revoked CA must not remain in the client trust store"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_ca_is_dropped_from_the_trust_store() {
+    // An expired root's own chain no longer validates, so trusting it buys
+    // nothing and hides the fact that it needs replacing.
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let mut expired = sample_ca(org_id);
+    expired.not_before = Utc::now() - Duration::days(400);
+    expired.not_after = Utc::now() - Duration::days(1);
+    let ca = repo.create(expired).await.unwrap();
+    repo.set_mtls_trust_anchor(org_id, ca.id, true)
+        .await
+        .unwrap();
+
+    assert!(repo.list_mtls_trust_anchors().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn anchors_span_every_organization() {
+    // There is one TLS listener per process presenting one trust store, so the
+    // question this answers is "what does this server trust", not "what does
+    // this organization trust". Scoping it per organization would silently drop
+    // every anchor but one deployment's.
+    let (db, org_a) = setup().await;
+    let org_b = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Other".into(),
+            slug: "other".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let repo = SurrealCaCertificateRepository::new(db);
+    let a = repo.create(sample_ca(org_a)).await.unwrap();
+    let b = repo.create(sample_ca(org_b)).await.unwrap();
+    repo.set_mtls_trust_anchor(org_a, a.id, true).await.unwrap();
+    repo.set_mtls_trust_anchor(org_b, b.id, true).await.unwrap();
+
+    let anchors = repo.list_mtls_trust_anchors().await.unwrap();
+    assert_eq!(anchors.len(), 2);
+}
+
+#[tokio::test]
+async fn flagging_a_foreign_organizations_ca_is_not_found() {
+    // The guard is on the UPDATE, not a read-then-write: a caller naming
+    // another organization's CA must match zero rows rather than flip a flag on
+    // a CA they cannot see.
+    let (db, org_a) = setup().await;
+    let org_b = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Other".into(),
+            slug: "other".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let repo = SurrealCaCertificateRepository::new(db);
+    let ca = repo.create(sample_ca(org_a)).await.unwrap();
+
+    assert!(
+        repo.set_mtls_trust_anchor(org_b, ca.id, true)
+            .await
+            .is_err(),
+        "another organization must not be able to flag this CA"
+    );
+    assert!(repo.list_mtls_trust_anchors().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn flagging_a_missing_ca_is_not_found() {
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    assert!(
+        repo.set_mtls_trust_anchor(org_id, Uuid::new_v4(), true)
+            .await
+            .is_err()
+    );
+}

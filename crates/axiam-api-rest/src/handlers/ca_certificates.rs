@@ -347,6 +347,197 @@ pub async fn revoke<C: Connection + Clone>(
 }
 
 // ---------------------------------------------------------------------------
+// Key custody migration
+// ---------------------------------------------------------------------------
+
+/// What a custody migration did.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct MigrateCustodyResponse {
+    /// The CA whose key moved.
+    pub ca_certificate_id: Uuid,
+    /// Where the key was.
+    #[schema(example = "database")]
+    pub previous_custody: String,
+    /// Where it is now.
+    #[schema(example = "vault")]
+    pub key_custody: String,
+    /// Where the new custodian filed it, when the custodian has a path.
+    pub key_locator: Option<String>,
+}
+
+/// `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`
+///
+/// Move this CA's signing key to the custodian the deployment is configured for.
+///
+/// Custody is recorded per CA rather than read from configuration, so adopting
+/// Vault does not move the CAs that already exist — their keys stay sealed in
+/// their rows until something moves them. This is that something, and without
+/// it the only route out of database custody is to generate a new CA and
+/// re-issue every leaf beneath it, which for a trust anchor means touching every
+/// relying party.
+///
+/// Takes effect immediately; no restart. The row is the authority on where a key
+/// lives, and the signing path reads it per request.
+#[utoipa::path(
+    post,
+    path = "/api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody",
+    tag = "ca-certificates",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "CA certificate ID"),
+    ),
+    responses(
+        (status = 200, description = "Key moved to the configured custodian",
+         body = MigrateCustodyResponse),
+        (status = 400, description = "Already there, nothing to move, or a custodian \
+                                      that will not hand its key over"),
+        (status = 403, description = "Different organization"),
+        (status = 404, description = "CA certificate not found"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn migrate_custody<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("ca_certificates:manage", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let (org_id, id) = path.into_inner();
+
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
+            },
+        ));
+    }
+
+    // Read the previous custody before the move, so the response can say what
+    // actually changed rather than only where the key ended up.
+    let before = state.pki.ca_service.get(org_id, id).await?;
+    let updated = state.pki.ca_service.migrate_key_custody(org_id, id).await?;
+
+    Ok(HttpResponse::Ok().json(MigrateCustodyResponse {
+        ca_certificate_id: updated.id,
+        previous_custody: before.key_custody.to_string(),
+        key_custody: updated.key_custody.to_string(),
+        key_locator: updated.key_locator.clone(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// mTLS trust anchor
+// ---------------------------------------------------------------------------
+
+/// Body for `PUT .../ca-certificates/{id}/mtls-trust-anchor`.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct SetMtlsTrustAnchor {
+    /// Whether this CA should be trusted for client-certificate authentication.
+    pub enabled: bool,
+}
+
+/// The acknowledgement, which is mostly about the restart.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct MtlsTrustAnchorResponse {
+    /// The CA this is about.
+    pub ca_certificate_id: Uuid,
+    /// The flag as now stored.
+    pub mtls_trust_anchor: bool,
+    /// Always `true`: rustls builds its client trust store once, when the
+    /// listener is constructed, so this takes effect at the next start.
+    pub restart_required: bool,
+    /// A sentence an operator can act on, rather than a bare boolean.
+    pub message: String,
+}
+
+/// `PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor`
+///
+/// Offer this CA — or stop offering it — as a trust anchor for mutual TLS.
+///
+/// When enabled, the next server start exports this CA's **public** certificate
+/// into the client-CA bundle and turns on client-certificate verification in
+/// `optional` mode, unless the operator has configured
+/// `AXIAM__SERVER__TLS__CLIENT_AUTH` / `CLIENT_CA_PATH` themselves, which is
+/// never overridden. The signing key is not copied and stays with its custodian.
+///
+/// `restart_required` is always true, and is the point of the response: there is
+/// no supported way to add a root to a rustls listener that is already serving.
+#[utoipa::path(
+    put,
+    path = "/api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
+    tag = "ca-certificates",
+    request_body = SetMtlsTrustAnchor,
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "CA certificate ID"),
+    ),
+    responses(
+        (status = 200, description = "Flag updated; takes effect at the next server start",
+         body = MtlsTrustAnchorResponse),
+        (status = 403, description = "Different organization"),
+        (status = 404, description = "CA certificate not found"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn set_mtls_trust_anchor<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState<C>>,
+    body: web::Json<SetMtlsTrustAnchor>,
+) -> Result<HttpResponse, AxiamApiError> {
+    // Gated on `ca_certificates:manage` rather than `:read`: this changes what
+    // the deployment's TLS listener will trust, which is a stronger act than
+    // reading a CA and a different one from issuing under it.
+    RequirePermission::new("ca_certificates:manage", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let (org_id, id) = path.into_inner();
+
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
+            },
+        ));
+    }
+
+    let enabled = body.into_inner().enabled;
+    use axiam_core::repository::CaCertificateRepository as _;
+    let updated = state
+        .pki
+        .ca_cert_repo
+        .set_mtls_trust_anchor(org_id, id, enabled)
+        .await?;
+
+    let message = if updated.mtls_trust_anchor {
+        "This CA will be added to the mTLS client trust store when the server \
+         next starts. Clients presenting a certificate it issued will then be \
+         verified by TLS itself."
+            .to_string()
+    } else {
+        "This CA will be removed from the mTLS client trust store when the \
+         server next starts. Certificates it issued will no longer authenticate \
+         a client."
+            .to_string()
+    };
+
+    Ok(HttpResponse::Ok().json(MtlsTrustAnchorResponse {
+        ca_certificate_id: updated.id,
+        mtls_trust_anchor: updated.mtls_trust_anchor,
+        restart_required: true,
+        message,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Tenant signing CAs
 // ---------------------------------------------------------------------------
 //

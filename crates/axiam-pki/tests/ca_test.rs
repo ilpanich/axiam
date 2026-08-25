@@ -1,6 +1,7 @@
 //! Integration tests for CaService — CA keypair generation and validation.
 
 use axiam_core::models::certificate::{CreateCaCertificate, KeyAlgorithm};
+use axiam_core::repository::CaCertificateRepository as _;
 use axiam_db::repository::SurrealCaCertificateRepository;
 use axiam_pki::ca::{CaService, PkiConfig};
 use surrealdb::Surreal;
@@ -136,4 +137,97 @@ async fn ca_generate_rejects_validity_above_max() {
         .await;
 
     assert!(result.is_err(), "validity_days above MAX must be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Key custody migration
+// ---------------------------------------------------------------------------
+//
+// Custody is recorded per CA rather than read from configuration, which is what
+// lets a deployment that adopts Vault keep issuing from the CAs it already had.
+// The cost is that adopting Vault otherwise changes nothing about those keys —
+// they stay in the database forever. `migrate_key_custody` is the way out, and
+// these pin the guard rails around it.
+
+#[tokio::test]
+async fn migrating_to_the_custodian_a_ca_already_uses_is_refused() {
+    // Not an error out of paranoia: a "successful" no-op would tell an operator
+    // their key had moved when it had not.
+    let db = setup_db().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let svc = CaService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let org_id = uuid::Uuid::new_v4();
+    let ca = svc
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "CN=Already Here".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
+        })
+        .await
+        .expect("CA generation");
+
+    let err = svc
+        .migrate_key_custody(org_id, ca.certificate.id)
+        .await
+        .expect_err("moving a key to where it already is must be refused");
+    assert!(
+        err.to_string().contains("already held"),
+        "the error must say why, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn migrating_a_ca_axiam_holds_no_key_for_is_refused() {
+    // An imported trust anchor with no `private_key_pem`. There is nothing to
+    // move, and saying so is more use than a decryption failure would be.
+    let db = setup_db().await;
+    let repo = SurrealCaCertificateRepository::new(db.clone());
+    let svc = CaService::new(
+        repo.clone(),
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let org_id = uuid::Uuid::new_v4();
+    // Write the row directly: `External` custody is what an import with no key
+    // produces, and constructing it here keeps the test about the migration.
+    let stored = repo
+        .create(axiam_core::models::certificate::StoreCaCertificate {
+            id: uuid::Uuid::new_v4(),
+            organization_id: org_id,
+            tenant_id: None,
+            parent_ca_id: None,
+            subject: "CN=Offline Root".into(),
+            public_cert_pem: "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----".into(),
+            chain_pem: None,
+            fingerprint: "sha256:abc".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: chrono::Utc::now() - chrono::Duration::minutes(1),
+            not_after: chrono::Utc::now() + chrono::Duration::days(365),
+            encrypted_private_key: None,
+            key_custody: axiam_core::ca_keys::CaKeyCustody::External,
+            key_locator: None,
+        })
+        .await
+        .expect("store");
+
+    let err = svc
+        .migrate_key_custody(org_id, stored.id)
+        .await
+        .expect_err("there is no key to move");
+    assert!(
+        err.to_string().contains("no private key"),
+        "the error must name the reason, got: {err}"
+    );
 }

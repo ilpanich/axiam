@@ -669,6 +669,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::post().to(handlers::ca_certificates::revoke::<C>)),
             )
             .service(
+                web::resource(
+                    "/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
+                )
+                .route(
+                    web::put().to(handlers::ca_certificates::set_mtls_trust_anchor::<C>),
+                ),
+            )
+            .service(
+                web::resource(
+                    "/organizations/{org_id}/ca-certificates/{id}/migrate-custody",
+                )
+                .route(web::post().to(handlers::ca_certificates::migrate_custody::<C>)),
+            )
+            .service(
                 // Registered before the two-segment tenant routes would shadow
                 // it: actix matches in registration order, and
                 // `/tenants/{tenant_id}` with a trailing literal is a different

@@ -92,6 +92,31 @@ EOF
   echo "[seed] wrote $SEED_ENV"
 }
 
+# Read one cookie value out of a curl Netscape cookie jar. Field 6 is the name,
+# field 7 the value; the last match wins so a rotated cookie shadows the one it
+# replaced.
+jar_cookie() {
+  awk -F'\t' -v n="$2" '$6==n{v=$7} END{if(v!="")print v}' "$1"
+}
+
+# Read one claim out of a JWT payload WITHOUT verifying it. This is only ever
+# used to learn ids the server already told us (org_id) so the seed env can
+# carry them; the server re-derives and re-verifies everything on its own, so
+# an unverified read here grants no trust.
+#
+# The payload is base64url with no padding, which `jq -R '@base64d'` and
+# `base64 -d` both reject as-is — hence the alphabet swap and re-padding.
+jwt_claim() {
+  local payload="${1#*.}"; payload="${payload%%.*}"
+  [ -n "$payload" ] || return 0
+  payload="${payload//-/+}"; payload="${payload//_//}"
+  case $(( ${#payload} % 4 )) in
+    2) payload="${payload}==" ;;
+    3) payload="${payload}=" ;;
+  esac
+  printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # AXIAM seeding notes (post-1.0.0-alpha):
 #   * Bootstrap (POST /api/v1/admin/bootstrap) now creates the org + default
@@ -258,7 +283,26 @@ seed_axiam() {
   [ -z "${TENANT_ID:-}" ] && TENANT_ID=$(echo "$login_body" | jq -r '.user.tenant_id // empty')
   [ -z "${TENANT_ID:-}" ] && TENANT_ID=$(api GET /api/v1/auth/me | jq -r '.tenant_id // empty')
   [ -z "${TENANT_ID:-}" ] && { echo "[seed/axiam] could not determine tenant_id"; exit 1; }
-  [ -z "${ORG_ID:-}" ] && ORG_ID=$(api GET /api/v1/auth/me | jq -r '.org_id // .organization_id // empty')
+  # N4: recover the org UUID on a re-seed (bootstrap answered 409, so the
+  # BootstrapResponse that normally carries `organization_id` never arrived).
+  #
+  # This probed `GET /api/v1/auth/me` for `.org_id // .organization_id`, which
+  # can NEVER succeed: that endpoint returns `LoginUserInfo`
+  # (crates/axiam-api-rest/src/handlers/auth.rs), whose org-shaped field is
+  # `org_slug` — deliberately, since 26-05/D-14 exposes the *slug* for tenant
+  # restoration and nothing exposes the raw org UUID there. So every re-seed
+  # silently wrote `BENCH_ORG_ID=` and the whole matrix ran with it empty. That
+  # is what broke the `token_refresh` cell (see lib/auth.js `axiamRefreshOp`).
+  #
+  # The access token itself carries the claim (`org_id`, crates/axiam-auth/src/
+  # token.rs), and we already hold a freshly-minted one in the cookie jar, so
+  # read it from there — no extra endpoint, no extra request, and it works
+  # identically on the 201 and 409 paths.
+  if [ -z "${ORG_ID:-}" ]; then
+    ORG_ID=$(jwt_claim "$(jar_cookie "$JAR" axiam_access)" org_id)
+  fi
+  [ -z "${ORG_ID:-}" ] && {
+    echo "[seed/axiam] could not determine org_id (no organization_id from bootstrap and no org_id claim in the access token)"; exit 1; }
 
   echo "[seed/axiam] creating benchmark user"
   USER_ID=$(create_or_find /api/v1/users \

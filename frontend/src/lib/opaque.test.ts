@@ -11,6 +11,19 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// The real module is a genuine dependency now, so the loader's failure path is
+// no longer reached "for free" by the specifier being unresolvable. Mock it
+// into the failure it actually has in production — a module that resolves but
+// cannot instantiate, which is what a browser without WebAssembly, or a CSP
+// missing `'wasm-unsafe-eval'`, produces. Without this the degradation tests
+// below would be passing only because jsdom cannot `fetch` a `file:` URL.
+vi.mock("@axiam/opaque-wasm", () => ({
+  default: async () => {
+    throw new Error("simulated: WebAssembly.instantiate refused");
+  },
+  opaqueAvailable: () => false,
+}));
+
 import {
   OpaqueUnavailableError,
   OpaqueUnsupportedError,
@@ -68,10 +81,10 @@ afterEach(() => {
 });
 
 describe("availability", () => {
-  it("reports false rather than throwing when the artifact is absent", async () => {
+  it("reports false rather than throwing when the module cannot instantiate", async () => {
     // The posture CONTRACT §23.1 requires: a build whose module did not load
-    // must answer the capability question, not fail at login time. The
-    // specifier is unresolvable in this checkout, so this is the real path.
+    // must answer the capability question, not fail at login time. The mock at
+    // the top of this file makes instantiation throw, so this is the real path.
     await expect(opaqueAvailable()).resolves.toBe(false);
   });
 

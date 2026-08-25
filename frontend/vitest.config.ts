@@ -29,6 +29,13 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Unconditionally the stub, unlike `vite.config.ts`, which prefers the
+      // built artifact when there is one. The unit tests never exercise real
+      // OPAQUE — `lib/opaque.test.ts` mocks this specifier and injects a module
+      // through `__setOpaqueModuleForTests` — so resolving to the real wasm
+      // would only make the suite's result depend on whether somebody had run
+      // `just build-opaque-wasm`, and jsdom cannot `fetch` the payload anyway.
+      "@axiam/opaque-wasm": path.resolve(__dirname, "./src/lib/opaqueUnavailable.ts"),
     },
   },
 });

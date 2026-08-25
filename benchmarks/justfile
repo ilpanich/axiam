@@ -745,6 +745,44 @@ sdk-bench:
     echo "[sdk-bench] {{sdk}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under results/sdk/{{profile}}/)"
     bash sdk/{{sdk}}/run.sh
 
+# Rehearse the SDK matrix in minutes instead of hours — the SDK counterpart to
+# `bench-dry-run`.
+#
+# Every language bench still runs for real (real toolchain, real build, real
+# published SDK package, real profile env, real seed env, real wire) with the
+# measured window collapsed to a handful of iterations, and each is graded on
+# the CLIENT CONTRACT — did it build, did all four contractual ops complete
+# without errors, did it emit a well-formed axiam.sdk-bench/v1 record — not on
+# throughput. A language whose toolchain is absent is SKIP, never FAIL.
+#
+# Unlike `sdk-bench-all` it does not stop at the first broken language, so one
+# pass gives you the whole fix list; it exits non-zero if anything FAILED.
+#
+# REQUIRES A LIVE, SEEDED STACK — the whole point is to exercise the SDKs
+# against the server, so both prerequisites are checked up front (a connect
+# probe plus a real login against the seeded fixture, so a stale fixture is one
+# line rather than eleven identical build-then-fail cells):
+#
+#   just target=axiam profile=p2-tls13 bench-up
+#   just target=axiam profile=p2-tls13 bench-seed
+#   just target=axiam profile=p2-tls13 sdk-dry-run
+#   just target=axiam profile=p2-tls13 sdk-dry-run python go   # just these
+#
+# Records go to results/dry-run/sdk/<profile>/ so `sdk/collect.py` and
+# `bench-report` can never pick a rehearsal number up and publish it.
+#
+# Knobs (env): SDK_DRY_ITERATIONS (10), SDK_DRY_WARMUP (2),
+# SDK_DRY_CONCURRENCY (2), SDK_DRY_TIMEOUT (900s per language, build included).
+sdk-dry-run *languages:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$PWD/profiles/certs}"
+    # shellcheck disable=SC1090
+    source profiles/{{profile}}.env
+    export BENCH_PROFILE="{{profile}}"
+    export BENCH_TARGET="{{target}}"
+    bash sdk/dry-run.sh {{languages}}
+
 sdk-bench-all:
     #!/usr/bin/env bash
     set -euo pipefail

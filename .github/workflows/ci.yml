@@ -683,9 +683,39 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # The admin UI resolves `@axiam/opaque-wasm` to this build output (see
+      # frontend/vite.config.ts), falling back to a stub when it is absent. This
+      # job serves the real production `dist/` to Playwright, so without these
+      # two steps the suite would exercise a bundle whose OPAQUE client is the
+      # stub — green, and blind to exactly the class of defect that let the
+      # admin UI ship a non-functional OPAQUE client for several releases.
+      #
+      # Same wasm-pack version as release-opaque.yml and Dockerfile.frontend.
+      # SHA-pinned like coverage.yml's use of this action, rather than the
+      # floating `@v2` release-opaque.yml still carries.
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2.85.13
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build the OPAQUE WebAssembly client
+        run: |
+          wasm-pack build crates/axiam-opaque-wasm \
+            --target web --release \
+            --out-dir "$PWD/frontend/vendor/opaque-wasm" \
+            --out-name axiam_opaque
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      # The alias falls back silently by design, so assert the real client is in
+      # the bundle rather than trusting that it is.
+      - name: Assert the bundle carries the real OPAQUE client
+        working-directory: frontend
+        run: |
+          test -n "$(find dist/assets -name 'axiam_opaque_bg-*.wasm' -print -quit)" \
+            || { echo "OPAQUE wasm missing from the bundle — the stub was used" >&2; exit 1; }
 
       - name: Install Playwright Chromium
         working-directory: frontend

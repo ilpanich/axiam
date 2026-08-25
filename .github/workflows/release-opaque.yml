@@ -220,7 +220,7 @@ jobs:
       # Hand the built package to the tag-only publisher rather than publishing
       # from here. The wasm toolchain, the two release builds and the smoke test
       # are all things a PR should run; `environment: production` is not.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: opaque-wasm-pkg
           path: crates/axiam-opaque-wasm/pkg/
@@ -343,7 +343,7 @@ jobs:
              "dist/${{ matrix.target }}-${{ matrix.lib }}"
           cp crates/axiam-opaque-ffi/include/axiam/opaque.h dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cabi-${{ matrix.target }}
           path: dist/

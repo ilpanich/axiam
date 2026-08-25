@@ -272,6 +272,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ca_key_custody_vault_pki",
         sql: SCHEMA_V46,
     },
+    Migration {
+        version: 47,
+        name: "tenant_signing_cas",
+        sql: SCHEMA_V47,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2586,9 +2591,51 @@ DEFINE FIELD IF NOT EXISTS chain_pem ON TABLE ca_certificate \
     TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v47 — a CA that belongs to a tenant, and the CA above it
+// -----------------------------------------------------------------------
+//
+// Until now every CA was the organization's: a trust anchor, self-signed or
+// imported, with nothing above it inside AXIAM. A tenant signing CA is neither.
+// It is an intermediate created beneath one of those anchors so that a tenant's
+// user, service and device certificates chain through a CA that can be revoked
+// and replaced without redistributing the anchor the rest of the estate trusts.
+//
+// Two nullable columns rather than a second table, because a tenant signing CA
+// *is* a CA: it is listed, revoked, has custody recorded and signs leaves
+// through exactly the same code. A parallel table would have duplicated all of
+// that and then had to be joined back together at every read.
+//
+// `tenant_id` NONE means an organization CA — which is every row written before
+// this migration, so there is no backfill to do. `parent_ca_id` records which
+// CA signed it, so revoking an anchor can name what depended on it.
+//
+// The index mirrors the organization one: the tenant view lists by
+// (organization, tenant), and without it that list is a table scan on the one
+// table certificate issuance reads on every request.
+
+const SCHEMA_V47: &str =
+    "DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ca_certificate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS parent_ca_id ON TABLE ca_certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_ca_cert_org_tenant ON TABLE ca_certificate \
+    COLUMNS organization_id, tenant_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v47_adds_tenant_scope_without_touching_existing_rows() {
+        // Both columns are optional on purpose: every CA that already exists is
+        // an organization CA, and a migration that demanded a tenant would have
+        // to invent one.
+        assert!(SCHEMA_V47.contains("tenant_id ON TABLE ca_certificate TYPE option<string>"));
+        assert!(SCHEMA_V47.contains("parent_ca_id ON TABLE ca_certificate TYPE option<string>"));
+        // No UPDATE: a backfill here would rewrite rows whose correct value is
+        // exactly the NONE they already have.
+        assert!(!SCHEMA_V47.contains("UPDATE"));
+    }
 
     #[test]
     fn schema_v46_admits_the_custody_v45_would_have_rejected() {

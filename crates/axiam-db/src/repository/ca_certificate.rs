@@ -22,6 +22,11 @@ use crate::helpers::{CountRow, paginate};
 #[derive(Debug, SurrealValue)]
 struct CaCertificateRow {
     organization_id: String,
+    /// Schema v47. `None` for an organization CA, which is every row written
+    /// before the migration.
+    tenant_id: Option<String>,
+    /// Schema v47. `None` for a CA with no parent inside AXIAM.
+    parent_ca_id: Option<String>,
     subject: String,
     public_cert_pem: String,
     /// Schema v46. `Option` for every row written before it, and for every CA
@@ -44,6 +49,11 @@ struct CaCertificateRow {
 struct CaCertificateRowWithId {
     record_id: String,
     organization_id: String,
+    /// Schema v47. `None` for an organization CA, which is every row written
+    /// before the migration.
+    tenant_id: Option<String>,
+    /// Schema v47. `None` for a CA with no parent inside AXIAM.
+    parent_ca_id: Option<String>,
     subject: String,
     public_cert_pem: String,
     /// Schema v46. `Option` for every row written before it, and for every CA
@@ -82,6 +92,22 @@ fn decode_custody(stored: Option<&str>, has_ciphertext: bool) -> CaKeyCustody {
         None if has_ciphertext => CaKeyCustody::Database,
         None => CaKeyCustody::External,
     }
+}
+
+/// Read a nullable UUID column.
+///
+/// A stored value that will not parse is a corrupt row rather than an absent
+/// one, and is reported as such: silently reading it as `None` would turn a
+/// tenant signing CA into an organization CA, which is a change in who is
+/// allowed to see it.
+fn parse_optional_uuid(stored: Option<&str>, column: &str) -> Result<Option<Uuid>, DbError> {
+    stored
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            Uuid::parse_str(v)
+                .map_err(|e| DbError::Migration(format!("invalid {column} UUID: {e}")))
+        })
+        .transpose()
 }
 
 fn parse_status(s: &str) -> Result<CertificateStatus, DbError> {
@@ -131,6 +157,8 @@ impl CaCertificateRow {
         Ok(CaCertificate {
             id,
             organization_id,
+            tenant_id: parse_optional_uuid(self.tenant_id.as_deref(), "tenant_id")?,
+            parent_ca_id: parse_optional_uuid(self.parent_ca_id.as_deref(), "parent_ca_id")?,
             subject: self.subject,
             public_cert_pem: self.public_cert_pem,
             chain_pem: self.chain_pem,
@@ -159,6 +187,8 @@ impl CaCertificateRowWithId {
         Ok(CaCertificate {
             id,
             organization_id,
+            tenant_id: parse_optional_uuid(self.tenant_id.as_deref(), "tenant_id")?,
+            parent_ca_id: parse_optional_uuid(self.parent_ca_id.as_deref(), "parent_ca_id")?,
             subject: self.subject,
             public_cert_pem: self.public_cert_pem,
             chain_pem: self.chain_pem,
@@ -209,6 +239,8 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .query(
                 "CREATE type::record('ca_certificate', $id) SET \
                  organization_id = $org_id, \
+                 tenant_id = $tenant_id, \
+                 parent_ca_id = $parent_ca_id, \
                  subject = $subject, \
                  public_cert_pem = $public_cert_pem, \
                  chain_pem = $chain_pem, \
@@ -223,6 +255,8 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             )
             .bind(("id", id_str))
             .bind(("org_id", input.organization_id.to_string()))
+            .bind(("tenant_id", input.tenant_id.map(|t| t.to_string())))
+            .bind(("parent_ca_id", input.parent_ca_id.map(|p| p.to_string())))
             .bind(("subject", input.subject))
             .bind(("public_cert_pem", input.public_cert_pem))
             .bind(("chain_pem", input.chain_pem))
@@ -341,6 +375,61 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .current()
             .query(data_sql)
             .bind(("org_id", org_id_str))
+            .bind(("limit", pagination.limit))
+            .bind(("offset", pagination.offset))
+            .await
+            .map_err(DbError::from)?;
+        let mut data_result = data_result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaCertificateRowWithId> = data_result.take(0).map_err(DbError::from)?;
+
+        let items: Vec<CaCertificate> = rows
+            .into_iter()
+            .map(|r| r.try_into_entry())
+            .collect::<Result<_, _>>()?;
+
+        Ok(paginate(items, count_rows, &pagination))
+    }
+
+    async fn list_by_tenant(
+        &self,
+        organization_id: Uuid,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<CaCertificate>> {
+        let org_id_str = organization_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        let count_sql = "SELECT count() AS total FROM ca_certificate \
+                         WHERE organization_id = $org_id AND tenant_id = $tenant_id \
+                         GROUP ALL";
+        let count_result = self
+            .db
+            .current()
+            .query(count_sql)
+            .bind(("org_id", org_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .await
+            .map_err(DbError::from)?;
+        let mut count_result = count_result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+
+        // Both predicates, not just the tenant: a tenant id is a UUID and
+        // therefore unguessable, but unguessable is not an authorisation check,
+        // and the organization scope is the one the handler verified.
+        let data_sql = "SELECT meta::id(id) AS record_id, * FROM ca_certificate \
+                        WHERE organization_id = $org_id AND tenant_id = $tenant_id \
+                        ORDER BY created_at DESC \
+                        LIMIT $limit START $offset";
+        let data_result = self
+            .db
+            .current()
+            .query(data_sql)
+            .bind(("org_id", org_id_str))
+            .bind(("tenant_id", tenant_id_str))
             .bind(("limit", pagination.limit))
             .bind(("offset", pagination.offset))
             .await

@@ -33,6 +33,8 @@ fn sample_ca(organization_id: Uuid) -> StoreCaCertificate {
     StoreCaCertificate {
         id: Uuid::new_v4(),
         organization_id,
+        tenant_id: None,
+        parent_ca_id: None,
         subject: "CN=ACME Root CA".into(),
         public_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----".into(),
         chain_pem: None,

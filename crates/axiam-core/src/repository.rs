@@ -1527,6 +1527,18 @@ pub trait CaCertificateRepository: Send + Sync {
         organization_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<CaCertificate>>> + Send;
+    /// The signing CAs belonging to one tenant, newest first.
+    ///
+    /// Narrower than [`Self::list_by_organization`], which returns the
+    /// organization's own CAs *and* every tenant's — the tenant view exists so
+    /// a tenant page does not have to filter an organization-wide list it may
+    /// not be entitled to read in full.
+    fn list_by_tenant(
+        &self,
+        organization_id: Uuid,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<CaCertificate>>> + Send;
     /// Look up a CA certificate by its record ID without requiring the
     /// organization ID. Used internally by mTLS chain verification
     /// (SEC-024) where the issuer_ca_id is already known from the leaf cert.

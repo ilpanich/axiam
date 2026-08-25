@@ -483,6 +483,8 @@ mod tests {
         let cert = CaCertificate {
             id: Uuid::new_v4(),
             organization_id: Uuid::new_v4(),
+            tenant_id: None,
+            parent_ca_id: None,
             subject: "CN=Test Root CA".to_string(),
             public_cert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
                 .to_string(),

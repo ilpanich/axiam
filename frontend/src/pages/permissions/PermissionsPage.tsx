@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   permissionService,
   type Permission,
@@ -312,7 +312,6 @@ export function PermissionsPage() {
         className="mb-4 max-w-sm"
         />
 
-
       <DataTable
         columns={columns}
         data={permissions}
@@ -321,7 +320,6 @@ export function PermissionsPage() {
           isFiltered ? "No permissions match your search." : "No permissions defined yet."
         }
         />
-
 
       <PaginationControls
         page={page}

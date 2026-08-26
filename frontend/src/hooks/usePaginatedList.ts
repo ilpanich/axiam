@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import api from "@/lib/api";
 import type { PaginatedResult } from "@/services/_pagination";
@@ -69,13 +69,32 @@ export function usePaginatedList<T>(
   url: string,
   { perPage = 20, params, enabled = true }: PaginatedListOptions = {},
 ): PaginatedList<T> {
-  const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounced(search);
 
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
+  // Page is stored per search term rather than reset by an effect.
+  //
+  // The obvious version — `useEffect(() => setPage(1), [debouncedSearch])` —
+  // renders once with the stale page before the effect corrects it, which is a
+  // request for a page the filtered set may not have. Keeping the term the page
+  // belongs to alongside it makes "page 1 for a new term" true during the render
+  // that introduces the term, with no second render and no intermediate fetch.
+  //
+  // A page reset is needed at all because a filtered result set is shorter: page
+  // 4 of the unfiltered list is very often past the end of the filtered one, and
+  // the user would see an empty table for a term that matches plenty.
+  const [pageState, setPageState] = useState({ term: "", page: 1 });
+  const page = pageState.term === debouncedSearch ? pageState.page : 1;
+
+  const setPage = useCallback(
+    (updater: (p: number) => number) => {
+      setPageState((prev) => {
+        const current = prev.term === debouncedSearch ? prev.page : 1;
+        return { term: debouncedSearch, page: updater(current) };
+      });
+    },
+    [debouncedSearch],
+  );
 
   const { data, isLoading } = useQuery({
     queryKey: [...queryKey, page, perPage, debouncedSearch, params],

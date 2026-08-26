@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   webhookService,
   WEBHOOK_EVENT_GROUPS,
@@ -568,7 +568,6 @@ export function WebhooksPage() {
         className="mb-4 max-w-sm"
         />
 
-
       <DataTable
         columns={columns}
         data={webhooks}
@@ -577,7 +576,6 @@ export function WebhooksPage() {
           isFiltered ? "No webhooks match your search." : "No webhooks configured."
         }
         />
-
 
       <PaginationControls
         page={page}

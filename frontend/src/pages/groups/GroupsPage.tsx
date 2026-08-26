@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   groupService,
   type Group,
@@ -271,7 +271,6 @@ export function GroupsPage() {
         className="mb-4 max-w-sm"
         />
 
-
       <DataTable
         columns={columns}
         data={groups}
@@ -280,7 +279,6 @@ export function GroupsPage() {
           isFiltered ? "No groups match your search." : "No groups yet. Create your first one."
         }
         />
-
 
       <PaginationControls
         page={page}

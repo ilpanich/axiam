@@ -61,7 +61,9 @@ export function ProfilePage() {
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null);
 
   const userId = useAuthStore((s) => s.user?.id);
-  const currentUser = useAuthStore((s) => s.user);
+  // `currentUser` used to be read here for the resend call's `tenant_id` and
+  // `email`. The self-service endpoint reads both off the caller's own record
+  // server-side, so the page no longer needs them — see `resendMutation`.
 
   const { data: profile, isLoading, error: loadError } = useQuery<UserProfile>({
     queryKey: ["currentUser", userId],

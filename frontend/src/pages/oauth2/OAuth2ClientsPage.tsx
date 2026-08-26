@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   oauth2ClientService,
@@ -995,7 +995,6 @@ export function OAuth2ClientsPage() {
         className="mb-4 max-w-sm"
         />
 
-
       <DataTable
         columns={columns}
         data={clients}
@@ -1004,7 +1003,6 @@ export function OAuth2ClientsPage() {
           isFiltered ? "No clients match your search." : "No OAuth2 clients registered."
         }
         />
-
 
       <PaginationControls
         page={page}

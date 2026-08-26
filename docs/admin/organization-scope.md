@@ -146,7 +146,25 @@ access at check time has none of those properties: a tenant created ten months
 later is reachable by the same rule with no write of any kind.
 
 Grant a *tenant* user access by assigning it one of those roles in the usual
-way.
+way. Provisioning a new tenant's first administrator is the same three calls,
+all made from the organization session that just created the tenant — which is
+the thing organization scope makes possible, and the thing whose absence left a
+new tenant unreachable by everybody:
+
+```http
+POST /api/v1/users                 X-Axiam-Tenant: <new tenant>
+PUT  /api/v1/users/{id}            X-Axiam-Tenant: <new tenant>   # {"status":"Active"}
+POST /api/v1/roles/{role}/users    X-Axiam-Tenant: <new tenant>   # role = super-admin
+```
+
+`scripts/e2e-bootstrap.sh` does exactly this, and
+[`examples/b6-organization-scope`](../../examples/b6-organization-scope/README.md)
+walks the whole flow with assertions.
+
+The `X-Axiam-Tenant` header is only as good as the resolver behind it. The
+server registers one at startup (`axiam-server`'s composition root, alongside
+the session validator); without it the extractor refuses every switch, so an
+organization administrator would be unable to act on any tenant at all.
 
 ## Upgrading an existing deployment
 

@@ -114,14 +114,20 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("AXIAM_GRPC_URL").unwrap_or_else(|_| "http://127.0.0.1:50051".into());
     let org_slug = std::env::var("E2E_ORG_SLUG").unwrap_or_else(|_| "test-org".into());
     let tenant_slug = std::env::var("E2E_TENANT_SLUG").unwrap_or_else(|_| "default".into());
-    let admin_email = std::env::var("E2E_ADMIN_EMAIL").unwrap_or_else(|_| "admin@axiam.dev".into());
+    // The TENANT-level administrator `scripts/e2e-bootstrap.sh` provisions
+    // inside `default`. Bootstrap's super-admin is organization-level: it lives
+    // in the organization's own scope and signs in naming no tenant at all, so
+    // it is not the principal for a single-tenant scenario like this one. See
+    // examples/b6-organization-scope for the organization-level flow.
+    let admin_email =
+        std::env::var("E2E_TENANT_ADMIN_EMAIL").unwrap_or_else(|_| "tenant-admin@axiam.dev".into());
     // Required, with no baked-in default: a credential literal in source is a
     // hard-coded-secret finding, and examples get copied. The compose stack's
     // value is documented in this example's README instead.
-    let admin_password = std::env::var("E2E_ADMIN_PASSWORD").map_err(|_| {
+    let admin_password = std::env::var("E2E_TENANT_ADMIN_PASSWORD").map_err(|_| {
         anyhow::anyhow!(
-            "E2E_ADMIN_PASSWORD must be set (see this example's README for the \
-             docker-compose.e2e.yml default)"
+            "E2E_TENANT_ADMIN_PASSWORD must be set (see this example's README for \
+             the docker-compose.e2e.yml default)"
         )
     })?;
 

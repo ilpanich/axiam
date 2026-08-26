@@ -1088,4 +1088,200 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Active-tenant resolution (organization scope)
+    // -----------------------------------------------------------------------
+
+    /// A resolver backed by a fixed table, so these tests exercise
+    /// [`resolve_active_tenant`]'s decision rather than a database.
+    struct FakeTenants(Vec<(Uuid, TenantScope)>);
+
+    impl TenantScopeResolver for FakeTenants {
+        fn resolve<'a>(
+            &'a self,
+            tenant_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Option<TenantScope>> + Send + 'a>> {
+            let found = self
+                .0
+                .iter()
+                .find(|(id, _)| *id == tenant_id)
+                .map(|(_, scope)| *scope);
+            Box::pin(async move { found })
+        }
+    }
+
+    fn caller_in(tenant_id: Uuid, org_id: Uuid) -> AuthenticatedUser {
+        use axiam_auth::token::{AccessTokenClaims, SubjectKind, ValidatedClaims};
+        use chrono::Utc;
+
+        let user_id = Uuid::new_v4();
+        let now = Utc::now().timestamp();
+        // `resolve_active_tenant` reads none of these — it decides from
+        // `principal_tenant_id` and the resolver alone — but `AuthenticatedUser`
+        // carries the claims it was built from, so they have to be real.
+        let claims = ValidatedClaims(AccessTokenClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            org_id: org_id.to_string(),
+            iss: "axiam-test".into(),
+            iat: now,
+            exp: now + 900,
+            jti: Uuid::new_v4().to_string(),
+            aud: Some("axiam:user".into()),
+            scope: None,
+            sub_kind: SubjectKind::User,
+            act: None,
+            permissions: None,
+            ext_exchange: None,
+            cnf: None,
+            ext: None,
+        });
+        AuthenticatedUser {
+            user_id,
+            tenant_id,
+            principal_tenant_id: tenant_id,
+            organization_level: false,
+            org_id,
+            session_id: Uuid::new_v4(),
+            claims,
+        }
+    }
+
+    /// The whole point of the header: an organization-level principal names a
+    /// tenant in its own organization and gets it.
+    #[actix_rt::test]
+    async fn an_organization_principal_may_act_on_a_tenant_of_its_organization() {
+        let org = Uuid::new_v4();
+        let org_scope = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![
+            (
+                org_scope,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: true,
+                },
+            ),
+            (
+                tenant,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+        ])) as Arc<dyn TenantScopeResolver>;
+
+        let user = caller_in(org_scope, org);
+        let resolved = resolve_active_tenant(&user, tenant, Some(&tenants))
+            .await
+            .expect("an organization principal may act on its own organization's tenant");
+        assert_eq!(resolved, tenant);
+    }
+
+    /// A tenant principal has exactly one tenant. Asking for another is asking
+    /// to be somebody else, and is refused rather than silently ignored.
+    #[actix_rt::test]
+    async fn a_tenant_principal_may_not_act_on_another_tenant() {
+        let org = Uuid::new_v4();
+        let home = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![
+            (
+                home,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+            (
+                other,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+        ])) as Arc<dyn TenantScopeResolver>;
+
+        let user = caller_in(home, org);
+        assert!(
+            resolve_active_tenant(&user, other, Some(&tenants))
+                .await
+                .is_err(),
+            "a tenant principal must not reach another tenant through the header"
+        );
+    }
+
+    /// Organization scope stays inside an organization. This is the check that
+    /// keeps global grants — which deliberately cross tenant boundaries — from
+    /// crossing organization boundaries too.
+    #[actix_rt::test]
+    async fn organization_scope_does_not_cross_organizations() {
+        let mine = Uuid::new_v4();
+        let theirs = Uuid::new_v4();
+        let org_scope = Uuid::new_v4();
+        let foreign_tenant = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![
+            (
+                org_scope,
+                TenantScope {
+                    organization_id: mine,
+                    is_organization: true,
+                },
+            ),
+            (
+                foreign_tenant,
+                TenantScope {
+                    organization_id: theirs,
+                    is_organization: false,
+                },
+            ),
+        ])) as Arc<dyn TenantScopeResolver>;
+
+        let user = caller_in(org_scope, mine);
+        assert!(
+            resolve_active_tenant(&user, foreign_tenant, Some(&tenants))
+                .await
+                .is_err(),
+            "an organization principal must not reach another organization's tenant"
+        );
+    }
+
+    /// Failing closed with no resolver registered is what makes the header
+    /// safe to add to the extractor at all: a deployment that forgot to wire
+    /// one refuses every switch rather than trusting the request.
+    #[actix_rt::test]
+    async fn without_a_resolver_the_header_is_refused() {
+        let user = caller_in(Uuid::new_v4(), Uuid::new_v4());
+        assert!(
+            resolve_active_tenant(&user, Uuid::new_v4(), None)
+                .await
+                .is_err(),
+            "with no resolver the header must be refused, never trusted"
+        );
+    }
+
+    /// A header naming a tenant that does not exist is refused too — not
+    /// quietly downgraded to the caller's own tenant, which would serve one
+    /// tenant's data under a header the caller believes was honoured.
+    #[actix_rt::test]
+    async fn an_unknown_tenant_is_refused() {
+        let org = Uuid::new_v4();
+        let org_scope = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![(
+            org_scope,
+            TenantScope {
+                organization_id: org,
+                is_organization: true,
+            },
+        )])) as Arc<dyn TenantScopeResolver>;
+
+        let user = caller_in(org_scope, org);
+        assert!(
+            resolve_active_tenant(&user, Uuid::new_v4(), Some(&tenants))
+                .await
+                .is_err(),
+            "a tenant that does not exist must be refused"
+        );
+    }
 }

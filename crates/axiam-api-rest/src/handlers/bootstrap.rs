@@ -374,19 +374,32 @@ pub async fn bootstrap<C: Connection + Clone>(
         }));
     }
 
+    // Get-or-create, then get again if the create lost. Two concurrent
+    // first-run requests both read "absent" and both try to create; exactly one
+    // wins the slug's uniqueness invariant and the loser must fall back to the
+    // row the winner just wrote, not fail. Reporting the loser's create error
+    // would surface a 500 for a race the deployment recovers from perfectly —
+    // the single-admin guarantee is `bootstrap_lock:global` below, not this.
     let org = match state.org_repo.get_by_slug(&org_slug).await {
         Ok(o) => o,
-        Err(_) => state
-            .org_repo
-            .create(CreateOrganization {
-                name: req.organization_name.trim().to_string(),
-                slug: org_slug.clone(),
-                metadata: None,
-            })
-            .await
-            .map_err(|e| {
-                AxiamApiError(AxiamError::Internal(format!("create organization: {e}")))
-            })?,
+        Err(_) => {
+            let created = state
+                .org_repo
+                .create(CreateOrganization {
+                    name: req.organization_name.trim().to_string(),
+                    slug: org_slug.clone(),
+                    metadata: None,
+                })
+                .await;
+            match created {
+                Ok(o) => o,
+                Err(create_err) => state.org_repo.get_by_slug(&org_slug).await.map_err(|_| {
+                    AxiamApiError(AxiamError::Internal(format!(
+                        "create organization: {create_err}"
+                    )))
+                })?,
+            }
+        }
     };
     // Bootstrap provisions the organization's **own scope**, not an ordinary
     // tenant. The super-admin created below lives here, which is what makes it
@@ -404,17 +417,30 @@ pub async fn bootstrap<C: Connection + Clone>(
     // field. Nothing reads them — which is what `#[deprecated]` on the fields
     // enforces under CI's `-D warnings`, and why the locals that used to
     // normalise them are gone rather than bound to `_`.
+    //
+    // Same get-create-get shape as the organization above: the organization
+    // scope is unique per organization (`organization_scope:<org_id>`), so a
+    // concurrent racer's create loses and must read the winner's row.
     let tenant = match state.tenant_repo.get_organization_tenant(org.id).await {
         Ok(t) => t,
-        Err(_) => state
-            .tenant_repo
-            .create(CreateTenant::organization_scope(org.id))
-            .await
-            .map_err(|e| {
-                AxiamApiError(AxiamError::Internal(format!(
-                    "create organization tenant: {e}"
-                )))
-            })?,
+        Err(_) => {
+            let created = state
+                .tenant_repo
+                .create(CreateTenant::organization_scope(org.id))
+                .await;
+            match created {
+                Ok(t) => t,
+                Err(create_err) => state
+                    .tenant_repo
+                    .get_organization_tenant(org.id)
+                    .await
+                    .map_err(|_| {
+                        AxiamApiError(AxiamError::Internal(format!(
+                            "create organization tenant: {create_err}"
+                        )))
+                    })?,
+            }
+        }
     };
     let tenant_id = tenant.id;
     // The organization tenant's own slug, reported so a client knows where the

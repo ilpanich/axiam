@@ -668,6 +668,18 @@ async fn main() -> std::io::Result<()> {
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
+    // Organization scope: resolves the tenant named in `X-Axiam-Tenant` so the
+    // `AuthenticatedUser` extractor can decide whether this caller may act on
+    // it. Registered as its own app_data for the same reason
+    // `session_validator` is — the extractor's `FromRequest` impl is
+    // non-generic and cannot name `AppState<C>`.
+    //
+    // Without it the extractor fails closed and *every* `X-Axiam-Tenant`
+    // request is refused, which would leave an organization-level super-admin
+    // unable to act on any tenant — the exact gap organization scope exists to
+    // close. See `claude_dev/organization-scope-design.md`.
+    let tenant_scope_resolver: std::sync::Arc<dyn axiam_api_rest::TenantScopeResolver> =
+        std::sync::Arc::new(SurrealTenantRepository::new(pool.handle_for_repo()));
     // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
     // on /scim/v2 into the tenant user it is bound to. Registered as its own
     // app_data (rather than reached through AppState) for the same reason
@@ -2286,6 +2298,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(tenant_scope_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)

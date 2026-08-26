@@ -23,8 +23,9 @@ function wrapper({ children }: { children: ReactNode }) {
 /** The params of the most recent GET. */
 function lastParams(): Record<string, unknown> {
   const calls = apiMock.get.mock.calls;
-  return (calls[calls.length - 1]?.[1] as { params: Record<string, unknown> })
-    .params;
+  const last = calls.at(-1);
+  if (!last) throw new Error("no GET was issued");
+  return (last[1] as { params: Record<string, unknown> }).params;
 }
 
 function page(items: Row[], total = items.length, limit = 20) {

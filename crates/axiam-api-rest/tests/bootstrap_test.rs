@@ -25,7 +25,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::{CreateTenant, TenantKind};
+use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
@@ -142,14 +142,11 @@ async fn setup_with_org_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
         })
         .await
         .unwrap();
+    // The organization's own reserved scope — where bootstrap puts the
+    // super-admin. Pre-seeding it (rather than an ordinary tenant) keeps the
+    // only contention in the race test the global bootstrap lock.
     let tenant = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant {
-            organization_id: org.id,
-            kind: TenantKind::Standard,
-            name: "Default".into(),
-            slug: "default".into(),
-            metadata: None,
-        })
+        .create(CreateTenant::organization_scope(org.id))
         .await
         .unwrap();
     (db, org.id, tenant.id)
@@ -641,7 +638,7 @@ async fn bootstrap_admin_can_login() {
 
     let peer: SocketAddr = TEST_PEER.parse().unwrap();
 
-    // 1. Bootstrap — creates org "login-org", tenant "default" and the admin.
+    // 1. Bootstrap — creates org "login-org", its organization scope and the admin.
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
@@ -668,8 +665,11 @@ async fn bootstrap_admin_can_login() {
         .get_by_slug("login-org")
         .await
         .unwrap();
+    // The administrator bootstrap created is organization-level, so it lives in
+    // the organization's own reserved scope — not in a tenant named by the
+    // request. Logging in as it means presenting that scope's id.
     let tenant = SurrealTenantRepository::new(db.clone())
-        .get_by_slug(org.id, "default")
+        .get_organization_tenant(org.id)
         .await
         .unwrap();
 

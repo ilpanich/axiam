@@ -152,8 +152,9 @@ api_expect PUT "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${TA_USER}" \
 # roles, since without them there would be nothing here to assign.
 ROLES=$(api_expect GET "${ORG_JAR}" "" '/api/v1/roles?search=super-admin' '' 200 "${TENANT_A}")
 TA_ROLE=$(printf '%s' "${ROLES}" | jq -r '.items[] | select(.name == "super-admin") | .id')
-[ -n "${TA_ROLE}" ] && [ "${TA_ROLE}" != "null" ] \
-  || fail "tenant ${TENANT_A_SLUG} has no seeded super-admin role: ${ROLES}"
+if [ -z "${TA_ROLE}" ] || [ "${TA_ROLE}" = "null" ]; then
+  fail "tenant ${TENANT_A_SLUG} has no seeded super-admin role: ${ROLES}"
+fi
 ok "the new tenant was seeded with its default roles"
 
 api_expect POST "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${TA_USER}/roles" \

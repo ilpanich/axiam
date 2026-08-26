@@ -39,13 +39,14 @@ test.describe("Login flow", () => {
   });
 
   // CQ-F11 removed `noValidate` from the login forms, so the browser's own
-  // constraint validation now runs first. Both slug fields are `required`,
-  // which means an EMPTY submit is blocked by the browser before React's
+  // constraint validation now runs first. The organization field is
+  // `required` (the tenant is not — see the blank-tenant test below), which
+  // means an EMPTY submit is blocked by the browser before React's
   // onSubmit handler is reached — the custom message below is unreachable in
   // that case by design. Native validation is the better path here: it is
   // announced by screen readers and focuses the offending field, which is the
   // whole point of dropping `noValidate`.
-  test("browser constraint validation blocks an empty org/tenant submit", async ({
+  test("browser constraint validation blocks an empty org submit", async ({
     page,
   }) => {
     await page.goto("/login");
@@ -62,17 +63,29 @@ test.describe("Login flow", () => {
 
   // The custom handler still has a job: whitespace-only input satisfies
   // `required` but fails the handler's `.trim()` check, so this is the case
-  // that still surfaces the application-level message.
-  test("shows the custom validation error when org/tenant are whitespace only", async ({
+  // that still surfaces the application-level message. Only the organization
+  // is checked now — the tenant is optional, and blank is what an
+  // organization-level account signs in with.
+  test("shows the custom validation error when the org slug is whitespace only", async ({
     page,
   }) => {
     await page.goto("/login");
     await page.getByLabel("Organization slug").fill("   ");
-    await page.getByLabel("Tenant slug").fill("   ");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(
-      page.getByText("Please enter both organization and tenant slug.")
+      page.getByText("Please enter your organization slug.")
     ).toBeVisible();
+  });
+
+  // The login half of organization scope: an organization-level account has no
+  // tenant to name, so leaving the field blank has to be a valid submit rather
+  // than a validation error. Asserted on the form, not on a real sign-in — the
+  // credentials belong to the backend specs.
+  test("advances with the tenant slug left blank", async ({ page }) => {
+    await page.goto("/login");
+    await page.getByLabel("Organization slug").fill("my-org");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByLabel("Username or email")).toBeVisible();
   });
 
   test("successful login lands off /login with navigation visible", async ({

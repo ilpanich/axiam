@@ -23,8 +23,10 @@ set -euo pipefail
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
-ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
-ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
+# The tenant-level admin seeded by scripts/e2e-bootstrap.sh (the
+# organization-level super-admin signs in with no tenant — see b6).
+ADMIN_EMAIL="${E2E_TENANT_ADMIN_EMAIL:-tenant-admin@axiam.dev}"
+ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-Tenant@Admin123!}"
 RP_PORT="${RP_PORT:-9999}"
 RP_URL="http://localhost:${RP_PORT}"
 

@@ -21,8 +21,19 @@ export const STORAGE_STATE = "e2e/.auth/admin.json";
  * empty session, and the `setup` project itself starts clean) does it drive the
  * full two-step login UI.
  *
- * Uses E2E_ORG_SLUG / E2E_TENANT_SLUG / E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD
- * env vars (with defaults matching scripts/e2e-bootstrap.sh).
+ * Uses E2E_ORG_SLUG / E2E_TENANT_SLUG / E2E_TENANT_ADMIN_EMAIL /
+ * E2E_TENANT_ADMIN_PASSWORD env vars (with defaults matching
+ * scripts/e2e-bootstrap.sh).
+ *
+ * Signs in as the TENANT-level administrator, not the organization-level
+ * super-admin bootstrap creates. Both exist in the seeded stack and the
+ * difference matters here: an organization-level principal signs in naming no
+ * tenant, and then acts on its own organization scope until the UI's tenant
+ * selector points it somewhere else. Almost every spec in this suite asserts
+ * on tenant-scoped data (users, roles, resources, certificates), so the
+ * principal that owns that data is the one to be. The organization-level flow
+ * has its own coverage: `lib/activeTenant` and `lib/grantReach` unit tests,
+ * and `examples/b6-organization-scope` end to end.
  *
  * Auth state is maintained via an httpOnly cookie set by the backend — no
  * sessionStorage or localStorage is used (T-07-12 / ASVS V3.1).
@@ -32,8 +43,10 @@ export const STORAGE_STATE = "e2e/.auth/admin.json";
 export async function loginAsAdmin(page: Page): Promise<void> {
   const orgSlug = process.env["E2E_ORG_SLUG"] ?? "test-org";
   const tenantSlug = process.env["E2E_TENANT_SLUG"] ?? "default";
-  const adminEmail = process.env["E2E_ADMIN_EMAIL"] ?? "admin@axiam.dev";
-  const adminPassword = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
+  const adminEmail =
+    process.env["E2E_TENANT_ADMIN_EMAIL"] ?? "tenant-admin@axiam.dev";
+  const adminPassword =
+    process.env["E2E_TENANT_ADMIN_PASSWORD"] ?? "Tenant@Admin123!";
 
   // Fast path: if a session already exists (shared storageState), navigating
   // home settles on an authenticated route rather than /login — nothing to do.

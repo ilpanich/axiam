@@ -998,6 +998,7 @@ version = "1.0.0-beta01"
 dependencies = [
  "axiam-core",
  "axiam-db",
+ "axiam-test-support",
  "chrono",
  "criterion",
  "futures",

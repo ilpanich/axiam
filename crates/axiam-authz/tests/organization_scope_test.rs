@@ -92,7 +92,7 @@ async fn fixture() -> Fixture {
             tenant_id: org_tenant.id,
             username: "root".into(),
             email: "root@acme.test".into(),
-            password: "correct horse battery staple".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -102,7 +102,7 @@ async fn fixture() -> Fixture {
             tenant_id: tenant_a.id,
             username: "alice".into(),
             email: "alice@acme.test".into(),
-            password: "correct horse battery staple".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

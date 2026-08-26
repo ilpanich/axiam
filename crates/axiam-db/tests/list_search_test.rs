@@ -81,7 +81,7 @@ async fn an_unfiltered_list_returns_everything() {
                 tenant_id: tenant,
                 username: name.into(),
                 email: format!("{name}@acme.test"),
-                password: "correct horse battery staple".into(),
+                password: axiam_test_support::test_password(),
                 metadata: None,
             })
             .await
@@ -107,7 +107,7 @@ async fn search_narrows_users_by_username_and_email() {
                 tenant_id: tenant,
                 username: name.into(),
                 email: mail.into(),
-                password: "correct horse battery staple".into(),
+                password: axiam_test_support::test_password(),
                 metadata: None,
             })
             .await

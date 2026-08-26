@@ -29,8 +29,13 @@ set -euo pipefail
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
-ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
-ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
+# The TENANT-level administrator scripts/e2e-bootstrap.sh provisions inside
+# `default` — not the organization-level super-admin. Bootstrap's super-admin
+# lives in the organization's own scope and signs in with no tenant at all
+# (see examples/b6-organization-scope); this scenario is about one tenant, so
+# it uses the administrator of that tenant.
+ADMIN_EMAIL="${E2E_TENANT_ADMIN_EMAIL:-tenant-admin@axiam.dev}"
+ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-Tenant@Admin123!}"
 
 # A run-unique suffix so the script is safe to re-run against a stack that
 # already has a previous run's fixtures in it.

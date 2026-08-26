@@ -28,6 +28,18 @@ docker compose -f docker/docker-compose.e2e.yml up -d --wait
 ./scripts/e2e-bootstrap.sh
 ```
 
+That seeds **two** administrators, because they are two different things:
+
+| | Lives in | Signs in with | Used by |
+|---|---|---|---|
+| `admin@axiam.dev` | the organization's own reserved scope | **no tenant** — the field is left blank | `b6-organization-scope` |
+| `tenant-admin@axiam.dev` | the `default` tenant | `default` as the tenant | `b1`, `b2`, `b3`, `b5` |
+
+The super-admin administers the organization and every tenant in it; the
+tenant admin administers exactly `default`. Examples that work inside one
+tenant hold the principal an application operator would actually have. See
+[`docs/admin/organization-scope.md`](../docs/admin/organization-scope.md).
+
 `b3-mesh-delegation-grpc` additionally needs the gRPC port published and
 bound off loopback — see its own README and
 [`docker-compose.grpc-port.override.yml`](b3-mesh-delegation-grpc/docker-compose.grpc-port.override.yml)
@@ -39,8 +51,8 @@ Each example's own README has the exact commands from there.
 
 [`.github/workflows/examples-smoke.yml`](../.github/workflows/examples-smoke.yml)
 runs four fast static-verification jobs on every PR touching this tree
-(shellcheck on the three bash scripts — `b1`, `b2`, and `b5`'s
-`smoke-test.sh` — `cargo build`/`fmt`/`clippy` on the Rust one,
+(shellcheck on the bash scripts — `b1`, `b2`, `b6`, `b5`'s `smoke-test.sh`
+and `scripts/e2e-bootstrap.sh` — `cargo build`/`fmt`/`clippy` on the Rust one,
 `tsc`/`npm run build` on the TypeScript one, YAML validation on the workflow
 and compose-override files themselves), then a docker-backed `runtime-smoke`
 job, gated on all four, that brings up the e2e stack and actually runs every

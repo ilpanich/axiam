@@ -786,3 +786,83 @@ async fn a_failing_repository_still_reaches_the_sink() {
     wait_for_events(&sink, 1).await;
     assert_eq!(sink.snapshot().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Orderly shutdown vs a channel that closed on its own
+// ---------------------------------------------------------------------------
+
+/// A clean stop must not look like a fault in the log.
+///
+/// The worker ends the same way in both cases — the last sender drops and
+/// `recv` returns `None` — so nothing it can observe distinguishes them. Before
+/// `begin_shutdown` existed it warned unconditionally, which meant every
+/// healthy boot ended with
+/// `Audit worker channel closed — no more entries will be written` at WARN. The
+/// 1.0.0-beta01 log shows it four times, once per restart, each immediately
+/// before `cleanup task received shutdown signal`. A warning that fires on
+/// every orderly run trains operators to ignore the one line that would tell
+/// them the audit trail stopped while the server was still answering requests.
+#[actix_web::test]
+async fn begin_shutdown_marks_the_close_as_intentional() {
+    let repo = RecordingRepo::default();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    assert!(
+        !mw.is_shutting_down(),
+        "a running worker has not been told to stop, so a channel close now is \
+         a genuine fault and must still warn"
+    );
+
+    mw.begin_shutdown();
+    assert!(mw.is_shutting_down());
+}
+
+/// The flag has to be shared, not copied.
+///
+/// Actix clones the middleware factory once per worker thread, and the
+/// composition root keeps only its own handle to call `begin_shutdown` on. If
+/// cloning produced an independent flag, the worker would read one the
+/// composition root never set and warn on every clean shutdown anyway.
+#[actix_web::test]
+async fn the_shutdown_flag_is_shared_across_clones() {
+    let repo = RecordingRepo::default();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let cloned = mw.clone();
+
+    mw.begin_shutdown();
+
+    assert!(
+        cloned.is_shutting_down(),
+        "a clone must observe the flag the composition root set"
+    );
+}
+
+/// Entries already queued when shutdown is announced still get written.
+///
+/// `begin_shutdown` only labels the eventual close; it must not cut the worker
+/// off from the backlog. Announcing a stop and then dropping audit entries that
+/// were already accepted would lose records the server told its caller it had
+/// taken.
+#[actix_web::test]
+async fn announcing_shutdown_does_not_discard_queued_entries() {
+    let repo = RecordingRepo::default();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(App::new().wrap(mw.clone()).route(
+        "/api/v1/users",
+        web::post().to(|| async { HttpResponse::Created().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::post().uri("/api/v1/users").to_request();
+    let _ = test::call_service(&app, req).await;
+
+    mw.begin_shutdown();
+
+    wait_for_entries(&repo, 1).await;
+    assert_eq!(
+        repo.len(),
+        1,
+        "an entry accepted before the stop was announced must still be appended"
+    );
+}

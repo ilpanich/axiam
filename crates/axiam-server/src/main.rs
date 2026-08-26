@@ -2359,6 +2359,12 @@ async fn main() -> std::io::Result<()> {
     };
     http_server.run().await?;
 
+    // Tell the audit worker its channel is about to close on purpose, before
+    // anything drops the senders. Without this the orderly stop below logs
+    // `Audit worker channel closed` at WARN on every single clean shutdown —
+    // see `AuditMiddleware::begin_shutdown` for why that matters.
+    audit_middleware.begin_shutdown();
+
     // Signal the cleanup task to shut down and wait for it to finish.
     let _ = cleanup_shutdown_tx.send(true);
     if let Err(e) = cleanup_handle.await {

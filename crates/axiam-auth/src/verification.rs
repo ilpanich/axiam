@@ -345,12 +345,19 @@ mod tests {
         );
     }
 
+    /// The regression this replaced a test for.
+    ///
+    /// The old assertion was that an `Active` user gets `None`, which is what
+    /// the code did and what made "Resend verification email" a button that
+    /// silently did nothing. `Active` says only that the account may sign in;
+    /// it does not say the address was ever confirmed, and an administrator
+    /// creating an account produces exactly that combination. The profile page
+    /// offers the button on `email_verified_at`, `verify_email` consumes a
+    /// token on `email_verified_at`, and now so does this.
     #[tokio::test]
-    async fn resend_returns_none_for_non_pending_user() {
+    async fn resend_works_for_an_active_user_whose_address_is_unverified() {
         let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
 
-        // Activate the user so they are no longer
-        // PendingVerification.
         user_repo
             .update(
                 tid,
@@ -363,14 +370,79 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = EmailVerificationService::new(user_repo, token_repo, fed_repo);
-
+        let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
         let result = svc.resend_verification(tid, &user.email).await.unwrap();
 
-        assert!(
-            result.is_none(),
-            "non-PendingVerification user should get None"
+        let (raw_token, user_id, _) = result.expect(
+            "an Active user with no email_verified_at is unverified and must be resendable",
         );
+        assert_eq!(user_id, user.id);
+
+        // And the token it minted actually verifies — the two predicates agree
+        // end to end, not just in their conditions.
+        svc.verify_email(tid, &raw_token).await.unwrap();
+        assert!(
+            user_repo
+                .get_by_id(tid, user.id)
+                .await
+                .unwrap()
+                .email_verified_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn resend_returns_none_once_the_address_is_verified() {
+        let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
+        let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
+
+        let (raw_token, _) = svc.initiate_verification(tid, user.id).await.unwrap();
+        svc.verify_email(tid, &raw_token).await.unwrap();
+
+        assert!(
+            svc.resend_verification(tid, &user.email)
+                .await
+                .unwrap()
+                .is_none(),
+            "a verified address has nothing to resend"
+        );
+    }
+
+    /// Status still excludes accounts that must not be handed a live token.
+    ///
+    /// Locked and Inactive are administrative refusals; Deleted and Anonymized
+    /// are tombstones whose `email` column holds a value derived from the row
+    /// id rather than a mailbox, so there is no addressee to mail at all.
+    #[tokio::test]
+    async fn resend_is_refused_for_statuses_that_must_not_receive_mail() {
+        for status in [
+            UserStatus::Locked,
+            UserStatus::Inactive,
+            UserStatus::Deleted,
+            UserStatus::Anonymized,
+        ] {
+            let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
+            user_repo
+                .update(
+                    tid,
+                    user.id,
+                    UpdateUser {
+                        status: Some(status.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+
+            let svc = EmailVerificationService::new(user_repo, token_repo, fed_repo);
+            assert!(
+                svc.resend_verification(tid, &user.email)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{status:?} must not be sent a verification token"
+            );
+        }
     }
 
     #[tokio::test]

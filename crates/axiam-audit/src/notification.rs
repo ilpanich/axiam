@@ -59,6 +59,32 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
             .get_by_events(tenant_id, &event_strings)
             .await?;
 
+        // Built once for the whole dispatch: it is the same for every rule and
+        // every recipient, and it is the one place `username` is decided.
+        //
+        // `username` is present ONLY when there is no actor to name. The mail
+        // consumer resolves it from `user_id` and its answer is the better one,
+        // but a message's own context is overlaid on top of what the consumer
+        // resolved — so supplying a placeholder unconditionally would mask every
+        // real actor. It cannot be a JSON `null` either: the consumer
+        // stringifies non-string values, so a null would arrive as the literal
+        // word "null". The key has to be genuinely absent, which is why this is
+        // assembled rather than written as one `json!` literal.
+        //
+        // Supplying nothing at all would instead leave the consumer's generic
+        // "unknown" on the events an administrator most wants alerting on — a
+        // failed login, a lockout — which have no authenticated actor by
+        // definition.
+        // `event` is not here: it is the one key that varies per rule, and is
+        // inserted into the clone below.
+        let mut context = serde_json::Map::new();
+        context.insert("details".into(), details.into());
+        context.insert("action".into(), action.into());
+        context.insert("outcome".into(), outcome.into());
+        if actor_id.is_none() {
+            context.insert("username".into(), "an unauthenticated caller".into());
+        }
+
         let mut enqueued = 0usize;
         for rule in rules {
             if rule.recipient_emails.is_empty() {
@@ -75,6 +101,10 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
                 None => continue,
             };
 
+            let mut context = context.clone();
+            context.insert("event".into(), event_name.clone().into());
+            let template_context = serde_json::Value::Object(context);
+
             // Enqueue one OutboundMailMessage per recipient.
             for recipient in &rule.recipient_emails {
                 let msg = OutboundMailMessage {
@@ -83,15 +113,11 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
                     org_id,
                     user_id: actor_id.unwrap_or(Uuid::nil()),
                     to_address: recipient.clone(),
-                    template_context: serde_json::json!({
-                        "event": event_name,
-                        "details": details,
-                        "action": action,
-                        "outcome": outcome,
-                    }),
+                    template_context: template_context.clone(),
                     attempt_count: 0,
                     enqueued_at: Utc::now(),
                 };
+
                 match mail_publisher.publish(msg).await {
                     Ok(()) => {
                         enqueued += 1;
@@ -690,5 +716,74 @@ mod tests {
             !details.contains("203.0.113.7"),
             "the client IP must not reach a rule's recipients"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_actor_is_named_rather_than_left_unknown() {
+        // A failed login has no authenticated actor by definition, and it is
+        // exactly the event an administrator most wants alerting on. The mail
+        // consumer's generic fallback would render "Actor: unknown"; saying what
+        // actually happened is more use to the reader.
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let dispatcher = NotificationDispatcher::new(repo);
+
+        dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                "Failure",
+                None, // no actor
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        let msg = publisher.messages().into_iter().next().unwrap();
+        assert_eq!(
+            msg.template_context["username"].as_str(),
+            Some("an unauthenticated caller")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_known_actor_is_left_for_the_consumer_to_resolve() {
+        // The complement. The consumer resolves `username` from `user_id` and
+        // its value is the better one, but the message's own context is overlaid
+        // on top — so the placeholder has to be dropped when there is a real
+        // actor, or it would win and the alert would name nobody.
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let dispatcher = NotificationDispatcher::new(repo);
+
+        let actor = Uuid::new_v4();
+        dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                "Failure",
+                Some(actor),
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        let msg = publisher.messages().into_iter().next().unwrap();
+        // Genuinely absent, not null. The consumer stringifies non-string
+        // values, so a null would arrive as the literal word "null" and mask the
+        // name it resolved from `user_id`.
+        assert!(
+            msg.template_context
+                .as_object()
+                .unwrap()
+                .get("username")
+                .is_none(),
+            "a resolvable actor must be left to the consumer, not overlaid"
+        );
+        assert_eq!(msg.user_id, actor);
     }
 }

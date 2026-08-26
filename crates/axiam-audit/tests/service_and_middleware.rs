@@ -624,3 +624,165 @@ async fn middleware_drops_entry_when_channel_closed() {
         assert!(resp.status().is_success());
     }
 }
+
+// ---------------------------------------------------------------------------
+// AuditAttribution — naming the tenant an unauthenticated request concerns
+// ---------------------------------------------------------------------------
+//
+// The requests a security notification rule most wants — a failed login, a
+// lockout, a password reset — carry no access token by definition: proving an
+// identity is the point. The middleware therefore wrote them with a NIL tenant
+// under `ActorType::System`, and notification rules are looked up BY tenant, so
+// a `login_failure` rule matched nothing however it was configured.
+//
+// `AuditAttribution` is how a handler that has proven which tenant a request
+// concerns says so. These pin the handoff itself: it travels through the
+// response's request extensions, which is an actix-web property worth a test
+// rather than an assumption.
+
+/// A sink that records every event the worker hands it.
+#[derive(Clone, Default)]
+struct RecordingSink {
+    seen: Arc<Mutex<Vec<axiam_audit::AuditEvent>>>,
+}
+
+impl RecordingSink {
+    fn snapshot(&self) -> Vec<axiam_audit::AuditEvent> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl axiam_audit::AuditEventSink for RecordingSink {
+    fn on_event<'a>(
+        &'a self,
+        event: &'a axiam_audit::AuditEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let seen = self.seen.clone();
+        let event = event.clone();
+        Box::pin(async move {
+            seen.lock().unwrap().push(event);
+        })
+    }
+}
+
+async fn wait_for_events(sink: &RecordingSink, n: usize) {
+    for _ in 0..100 {
+        if sink.seen.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[actix_web::test]
+async fn a_handler_can_attribute_an_unauthenticated_request_to_a_tenant() {
+    let repo = RecordingRepo::new();
+    let sink = RecordingSink::default();
+    let mw = AuditMiddleware::spawn_with_sink(repo.clone(), Some(Arc::new(sink.clone())));
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/v1/auth/login",
+        web::post().to(move |req: actix_web::HttpRequest| async move {
+            // What `handlers::auth::login` does once it has proven the
+            // tenant∈organization binding.
+            req.extensions_mut()
+                .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+            HttpResponse::Unauthorized().finish()
+        }),
+    ))
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/login")
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 1).await;
+    let entries = repo.snapshot();
+    assert_eq!(
+        entries[0].tenant_id, tenant_id,
+        "the attributed tenant must reach the audit entry — a nil one is what \
+         made login_failure rules unmatchable"
+    );
+    assert_eq!(entries[0].outcome, AuditOutcome::Failure);
+
+    wait_for_events(&sink, 1).await;
+    let events = sink.snapshot();
+    assert_eq!(
+        events[0].org_id, org_id,
+        "the organization must reach the sink so the mail consumer can resolve \
+         the effective email config"
+    );
+}
+
+#[actix_web::test]
+async fn a_request_with_no_attribution_is_still_recorded_with_a_nil_tenant() {
+    // The complement: attribution is something a handler opts into, and its
+    // absence must not change how anything else behaves.
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/v1/auth/login",
+        web::post().to(|| async { HttpResponse::Unauthorized().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/login")
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 1).await;
+    assert_eq!(repo.snapshot()[0].tenant_id, Uuid::nil());
+}
+
+#[actix_web::test]
+async fn every_recorded_entry_reaches_the_sink() {
+    // The wiring the notification dispatcher depends on. Before this existed,
+    // `NotificationDispatcher` was constructed nowhere and every configured
+    // rule was inert.
+    let repo = RecordingRepo::new();
+    let sink = RecordingSink::default();
+    let mw = AuditMiddleware::spawn_with_sink(repo.clone(), Some(Arc::new(sink.clone())));
+
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/v1/users",
+        web::post().to(|| async { HttpResponse::Created().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::post().uri("/api/v1/users").to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_events(&sink, 1).await;
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].entry.action, "POST /api/v1/users");
+    assert_eq!(events[0].entry.outcome, AuditOutcome::Success);
+}
+
+#[actix_web::test]
+async fn a_failing_repository_still_reaches_the_sink() {
+    // Append first, notify second — but a failed append must not swallow the
+    // notification: the operator who asked to be emailed about certificate
+    // revocations still wants the email when the audit write had a bad day.
+    let repo = RecordingRepo::failing();
+    let sink = RecordingSink::default();
+    let mw = AuditMiddleware::spawn_with_sink(repo.clone(), Some(Arc::new(sink.clone())));
+
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/v1/users",
+        web::post().to(|| async { HttpResponse::Created().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::post().uri("/api/v1/users").to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_events(&sink, 1).await;
+    assert_eq!(sink.snapshot().len(), 1);
+}

@@ -485,7 +485,10 @@ async fn a_missing_user_costs_the_greeting_and_not_the_email() {
     )
     .await;
 
-    assert!(ctx.get("username").is_none());
+    // Present, but the honest placeholder rather than a name — the renderer
+    // leaves an ABSENT key standing as a literal `{{username}}`, which is the
+    // very bug this context exists to close.
+    assert_eq!(ctx.get("username").map(String::as_str), Some("unknown"));
     // The tenant and organization still resolve — one missing lookup must not
     // take the others with it.
     assert_eq!(
@@ -516,8 +519,8 @@ async fn a_nil_user_id_is_not_looked_up() {
     )
     .await;
 
-    assert!(ctx.get("username").is_none());
-    assert!(ctx.get("email").is_none());
+    assert_eq!(ctx.get("username").map(String::as_str), Some("unknown"));
+    assert_eq!(ctx.get("email").map(String::as_str), Some("unknown"));
     assert_eq!(
         ctx.get("tenant_name").map(String::as_str),
         Some("Acme Production")
@@ -563,4 +566,32 @@ async fn a_messages_own_context_wins_over_the_resolved_identity() {
         Some("Test Tenant"),
         "the message's own value must win"
     );
+}
+
+#[tokio::test]
+async fn every_key_the_templates_use_is_always_present() {
+    // The invariant that makes "Welcome, {{username}}!" impossible to
+    // reintroduce: the renderer leaves an unknown placeholder standing, so a
+    // key that is sometimes absent is a literal `{{…}}` in somebody's inbox.
+    // Nothing resolves here — no user, no tenant, no org — and all four keys
+    // still come back.
+    let db = setup_db().await;
+    let mut msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
+    msg.user_id = Uuid::new_v4();
+
+    let ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+
+    for key in ["username", "email", "tenant_name", "org_name"] {
+        assert_eq!(
+            ctx.get(key).map(String::as_str),
+            Some("unknown"),
+            "`{key}` must always be present, resolved or not"
+        );
+    }
 }

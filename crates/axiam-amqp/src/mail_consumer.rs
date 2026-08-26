@@ -136,6 +136,24 @@ where
 {
     let mut ctx = TemplateContext::new();
 
+    // Every key the built-in templates use is inserted, resolved or not.
+    //
+    // The renderer leaves an UNKNOWN placeholder standing — that is the whole
+    // reason these emails read "Welcome, {{username}}!" — so an unresolvable
+    // lookup that simply skipped its key would reproduce the bug in miniature
+    // for whichever fact was missing. A notification about a failed login, for
+    // instance, has no actor to name, and would otherwise render
+    // "Actor: {{username}}".
+    //
+    // `UNRESOLVED` is what an honest email says instead. A publisher with a
+    // better word for its own case overlays it — see the dispatcher, which
+    // names an unauthenticated actor as such.
+    const UNRESOLVED: &str = "unknown";
+    ctx.insert("username".into(), UNRESOLVED.into());
+    ctx.insert("email".into(), UNRESOLVED.into());
+    ctx.insert("tenant_name".into(), UNRESOLVED.into());
+    ctx.insert("org_name".into(), UNRESOLVED.into());
+
     if !msg.user_id.is_nil()
         && let Ok(user) = user_repo.get_by_id(msg.tenant_id, msg.user_id).await
     {

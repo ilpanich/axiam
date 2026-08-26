@@ -955,51 +955,105 @@ mod tests {
                 client_ca_path: Some(ca_path.clone()),
                 ..TlsConfig::default()
             };
-            build_client_cert_verifier(&tls, &provider)
+            let roots = read_client_ca_roots(&tls)
+                .unwrap_or_else(|e| panic!("roots must read for {mode:?}: {e}"));
+            let verifier = ReloadableClientCertVerifier::empty(mode == ClientAuth::Required);
+            let count = verifier
+                .replace(roots, &provider)
                 .unwrap_or_else(|e| panic!("verifier must build for {mode:?}: {e}"));
+            assert_eq!(count, 1);
+            assert!(verifier.offer_client_auth());
+            assert_eq!(
+                verifier.client_auth_mandatory(),
+                mode == ClientAuth::Required
+            );
         }
+    }
+
+    /// An empty anchor set returns to "offer no client authentication" rather
+    /// than building a verifier that trusts nothing.
+    ///
+    /// This is what un-flagging the last CA produces, and it matters: a verifier
+    /// that requests a certificate and then rejects every one is strictly worse
+    /// than not requesting one — it breaks clients that would otherwise have
+    /// connected anonymously.
+    #[test]
+    fn clearing_the_anchors_stops_offering_client_auth() {
+        let pki = gen_test_pki();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = TlsConfig {
+            enabled: true,
+            client_auth: ClientAuth::Optional,
+            client_ca_path: Some(write_tmp("ca", &pki.ca_pem)),
+            ..TlsConfig::default()
+        };
+
+        let verifier = ReloadableClientCertVerifier::empty(false);
+        assert!(
+            !verifier.offer_client_auth(),
+            "a fresh verifier must behave exactly like with_no_client_auth()"
+        );
+
+        verifier
+            .replace(read_client_ca_roots(&tls).unwrap(), &provider)
+            .unwrap();
+        assert!(verifier.offer_client_auth());
+
+        assert_eq!(
+            verifier.replace(RootCertStore::empty(), &provider).unwrap(),
+            0
+        );
+        assert!(!verifier.offer_client_auth());
+        assert!(!verifier.client_auth_mandatory());
+    }
+
+    /// `mandatory` must not survive into the empty state.
+    ///
+    /// Answering `client_auth_mandatory() == true` with no anchors installed
+    /// would refuse every connection to a server that cannot verify anybody —
+    /// a self-inflicted outage on a deployment that just un-flagged its last CA.
+    #[test]
+    fn a_required_verifier_with_no_anchors_does_not_lock_everyone_out() {
+        let verifier = ReloadableClientCertVerifier::empty(true);
+        assert!(!verifier.offer_client_auth());
+        assert!(!verifier.client_auth_mandatory());
     }
 
     #[test]
     fn required_without_ca_path_fails_fast() {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = TlsConfig {
             enabled: true,
             client_auth: ClientAuth::Required,
             client_ca_path: None,
             ..TlsConfig::default()
         };
-        let err = build_client_cert_verifier(&tls, &provider)
+        let err = read_client_ca_roots(&tls)
             .expect_err("required client-auth with no CA path must fail fast");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn missing_ca_bundle_file_fails_fast() {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = TlsConfig {
             enabled: true,
             client_auth: ClientAuth::Required,
             client_ca_path: Some("/nonexistent/axiam-d3-ca.pem".into()),
             ..TlsConfig::default()
         };
-        let err = build_client_cert_verifier(&tls, &provider)
-            .expect_err("unreadable CA bundle must fail fast");
+        let err = read_client_ca_roots(&tls).expect_err("unreadable CA bundle must fail fast");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn empty_ca_bundle_fails_fast() {
         let ca_path = write_tmp("empty-ca", "# no certificates here\n");
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = TlsConfig {
             enabled: true,
             client_auth: ClientAuth::Required,
             client_ca_path: Some(ca_path),
             ..TlsConfig::default()
         };
-        let err = build_client_cert_verifier(&tls, &provider)
-            .expect_err("empty CA bundle must fail fast");
+        let err = read_client_ca_roots(&tls).expect_err("empty CA bundle must fail fast");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -1042,7 +1096,7 @@ mod tests {
     /// A CA bundle file whose content isn't valid PEM at all (garbage bytes
     /// where a base64 body is expected) must fail with `InvalidData` — the
     /// `CertificateDer::pem_reader_iter(..).collect()` parse-error arm in
-    /// `build_client_cert_verifier`, distinct from "file unreadable" and
+    /// `roots_from_pem`, distinct from "file unreadable" and
     /// "well-formed PEM but zero certificates".
     #[test]
     fn malformed_ca_bundle_fails_fast() {
@@ -1050,15 +1104,13 @@ mod tests {
             "garbage-ca",
             "-----BEGIN CERTIFICATE-----\nnot valid base64 !!!\n-----END CERTIFICATE-----\n",
         );
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = TlsConfig {
             enabled: true,
             client_auth: ClientAuth::Required,
             client_ca_path: Some(ca_path),
             ..TlsConfig::default()
         };
-        let err = build_client_cert_verifier(&tls, &provider)
-            .expect_err("malformed CA bundle PEM must fail fast");
+        let err = read_client_ca_roots(&tls).expect_err("malformed CA bundle PEM must fail fast");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -1077,14 +1129,13 @@ mod tests {
             "bogus-der-ca",
             &format!("-----BEGIN CERTIFICATE-----\n{bogus_body}\n-----END CERTIFICATE-----\n"),
         );
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = TlsConfig {
             enabled: true,
             client_auth: ClientAuth::Required,
             client_ca_path: Some(ca_path),
             ..TlsConfig::default()
         };
-        let err = build_client_cert_verifier(&tls, &provider)
+        let err = read_client_ca_roots(&tls)
             .expect_err("PEM-valid but DER-invalid CA cert must fail fast");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }

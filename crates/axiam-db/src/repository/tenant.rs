@@ -152,12 +152,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // `SCHEMA_V50` for why this is a marker row and not a partial unique
         // index.
         let claim_scope = if input.kind.is_organization() {
-            format!(
-                " CREATE type::record('organization_scope', $org_id) \
-                  SET tenant_id = $id;"
-            )
+            " CREATE type::record('organization_scope', $org_id) \
+              SET tenant_id = $id;"
         } else {
-            String::new()
+            ""
         };
         let query = format!(
             "CREATE type::record('tenant', $id) SET \

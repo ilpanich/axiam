@@ -420,6 +420,7 @@ async fn list_paginates_within_the_tenant() {
             Pagination {
                 limit: 2,
                 offset: 0,
+                search: None,
             },
         )
         .await

@@ -208,6 +208,87 @@ fn write_bundle(path: &Path, pem: &str) -> std::io::Result<()> {
     std::fs::write(path, pem)
 }
 
+// ---------------------------------------------------------------------------
+// Live reload
+// ---------------------------------------------------------------------------
+
+/// Rebuilds the trust anchor bundle from the database and installs it on the
+/// running listener.
+///
+/// Registered in `AppState` at startup as the implementation of
+/// [`axiam_api_rest::TrustAnchorReloader`]. It holds the CA repository and the
+/// resolved bundle path — the same path the boot sequence wrote, so a reload
+/// and a restart converge on the same file.
+pub struct TrustAnchorReload<C: surrealdb::Connection> {
+    ca_repo: axiam_db::SurrealCaCertificateRepository<C>,
+    /// Where the bundle is written. `None` when no path could be derived, in
+    /// which case there is nothing on disk for a restart to read and the reload
+    /// reports that a restart is required.
+    bundle_path: Option<PathBuf>,
+}
+
+impl<C: surrealdb::Connection> TrustAnchorReload<C> {
+    pub fn new(
+        ca_repo: axiam_db::SurrealCaCertificateRepository<C>,
+        bundle_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            ca_repo,
+            bundle_path,
+        }
+    }
+}
+
+impl<C: surrealdb::Connection> axiam_api_rest::TrustAnchorReloader for TrustAnchorReload<C> {
+    fn reload<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = axiam_core::error::AxiamResult<Option<usize>>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            use axiam_core::repository::CaCertificateRepository as _;
+
+            // Re-read rather than accept a delta from the caller. The listener's
+            // trust store is a whole set, the database is what a restart would
+            // read, and rebuilding from it is what keeps the two from drifting
+            // — including when two administrators toggle two CAs at once.
+            let anchors = self.ca_repo.list_mtls_trust_anchors().await?;
+            let pem = bundle_pem(&anchors);
+
+            // Write the bundle first. If the process dies between the write and
+            // the swap, the next boot reads the file and reaches the same state;
+            // the other order would leave a listener trusting a set that no
+            // restart could reproduce.
+            if let Some(path) = self.bundle_path.as_ref() {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| {
+                        axiam_core::error::AxiamError::Internal(format!(
+                            "failed to create the trust anchor bundle directory {}: {e}",
+                            dir.display()
+                        ))
+                    })?;
+                }
+                write_bundle(path, &pem).map_err(|e| {
+                    axiam_core::error::AxiamError::Internal(format!(
+                        "failed to write the trust anchor bundle {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            }
+
+            crate::tls::reload_trust_anchors(&pem).map_err(|e| {
+                axiam_core::error::AxiamError::Internal(format!(
+                    "failed to install the trust anchor bundle on the listener: {e}"
+                ))
+            })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,86 +432,5 @@ mod tests {
         assert_eq!(apply(&mut tls, &AnchorPlan::NoBundlePath).unwrap(), None);
         assert_eq!(tls.client_auth, ClientAuth::Off);
         assert!(tls.client_ca_path.is_none());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Live reload
-// ---------------------------------------------------------------------------
-
-/// Rebuilds the trust anchor bundle from the database and installs it on the
-/// running listener.
-///
-/// Registered in `AppState` at startup as the implementation of
-/// [`axiam_api_rest::TrustAnchorReloader`]. It holds the CA repository and the
-/// resolved bundle path — the same path the boot sequence wrote, so a reload
-/// and a restart converge on the same file.
-pub struct TrustAnchorReload<C: surrealdb::Connection> {
-    ca_repo: axiam_db::SurrealCaCertificateRepository<C>,
-    /// Where the bundle is written. `None` when no path could be derived, in
-    /// which case there is nothing on disk for a restart to read and the reload
-    /// reports that a restart is required.
-    bundle_path: Option<PathBuf>,
-}
-
-impl<C: surrealdb::Connection> TrustAnchorReload<C> {
-    pub fn new(
-        ca_repo: axiam_db::SurrealCaCertificateRepository<C>,
-        bundle_path: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            ca_repo,
-            bundle_path,
-        }
-    }
-}
-
-impl<C: surrealdb::Connection> axiam_api_rest::TrustAnchorReloader for TrustAnchorReload<C> {
-    fn reload<'a>(
-        &'a self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = axiam_core::error::AxiamResult<Option<usize>>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            use axiam_core::repository::CaCertificateRepository as _;
-
-            // Re-read rather than accept a delta from the caller. The listener's
-            // trust store is a whole set, the database is what a restart would
-            // read, and rebuilding from it is what keeps the two from drifting
-            // — including when two administrators toggle two CAs at once.
-            let anchors = self.ca_repo.list_mtls_trust_anchors().await?;
-            let pem = bundle_pem(&anchors);
-
-            // Write the bundle first. If the process dies between the write and
-            // the swap, the next boot reads the file and reaches the same state;
-            // the other order would leave a listener trusting a set that no
-            // restart could reproduce.
-            if let Some(path) = self.bundle_path.as_ref() {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).map_err(|e| {
-                        axiam_core::error::AxiamError::Internal(format!(
-                            "failed to create the trust anchor bundle directory {}: {e}",
-                            dir.display()
-                        ))
-                    })?;
-                }
-                write_bundle(path, &pem).map_err(|e| {
-                    axiam_core::error::AxiamError::Internal(format!(
-                        "failed to write the trust anchor bundle {}: {e}",
-                        path.display()
-                    ))
-                })?;
-            }
-
-            crate::tls::reload_trust_anchors(&pem).map_err(|e| {
-                axiam_core::error::AxiamError::Internal(format!(
-                    "failed to install the trust anchor bundle on the listener: {e}"
-                ))
-            })
-        })
     }
 }

@@ -118,15 +118,17 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn engine(
-    db: &Surreal<TestDb>,
-) -> AuthorizationEngine<
+/// The engine's five repository parameters, named once — the same alias
+/// `authz_engine_test` uses, and what `clippy::type_complexity` asks for.
+type TestEngine = AuthorizationEngine<
     SurrealRoleRepository<TestDb>,
     SurrealPermissionRepository<TestDb>,
     SurrealResourceRepository<TestDb>,
     SurrealScopeRepository<TestDb>,
     SurrealGroupRepository<TestDb>,
-> {
+>;
+
+fn engine(db: &Surreal<TestDb>) -> TestEngine {
     AuthorizationEngine::new(
         SurrealRoleRepository::new(db.clone()),
         SurrealPermissionRepository::new(db.clone()),

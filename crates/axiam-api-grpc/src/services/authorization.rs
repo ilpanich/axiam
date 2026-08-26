@@ -443,7 +443,6 @@ mod tests {
                 .iter()
                 .map(|r| CheckAccessRequest {
                     tenant_id: r.tenant_id.to_string(),
-                    subject_scope: SubjectScope::Tenant,
                     subject_id: r.subject_id.to_string(),
                     action: r.action.clone(),
                     resource_id: r.resource_id.to_string(),

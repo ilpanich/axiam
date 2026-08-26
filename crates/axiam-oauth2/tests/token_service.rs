@@ -298,12 +298,20 @@ enum TenantOutcome {
 struct MockTenantRepo(TenantOutcome);
 
 impl TenantRepository for MockTenantRepo {
+    async fn get_organization_tenant(
+        &self,
+        _organization_id: uuid::Uuid,
+    ) -> axiam_core::error::AxiamResult<Tenant> {
+        unimplemented!("this stub has no organization scope")
+    }
+
     async fn create(&self, _i: CreateTenant) -> AxiamResult<Tenant> {
         unimplemented!()
     }
     async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
         match self.0 {
             TenantOutcome::Found => Ok(Tenant {
+                kind: axiam_core::models::tenant::TenantKind::Standard,
                 id,
                 organization_id: Uuid::new_v4(),
                 name: "T".into(),

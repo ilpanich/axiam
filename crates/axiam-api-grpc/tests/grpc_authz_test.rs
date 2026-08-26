@@ -341,7 +341,6 @@ async fn check_access_allows_when_role_grants_permission() {
     let resp = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -385,7 +384,6 @@ async fn check_access_accepts_omitted_subject_id() {
     let omitted = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             // Left empty: proto3 cannot express absence for a plain string, so
             // empty is what a client that does not set the field sends.
             subject_id: String::new(),
@@ -406,7 +404,6 @@ async fn check_access_accepts_omitted_subject_id() {
     let spelled_out = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -444,7 +441,6 @@ async fn check_access_deny_carries_reason_and_deprecated_deny_reason() {
     let resp = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -483,7 +479,6 @@ async fn check_access_denies_when_no_role() {
     let resp = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -522,7 +517,6 @@ async fn check_access_denies_wrong_action() {
     let resp = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "write".into(), // user only has "read"
             resource_id: resource_id.to_string(),
@@ -554,7 +548,6 @@ async fn check_access_rejects_malformed_user_id() {
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: "not-a-uuid".into(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -587,7 +580,6 @@ async fn check_access_rejects_malformed_tenant_id() {
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: "not-a-valid-uuid".into(),
-            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: resource_id.to_string(),
@@ -639,7 +631,6 @@ async fn batch_check_access_returns_mixed_results() {
                 // Should be allowed (role covers resource_a).
                 CheckAccessRequest {
                     tenant_id: tenant_id.to_string(),
-                    subject_scope: SubjectScope::Tenant,
                     subject_id: user_id.to_string(),
                     action: "read".into(),
                     resource_id: resource_a.to_string(),
@@ -648,7 +639,6 @@ async fn batch_check_access_returns_mixed_results() {
                 // Should be denied (no role on resource_b).
                 CheckAccessRequest {
                     tenant_id: tenant_id.to_string(),
-                    subject_scope: SubjectScope::Tenant,
                     subject_id: user_id.to_string(),
                     action: "read".into(),
                     resource_id: resource_b.to_string(),
@@ -657,7 +647,6 @@ async fn batch_check_access_returns_mixed_results() {
                 // Should be denied (wrong action on resource_a).
                 CheckAccessRequest {
                     tenant_id: tenant_id.to_string(),
-                    subject_scope: SubjectScope::Tenant,
                     subject_id: user_id.to_string(),
                     action: "delete".into(),
                     resource_id: resource_a.to_string(),
@@ -721,7 +710,6 @@ async fn concurrent_check_access_all_resolve_correctly() {
             let resp = client
                 .check_access(CheckAccessRequest {
                     tenant_id: tid.to_string(),
-                    subject_scope: SubjectScope::Tenant,
                     subject_id: uid.to_string(),
                     action: action.into(),
                     resource_id: rid.to_string(),

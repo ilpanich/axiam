@@ -155,6 +155,13 @@ impl EmailTemplateRepository for MockTemplateRepo {
 struct MissingTenantRepo;
 
 impl TenantRepository for MissingTenantRepo {
+    async fn get_organization_tenant(
+        &self,
+        _organization_id: uuid::Uuid,
+    ) -> axiam_core::error::AxiamResult<Tenant> {
+        unimplemented!("this stub has no organization scope")
+    }
+
     async fn create(&self, _i: CreateTenant) -> AxiamResult<Tenant> {
         unimplemented!()
     }

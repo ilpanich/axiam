@@ -88,6 +88,10 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
     AuthenticatedUser {
         user_id,
         tenant_id,
+        // An ordinary tenant principal: the tenant it acts on is the tenant it
+        // lives in, and it has not been verified as organization-level.
+        principal_tenant_id: tenant_id,
+        organization_level: false,
         org_id: Uuid::nil(),
         session_id,
         claims: ValidatedClaims(AccessTokenClaims {

@@ -325,23 +325,6 @@ pub async fn bootstrap<C: Connection + Clone>(
             message: "organization_name must contain at least one alphanumeric character".into(),
         }));
     }
-    let tenant_name = req
-        .tenant_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Default")
-        .to_string();
-    let tenant_slug = req
-        .tenant_slug
-        .as_deref()
-        .map(slugify)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            let s = slugify(&tenant_name);
-            if s.is_empty() { "default".into() } else { s }
-        });
-
     // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
     //    the system has been initialized. The authoritative guard is the
     //    `bootstrap_lock:global` CREATE inside the atomic transaction below;
@@ -418,8 +401,9 @@ pub async fn bootstrap<C: Connection + Clone>(
     //
     // `tenant_name` / `tenant_slug` are still accepted and now ignored, so an
     // older client's request still succeeds rather than failing on an unknown
-    // field. Nothing is created from them.
-    let _ = (&tenant_name, &tenant_slug);
+    // field. Nothing reads them — which is what `#[deprecated]` on the fields
+    // enforces under CI's `-D warnings`, and why the locals that used to
+    // normalise them are gone rather than bound to `_`.
     let tenant = match state.tenant_repo.get_organization_tenant(org.id).await {
         Ok(t) => t,
         Err(_) => state
@@ -433,6 +417,10 @@ pub async fn bootstrap<C: Connection + Clone>(
             })?,
     };
     let tenant_id = tenant.id;
+    // The organization tenant's own slug, reported so a client knows where the
+    // administrator it just created lives. Read off the row rather than from
+    // the request, which no longer carries one.
+    let tenant_slug = tenant.slug.clone();
 
     // 4b. Seed the organization's security baseline, including the OPAQUE
     // policy validated above. Written before the admin transaction so the
@@ -664,7 +652,8 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     // 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
-        message: "Organization, tenant and admin user created. Login via /api/v1/auth/login."
+        message: "Organization and organization-level admin user created. Login \
+                  via /api/v1/auth/login with no tenant."
             .into(),
         organization_id: org.id,
         organization_slug: org_slug,

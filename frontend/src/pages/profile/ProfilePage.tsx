@@ -1,4 +1,5 @@
 import { useState, useActionState } from "react";
+import { getApiErrorStatus } from "@/lib/apiError";
 import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
@@ -74,21 +75,33 @@ export function ProfilePage() {
     enabled: !!userId,
   });
 
-  // 23-RESEARCH Pitfall 4: `resendVerification` is a PUBLIC/unauthenticated
-  // backend route that requires BOTH `tenant_id` AND `email` in the body —
-  // both are already available from the authenticated auth store.
+  // The authenticated self-service endpoint, not the public one.
+  //
+  // This used to call `resendVerification`, which is unauthenticated and
+  // answers a constant 200 by design — so the button said "Verification email
+  // sent" whether or not anything happened, and there was no way to tell from
+  // the UI that it had not. It also needed `tenant_id` from the auth store and
+  // failed silently when that was absent.
+  //
+  // `/users/me/resend-verification` reads the address off the caller's own
+  // record and reports the outcome, so the three cases that actually occur are
+  // now distinguishable to the person looking at the screen.
   const resendMutation = useMutation({
-    mutationFn: () => {
-      if (!currentUser?.tenant_id || !currentUser?.email) {
-        return Promise.reject(new Error("missing tenant context or email"));
-      }
-      return authService.resendVerification(currentUser.tenant_id, currentUser.email);
-    },
+    mutationFn: () => authService.resendOwnVerification(),
     onSuccess: () => {
-      setVerificationMessage("Verification email sent. Please check your inbox.");
+      setVerificationMessage(
+        "Verification email sent. Please check your inbox — it may take a minute to arrive.",
+      );
     },
-    onError: () => {
-      setVerificationMessage("Failed to resend verification email. Try again later.");
+    onError: (err: unknown) => {
+      const status = getApiErrorStatus(err);
+      setVerificationMessage(
+        status === 409
+          ? "This address is already verified, or this account cannot be sent a verification email."
+          : status === 429
+            ? "You have requested too many verification emails today. Try again tomorrow."
+            : "Could not send the verification email. Try again later.",
+      );
     },
   });
 

@@ -736,6 +736,22 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/users").route(web::get().to(handlers::users::list::<C>)),
             )
             .service(
+                // Registered BEFORE `/users/{user_id}`: actix matches routes in
+                // registration order, and `me` would otherwise be captured as a
+                // user id and fail to parse as a UUID.
+                //
+                // Rate-limited on the same governor as the public resend, since
+                // it mints the same token and enqueues the same mail — being
+                // authenticated is not a reason to be allowed to send more of
+                // them.
+                web::resource("/users/me/resend-verification")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::email_verification::resend_own_verification::<C>),
+                    ),
+            )
+            .service(
                 web::resource("/users/{user_id}")
                     .route(web::get().to(handlers::users::get::<C>))
                     .route(web::put().to(handlers::users::update::<C>))

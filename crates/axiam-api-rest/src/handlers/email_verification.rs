@@ -213,6 +213,87 @@ pub async fn resend_verification<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }
 
+/// `POST /api/v1/users/me/resend-verification`
+///
+/// Resend the caller's **own** verification email, and say what happened.
+///
+/// # Why this exists beside the public endpoint
+///
+/// `POST /auth/resend-verification` answers a constant `200 {"sent": true}`
+/// whatever the outcome, and it must: it takes an address from an
+/// unauthenticated caller, so a 404 for "no such user" or a 429 for "rate
+/// limited" would be an oracle for which addresses have accounts.
+///
+/// That reasoning does not apply here. The caller is authenticated and asking
+/// about the address on its own record — it already knows the account exists,
+/// because it is signed in to it. Reusing the enumeration-safe endpoint for
+/// this is what made the profile page's button report success while doing
+/// nothing: the address was already verified, or the account was locked, or the
+/// daily limit was reached, and the response looked identical in every case.
+///
+/// So this one tells the truth:
+///
+/// * `200 {"sent": true}` — a token was minted and the mail enqueued.
+/// * `409` — the address is already verified, or the account is in a state that
+///   must not be sent a live token.
+/// * `429` — the daily resend limit is reached.
+///
+/// None of those disclose anything the caller did not bring with it.
+///
+/// Note what "sent" means: the mail is *enqueued*. Delivery is asynchronous and
+/// can still fail at the provider — which is worth knowing, because a mail
+/// queue that accepts everything and a provider that rejects it looks exactly
+/// like this endpoint working.
+#[utoipa::path(
+    post,
+    path = "/api/v1/users/me/resend-verification",
+    tag = "users",
+    responses(
+        (status = 200, description = "Verification email enqueued"),
+        (status = 409, description = "Already verified, or the account may not be sent one"),
+        (status = 429, description = "Daily resend limit reached"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn resend_own_verification<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    state: web::Data<AppState<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    // No permission check: this is self-service on the caller's own record, the
+    // same shape as the rest of `/users/me`. The address is read from the
+    // record rather than taken from the request — a caller that could name the
+    // address would be able to mail an arbitrary one from an authenticated
+    // session.
+    let me = state
+        .user_repo
+        .get_by_id(user.principal_tenant_id, user.user_id)
+        .await?;
+
+    match state
+        .mail
+        .email_verification_service
+        .resend_verification(user.principal_tenant_id, &me.email)
+        .await
+    {
+        Ok(Some((_raw_token, user_id, _expires_at))) => {
+            enqueue_verification_email(&state, user.principal_tenant_id, user_id, &me.email).await;
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
+        }
+        // The service returns `None` for "nothing to do", which here can only
+        // mean the address is already verified or the account's status forbids
+        // it — the "unknown user" case is impossible for a caller reading its
+        // own record.
+        Ok(None) => Err(AxiamError::AlreadyExists {
+            entity: "a verified email address for this account, or an account \
+                     state that permits a verification email"
+                .into(),
+        }
+        .into()),
+        Err(AxiamError::RateLimited) => Err(AxiamError::RateLimited.into()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests (D-15 enumeration-safe gate)
 // ---------------------------------------------------------------------------

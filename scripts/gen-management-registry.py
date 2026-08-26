@@ -450,6 +450,28 @@ def _flat_properties(
     return out
 
 
+def _update_style(spec: dict[str, Any], method: str, schema: str | None) -> str | None:
+    """Classify a ``PUT`` body as a sparse update or a full replacement.
+
+    Both shapes live on this surface and they are not interchangeable. Most
+    update bodies are entirely optional -- ``UpdateUserRequest`` has four
+    nullable fields and no required one -- so a PUT carrying only ``email``
+    changes only the email. But ``SetOrgSettings`` requires twenty fields, and
+    ``PUT /api/v1/organizations/{org_id}/settings`` with a subset does not
+    partially update anything: it is a replacement, and the fields left out are
+    gone.
+
+    An SDK that models both as "pass what you want to change" silently wipes a
+    tenant's security policy the first time someone raises a lockout threshold.
+    Generators read this field to pick the right shape: an optional-everything
+    patch type for ``sparse``, a required-everything value type for ``replace``.
+    """
+    if method != "PUT" or not schema:
+        return None
+    component = spec["components"]["schemas"].get(schema, {})
+    return "replace" if component.get("required") else "sparse"
+
+
 def _sensitive(spec: dict[str, Any], name: str | None) -> list[str]:
     """Which of a schema's fields §27.5 requires wrapped in ``Sensitive<T>``.
 
@@ -617,6 +639,7 @@ def build_registry(spec: dict[str, Any]) -> dict[str, Any]:
                 "response": resp,
                 "sensitive_response_fields": _sensitive(spec, resp["schema"]),
                 "sensitive_request_fields": _sensitive(spec, body_schema),
+                "update_style": _update_style(spec, method, body_schema),
                 "authenticated": bool(op.get("security")),
                 "summary": op.get("summary", "").strip("`"),
             }

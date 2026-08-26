@@ -64,6 +64,16 @@ function isExpiringSoon(notAfter: string): boolean {
 interface CaOption {
   id: string;
   subject: string;
+  /**
+   * When the CA itself expires.
+   *
+   * Carried into the form because a leaf cannot outlive its issuer — past this
+   * date the chain stops validating — so it is what caps the Validity Days
+   * input. The server refuses a longer request outright (it used to truncate
+   * silently), and a form that could not see this date could only discover the
+   * limit on submit.
+   */
+  not_after: string;
 }
 
 interface GenerateFieldsProps {
@@ -277,6 +287,7 @@ export function CertificatesPage() {
   const caOptions: CaOption[] = caCertificates.map((ca) => ({
     id: ca.id,
     subject: ca.subject,
+    not_after: ca.not_after,
   }));
 
   // Where CAs are issued. The org detail page's CA section is the only place

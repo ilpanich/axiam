@@ -47,6 +47,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations"
         },
@@ -70,6 +71,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}"
         },
@@ -93,6 +95,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/organizations/{org_id}"
         }
@@ -132,6 +135,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/tenants"
         },
@@ -155,6 +159,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/tenants"
         },
@@ -182,6 +187,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/tenants/{tenant_id}"
         },
@@ -209,6 +215,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}"
         },
@@ -236,6 +243,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}"
         }
@@ -270,6 +278,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/users"
         },
@@ -290,6 +299,7 @@
           "sensitive_request_fields": [
             "password"
           ],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/users"
         },
@@ -313,6 +323,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/users/{user_id}"
         },
@@ -336,6 +347,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/users/{user_id}"
         },
@@ -359,6 +371,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/users/{user_id}"
         },
@@ -382,6 +395,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/users/{user_id}/mfa-methods"
         },
@@ -409,6 +423,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/users/{user_id}/mfa-methods/{method_id}"
         },
@@ -432,6 +447,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/users/{user_id}/reset-mfa"
         },
@@ -455,6 +471,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/users/{user_id}/unlock"
         },
@@ -478,6 +495,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/users/{user_id}/roles"
         }
@@ -512,6 +530,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/groups"
         },
@@ -530,6 +549,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/groups"
         },
@@ -553,6 +573,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/groups/{group_id}"
         },
@@ -576,6 +597,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/groups/{group_id}"
         },
@@ -599,6 +621,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/groups/{group_id}"
         },
@@ -633,6 +656,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/groups/{group_id}/members"
         },
@@ -656,6 +680,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/groups/{group_id}/members"
         },
@@ -683,6 +708,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/groups/{group_id}/members/{user_id}"
         },
@@ -706,6 +732,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/groups/{group_id}/roles"
         }
@@ -740,6 +767,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/roles"
         },
@@ -758,6 +786,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/roles"
         },
@@ -781,6 +810,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/roles/{role_id}"
         },
@@ -804,6 +834,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/roles/{role_id}"
         },
@@ -827,6 +858,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/roles/{role_id}"
         },
@@ -850,6 +882,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/roles/{role_id}/users"
         },
@@ -873,6 +906,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/roles/{role_id}/users"
         },
@@ -909,6 +943,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/roles/{role_id}/users/{user_id}"
         },
@@ -932,6 +967,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/roles/{role_id}/groups"
         },
@@ -955,6 +991,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/roles/{role_id}/groups"
         },
@@ -991,6 +1028,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/roles/{role_id}/groups/{group_id}"
         },
@@ -1014,6 +1052,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/roles/{role_id}/permissions"
         },
@@ -1037,6 +1076,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/roles/{role_id}/permissions"
         },
@@ -1064,6 +1104,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/roles/{role_id}/permissions/{permission_id}"
         }
@@ -1098,6 +1139,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/permissions"
         },
@@ -1116,6 +1158,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/permissions"
         },
@@ -1139,6 +1182,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/permissions/{permission_id}"
         },
@@ -1162,6 +1206,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/permissions/{permission_id}"
         },
@@ -1185,6 +1230,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/permissions/{permission_id}"
         }
@@ -1219,6 +1265,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources"
         },
@@ -1237,6 +1284,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/resources"
         },
@@ -1260,6 +1308,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources/{resource_id}"
         },
@@ -1283,6 +1332,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/resources/{resource_id}"
         },
@@ -1306,6 +1356,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/resources/{resource_id}"
         },
@@ -1329,6 +1380,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources/{resource_id}/children"
         },
@@ -1352,6 +1404,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources/{resource_id}/ancestors"
         }
@@ -1380,6 +1433,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources/{resource_id}/scopes"
         },
@@ -1403,6 +1457,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/resources/{resource_id}/scopes"
         },
@@ -1430,6 +1485,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/resources/{resource_id}/scopes/{scope_id}"
         },
@@ -1457,6 +1513,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/resources/{resource_id}/scopes/{scope_id}"
         },
@@ -1484,6 +1541,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/resources/{resource_id}/scopes/{scope_id}"
         }
@@ -1518,6 +1576,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/service-accounts"
         },
@@ -1538,6 +1597,7 @@
             "client_secret"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/service-accounts"
         },
@@ -1561,6 +1621,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/service-accounts/{sa_id}"
         },
@@ -1584,6 +1645,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/service-accounts/{sa_id}"
         },
@@ -1607,6 +1669,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/service-accounts/{sa_id}"
         },
@@ -1632,6 +1695,7 @@
             "client_secret"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/service-accounts/{sa_id}/rotate-secret"
         },
@@ -1655,6 +1719,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/service-accounts/{sa_id}/bind-certificate"
         }
@@ -1689,6 +1754,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/certificates"
         },
@@ -1709,6 +1775,7 @@
             "private_key_pem"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/certificates"
         },
@@ -1732,6 +1799,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/certificates/{id}"
         },
@@ -1755,6 +1823,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/certificates/{id}/revoke"
         }
@@ -1794,6 +1863,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/ca-certificates"
         },
@@ -1819,6 +1889,7 @@
             "private_key_pem"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/ca-certificates"
         },
@@ -1844,6 +1915,7 @@
           "sensitive_request_fields": [
             "private_key_pem"
           ],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/ca-certificates/import"
         },
@@ -1871,6 +1943,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/ca-certificates/{id}"
         },
@@ -1898,6 +1971,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/ca-certificates/{id}/revoke"
         },
@@ -1925,6 +1999,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody"
         },
@@ -1952,6 +2027,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "replace",
           "authenticated": true,
           "summary": "PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor"
         },
@@ -1990,6 +2066,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"
         },
@@ -2019,6 +2096,7 @@
             "private_key_pem"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"
         },
@@ -2046,6 +2124,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"
         }
@@ -2080,6 +2159,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/pgp-keys"
         },
@@ -2100,6 +2180,7 @@
             "private_key_armored"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/pgp-keys"
         },
@@ -2123,6 +2204,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/pgp-keys/{id}"
         },
@@ -2146,6 +2228,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/pgp-keys/{id}/revoke"
         },
@@ -2169,6 +2252,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/pgp-keys/{id}/encrypt"
         },
@@ -2187,6 +2271,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/pgp-keys/sign-audit-batch"
         }
@@ -2221,6 +2306,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/webhooks"
         },
@@ -2241,6 +2327,7 @@
           "sensitive_request_fields": [
             "secret"
           ],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/webhooks"
         },
@@ -2264,6 +2351,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/webhooks/{id}"
         },
@@ -2289,6 +2377,7 @@
           "sensitive_request_fields": [
             "secret"
           ],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/webhooks/{id}"
         },
@@ -2312,6 +2401,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/webhooks/{id}"
         }
@@ -2346,6 +2436,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/oauth2-clients"
         },
@@ -2366,6 +2457,7 @@
             "client_secret"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/oauth2-clients"
         },
@@ -2389,6 +2481,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/oauth2-clients/{id}"
         },
@@ -2412,6 +2505,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/oauth2-clients/{id}"
         },
@@ -2435,6 +2529,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/oauth2-clients/{id}"
         }
@@ -2469,6 +2564,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/federation-configs"
         },
@@ -2489,6 +2585,7 @@
           "sensitive_request_fields": [
             "client_secret"
           ],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/federation-configs"
         },
@@ -2512,6 +2609,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/federation-configs/{id}"
         },
@@ -2537,6 +2635,7 @@
           "sensitive_request_fields": [
             "client_secret"
           ],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/federation-configs/{id}"
         },
@@ -2560,6 +2659,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/federation-configs/{id}"
         },
@@ -2583,6 +2683,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/federation-links/user/{user_id}"
         },
@@ -2606,6 +2707,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/federation-links/{id}"
         },
@@ -2624,6 +2726,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/federation/oidc/authorize"
         },
@@ -2642,6 +2745,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/federation/oidc/callback"
         }
@@ -2676,6 +2780,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/notification-rules"
         },
@@ -2694,6 +2799,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/notification-rules"
         },
@@ -2717,6 +2823,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/notification-rules/{id}"
         },
@@ -2740,6 +2847,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/notification-rules/{id}"
         },
@@ -2763,6 +2871,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/notification-rules/{id}"
         }
@@ -2791,6 +2900,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/email-config"
         },
@@ -2814,6 +2924,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "replace",
           "authenticated": true,
           "summary": "PUT /api/v1/organizations/{org_id}/email-config"
         },
@@ -2837,6 +2948,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/organizations/{org_id}/email-config"
         },
@@ -2860,6 +2972,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/organizations/{org_id}/email-config/test"
         },
@@ -2883,6 +2996,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/tenants/{tenant_id}/email-config"
         },
@@ -2906,6 +3020,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/tenants/{tenant_id}/email-config"
         },
@@ -2929,6 +3044,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/tenants/{tenant_id}/email-config"
         },
@@ -2952,6 +3068,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/tenants/{tenant_id}/email-config/test"
         }
@@ -2980,6 +3097,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/organizations/{org_id}/settings"
         },
@@ -3003,6 +3121,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "replace",
           "authenticated": true,
           "summary": "PUT /api/v1/organizations/{org_id}/settings"
         },
@@ -3021,6 +3140,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/settings"
         },
@@ -3039,6 +3159,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/settings"
         },
@@ -3062,6 +3183,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/tenants/{tenant_id}/settings"
         },
@@ -3085,6 +3207,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/tenants/{tenant_id}/settings"
         },
@@ -3108,6 +3231,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/tenants/{tenant_id}/settings"
         }
@@ -3131,6 +3255,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/scim-tokens"
         },
@@ -3151,6 +3276,7 @@
             "provisioning_token"
           ],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/scim-tokens"
         },
@@ -3174,6 +3300,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/scim-tokens/{id}"
         }
@@ -3208,6 +3335,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/reactors"
         },
@@ -3226,6 +3354,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/reactors"
         },
@@ -3249,6 +3378,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/reactors/{id}"
         },
@@ -3272,6 +3402,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "sparse",
           "authenticated": true,
           "summary": "PUT /api/v1/reactors/{id}"
         },
@@ -3295,6 +3426,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "DELETE /api/v1/reactors/{id}"
         },
@@ -3313,6 +3445,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/reactors/events` \u2014 the registry, verbatim."
         }
@@ -3341,6 +3474,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/tenants/{tenant_id}/webauthn/attestation-policy"
         },
@@ -3364,6 +3498,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": "replace",
           "authenticated": true,
           "summary": "PUT /api/v1/tenants/{tenant_id}/webauthn/attestation-policy"
         },
@@ -3387,6 +3522,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/tenants/{tenant_id}/webauthn/compliance-report"
         }
@@ -3466,6 +3602,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/audit-logs"
         },
@@ -3540,6 +3677,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/audit-logs/system"
         }
@@ -3563,6 +3701,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/account/export"
         },
@@ -3586,6 +3725,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/account/export/{token}"
         },
@@ -3604,6 +3744,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/account/delete"
         },
@@ -3628,6 +3769,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": false,
           "summary": "GET /api/v1/auth/account/delete/cancel?token=<opaque>"
         }
@@ -3651,6 +3793,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": false,
           "summary": "GET /health` \u2014 liveness probe. Always returns 200."
         },
@@ -3669,6 +3812,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": false,
           "summary": "GET /ready` \u2014 readiness probe. Checks DB connectivity."
         },
@@ -3687,6 +3831,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "GET /api/v1/mds/status"
         },
@@ -3705,6 +3850,7 @@
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],
+          "update_style": null,
           "authenticated": true,
           "summary": "POST /api/v1/mds/refresh"
         }

@@ -22,12 +22,29 @@ export interface Organization {
 /** Backend `TenantStatus` enum, serialized PascalCase. */
 export type TenantStatus = "Active" | "Suspended";
 
+/**
+ * What a tenant *is*, as distinct from what state it is in.
+ *
+ * `"organization"` is the organization's own reserved scope — one per
+ * organization — where organization-level principals live. It is not a tenant
+ * an operator picks from a list of tenants, so the selector offers it
+ * separately and by name.
+ */
+export type TenantKind = "standard" | "organization";
+
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
   /** Lifecycle status; new tenants default to "Active". */
   status: TenantStatus;
+  /**
+   * Ordinary tenant or the organization's own scope.
+   *
+   * Optional on the wire: a server older than the organization-scope migration
+   * omits it, and every tenant such a server has is standard.
+   */
+  kind?: TenantKind;
   metadata?: Record<string, unknown>;
   organization_id: string;
   created_at: string;

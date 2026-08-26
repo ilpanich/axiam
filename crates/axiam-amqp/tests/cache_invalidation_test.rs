@@ -61,7 +61,7 @@ fn cache() -> Arc<DecisionCache> {
 fn request(tenant: Uuid, subject: Uuid) -> AccessRequest {
     AccessRequest {
         tenant_id: tenant,
-        subject_tenant_id: None,
+        subject_scope: SubjectScope::Tenant,
         subject_id: subject,
         action: "read".into(),
         resource_id: Uuid::nil(),

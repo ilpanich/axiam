@@ -2,7 +2,7 @@
 
 use axiam_auth::token::ValidatedClaims;
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::repository::{
     GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
 };
@@ -148,7 +148,7 @@ where
 
         let access_req = AccessRequest {
             tenant_id: claims_tenant_id,
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id,
             action: req.action,
             resource_id: parse_uuid(&req.resource_id, "resource_id")?,
@@ -199,7 +199,7 @@ where
 
             access_requests.push(AccessRequest {
                 tenant_id: claims_tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id,
                 action: check_req.action,
                 resource_id: parse_uuid(&check_req.resource_id, "resource_id")?,
@@ -373,7 +373,7 @@ mod tests {
         let requests = vec![
             AccessRequest {
                 tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id: user_id,
                 action: "read".into(),
                 resource_id: resource_a,
@@ -381,7 +381,7 @@ mod tests {
             },
             AccessRequest {
                 tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id: user_id,
                 action: "read".into(),
                 resource_id: resource_b,
@@ -389,7 +389,7 @@ mod tests {
             },
             AccessRequest {
                 tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id: user_id,
                 action: "delete".into(),
                 resource_id: resource_c,
@@ -397,7 +397,7 @@ mod tests {
             },
             AccessRequest {
                 tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id: user_id,
                 action: "read".into(),
                 resource_id: resource_a,
@@ -442,7 +442,7 @@ mod tests {
                 .iter()
                 .map(|r| CheckAccessRequest {
                     tenant_id: r.tenant_id.to_string(),
-                    subject_tenant_id: None,
+                    subject_scope: SubjectScope::Tenant,
                     subject_id: r.subject_id.to_string(),
                     action: r.action.clone(),
                     resource_id: r.resource_id.to_string(),

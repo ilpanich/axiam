@@ -144,6 +144,21 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // Create tenant record and relate to organization in one query.
         // RELATE requires literal record-id syntax, so we embed UUIDs
         // directly in the RELATE portion (they are safe — UUID format).
+        //
+        // An organization tenant also claims `organization_scope:<org_id>`,
+        // whose record id IS the constraint that there is only one of them. A
+        // second attempt fails on that CREATE rather than quietly producing a
+        // second place organization-level principals could live — see
+        // `SCHEMA_V50` for why this is a marker row and not a partial unique
+        // index.
+        let claim_scope = if input.kind.is_organization() {
+            format!(
+                " CREATE type::record('organization_scope', $org_id) \
+                  SET tenant_id = $id;"
+            )
+        } else {
+            String::new()
+        };
         let query = format!(
             "CREATE type::record('tenant', $id) SET \
              organization_id = $org_id, \
@@ -152,7 +167,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
              kind = $kind, \
              metadata = $metadata; \
              RELATE organization:`{org_id_str}` \
-             -> has_tenant -> tenant:`{id_str}`;"
+             -> has_tenant -> tenant:`{id_str}`;{claim_scope}"
         );
 
         let result = self

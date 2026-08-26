@@ -138,17 +138,45 @@ pub struct AuthenticatedUser {
     /// The tenant the caller's own record and grants live in.
     ///
     /// The organization tenant for an organization-level principal, and the
-    /// same as [`Self::tenant_id`] for everyone else. Passed to the
-    /// authorization engine as `subject_tenant_id`, which is how one principal
-    /// administers every tenant in an organization without a copy of its grants
-    /// in each.
+    /// same as [`Self::tenant_id`] for everyone else.
     pub principal_tenant_id: Uuid,
+    /// Whether [`Self::principal_tenant_id`] was **verified** to be the
+    /// organization's reserved scope.
+    ///
+    /// Set only by [`resolve_active_tenant`], which reads the tenant record and
+    /// checks its `kind`. `false` until then, so a request that never named
+    /// another tenant is evaluated as an ordinary tenant principal — which it
+    /// is, as far as this request is concerned.
+    ///
+    /// This is the flag that becomes
+    /// [`axiam_authz::types::SubjectScope::Organization`], and it is the whole
+    /// reason that claim is trustworthy: it cannot be reached without the
+    /// lookup that justifies it.
+    pub organization_level: bool,
     pub org_id: Uuid,
     /// The session ID — equals the JWT `jti` claim which is set to
     /// `session.id` for user-facing tokens (D-15). Use this for
     /// selective session invalidation on password change.
     pub session_id: Uuid,
     pub claims: ValidatedClaims,
+}
+
+impl AuthenticatedUser {
+    /// How the authorization engine should read this caller's grants.
+    ///
+    /// [`SubjectScope::Organization`] only when
+    /// [`Self::organization_level`] was set by the tenant lookup in
+    /// [`resolve_active_tenant`], so the claim can never be made on the
+    /// strength of request input alone.
+    pub fn subject_scope(&self) -> axiam_authz::types::SubjectScope {
+        if self.organization_level {
+            axiam_authz::types::SubjectScope::Organization {
+                tenant_id: self.principal_tenant_id,
+            }
+        } else {
+            axiam_authz::types::SubjectScope::Tenant
+        }
+    }
 }
 
 impl actix_web::FromRequest for AuthenticatedUser {
@@ -202,6 +230,9 @@ impl actix_web::FromRequest for AuthenticatedUser {
 
             if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
                 user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
+                // Reached only when the resolution above confirmed the caller's
+                // own tenant is the organization scope — it refuses otherwise.
+                user.organization_level = true;
             }
 
             Ok(user)
@@ -484,6 +515,7 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
             // The token's tenant is the home tenant until the header
             // resolution in `from_request` says otherwise.
             principal_tenant_id: cached.tenant_id,
+            organization_level: false,
             org_id: cached.org_id,
             session_id,
             claims: cached.claims.clone(),
@@ -517,6 +549,7 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         user_id,
         tenant_id,
         principal_tenant_id: tenant_id,
+        organization_level: false,
         org_id,
         session_id,
         claims: validated,

@@ -21,7 +21,18 @@ interface TopbarProps {
 export function Topbar({ onMenuClick }: TopbarProps) {
   const navigate = useNavigate();
   const matches = useMatches();
-  const { user, tenantSlug, orgSlug, clearAuth } = useAuthStore();
+  const {
+    user,
+    tenantSlug,
+    orgSlug,
+    activeTenantId,
+    activeTenantName,
+    clearAuth,
+    selectTenant,
+  } = useAuthStore();
+  // Whether this principal lives in the organization's own scope. Only such a
+  // principal can act on another tenant, because only its grants apply there.
+  const isOrgLevel = user?.organization_level === true;
   const queryClientInstance = useQueryClient();
   const { can } = usePermissions();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -108,19 +119,45 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   });
 
   /**
-   * Switch to another tenant.
+   * Act on a different tenant, for an organization-level principal.
    *
-   * A session is bound to one tenant and a user record belongs to one tenant:
-   * the JWT carries `tenant_id`, every repository call is scoped by it, and a
-   * principal of one tenant is simply not a principal of another. So switching
-   * cannot re-scope the current session — there is no server-side operation
-   * that would make that safe, and inventing one would be a cross-tenant
-   * privilege path in a product whose central promise is tenant isolation.
+   * No re-authentication: this principal's grants live in the organization
+   * tenant and apply to every tenant in the organization, so it already *is* a
+   * principal there. Selecting one sets `X-Axiam-Tenant` on subsequent
+   * requests; the server verifies the tenant is in the caller's own
+   * organization and refuses otherwise.
+   *
+   * The query cache is cleared because every list in the app is tenant-scoped.
+   * Leaving one tenant's rows on screen under another tenant's name is worse
+   * than a moment of loading.
+   */
+  const selectActiveTenant = (
+    tenantId: string | null,
+    tenantName: string | null,
+  ) => {
+    selectTenant(tenantId, tenantName);
+    queryClientInstance.clear();
+    closeAll();
+  };
+
+  /**
+   * Switch to another tenant, for a **tenant-level** principal.
+   *
+   * A session is bound to one tenant and such a user record belongs to one
+   * tenant: the JWT carries `tenant_id`, every repository call is scoped by it,
+   * and a principal of one tenant is simply not a principal of another. So
+   * switching cannot re-scope the current session — there is no server-side
+   * operation that would make that safe, and inventing one would be a
+   * cross-tenant privilege path in a product whose central promise is tenant
+   * isolation.
    *
    * What it does instead is honest and does the job: revoke the current session
    * and hand the login page the target org and tenant pre-filled. The operator
    * authenticates as a principal of that tenant, which is the only way to
    * become one.
+   *
+   * Organization-level principals do not come through here — they use
+   * `selectActiveTenant`, because for them the premise above is false.
    */
   const switchTenant = async (targetSlug: string) => {
     if (targetSlug === tenantSlug) {
@@ -221,9 +258,11 @@ export function Topbar({ onMenuClick }: TopbarProps) {
           >
             <Building2 size={14} aria-hidden="true" />
             <span className="hidden sm:inline">
-              {tenantSlug
-                ? `${orgSlug ?? "org"} / ${tenantSlug}`
-                : "Select tenant"}
+              {isOrgLevel
+                ? `${orgSlug ?? "org"} / ${activeTenantName ?? "Organization"}`
+                : tenantSlug
+                  ? `${orgSlug ?? "org"} / ${tenantSlug}`
+                  : "Select tenant"}
             </span>
             <ChevronDown size={14} aria-hidden="true" />
           </button>
@@ -251,34 +290,72 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                   No other tenant is visible to you.
                 </p>
               )}
-              {tenants.map((t) => {
-                const current = t.slug === tenantSlug;
-                return (
-                  <button
-                    key={t.id}
-                    role="menuitem"
-                    onClick={() => void switchTenant(t.slug)}
-                    aria-current={current ? "true" : undefined}
-                    className={cn(
-                      "w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left",
-                      "hover:bg-white/5 transition-colors",
-                      current ? "text-foreground" : "text-muted-foreground",
-                    )}
-                  >
-                    <span className="truncate">{t.name}</span>
-                    {current && (
-                      <Check
-                        size={14}
-                        className="shrink-0 text-primary"
-                        aria-hidden="true"
-                      />
-                    )}
-                  </button>
-                );
-              })}
+              {/* Organization scope: only an organization-level principal has
+                  one to return to, and it is where its own record lives. */}
+              {isOrgLevel && (
+                <button
+                  role="menuitem"
+                  onClick={() => selectActiveTenant(null, null)}
+                  aria-current={activeTenantId === null ? "true" : undefined}
+                  className={cn(
+                    "w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left",
+                    "hover:bg-white/5 transition-colors border-b border-primary/10",
+                    activeTenantId === null
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  <span className="truncate font-medium">Organization</span>
+                  {activeTenantId === null && (
+                    <Check
+                      size={14}
+                      className="shrink-0 text-primary"
+                      aria-hidden="true"
+                    />
+                  )}
+                </button>
+              )}
+              {tenants
+                // The organization scope is offered above, by name, and is not
+                // a tenant an operator picks from a list of tenants.
+                .filter((t) => t.kind !== "organization")
+                .map((t) => {
+                  const current = isOrgLevel
+                    ? activeTenantId === t.id
+                    : t.slug === tenantSlug;
+                  return (
+                    <button
+                      key={t.id}
+                      role="menuitem"
+                      onClick={() =>
+                        isOrgLevel
+                          ? selectActiveTenant(t.id, t.name)
+                          : void switchTenant(t.slug)
+                      }
+                      aria-current={current ? "true" : undefined}
+                      className={cn(
+                        "w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left",
+                        "hover:bg-white/5 transition-colors",
+                        current ? "text-foreground" : "text-muted-foreground",
+                      )}
+                    >
+                      <span className="truncate">{t.name}</span>
+                      {current && (
+                        <Check
+                          size={14}
+                          className="shrink-0 text-primary"
+                          aria-hidden="true"
+                        />
+                      )}
+                    </button>
+                  );
+                })}
               <p className="px-3 pt-2 pb-1 border-t border-primary/10 text-xs text-muted-foreground">
-                A session belongs to one tenant, so switching signs you out and
-                asks you to sign in to the tenant you picked.
+                {isOrgLevel
+                  ? "Your roles are held at organization level, so switching " +
+                    "tenant takes effect immediately — no sign-in needed."
+                  : "A session belongs to one tenant, so switching signs you " +
+                    "out and asks you to sign in to the tenant you picked."}
               </p>
             </div>
           )}

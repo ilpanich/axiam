@@ -2365,7 +2365,9 @@ async fn backfill_organization_tenants<C: Connection>(db: &Surreal<C>) -> Result
                  organization_id = $org_id, \
                  name = 'Organization', slug = 'organization', \
                  status = 'Active', kind = 'organization', \
-                 metadata = {};",
+                 metadata = {}; \
+                 CREATE type::record('organization_scope', $org_id) \
+                 SET tenant_id = $id;",
             )
             .bind(("id", tenant_id.clone()))
             .bind(("org_id", org.record_id.clone()))
@@ -2802,13 +2804,23 @@ const SCHEMA_V50: &str = "\
 DEFINE FIELD IF NOT EXISTS kind ON TABLE tenant TYPE string
     DEFAULT 'standard'
     ASSERT $value IN ['standard', 'organization'];
+DEFINE INDEX IF NOT EXISTS idx_tenant_org_kind ON TABLE tenant \
+    COLUMNS organization_id, kind;
 -- One organization tenant per organization, enforced rather than assumed.
--- A second one would be a second place organization-level principals could
--- live, and every lookup that resolves 'the organization scope' would then
--- have to pick between them.
-DEFINE INDEX IF NOT EXISTS idx_tenant_org_scope ON TABLE tenant \
-    COLUMNS organization_id, kind UNIQUE
-    WHERE kind = 'organization';
+--
+-- A partial UNIQUE index would say this directly, and SurrealDB has no such
+-- thing: `DEFINE INDEX ... UNIQUE WHERE ...` does not parse. A plain UNIQUE on
+-- (organization_id, kind) is not the constraint wanted either — it would allow
+-- one *standard* tenant per organization, which is the opposite of the point.
+--
+-- So the record id is the constraint, the same way `bootstrap_lock` is: one row
+-- per organization, whose id IS the organization id. A second organization
+-- tenant means a second CREATE of the same record, which fails. Written in the
+-- same statement batch as the tenant it marks.
+DEFINE TABLE IF NOT EXISTS organization_scope SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE organization_scope TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE organization_scope
+    TYPE datetime DEFAULT time::now();
 ";
 
 #[cfg(test)]
@@ -2830,13 +2842,24 @@ mod tests {
     fn schema_v50_makes_one_organization_tenant_an_invariant() {
         // Two organization tenants would mean two answers to "where do
         // organization-level principals live", and the one that answered would
-        // depend on row order.
-        assert!(SCHEMA_V50.contains("idx_tenant_org_scope"));
-        assert!(SCHEMA_V50.contains("UNIQUE"));
+        // depend on row order. The marker table's record id is what forbids it.
+        assert!(SCHEMA_V50.contains("organization_scope"));
         assert!(
-            SCHEMA_V50.contains("WHERE kind = 'organization'"),
-            "the uniqueness must be partial — ordinary tenants are many per \
-             organization and must not collide with each other"
+            !SCHEMA_V50.contains("UNIQUE"),
+            "a plain UNIQUE on (organization_id, kind) would cap a deployment \
+             at one standard tenant per organization, and SurrealDB has no \
+             partial index to express the constraint that is actually wanted"
+        );
+    }
+
+    #[test]
+    fn schema_v50_uses_no_partial_index() {
+        // `DEFINE INDEX ... WHERE ...` does not parse in SurrealDB 3.x; it
+        // fails at migration time with `Unexpected token WHERE`, which means a
+        // deployment that upgrades cannot start.
+        assert!(
+            !SCHEMA_V50.contains("WHERE"),
+            "SurrealDB rejects a WHERE clause on DEFINE INDEX"
         );
     }
 

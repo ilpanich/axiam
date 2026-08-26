@@ -185,7 +185,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::types::{AccessDecision, AccessRequest};
+use crate::types::{AccessDecision, AccessRequest, SubjectScope};
 
 /// Number of independent tenant-map mutexes. Fixed (not CPU-derived) so the
 /// structure is deterministic across hosts and reproducible in benchmarks.
@@ -225,8 +225,7 @@ impl Default for DecisionCacheConfig {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct SubKey {
     subject_id: Uuid,
-    /// Where the subject's grants were read from, when that is not the shard's
-    /// own tenant.
+    /// Whose grants answered, and how far they reached.
     ///
     /// Part of the key because it is part of the question. The same subject
     /// asking about the same resource gets a different answer depending on
@@ -236,7 +235,7 @@ struct SubKey {
     /// distinguishes two live keys — it is here so that correctness does not
     /// *depend* on that being true, which is the sort of invariant that holds
     /// until someone adds a feature.
-    subject_tenant_id: Option<Uuid>,
+    subject_scope: SubjectScope,
     resource_id: Uuid,
     action: String,
     scope: Option<String>,
@@ -246,7 +245,7 @@ impl SubKey {
     fn from_request(request: &AccessRequest) -> Self {
         Self {
             subject_id: request.subject_id,
-            subject_tenant_id: request.subject_tenant_id,
+            subject_scope: request.subject_scope,
             resource_id: request.resource_id,
             action: request.action.clone(),
             scope: request.scope.clone(),
@@ -714,7 +713,7 @@ mod tests {
     fn req(tenant: Uuid, subject: Uuid, resource: Uuid, action: &str) -> AccessRequest {
         AccessRequest {
             tenant_id: tenant,
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id: subject,
             action: action.to_string(),
             resource_id: resource,

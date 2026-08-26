@@ -213,8 +213,13 @@ export function LoginPage() {
   const handleOrgTenantSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!orgTenantData.orgSlug.trim() || !orgTenantData.tenantSlug.trim()) {
-      setError("Please enter both organization and tenant slug.");
+    // The tenant is optional now: omitting it signs in at organization level,
+    // which is where organization-level principals live. A tenant user who
+    // omits it is simply not found there, and gets the same generic failure as
+    // a wrong password — so the field can be blank without the form having to
+    // know which kind of user is typing into it.
+    if (!orgTenantData.orgSlug.trim()) {
+      setError("Please enter your organization slug.");
       return;
     }
     setStep("credentials");
@@ -281,7 +286,12 @@ export function LoginPage() {
         const response = await api.post<LoginResponse>("/api/v1/auth/login", {
           username,
           password,
-          tenant_slug: orgTenantData.tenantSlug,
+          // Omitted entirely when blank, rather than sent as "". The server
+          // reads "no tenant named" as "sign in at organization level"; an
+          // empty string would be a slug lookup that cannot match.
+          ...(orgTenantData.tenantSlug.trim()
+            ? { tenant_slug: orgTenantData.tenantSlug.trim() }
+            : {}),
           org_slug: orgTenantData.orgSlug,
         });
         data = response.data;
@@ -438,7 +448,8 @@ export function LoginPage() {
                 Select your workspace
               </legend>
               <p className="text-sm text-muted-foreground mb-6">
-                Enter your organization and tenant to continue.
+                Enter your organization to continue. Add a tenant only if your
+                account belongs to one.
               </p>
 
               <div className="space-y-4">
@@ -461,11 +472,16 @@ export function LoginPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="tenant-slug">Tenant slug</Label>
+                  <Label htmlFor="tenant-slug">
+                    Tenant slug{" "}
+                    <span className="text-muted-foreground font-normal">
+                      (optional)
+                    </span>
+                  </Label>
                   <Input
                     id="tenant-slug"
                     type="text"
-                    placeholder="default"
+                    placeholder="Leave blank to sign in at organization level"
                     value={orgTenantData.tenantSlug}
                     onChange={(e) =>
                       setOrgTenantData((d) => ({
@@ -474,8 +490,16 @@ export function LoginPage() {
                       }))
                     }
                     autoComplete="off"
-                    required
+                    aria-describedby="tenant-slug-help"
                   />
+                  <p
+                    id="tenant-slug-help"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Organization-level accounts — including the administrator
+                    created at setup — leave this blank. Tenant accounts must
+                    name their tenant.
+                  </p>
                 </div>
               </div>
 
@@ -497,7 +521,9 @@ export function LoginPage() {
               <p className="text-sm text-muted-foreground">
                 Workspace:{" "}
                 <span className="text-primary font-mono text-xs">
-                  {orgTenantData.orgSlug}/{orgTenantData.tenantSlug}
+                  {orgTenantData.tenantSlug.trim()
+                    ? `${orgTenantData.orgSlug}/${orgTenantData.tenantSlug}`
+                    : `${orgTenantData.orgSlug} (organization)`}
                 </span>
               </p>
             </div>

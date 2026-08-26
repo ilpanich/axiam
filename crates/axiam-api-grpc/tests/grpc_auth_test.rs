@@ -314,7 +314,7 @@ async fn grpc_rejects_call_without_bearer_token() {
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: Uuid::new_v4().to_string(),
@@ -360,7 +360,7 @@ async fn grpc_accepts_call_with_valid_bearer_token() {
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: Uuid::new_v4().to_string(),
@@ -399,7 +399,7 @@ async fn grpc_rejects_call_with_malformed_token() {
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id.to_string(),
             action: "read".into(),
             resource_id: Uuid::new_v4().to_string(),

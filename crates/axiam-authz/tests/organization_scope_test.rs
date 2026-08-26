@@ -11,6 +11,7 @@
 //! the super-admin had was a row in a different tenant and the engine filters
 //! every lookup by tenant. See `claude_dev/organization-scope-design.md`.
 
+use axiam_authz::types::SubjectScope;
 use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
@@ -187,11 +188,30 @@ async fn resource(db: &Surreal<TestDb>, tenant: Uuid, name: &str) -> Uuid {
         .id
 }
 
-/// `subject` in `subject_tenant` asking about `tenant`.
-fn request(tenant: Uuid, subject_tenant: Uuid, subject: Uuid, action: &str) -> AccessRequest {
+/// An **organization-level** `subject`, whose grants are in `org_tenant`,
+/// asking about `tenant`.
+fn org_request(tenant: Uuid, org_tenant: Uuid, subject: Uuid, action: &str) -> AccessRequest {
     AccessRequest {
         tenant_id: tenant,
-        subject_tenant_id: Some(subject_tenant),
+        subject_scope: SubjectScope::Organization {
+            tenant_id: org_tenant,
+        },
+        subject_id: subject,
+        action: action.into(),
+        resource_id: Uuid::nil(),
+        scope: None,
+    }
+}
+
+/// An ordinary tenant `subject` asking about `tenant`.
+///
+/// Deliberately takes no subject-tenant argument: an ordinary principal's
+/// grants are in the tenant being acted upon, always, and there is no value it
+/// could pass that would say otherwise.
+fn tenant_request(tenant: Uuid, subject: Uuid, action: &str) -> AccessRequest {
+    AccessRequest {
+        tenant_id: tenant,
+        subject_scope: SubjectScope::Tenant,
         subject_id: subject,
         action: action.into(),
         resource_id: Uuid::nil(),
@@ -227,7 +247,12 @@ async fn an_organization_level_global_grant_reaches_every_tenant() {
         ("another tenant", f.tenant_b),
     ] {
         let d = e
-            .check_access(&request(tenant, f.org_tenant, f.org_admin, "users:list"))
+            .check_access(&org_request(
+                tenant,
+                f.org_tenant,
+                f.org_admin,
+                "users:list",
+            ))
             .await
             .unwrap();
         assert!(
@@ -272,7 +297,7 @@ async fn a_tenant_created_later_is_reachable_without_any_new_grant() {
         .unwrap();
 
     let d = engine(&f.db)
-        .check_access(&request(
+        .check_access(&org_request(
             latecomer.id,
             f.org_tenant,
             f.org_admin,
@@ -310,7 +335,7 @@ async fn a_resource_scoped_organization_grant_does_not_cross_into_a_tenant() {
     let e = engine(&f.db);
 
     // It applies where it was granted...
-    let mut own = request(f.org_tenant, f.org_tenant, f.org_admin, "reports:read");
+    let mut own = org_request(f.org_tenant, f.org_tenant, f.org_admin, "reports:read");
     own.resource_id = org_resource;
     assert!(
         matches!(e.check_access(&own).await.unwrap(), AccessDecision::Allow),
@@ -319,7 +344,7 @@ async fn a_resource_scoped_organization_grant_does_not_cross_into_a_tenant() {
 
     // ...and nowhere else, not even on a resource of the same name.
     let twin = resource(&f.db, f.tenant_a, "billing").await;
-    let mut across = request(f.tenant_a, f.org_tenant, f.org_admin, "reports:read");
+    let mut across = org_request(f.tenant_a, f.org_tenant, f.org_admin, "reports:read");
     across.resource_id = twin;
     let d = e.check_access(&across).await.unwrap();
     assert!(
@@ -349,26 +374,16 @@ async fn a_tenant_users_grant_does_not_reach_another_tenant() {
 
     assert!(
         matches!(
-            e.check_access(&request(
-                f.tenant_a,
-                f.tenant_a,
-                f.tenant_user,
-                "users:list"
-            ))
-            .await
-            .unwrap(),
+            e.check_access(&tenant_request(f.tenant_a, f.tenant_user, "users:list"))
+                .await
+                .unwrap(),
             AccessDecision::Allow
         ),
         "a tenant user must still be allowed in its own tenant"
     );
 
     let d = e
-        .check_access(&request(
-            f.tenant_b,
-            f.tenant_a,
-            f.tenant_user,
-            "users:list",
-        ))
+        .check_access(&tenant_request(f.tenant_b, f.tenant_user, "users:list"))
         .await
         .unwrap();
     assert!(
@@ -382,7 +397,7 @@ async fn a_tenant_users_grant_does_not_reach_another_tenant() {
 async fn organization_scope_is_not_itself_a_permission() {
     let f = fixture().await;
     let d = engine(&f.db)
-        .check_access(&request(
+        .check_access(&org_request(
             f.tenant_a,
             f.org_tenant,
             f.org_admin,
@@ -396,9 +411,52 @@ async fn organization_scope_is_not_itself_a_permission() {
     );
 }
 
-/// `subject_tenant_id: None` must behave exactly as before the field existed.
+/// An organization-level principal acting on the organization tenant itself is
+/// not crossing anything, and must get ordinary evaluation there.
+///
+/// The alternative — treating every organization-level check as cross-tenant —
+/// would silently drop resource-scoped grants inside the organization's own
+/// scope, which is where an organization-level administrator does most of its
+/// work.
 #[tokio::test]
-async fn an_absent_subject_tenant_means_the_same_tenant() {
+async fn an_organization_principal_in_its_own_tenant_is_not_crossing_a_boundary() {
+    let f = fixture().await;
+    let res = resource(&f.db, f.org_tenant, "billing").await;
+    grant(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "billing-admin",
+        false,
+        "reports:read",
+        Some(res),
+    )
+    .await;
+
+    let mut req = org_request(f.org_tenant, f.org_tenant, f.org_admin, "reports:read");
+    req.resource_id = res;
+    assert!(!req.crosses_tenant_boundary());
+    assert!(
+        matches!(
+            engine(&f.db).check_access(&req).await.unwrap(),
+            AccessDecision::Allow
+        ),
+        "a resource-scoped grant must still work inside the organization tenant"
+    );
+}
+
+/// The hole the earlier two-id encoding left open, kept shut.
+///
+/// `subject_tenant_id: Option<Uuid>` made "cross-tenant reach" mean nothing
+/// more than *two ids differ*, so a request built for a tenant user in tenant A
+/// about tenant B got it for free — and that user's ordinary global `admin`
+/// role then applied in every tenant in the deployment. This test failed
+/// against that encoding, which is how it was found.
+///
+/// `SubjectScope` makes the claim a named thing a caller has to ask for, so an
+/// ordinary principal cannot express it at all.
+#[tokio::test]
+async fn a_tenant_principal_cannot_express_cross_tenant_reach() {
     let f = fixture().await;
     grant(
         &f.db,
@@ -411,17 +469,15 @@ async fn an_absent_subject_tenant_means_the_same_tenant() {
     )
     .await;
 
-    let explicit = request(f.tenant_a, f.tenant_a, f.tenant_user, "users:list");
-    let implicit = AccessRequest {
-        subject_tenant_id: None,
-        ..explicit.clone()
-    };
-    let e = engine(&f.db);
-    assert_eq!(
-        e.check_access(&explicit).await.unwrap().is_allowed(),
-        e.check_access(&implicit).await.unwrap().is_allowed(),
-        "naming the subject's own tenant must not change the answer"
+    // The only request an ordinary principal can produce, whatever tenant it
+    // asks about: its scope pins the assignment tenant to the target.
+    let req = tenant_request(f.tenant_b, f.tenant_user, "users:list");
+    assert!(
+        !req.crosses_tenant_boundary(),
+        "SubjectScope::Tenant must never cross a boundary, whatever tenant is named"
     );
+    assert_eq!(req.assignment_tenant_id(), f.tenant_b);
+    assert!(!engine(&f.db).check_access(&req).await.unwrap().is_allowed());
 }
 
 /// The batch path promises decisions byte-identical to the per-item path. That
@@ -452,11 +508,11 @@ async fn batched_decisions_match_per_item_decisions_across_scopes() {
     .await;
 
     let requests = vec![
-        request(f.tenant_a, f.org_tenant, f.org_admin, "users:list"),
-        request(f.tenant_b, f.org_tenant, f.org_admin, "users:list"),
-        request(f.tenant_a, f.tenant_a, f.tenant_user, "users:list"),
-        request(f.tenant_b, f.tenant_a, f.tenant_user, "users:list"),
-        request(f.org_tenant, f.org_tenant, f.org_admin, "users:list"),
+        org_request(f.tenant_a, f.org_tenant, f.org_admin, "users:list"),
+        org_request(f.tenant_b, f.org_tenant, f.org_admin, "users:list"),
+        tenant_request(f.tenant_a, f.tenant_user, "users:list"),
+        tenant_request(f.tenant_b, f.tenant_user, "users:list"),
+        org_request(f.org_tenant, f.org_tenant, f.org_admin, "users:list"),
     ];
 
     let e = engine(&f.db);

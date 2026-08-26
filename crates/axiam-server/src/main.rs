@@ -1991,6 +1991,11 @@ async fn main() -> std::io::Result<()> {
         ));
     let audit_middleware =
         AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
+    // A handle kept outside the App factory closure, which takes ownership of
+    // the middleware. Cloning shares the shutdown flag — see
+    // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
+    // after `http_server.run()` returns.
+    let audit_shutdown = audit_middleware.clone();
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so
@@ -2380,7 +2385,7 @@ async fn main() -> std::io::Result<()> {
     // anything drops the senders. Without this the orderly stop below logs
     // `Audit worker channel closed` at WARN on every single clean shutdown —
     // see `AuditMiddleware::begin_shutdown` for why that matters.
-    audit_middleware.begin_shutdown();
+    audit_shutdown.begin_shutdown();
 
     // Signal the cleanup task to shut down and wait for it to finish.
     let _ = cleanup_shutdown_tx.send(true);

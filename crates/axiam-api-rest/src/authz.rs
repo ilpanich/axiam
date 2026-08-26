@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::repository::{
     GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
@@ -192,13 +192,8 @@ impl RequirePermission {
         // acting on one of its organization's tenants — which the extractor has
         // already verified. This one line is what carries organization scope
         // into all ~100 guarded endpoints without any of them changing.
-        self.check_subject_from(
-            user.tenant_id,
-            Some(user.principal_tenant_id),
-            user.user_id,
-            authz,
-        )
-        .await
+        self.check_subject_from(user.tenant_id, user.subject_scope(), user.user_id, authz)
+            .await
     }
 
     /// Same check, against an explicit `(tenant, subject)` pair.
@@ -215,29 +210,29 @@ impl RequirePermission {
         subject_id: Uuid,
         authz: &dyn AuthzChecker,
     ) -> Result<(), AxiamApiError> {
-        self.check_subject_from(tenant_id, None, subject_id, authz)
+        self.check_subject_from(tenant_id, SubjectScope::Tenant, subject_id, authz)
             .await
     }
 
     /// As [`check_subject`](Self::check_subject), naming the tenant the
     /// subject's grants live in.
     ///
-    /// `subject_tenant_id` is `None` for a subject whose grants are in the
-    /// tenant being acted upon, which is every ordinary principal. It is
-    /// `Some(organization_tenant)` for an organization-level one. Never derived
-    /// from request input — the extractor sets it from the validated token and
-    /// a tenant lookup, because a caller that could name its own subject tenant
-    /// could name any tenant's grants as its own.
+    /// `scope` is [`SubjectScope::Tenant`] for every ordinary principal and
+    /// [`SubjectScope::Organization`] for one whose grants live in the
+    /// organization's reserved tenant. Never derived from request input — the
+    /// extractor resolves the caller's own tenant record and checks its `kind`
+    /// before claiming organization scope, because a caller that could assert
+    /// its own scope could assert any tenant's grants as its own.
     pub async fn check_subject_from(
         &self,
         tenant_id: Uuid,
-        subject_tenant_id: Option<Uuid>,
+        scope: SubjectScope,
         subject_id: Uuid,
         authz: &dyn AuthzChecker,
     ) -> Result<(), AxiamApiError> {
         let request = AccessRequest {
             tenant_id,
-            subject_tenant_id,
+            subject_scope: scope,
             subject_id,
             action: self.action.clone(),
             resource_id: self.resource_id,

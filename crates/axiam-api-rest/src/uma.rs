@@ -14,7 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::repository::ScopeRepository;
 use axiam_oauth2::uma::{PairOutcome, PermissionEvaluator, ScopeCatalog};
 use uuid::Uuid;
@@ -69,7 +69,7 @@ impl PermissionEvaluator for EngineEvaluator {
         Box::pin(async move {
             let request = AccessRequest {
                 tenant_id,
-                subject_tenant_id: None,
+                subject_scope: SubjectScope::Tenant,
                 subject_id,
                 action: scope.to_string(),
                 resource_id,

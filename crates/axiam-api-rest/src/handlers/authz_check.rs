@@ -15,7 +15,7 @@
 //! returning, regardless of the engine's decision (T-15-04, D-06).
 
 use actix_web::{HttpResponse, web};
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use axiam_db::SurrealAuditLogRepository;
@@ -198,7 +198,7 @@ pub async fn check_access<C: Connection + Clone>(
 
     let access_req = AccessRequest {
         tenant_id: user.tenant_id,
-        subject_tenant_id: None,
+        subject_scope: SubjectScope::Tenant,
         subject_id: effective_subject,
         action: body.action,
         resource_id,
@@ -282,7 +282,7 @@ pub async fn batch_check_access<C: Connection + Clone>(
 
         access_requests.push(AccessRequest {
             tenant_id,
-            subject_tenant_id: None,
+            subject_scope: SubjectScope::Tenant,
             subject_id: effective_subject,
             action: check.action,
             resource_id,

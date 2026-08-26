@@ -422,7 +422,12 @@ export const OPERATE_PAGES: DocPage[] = [
         rows: [
           ["AXIAM__SERVER__TLS__CLIENT_AUTH", "off | optional | required", "off", "Client-certificate policy."],
           ["AXIAM__SERVER__TLS__CLIENT_CA_PATH", "PEM bundle path", "—", "Trust anchors for client certificates."],
+          ["AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH", "path", "beside CERT_PATH", "Where the bundle assembled from organization CAs flagged as mTLS trust anchors is written at startup."],
         ],
+      },
+      {
+        type: "p",
+        text: "The two settings above can also be filled in for you. Flagging an organization CA as an mTLS trust anchor (in the admin UI, or `PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor`) makes the next server start export that CA's public certificate to `CLIENT_CA_BUNDLE_PATH` and set `CLIENT_AUTH=optional` — but only where you have not set them yourself, which is never overridden. The CA's private key stays with its custodian and is never copied. See the PKI guide for the full walkthrough.",
       },
       {
         type: "p",

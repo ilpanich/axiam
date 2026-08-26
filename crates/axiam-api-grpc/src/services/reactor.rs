@@ -134,6 +134,7 @@ where
             .engine
             .check_access(&AccessRequest {
                 tenant_id,
+                subject_tenant_id: None,
                 subject_id,
                 action: action.to_string(),
                 resource_id: Uuid::nil(),

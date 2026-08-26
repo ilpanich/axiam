@@ -158,6 +158,7 @@ where
     // Build access request and evaluate.
     let access_request = AccessRequest {
         tenant_id: request.tenant_id,
+        subject_tenant_id: None,
         subject_id: request.subject_id,
         action: request.action,
         resource_id: request.resource_id,

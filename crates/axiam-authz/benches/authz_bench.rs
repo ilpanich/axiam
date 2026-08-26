@@ -155,6 +155,7 @@ async fn seed(n: usize) -> (Surreal<TestDb>, Vec<AccessRequest>) {
             .unwrap();
         requests.push(AccessRequest {
             tenant_id: tenant.id,
+            subject_tenant_id: None,
             subject_id: user.id,
             action: "read".into(),
             resource_id: resource.id,

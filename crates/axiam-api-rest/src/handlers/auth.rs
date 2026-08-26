@@ -69,6 +69,21 @@ pub struct LoginUserInfo {
     /// tenant's `organization_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_slug: Option<String>,
+    /// Whether the caller is an **organization-level** principal — one whose
+    /// record lives in the organization's reserved tenant, and whose global
+    /// grants therefore apply to every tenant in the organization.
+    ///
+    /// The admin UI needs this to decide what its tenant selector can do. An
+    /// organization-level principal switches the tenant it is acting on with a
+    /// header on the next request; an ordinary tenant principal cannot switch
+    /// at all, because it is not a principal of any other tenant, and its
+    /// selector has to say so rather than offer a switch that would fail.
+    ///
+    /// Resolved from the caller's own tenant record, never from request input.
+    /// Defaults to `false` when the lookup fails, which is the safe direction:
+    /// the UI then offers no cross-tenant action.
+    #[serde(default)]
+    pub organization_level: bool,
 }
 
 /// Login success response body.
@@ -230,6 +245,13 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     // failure degrades to `None`, never to a failed login (T-26-05-02).
     let tenant = tenant_repo.get_by_id(tenant_id).await.ok();
     let tenant_slug = tenant.as_ref().map(|t| t.slug.clone());
+    // Whether this login is at organization level. Read off the tenant the
+    // credentials authenticated against — which, when the request named no
+    // tenant, is the organization tenant resolved above. `false` when the
+    // lookup failed, so the UI offers no cross-tenant action it cannot back up.
+    let organization_level = tenant
+        .as_ref()
+        .is_some_and(axiam_core::models::tenant::Tenant::is_organization_scope);
     let org_slug = match tenant.as_ref() {
         Some(t) => org_repo
             .get_by_id(t.organization_id)
@@ -296,6 +318,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
                 tenant_id,
                 tenant_slug,
                 org_slug,
+                organization_level,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -360,10 +383,27 @@ pub async fn login<C: Connection + Clone>(
                 })?
                 .id
         }
+        // No tenant named: sign in at organization level.
+        //
+        // The organization tenant is where organization-level principals live,
+        // so resolving to it here means the credential lookup that follows
+        // finds exactly those users and nobody else. A tenant user who omits
+        // the tenant is simply not found in it, which is the right answer and
+        // the same enumeration-safe 401 as a wrong password — a tenant user
+        // must name their tenant, and does not learn anything by failing to.
+        //
+        // An organization that predates the migration has no organization
+        // tenant, and the same 401 covers that too: there is nobody to sign in
+        // as at organization level there.
         (None, None) => {
-            return Err(AxiamApiError(AxiamError::Validation {
-                message: "must provide tenant_id or tenant_slug".into(),
-            }));
+            state
+                .tenant_repo
+                .get_organization_tenant(org_id)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                })?
+                .id
         }
     };
 
@@ -896,6 +936,16 @@ pub async fn me<C: Connection + Clone>(
             tenant_id: user.tenant_id,
             tenant_slug,
             org_slug,
+            // From the tenant the caller *lives in*, not the one it is acting
+            // on. An organization-level principal acting on `tenant-a` is still
+            // organization-level, and a UI told otherwise would hide the
+            // selector that got it there.
+            organization_level: state
+                .tenant_repo
+                .get_by_id(user.principal_tenant_id)
+                .await
+                .ok()
+                .is_some_and(|t| t.is_organization_scope()),
         },
         permissions,
         opaque,
@@ -1034,6 +1084,7 @@ mod tests {
             tenant_id: Uuid::nil(),
             tenant_slug,
             org_slug,
+            organization_level: false,
         }
     }
 

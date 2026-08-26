@@ -8,6 +8,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 axiam-core = { workspace = true }
 axiam-db = { workspace = true }
 axiam-auth = { workspace = true }

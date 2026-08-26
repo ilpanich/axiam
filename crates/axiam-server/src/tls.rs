@@ -15,6 +15,8 @@ use std::fs::File;
 use std::io;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+
 use axiam_api_rest::config::{ClientAuth, TlsConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -253,10 +255,7 @@ impl Http2Tuning {
 /// Fails fast (aborting startup) when the CA path is unset, missing/unreadable,
 /// empty, or malformed — matching this file's existing `io::Error` style so a
 /// misconfigured mTLS server never starts.
-fn build_client_cert_verifier(
-    tls: &TlsConfig,
-    provider: &Arc<rustls::crypto::CryptoProvider>,
-) -> io::Result<Arc<dyn ClientCertVerifier>> {
+fn read_client_ca_roots(tls: &TlsConfig) -> io::Result<RootCertStore> {
     let ca_path = tls.client_ca_path.as_ref().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -265,7 +264,7 @@ fn build_client_cert_verifier(
         )
     })?;
 
-    let ca_file = File::open(ca_path).map_err(|e| {
+    let pem = std::fs::read_to_string(ca_path).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -274,47 +273,272 @@ fn build_client_cert_verifier(
             ),
         )
     })?;
-    let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(ca_file)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "failed to parse client CA certificates from {}: {e}",
-                    ca_path.display()
-                ),
-            )
-        })?;
-    if ca_certs.is_empty() {
+    let roots = roots_from_pem(&pem, &ca_path.display().to_string())?;
+    if roots.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("no client CA certificates found in {}", ca_path.display()),
         ));
     }
+    Ok(roots)
+}
+
+/// The verifier the live listener is using, and the provider to rebuild with.
+///
+/// A process-global because there is one TLS listener per process and the
+/// handler that flags a CA has no path to the `ServerConfig` actix built — it
+/// runs inside it. Set once, during `build_rustls_server_config`.
+static LIVE_VERIFIER: std::sync::OnceLock<(
+    Arc<ReloadableClientCertVerifier>,
+    Arc<rustls::crypto::CryptoProvider>,
+)> = std::sync::OnceLock::new();
+
+fn install_reloadable_verifier(
+    verifier: Arc<ReloadableClientCertVerifier>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) {
+    // `set` fails only if called twice, which means a second listener was
+    // built. The first one is the one actix is serving on.
+    let _ = LIVE_VERIFIER.set((verifier, provider));
+}
+
+/// Install `pem` as the live client trust anchor set, without a restart.
+///
+/// Returns the number of anchors now trusted, or `None` when this process has
+/// no TLS listener with client authentication enabled — a plaintext deployment,
+/// or one whose operator set `client_auth = off`. That is not a failure: there
+/// is nothing to reload into, and saying so lets the caller report "saved, and
+/// it will apply when TLS is enabled" rather than a spurious error.
+///
+/// # Errors
+///
+/// A bundle that does not parse, or a certificate webpki refuses as a trust
+/// anchor. The live anchor set is left **unchanged** in that case: the new
+/// bundle is fully parsed and the verifier fully built before anything is
+/// swapped, so a bad reload cannot leave the listener trusting nothing.
+pub fn reload_trust_anchors(pem: &str) -> io::Result<Option<usize>> {
+    let Some((verifier, provider)) = LIVE_VERIFIER.get() else {
+        return Ok(None);
+    };
+    let roots = roots_from_pem(pem, "the mTLS trust anchor bundle")?;
+    let count = verifier.replace(roots, provider)?;
+    Ok(Some(count))
+}
+
+// ---------------------------------------------------------------------------
+// Hot-reloadable client trust anchors
+// ---------------------------------------------------------------------------
+
+/// A [`ClientCertVerifier`] whose trust anchors can be replaced while the
+/// server is listening.
+///
+/// # Why this exists
+///
+/// rustls builds its client trust store when the `ServerConfig` is constructed,
+/// and actix binds that config for the process's life. Flagging a CA as an mTLS
+/// trust anchor therefore used to take effect at the *next* boot, and the API
+/// said so rather than pretending otherwise — which is honest and still means
+/// an operator adding a device CA has to restart the server every browser
+/// session and every IoT device is currently connected to.
+///
+/// rustls consults the verifier **per handshake**, not once at construction. So
+/// a verifier that delegates to a swappable inner one gives the config
+/// something permanent to hold while the anchors behind it change. Connections
+/// already established keep the verifier they handshook with, which is correct:
+/// a certificate accepted a moment ago does not become invalid mid-connection,
+/// and revocation of an established session is what session invalidation is
+/// for.
+///
+/// # The empty state
+///
+/// [`Anchors::None`] is not "trust nothing" — it is "do not ask for a client
+/// certificate at all", the same posture as `with_no_client_auth()`. A
+/// deployment that boots with no flagged CA must behave exactly as it does
+/// today, *and* must be able to reach the anchored state without a restart.
+/// Installing this verifier unconditionally is what makes both true;
+/// `WebPkiClientVerifier` cannot express it, because it refuses to build over
+/// an empty root store.
+#[derive(Debug)]
+pub struct ReloadableClientCertVerifier {
+    anchors: ArcSwap<Anchors>,
+    /// Whether a verified client certificate is required once anchors exist.
+    ///
+    /// Fixed at construction from `client_auth`: it is an operator's policy
+    /// decision, not a property of the anchor set, and changing it changes
+    /// whether unauthenticated clients can connect at all.
+    mandatory: bool,
+}
+
+/// What the verifier currently trusts.
+#[derive(Debug)]
+enum Anchors {
+    /// No trust anchors: no client certificate is requested.
+    None,
+    /// A webpki verifier over the current anchor set.
+    Some(Arc<dyn ClientCertVerifier>),
+}
+
+impl ReloadableClientCertVerifier {
+    /// An empty verifier that offers no client authentication.
+    pub fn empty(mandatory: bool) -> Self {
+        Self {
+            anchors: ArcSwap::from_pointee(Anchors::None),
+            mandatory,
+        }
+    }
+
+    /// Replace the trust anchors with a verifier built over `roots`.
+    ///
+    /// An empty `roots` returns to [`Anchors::None`] rather than building a
+    /// verifier that trusts nothing: a verifier that requests a certificate and
+    /// then rejects every one is strictly worse than not requesting one, and it
+    /// is what un-flagging the last CA should produce.
+    pub fn replace(
+        &self,
+        roots: RootCertStore,
+        provider: &Arc<rustls::crypto::CryptoProvider>,
+    ) -> io::Result<usize> {
+        if roots.is_empty() {
+            self.anchors.store(Arc::new(Anchors::None));
+            return Ok(0);
+        }
+        let count = roots.len();
+        let builder =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
+        let verifier = if self.mandatory {
+            builder.build()
+        } else {
+            builder.allow_unauthenticated().build()
+        }
+        .map_err(|e| io::Error::other(format!("failed to build client cert verifier: {e}")))?;
+
+        self.anchors.store(Arc::new(Anchors::Some(verifier)));
+        Ok(count)
+    }
+
+    /// How many anchors are currently installed.
+    pub fn anchor_count(&self) -> usize {
+        match &**self.anchors.load() {
+            Anchors::None => 0,
+            Anchors::Some(v) => v.root_hint_subjects().len(),
+        }
+    }
+
+    /// The current inner verifier, if any.
+    fn current(&self) -> Option<Arc<dyn ClientCertVerifier>> {
+        match &**self.anchors.load() {
+            Anchors::None => None,
+            Anchors::Some(v) => Some(Arc::clone(v)),
+        }
+    }
+}
+
+impl ClientCertVerifier for ReloadableClientCertVerifier {
+    fn offer_client_auth(&self) -> bool {
+        // Consulted per handshake, which is the whole mechanism: the answer
+        // changes the moment `replace` installs an anchor set.
+        self.current().is_some()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        // Only meaningful while anchors exist. Answering `true` with none
+        // installed would refuse every connection to a server that cannot
+        // verify anybody — a self-inflicted outage on a deployment that
+        // un-flagged its last CA.
+        self.mandatory && self.current().is_some()
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        // Cannot borrow through the ArcSwap guard, and the hint is advisory:
+        // it tells a client which issuers the server would accept, and a client
+        // that offers a certificate anyway is verified normally by
+        // `verify_client_cert`. Returning nothing costs a round trip in the
+        // worst case and never accepts anything it should not.
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        match self.current() {
+            Some(v) => v.verify_client_cert(end_entity, intermediates, now),
+            // Unreachable while rustls honours `offer_client_auth`, and a
+            // refusal rather than an acceptance if it ever does not.
+            None => Err(rustls::Error::General(
+                "no client trust anchors are configured".into(),
+            )),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        match self.current() {
+            Some(v) => v.verify_tls12_signature(message, cert, dss),
+            None => Err(rustls::Error::General(
+                "no client trust anchors are configured".into(),
+            )),
+        }
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        match self.current() {
+            Some(v) => v.verify_tls13_signature(message, cert, dss),
+            None => Err(rustls::Error::General(
+                "no client trust anchors are configured".into(),
+            )),
+        }
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        match self.current() {
+            Some(v) => v.supported_verify_schemes(),
+            // The provider's full set: this is a capability advertisement, and
+            // an empty list would make a handshake fail to negotiate rather
+            // than fall through to the "no anchors" path above.
+            None => rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+}
+
+/// Build a [`RootCertStore`] from concatenated PEM.
+///
+/// Shared by the boot path and the reload path so a hot-reloaded anchor set is
+/// parsed by exactly the same code as one read at startup — two parsers is how
+/// a bundle comes to be accepted at boot and rejected on reload.
+pub fn roots_from_pem(pem: &str, source: &str) -> io::Result<RootCertStore> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to parse client CA certificates from {source}: {e}"),
+            )
+        })?;
 
     let mut roots = RootCertStore::empty();
-    for cert in ca_certs {
+    for cert in certs {
         roots.add(cert).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "invalid client CA certificate in {}: {e}",
-                    ca_path.display()
-                ),
+                format!("invalid client CA certificate in {source}: {e}"),
             )
         })?;
     }
-
-    let builder = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
-    let verifier = match tls.client_auth {
-        // Verify presented certs but accept anonymous clients.
-        ClientAuth::Optional => builder.allow_unauthenticated().build(),
-        // Require a verified client cert (Off is unreachable here).
-        _ => builder.build(),
-    }
-    .map_err(|e| io::Error::other(format!("failed to build client cert verifier: {e}")))?;
-
-    Ok(verifier)
+    Ok(roots)
 }
 
 /// Build a TLS 1.3-only rustls [`ServerConfig`] from the configured PEM files.
@@ -397,13 +621,31 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
     // WebPkiClientVerifier over the configured CA bundle so rustls verifies the
     // client cert during the handshake and the *verified* cert (not a header)
     // drives certificate-based identity.
-    let builder = match tls.client_auth {
-        ClientAuth::Off => builder.with_no_client_auth(),
-        ClientAuth::Optional | ClientAuth::Required => {
-            let verifier = build_client_cert_verifier(tls, &provider)?;
-            builder.with_client_cert_verifier(verifier)
-        }
-    };
+    // Always a `ReloadableClientCertVerifier`, even when `client_auth` is off.
+    //
+    // rustls binds whatever it is given here for the process's life, so the
+    // choice made at this line decides whether flagging a CA later can take
+    // effect without a restart. `with_no_client_auth()` decides "no", forever.
+    // The reloadable verifier starts in exactly that posture — it offers no
+    // client authentication until anchors are installed — and can leave it.
+    //
+    // A listener that boots with `Off` therefore starts by requesting no
+    // client certificate and can still be given anchors later — which matches
+    // what `mtls_anchors::apply` already does at boot, where flagging a CA
+    // upgrades an unset `Off` to `Optional`.
+    let reloadable = Arc::new(ReloadableClientCertVerifier::empty(
+        tls.client_auth == ClientAuth::Required,
+    ));
+    if tls.client_auth != ClientAuth::Off {
+        // The bundle written by `mtls_anchors::apply` at boot, or one the
+        // operator curated themselves.
+        let roots = read_client_ca_roots(tls)?;
+        let count = reloadable.replace(roots, &provider)?;
+        tracing::info!(anchors = count, "client trust anchors loaded");
+    }
+    let builder =
+        builder.with_client_cert_verifier(reloadable.clone() as Arc<dyn ClientCertVerifier>);
+    install_reloadable_verifier(reloadable, Arc::clone(&provider));
 
     let mut config = builder.with_single_cert(cert_chain, key).map_err(|e| {
         io::Error::new(

@@ -483,6 +483,7 @@ async fn same_subject_batch_of_5_coalesces_round_trips() {
     let requests: Vec<AccessRequest> = (0..5)
         .map(|_| AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject,
             action: "read".into(),
             resource_id,
@@ -610,6 +611,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
     let requests = vec![
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject_a,
             action: "read".into(),
             resource_id: resource_x,
@@ -617,6 +619,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         },
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject_a,
             action: "write".into(),
             resource_id: resource_x,
@@ -624,6 +627,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         },
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject_b,
             action: "write".into(),
             resource_id: resource_y,
@@ -631,6 +635,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         },
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject_a,
             action: "read".into(),
             resource_id: resource_x,
@@ -674,6 +679,7 @@ async fn empty_subject_denies_without_extra_round_trips() {
     let unknown = Uuid::new_v4(); // no assignments seeded
     let requests = vec![AccessRequest {
         tenant_id: tenant,
+        subject_tenant_id: None,
         subject_id: unknown,
         action: "read".into(),
         resource_id,
@@ -713,6 +719,7 @@ async fn concurrent_strategy_is_per_item_and_matches_sequential() {
     let requests: Vec<AccessRequest> = (0..5)
         .map(|_| AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject,
             action: "read".into(),
             resource_id,
@@ -762,6 +769,7 @@ async fn concurrent_batch_future_is_boxable_as_send_trait_object() {
 
     let requests = vec![AccessRequest {
         tenant_id: tenant,
+        subject_tenant_id: None,
         subject_id: subject,
         action: "read".into(),
         resource_id,
@@ -848,6 +856,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
         // Matching scope name -> resolves to scope_id -> grant covers it -> Allow.
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject,
             action: "read".into(),
             resource_id,
@@ -856,6 +865,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
         // Unknown scope name on the same resource -> not-found deny.
         AccessRequest {
             tenant_id: tenant,
+            subject_tenant_id: None,
             subject_id: subject,
             action: "read".into(),
             resource_id,

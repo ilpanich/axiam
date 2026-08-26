@@ -52,18 +52,31 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BootstrapRequest {
     /// Display name of the organization to create (required). On a fresh
-    /// deployment nothing exists yet, so bootstrap provisions the org and its
-    /// default tenant itself rather than requiring pre-existing IDs.
+    /// deployment nothing exists yet, so bootstrap provisions the organization
+    /// and its own reserved scope itself rather than requiring pre-existing IDs.
     pub organization_name: String,
     /// URL-safe slug for the organization. Derived from `organization_name`
     /// when omitted or blank.
     #[serde(default)]
     pub organization_slug: Option<String>,
-    /// Display name of the default tenant. Defaults to `"Default"`.
+    /// **Deprecated and ignored.** Bootstrap no longer creates an ordinary
+    /// tenant.
+    ///
+    /// The super-admin it provisions is organization-level, so it administers
+    /// every tenant the organization has — including ones created long
+    /// afterwards. Creating a tenant here is what produced the opposite: the
+    /// super-admin's grants were rows in one tenant, and every tenant created
+    /// later was unreachable by everyone.
+    ///
+    /// Still accepted so an older client's request succeeds rather than failing
+    /// on an unknown field. Create tenants through
+    /// `POST /api/v1/organizations/{org_id}/tenants` once you are signed in.
     #[serde(default)]
+    #[deprecated(note = "bootstrap no longer creates a tenant; this value is ignored")]
     pub tenant_name: Option<String>,
-    /// URL-safe slug for the default tenant. Defaults to `"default"`.
+    /// **Deprecated and ignored.** See [`Self::tenant_name`].
     #[serde(default)]
+    #[deprecated(note = "bootstrap no longer creates a tenant; this value is ignored")]
     pub tenant_slug: Option<String>,
     /// Admin email address.
     pub email: String,
@@ -392,18 +405,32 @@ pub async fn bootstrap<C: Connection + Clone>(
                 AxiamApiError(AxiamError::Internal(format!("create organization: {e}")))
             })?,
     };
-    let tenant = match state.tenant_repo.get_by_slug(org.id, &tenant_slug).await {
+    // Bootstrap provisions the organization's **own scope**, not an ordinary
+    // tenant. The super-admin created below lives here, which is what makes it
+    // an administrator of every tenant the organization ever has — including
+    // the ones created months later — rather than of one tenant chosen on the
+    // first screen of a first-run wizard.
+    //
+    // That first-screen choice is precisely what left new tenants unreachable:
+    // the super-admin's grants were rows in the tenant bootstrap happened to
+    // create, and the authorization engine filters every lookup by tenant. See
+    // `claude_dev/organization-scope-design.md`.
+    //
+    // `tenant_name` / `tenant_slug` are still accepted and now ignored, so an
+    // older client's request still succeeds rather than failing on an unknown
+    // field. Nothing is created from them.
+    let _ = (&tenant_name, &tenant_slug);
+    let tenant = match state.tenant_repo.get_organization_tenant(org.id).await {
         Ok(t) => t,
         Err(_) => state
             .tenant_repo
-            .create(CreateTenant {
-                organization_id: org.id,
-                name: tenant_name,
-                slug: tenant_slug.clone(),
-                metadata: None,
-            })
+            .create(CreateTenant::organization_scope(org.id))
             .await
-            .map_err(|e| AxiamApiError(AxiamError::Internal(format!("create tenant: {e}"))))?,
+            .map_err(|e| {
+                AxiamApiError(AxiamError::Internal(format!(
+                    "create organization tenant: {e}"
+                )))
+            })?,
     };
     let tenant_id = tenant.id;
 

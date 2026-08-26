@@ -1,9 +1,9 @@
 //! Tenant management endpoints (nested under organizations).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
+use axiam_core::models::tenant::{CreateTenant, Tenant, TenantKind, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
-use axiam_db::seed_permissions;
+use axiam_db::seeder::{seed_default_roles, seed_permissions};
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -72,10 +72,30 @@ pub async fn create<C: Connection + Clone>(
     }
 
     let req = body.into_inner();
+
+    // The organization scope is created with its organization, never through
+    // this endpoint. Refusing the reserved slug here turns what would be an
+    // opaque unique-index violation into a message that says which name is
+    // taken and why.
+    if req.slug == axiam_core::models::tenant::ORGANIZATION_TENANT_SLUG {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "`{}` is reserved for the organization's own scope, which is created \
+                 with the organization; choose another slug",
+                axiam_core::models::tenant::ORGANIZATION_TENANT_SLUG
+            ),
+        }));
+    }
+
     let input = CreateTenant {
         organization_id: path.org_id,
         name: req.name,
         slug: req.slug,
+        // Always an ordinary tenant: `CreateTenant::kind` is
+        // `skip_deserializing`, so a caller cannot ask for anything else, and
+        // saying so explicitly here keeps that visible at the one call site
+        // that matters.
+        kind: TenantKind::Standard,
         metadata: req.metadata,
     };
     let tenant = state.tenant_repo.create(input).await?;
@@ -93,6 +113,39 @@ pub async fn create<C: Connection + Clone>(
                 "Failed to seed permissions for tenant".into(),
             ))
         })?;
+
+    // …and its roles. Seeding permissions alone left the tenant holding a set
+    // of actions with nothing to attach them to: no roles, no grants, no
+    // assignments. The authorization engine filters every lookup by tenant, so
+    // the first question anyone asked about the new tenant — including the
+    // person who had just created it — resolved to `no roles assigned` and was
+    // denied. A tenant nobody can administer is not a tenant.
+    //
+    // Not best-effort, unlike the permission seed's sibling failure paths
+    // elsewhere: a tenant with permissions and no roles is exactly the
+    // unreachable state this repairs, so failing here has to be visible rather
+    // than leaving one behind for someone to find later.
+    seed_default_roles(&state.db.current(), tenant.id, PERMISSION_REGISTRY)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                tenant_id = %tenant.id,
+                error = %e,
+                "Failed to seed default roles for new tenant"
+            );
+            AxiamApiError(AxiamError::Internal(
+                "Failed to seed default roles for tenant".into(),
+            ))
+        })?;
+
+    // Nothing is assigned to anyone here, deliberately. Organization-level
+    // principals already reach this tenant — their global grants live in the
+    // organization tenant and carry across by the rule in
+    // `AuthorizationEngine::evaluate` — so fanning assignments out at creation
+    // time would write rows that grant nothing new, would miss every
+    // organization-level principal created afterwards, and would have to be
+    // undone in every tenant to revoke. See
+    // `claude_dev/organization-scope-design.md`.
 
     Ok(HttpResponse::Created().json(tenant))
 }

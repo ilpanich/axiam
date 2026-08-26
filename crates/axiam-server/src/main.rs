@@ -903,7 +903,7 @@ async fn main() -> std::io::Result<()> {
              deployment, and nothing records the read. Unset \
              AXIAM__PKI__CA_KEY_STORE (or set it to `vault`) to hold them in Vault \
              instead, then migrate the CAs you already have with \
-             `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`."
+             `POST /api/v1/organizations/{{org_id}}/ca-certificates/{{id}}/migrate-custody`."
         );
     }
 
@@ -1274,6 +1274,22 @@ async fn main() -> std::io::Result<()> {
              client-certificate authentication is left as configured"
         ),
     }
+
+    // The seam that lets flagging a CA take effect without a restart.
+    //
+    // Built from the bundle path resolved against the *final* `tls_config`, so
+    // a reload writes the same file the next boot reads and the two cannot
+    // drift. Constructed even when nothing is flagged today: the whole point is
+    // that the first CA an operator flags applies immediately, and a reloader
+    // that only existed when anchors already existed would miss exactly that
+    // case.
+    let trust_anchor_reloader: Option<Arc<dyn axiam_api_rest::TrustAnchorReloader>> = Some(
+        Arc::new(axiam_server::mtls_anchors::TrustAnchorReload::new(
+            SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+            axiam_server::mtls_anchors::bundle_path(&tls_config),
+        )),
+    );
+
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = pool;
@@ -2151,6 +2167,7 @@ async fn main() -> std::io::Result<()> {
             ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),
             device_auth_service: device_auth_service.clone(),
+            trust_anchor_reloader: trust_anchor_reloader.clone(),
         },
         webauthn: bundles::WebauthnState {
             webauthn_service: webauthn_service.clone(),

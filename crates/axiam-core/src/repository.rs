@@ -138,6 +138,24 @@ pub trait TenantRepository: Send + Sync {
         organization_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<Tenant>>> + Send;
+
+    /// The organization's own tenant — where organization-level principals
+    /// live.
+    ///
+    /// A lookup rather than a convention: the scope is identified by
+    /// `kind = organization`, which a unique index makes singular, so nothing
+    /// depends on its slug or on it being the oldest row. An operator who
+    /// renames it does not thereby detach every organization-level
+    /// administrator from their grants.
+    ///
+    /// `NotFound` for an organization that predates the migration and has not
+    /// been backfilled. Callers on the authorization path treat that as "this
+    /// deployment has no organization scope yet" and fall back to
+    /// tenant-scoped behaviour, which is what such a deployment had.
+    fn get_organization_tenant(
+        &self,
+        organization_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Tenant>> + Send;
 }
 
 // ---------------------------------------------------------------------------

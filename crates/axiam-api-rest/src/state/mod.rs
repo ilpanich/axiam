@@ -707,6 +707,10 @@ impl<C: Connection + Clone> AppState<C> {
                 ca_cert_repo: axiam_db::SurrealCaCertificateRepository::new(db.clone()),
                 pgp_service,
                 device_auth_service,
+                // No listener in a test harness, so a trust-anchor toggle
+                // reports that a restart is required — which is what a
+                // deployment with no TLS listener genuinely gets.
+                trust_anchor_reloader: None,
             },
             webauthn: bundles::WebauthnState {
                 webauthn_service,

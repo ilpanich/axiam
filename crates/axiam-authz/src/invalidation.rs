@@ -132,6 +132,7 @@ mod tests {
     fn request(tenant_id: Uuid, subject_id: Uuid) -> AccessRequest {
         AccessRequest {
             tenant_id,
+            subject_tenant_id: None,
             subject_id,
             action: "read".into(),
             resource_id: Uuid::nil(),

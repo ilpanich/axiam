@@ -69,6 +69,7 @@ impl PermissionEvaluator for EngineEvaluator {
         Box::pin(async move {
             let request = AccessRequest {
                 tenant_id,
+                subject_tenant_id: None,
                 subject_id,
                 action: scope.to_string(),
                 resource_id,

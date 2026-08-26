@@ -58,6 +58,59 @@ impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
     }
 }
 
+/// The header a client uses to say which tenant it is acting on.
+///
+/// Only meaningful for an organization-level principal, which is the only kind
+/// that has more than one answer. Honoured for anyone else would be a request
+/// asking to be treated as belonging to a tenant it does not belong to.
+pub const ACTIVE_TENANT_HEADER: &str = "X-Axiam-Tenant";
+
+/// What the authorization layer needs to know about a tenant to decide whether
+/// a principal may act on it.
+#[derive(Debug, Clone, Copy)]
+pub struct TenantScope {
+    pub organization_id: Uuid,
+    /// Whether this is the organization's own reserved tenant.
+    pub is_organization: bool,
+}
+
+/// Object-safe tenant lookup for the authentication extractor.
+///
+/// The same boxed-future seam as [`SessionValidator`], and for the same reason:
+/// the extractor is not generic over the DB `Connection` and the repository
+/// methods are native `async fn`.
+///
+/// # Why this cannot be answered from the token
+///
+/// The token says which tenant the principal *lives in*. Whether some **other**
+/// tenant belongs to the same organization is a fact about that other tenant,
+/// and a client that could assert it could name a tenant in an organization it
+/// has nothing to do with. An organization-level principal's global grants
+/// carry across tenant boundaries by design; without this check they would
+/// carry across *organization* boundaries too, which is the one thing an
+/// organization is.
+pub trait TenantScopeResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Option<TenantScope>> + Send + 'a>>;
+}
+
+impl<C: Connection> TenantScopeResolver for axiam_db::SurrealTenantRepository<C> {
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Option<TenantScope>> + Send + 'a>> {
+        Box::pin(async move {
+            use axiam_core::repository::TenantRepository as _;
+            self.get_by_id(tenant_id).await.ok().map(|t| TenantScope {
+                organization_id: t.organization_id,
+                is_organization: t.is_organization_scope(),
+            })
+        })
+    }
+}
+
 /// Authenticated user context extracted from a valid JWT.
 ///
 /// Use this as a handler parameter to require authentication.
@@ -74,7 +127,22 @@ impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
+    /// The tenant being **acted upon**.
+    ///
+    /// Equal to [`Self::principal_tenant_id`] for every ordinary principal,
+    /// which is why the ~100 handlers that read this field did not change when
+    /// organization scope arrived. For an organization-level principal it is
+    /// whichever tenant the request named in [`ACTIVE_TENANT_HEADER`],
+    /// validated to be in the caller's own organization.
     pub tenant_id: Uuid,
+    /// The tenant the caller's own record and grants live in.
+    ///
+    /// The organization tenant for an organization-level principal, and the
+    /// same as [`Self::tenant_id`] for everyone else. Passed to the
+    /// authorization engine as `subject_tenant_id`, which is how one principal
+    /// administers every tenant in an organization without a copy of its grants
+    /// in each.
+    pub principal_tenant_id: Uuid,
     pub org_id: Uuid,
     /// The session ID — equals the JWT `jti` claim which is set to
     /// `session.id` for user-facing tokens (D-15). Use this for
@@ -95,16 +163,35 @@ impl actix_web::FromRequest for AuthenticatedUser {
         let validator = req
             .app_data::<web::Data<Arc<dyn SessionValidator>>>()
             .map(|d| d.get_ref().clone());
+        let tenants = req
+            .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
+            .map(|d| d.get_ref().clone());
+        // Read the header here, while `req` is still borrowed. A malformed
+        // value is dropped rather than refused: it names a tenant that cannot
+        // exist, so the request falls back to the caller's own tenant and is
+        // then denied by RBAC like any other over-reach.
+        let requested_tenant = req
+            .headers()
+            .get(ACTIVE_TENANT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| Uuid::parse_str(v.trim()).ok());
 
         Box::pin(async move {
-            let user = user_result?;
+            let mut user = user_result?;
+
             // REQ-7 / D-15: reject access tokens whose session has been revoked
             // (row deleted on password change/reset/MFA reset) or expired. The
             // validator is optional so non-session test harnesses are unaffected;
             // the production server (and session-security tests) always register it.
+            //
+            // Checked against the *principal's* tenant, which is where the
+            // session row is. It is the same value as `tenant_id` at this point
+            // — the header is applied below — but ordering matters: resolving
+            // the active tenant first would look the session up in whichever
+            // tenant the request asked to act on, and find none.
             if let Some(validator) = validator
                 && !validator
-                    .is_session_active(user.tenant_id, user.session_id)
+                    .is_session_active(user.principal_tenant_id, user.session_id)
                     .await
             {
                 return Err(AxiamError::AuthenticationFailed {
@@ -112,6 +199,11 @@ impl actix_web::FromRequest for AuthenticatedUser {
                 }
                 .into());
             }
+
+            if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
+                user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
+            }
+
             Ok(user)
         })
     }
@@ -316,6 +408,68 @@ fn verified_dpop_thumbprint(req: &HttpRequest, token: &str) -> Option<String> {
 // AuthenticatedUser extractor
 // ---------------------------------------------------------------------------
 
+/// Decide whether `target` may be this request's active tenant.
+///
+/// Two conditions, both required, and both refusals rather than silent
+/// fallbacks — a caller that named a tenant it may not act on should be told
+/// so, not served a different tenant's data under a header it thinks was
+/// honoured.
+///
+/// 1. The caller must be **organization-level**: its own record lives in the
+///    organization's reserved tenant. A tenant user has exactly one tenant it
+///    can act on, and a request asking otherwise is asking to be somebody else.
+/// 2. `target` must belong to the **caller's own organization**. This is the
+///    check that keeps organization scope inside an organization: an
+///    organization-level principal's global grants deliberately cross tenant
+///    boundaries, so without it they would cross organization boundaries too.
+///
+/// With no resolver registered — the shape most test harnesses use — the header
+/// is refused rather than trusted. Failing closed is the only safe default for
+/// a check whose entire job is to say no.
+async fn resolve_active_tenant(
+    user: &AuthenticatedUser,
+    target: Uuid,
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
+) -> Result<Uuid, AxiamApiError> {
+    let deny = |reason: &str| -> AxiamApiError {
+        AxiamError::AuthorizationDenied {
+            reason: reason.to_string(),
+            action: None,
+            resource_id: None,
+        }
+        .into()
+    };
+
+    let Some(tenants) = tenants else {
+        return Err(deny(
+            "cannot verify the requested tenant: no tenant resolver is configured",
+        ));
+    };
+
+    let Some(home) = tenants.resolve(user.principal_tenant_id).await else {
+        return Err(deny("the caller's own tenant could not be resolved"));
+    };
+    if !home.is_organization {
+        return Err(deny(
+            "only organization-level principals may act on another tenant",
+        ));
+    }
+
+    let Some(scope) = tenants.resolve(target).await else {
+        return Err(deny("the requested tenant does not exist"));
+    };
+    // Compare against the *home tenant's* organization rather than the token's
+    // `org_id` claim: both should agree, and if they ever do not, the one
+    // backed by a row the caller cannot edit is the one to trust.
+    if scope.organization_id != home.organization_id {
+        return Err(deny(
+            "the requested tenant belongs to a different organization",
+        ));
+    }
+
+    Ok(target)
+}
+
 fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
     // Try to reuse claims cached by the audit middleware.
     if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
@@ -327,6 +481,9 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         return Ok(AuthenticatedUser {
             user_id: cached.user_id,
             tenant_id: cached.tenant_id,
+            // The token's tenant is the home tenant until the header
+            // resolution in `from_request` says otherwise.
+            principal_tenant_id: cached.tenant_id,
             org_id: cached.org_id,
             session_id,
             claims: cached.claims.clone(),
@@ -359,6 +516,7 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
     Ok(AuthenticatedUser {
         user_id,
         tenant_id,
+        principal_tenant_id: tenant_id,
         org_id,
         session_id,
         claims: validated,

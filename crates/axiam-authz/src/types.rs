@@ -66,9 +66,34 @@ impl AccessDecision {
 /// Input for an authorization check.
 #[derive(Debug, Clone)]
 pub struct AccessRequest {
-    /// The tenant the check is scoped to. Every lookup the engine performs is
-    /// filtered by it, so a request can never see another tenant's grants.
+    /// The tenant the check is scoped to — the tenant being **acted upon**.
+    /// Resources, scopes and their hierarchy are resolved here, so a request
+    /// can never see another tenant's resources.
     pub tenant_id: Uuid,
+    /// Where the subject's own role assignments live, when that is not
+    /// [`Self::tenant_id`].
+    ///
+    /// `None` — the overwhelmingly common case — means "the same tenant", and
+    /// the engine behaves exactly as it did before this field existed.
+    ///
+    /// `Some(other)` is an **organization-level principal** acting on one of
+    /// its organization's tenants: its user row, roles and group memberships
+    /// are in the organization tenant, while the resource it is reaching for is
+    /// in `tenant_id`. Splitting the two is what lets one principal administer
+    /// every tenant in an organization without a copy of its grants being
+    /// written into each.
+    ///
+    /// Crossing that boundary narrows what carries: only **global** grants
+    /// apply (see [`Self::crosses_tenant_boundary`]). A resource-scoped
+    /// assignment names a resource in the subject's own tenant and says nothing
+    /// about a same-named resource elsewhere; honouring it across the boundary
+    /// would be a silent escalation between isolated tenants.
+    ///
+    /// Never taken from request input. The REST extractor sets it from the
+    /// authenticated principal's home tenant, which comes from the validated
+    /// token — a caller that could name its own subject tenant could name any
+    /// tenant's grants.
+    pub subject_tenant_id: Option<Uuid>,
     /// Who is asking -- a user id, or a service account's id. The engine
     /// resolves roles by subject id, directly and through group membership.
     pub subject_id: Uuid,
@@ -81,6 +106,23 @@ pub struct AccessRequest {
     pub resource_id: Uuid,
     /// Optional scope for sub-resource granularity.
     pub scope: Option<String>,
+}
+
+impl AccessRequest {
+    /// The tenant whose role assignments answer for this subject.
+    pub fn assignment_tenant_id(&self) -> Uuid {
+        self.subject_tenant_id.unwrap_or(self.tenant_id)
+    }
+
+    /// Whether the subject's grants are being read across a tenant boundary.
+    ///
+    /// True only for an organization-level principal acting on one of its
+    /// organization's tenants. When true, the engine keeps only global grants
+    /// — the one rule organization scope adds to RBAC.
+    pub fn crosses_tenant_boundary(&self) -> bool {
+        self.subject_tenant_id
+            .is_some_and(|subject| subject != self.tenant_id)
+    }
 }
 
 #[cfg(test)]

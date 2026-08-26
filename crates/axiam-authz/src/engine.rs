@@ -95,6 +95,24 @@ fn applicable_role_ids(
         .collect()
 }
 
+/// The roles assigned globally — with no resource named — deduplicated in
+/// first-seen order.
+///
+/// The cross-tenant half of [`applicable_role_ids`]. An organization-level
+/// principal's global roles are exactly the ones that mean "anywhere in this
+/// organization"; its resource-scoped ones mean "this resource, in the
+/// organization tenant", and there is no coherent way to carry that meaning
+/// into a different tenant's resource tree.
+fn global_role_ids(assignments: &[RoleAssignment]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    assignments
+        .iter()
+        .filter(|a| a.role.is_global && a.resource_id.is_none())
+        .map(|a| a.role.id)
+        .filter(|role_id| seen.insert(*role_id))
+        .collect()
+}
+
 /// Whether a single grant applies to `action` under `requested_scope_id`.
 ///
 /// Wildcard grants (empty `scope_ids`) match any requested scope; otherwise the
@@ -380,9 +398,15 @@ where
     /// hit returns exactly what this would have produced.
     async fn evaluate(&self, request: &AccessRequest) -> AxiamResult<AccessDecision> {
         // 1. Fetch all role assignments (direct + group) with resource scope.
+        //
+        //    Read from the tenant the *subject* lives in, which is the tenant
+        //    being acted upon for every ordinary principal. It differs only for
+        //    an organization-level principal reaching into one of its
+        //    organization's tenants: its grants are in the organization tenant
+        //    and the resource is not.
         let assignments = self
             .role_repo
-            .get_user_role_assignments(request.tenant_id, request.subject_id)
+            .get_user_role_assignments(request.assignment_tenant_id(), request.subject_id)
             .instrument(tracing::debug_span!("db.get_user_role_assignments"))
             .await?;
 
@@ -391,6 +415,8 @@ where
         }
 
         // 2. Build the set of ancestor resource IDs for hierarchy inheritance.
+        //    Always from the *target* tenant: the resource being reached for
+        //    lives there, and so does its hierarchy.
         let ancestors = self
             .resource_repo
             .get_ancestors(request.tenant_id, request.resource_id)
@@ -400,7 +426,20 @@ where
 
         // 3. Filter applicable roles (global / target-scoped / ancestor-scoped),
         //    deduplicated in first-seen order.
-        let unique_role_ids = applicable_role_ids(&assignments, request.resource_id, &ancestor_ids);
+        //
+        //    Across a tenant boundary only *global* assignments carry — the one
+        //    rule organization scope adds, and it is stated here. A
+        //    resource-scoped assignment names a resource in the organization
+        //    tenant; a resource with that id does not exist in the target
+        //    tenant, and one that happened to share a *name* would be a
+        //    different thing entirely. Letting either match would turn an
+        //    organization-level grant on one resource into a grant on an
+        //    unrelated resource inside an isolated tenant.
+        let unique_role_ids = if request.crosses_tenant_boundary() {
+            global_role_ids(&assignments)
+        } else {
+            applicable_role_ids(&assignments, request.resource_id, &ancestor_ids)
+        };
 
         if unique_role_ids.is_empty() {
             return Ok(AccessDecision::Deny(
@@ -419,7 +458,7 @@ where
         //    (CQ-B13 N+1 fix), then evaluate action + scope constraints.
         let grants_by_role = self
             .permission_repo
-            .get_role_permission_grants_for_roles(request.tenant_id, &unique_role_ids)
+            .get_role_permission_grants_for_roles(request.assignment_tenant_id(), &unique_role_ids)
             .instrument(tracing::debug_span!(
                 "db.get_role_permission_grants_for_roles"
             ))
@@ -583,19 +622,24 @@ where
             return Ok(Vec::new());
         }
 
-        // --- Coalesce round-trip 1: role assignments, once per (tenant, subject).
+        // --- Coalesce round-trip 1: role assignments, once per
+        //     (assignment tenant, subject). Keyed by the tenant the subject's
+        //     grants live in rather than the tenant being acted upon, so an
+        //     organization-level principal checked against five tenants in one
+        //     batch resolves its assignments once, not five times — and, more
+        //     importantly, so the cache key names the tenant actually queried.
         let mut assignments_by_subject: HashMap<(Uuid, Uuid), Vec<RoleAssignment>> = HashMap::new();
         for req in requests {
-            let key = (req.tenant_id, req.subject_id);
+            let key = (req.assignment_tenant_id(), req.subject_id);
             if let std::collections::hash_map::Entry::Vacant(slot) =
                 assignments_by_subject.entry(key)
             {
                 let assignments = self
                     .role_repo
-                    .get_user_role_assignments(req.tenant_id, req.subject_id)
+                    .get_user_role_assignments(req.assignment_tenant_id(), req.subject_id)
                     .instrument(tracing::debug_span!(
                         "db.get_user_role_assignments",
-                        tenant_id = %req.tenant_id,
+                        tenant_id = %req.assignment_tenant_id(),
                         subject_id = %req.subject_id
                     ))
                     .await?;
@@ -610,7 +654,7 @@ where
         // for a subject that would deny at "no roles assigned").
         let has_roles = |req: &AccessRequest| {
             assignments_by_subject
-                .get(&(req.tenant_id, req.subject_id))
+                .get(&(req.assignment_tenant_id(), req.subject_id))
                 .map(|a| !a.is_empty())
                 .unwrap_or(false)
         };
@@ -685,7 +729,7 @@ where
             .entered();
 
             let assignments = assignments_by_subject
-                .get(&(req.tenant_id, req.subject_id))
+                .get(&(req.assignment_tenant_id(), req.subject_id))
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             if assignments.is_empty() {
@@ -707,7 +751,7 @@ where
             // closure defined above, keyed off `assignments_by_subject`), and
             // this call site is reached only when the `assignments.is_empty()`
             // check just above did NOT `continue` — i.e. only when
-            // `assignments_by_subject.get(&(req.tenant_id, req.subject_id))`
+            // `assignments_by_subject.get(&(req.assignment_tenant_id(), req.subject_id))`
             // is non-empty for this same `req`, which is exactly `has_roles`'s
             // condition. So every `req` that reaches this line already had its
             // `(tenant_id, resource_id)` key inserted into `ancestors_by_resource`
@@ -723,7 +767,15 @@ where
                 .get(&(req.tenant_id, req.resource_id))
                 .unwrap_or(&empty_ancestors);
 
-            let unique_role_ids = applicable_role_ids(assignments, req.resource_id, ancestor_ids);
+            // Same rule as the single-check path: across a tenant boundary
+            // only global assignments carry. Sharing `global_role_ids` with
+            // `evaluate` is what keeps a batched decision byte-identical to the
+            // per-item one, which is a property this method's docs promise.
+            let unique_role_ids = if req.crosses_tenant_boundary() {
+                global_role_ids(assignments)
+            } else {
+                applicable_role_ids(assignments, req.resource_id, ancestor_ids)
+            };
             if unique_role_ids.is_empty() {
                 pre.push(PreDecision::Decided(AccessDecision::Deny(
                     "no applicable roles for this resource".into(),
@@ -752,8 +804,16 @@ where
             };
 
             for rid in &unique_role_ids {
-                if grant_role_seen.insert((req.tenant_id, *rid)) {
-                    grant_role_ids.entry(req.tenant_id).or_default().push(*rid);
+                // Grants hang off the role, and the role lives in the tenant
+                // the assignment came from — the organization tenant for an
+                // organization-level principal. Fetching them from the target
+                // tenant would find nothing and deny an administrator who has
+                // the grant.
+                if grant_role_seen.insert((req.assignment_tenant_id(), *rid)) {
+                    grant_role_ids
+                        .entry(req.assignment_tenant_id())
+                        .or_default()
+                        .push(*rid);
                 }
             }
 
@@ -807,12 +867,17 @@ where
                 } => {
                     // Same two helpers the single-check path uses, so the
                     // batch path's deny-override semantics and reason codes
-                    // cannot diverge from it. Scoped to this item's tenant
-                    // before handing off, so `evaluate_grants` (shared with
-                    // the single-check path, which is inherently
-                    // single-tenant) never sees another tenant's role ids.
+                    // cannot diverge from it. Scoped to the tenant the *grants*
+                    // were fetched from — the assignment tenant, matching the
+                    // key `grant_role_ids` was built under — before handing
+                    // off, so `evaluate_grants` (shared with the single-check
+                    // path, which is inherently single-tenant) never sees
+                    // another tenant's role ids. Reading `req.tenant_id` here
+                    // instead would look up a map entry that was never
+                    // populated for an organization-level principal and deny it
+                    // with "no permission grants action".
                     let tenant_grants = grants_by_role
-                        .get(&req.tenant_id)
+                        .get(&req.assignment_tenant_id())
                         .unwrap_or(&empty_role_grants);
                     decisions.push(decision_for(
                         evaluate_grants(

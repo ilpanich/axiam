@@ -73,6 +73,20 @@ jobs:
       - name: Conflict markers appear in one place only
         run: python3 scripts/check-conflict-markers.py
 
+      # M1 -- CONTRACT.md §27's management vocabulary is derived from
+      # openapi.json rather than hand-maintained, because a hand-maintained
+      # table of 146 operations across eleven SDKs is wrong by the next
+      # release. This gate is what makes "derived" true: it fails when the
+      # committed registry drifts from the spec, and -- the half that actually
+      # earns its keep -- when a new route lands under a management tag and
+      # nothing claims it. Without the second check, adding a handler to
+      # axiam-api-rest silently creates surface no SDK can reach, and the
+      # first person to notice is a user.
+      - name: Management registry gate self-test (fixtures)
+        run: python3 scripts/gen-management-registry.py --self-test
+      - name: §27 management registry is in sync with openapi.json
+        run: python3 scripts/gen-management-registry.py --check
+
       # The advisory ignore-list has to be written twice -- cargo-deny reads
       # deny.toml, cargo-audit reads the `ignore:` input below and never looks
       # at deny.toml -- and until now "keep them in sync" was a comment and

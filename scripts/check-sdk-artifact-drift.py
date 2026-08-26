@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Detect stale copies of this repo's vendored artifacts in the SDK repositories.
 
-Why this exists (publishing-and-secrets.md §8): three artifacts are authored
+Why this exists (publishing-and-secrets.md §8): four artifacts are authored
 **here** and vendored **there** —
 
-    sdks/CONTRACT.md         -> <sdk repo>/CONTRACT.md
-    sdks/openapi.json        -> <sdk repo>/openapi.json
-    proto/axiam/v1/*.proto   -> <sdk repo>/proto/axiam/v1/*.proto
+    sdks/CONTRACT.md              -> <sdk repo>/CONTRACT.md
+    sdks/openapi.json             -> <sdk repo>/openapi.json
+    sdks/management-registry.json -> <sdk repo>/management-registry.json
+    proto/axiam/v1/*.proto        -> <sdk repo>/proto/axiam/v1/*.proto
 
 This repo's CI already guards the **sources**: ``sdk-openapi-drift.yml`` fails if
 ``sdks/openapi.json`` drifts from a fresh ``--dump-openapi`` export, and
@@ -132,6 +133,14 @@ FLAT_ARTIFACTS = [
     ("sdks/CONTRACT.md", "CONTRACT.md"),
     ("sdks/openapi.json", "openapi.json"),
     ("sdks/opaque-test-vectors.json", "opaque-test-vectors.json"),
+    # CONTRACT §27's management vocabulary. Gated harder than the others,
+    # because an SDK does not merely *read* this file -- it generates 146
+    # operations from it. A stale copy is not a stale document, it is 146
+    # methods pointing at last release's routes, and the SDK's own CI cannot
+    # notice: regenerating from the stale registry reproduces the stale output
+    # exactly, so §27.8's regenerate-and-diff gate passes while the surface is
+    # wrong. This comparison is the only thing that catches it.
+    ("sdks/management-registry.json", "management-registry.json"),
 ]
 
 #: Source files vendored into ONE repo rather than all of them.

@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta01] - 2026-08-26
+
+### Added
+
+- Classify PUT bodies as sparse update or full replacement
+
+- Derive the §27 management vocabulary from openapi.json
+
+- An organization CA can anchor mTLS, and its key can move to Vault
+
+### Changed
+
+- Add CONTRACT §27 — the management API
+
+- Request 365, not 800 — a bigger number never reaches the issuer check
+
+- Three suites were asserting the behaviour this PR set out to fix
+
+- Generate fixture passwords instead of hard-coding them
+
+- Document AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH
+
+### Fixed
+
+- Clippy errors, and use the lockout helper the tests were missing
+
+- Erase a deleted user's personal data, and free their identifiers
+
+- Guarantee no template placeholder ever renders literally
+
+- Carry the CA's expiry into the certificate form's CA option
+
+- Every template greeted the reader with "{{username}}"
+
+- Stop the random logouts, the stale views, and the nameless scope chip
+
+- Make Delete remove a user, seed a default scope, and sync the sidebar
+
+- Send the activation mail, and make notification rules actually fire
+
+- Lock accounts on the organization's threshold, not the deployment default
+
+- RSA-4096 keygen, and refuse a certificate that outlives its issuer
+
 ## [1.0.0-alpha44] - 2026-08-25
 
 ### Added

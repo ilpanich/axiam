@@ -676,6 +676,16 @@ def build_registry(spec: dict[str, Any]) -> dict[str, Any]:
             "This file is the input every SDK's §27 code generator reads."
         ),
         "spec_version": spec["info"]["version"],
+        # The digest of the spec this registry was derived from.
+        #
+        # `spec_version` has the same weakness `info.version` does, for the same reason:
+        # it is the server's RELEASE version, so it moves when a release is cut rather
+        # than when a path is added. Two registries built from genuinely different specs
+        # can therefore carry the same `spec_version` -- and an SDK matching its vendored
+        # registry against its vendored spec by that string cannot tell them apart.
+        #
+        # Absent when the spec predates the field, so an older export still generates.
+        "spec_digest": spec["info"].get("x-axiam-spec-digest"),
         "operation_count": total,
         "namespace_count": len(namespaces),
         "excluded_tags": EXCLUDED_TAGS,

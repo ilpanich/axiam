@@ -154,17 +154,21 @@ pub async fn request_reset<C: Connection + Clone>(
     // must stay indistinguishable from an unknown account (D-05), and that
     // includes leaving no attributed audit trail behind for one and not the
     // other.
+    //
+    // The lookup is resolved BEFORE the extensions borrow is taken. Awaiting
+    // inside the `insert(...)` argument holds a `RefCell` borrow of the
+    // extensions map across the await — `clippy::await_holding_refcell_ref` —
+    // and anything that borrowed the same map while this task was suspended
+    // would panic at runtime rather than fail to compile.
+    let org_id = state
+        .tenant_repo
+        .get_by_id(tenant_id)
+        .await
+        .map(|t| t.organization_id)
+        .unwrap_or_else(|_| Uuid::nil());
     http_req
         .extensions_mut()
-        .insert(axiam_audit::AuditAttribution {
-            tenant_id,
-            org_id: state
-                .tenant_repo
-                .get_by_id(tenant_id)
-                .await
-                .map(|t| t.organization_id)
-                .unwrap_or_else(|_| Uuid::nil()),
-        });
+        .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
 
     // QUAL-07: PasswordResetService is now a hoisted AppState singleton
     // (was constructed per-request here).

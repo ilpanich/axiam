@@ -1003,6 +1003,119 @@ async fn account_locks_after_max_attempts() {
     assert!(matches!(err, AxiamError::AuthenticationFailed { .. }));
 }
 
+/// The reported bug: a threshold lowered in the admin UI changed nothing.
+///
+/// The deployment default here is 10 — high enough that three failures come
+/// nowhere near it — while the tenant's own policy says 3. Before
+/// `LoginInput::lockout_policy` existed the login path metered against
+/// `AuthConfig` and this account would still be unlocked; the tenant's setting
+/// was stored, merged org→tenant, returned by the settings API, and read by
+/// nothing.
+#[tokio::test]
+async fn a_tenants_own_threshold_locks_sooner_than_the_deployment_default() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let mut config = test_config();
+    config.max_failed_login_attempts = 10;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config,
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // Spelled out rather than derived from a default: the three fields beyond
+    // the threshold are what the lockout WINDOW is, and a test that inherited
+    // them would not say which value it was actually exercising.
+    let policy = axiam_core::models::settings::LockoutPolicy {
+        max_failed_login_attempts: 3,
+        lockout_duration_secs: 60,
+        lockout_backoff_multiplier: 2.0,
+        max_lockout_duration_secs: 900,
+    };
+
+    for _ in 0..3 {
+        bad_login_with_policy(&svc, tenant_id, org_id, Some(policy.clone())).await;
+    }
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.failed_login_attempts, 3);
+    assert!(
+        user.locked_until.is_some(),
+        "the tenant's threshold of 3 must lock the account, not the deployment default of 10"
+    );
+}
+
+/// And the converse: a tenant asking for a HIGHER threshold is honoured too.
+///
+/// Without this, a fix that simply always locked at three would pass the test
+/// above. What the setting means is "use my number", in both directions.
+#[tokio::test]
+async fn a_tenants_higher_threshold_holds_the_account_open() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let mut config = test_config();
+    config.max_failed_login_attempts = 3;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config,
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let policy = axiam_core::models::settings::LockoutPolicy {
+        max_failed_login_attempts: 8,
+        lockout_duration_secs: 60,
+        lockout_backoff_multiplier: 2.0,
+        max_lockout_duration_secs: 900,
+    };
+
+    for _ in 0..3 {
+        bad_login_with_policy(&svc, tenant_id, org_id, Some(policy.clone())).await;
+    }
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.failed_login_attempts, 3);
+    assert!(
+        user.locked_until.is_none(),
+        "the deployment default of 3 must not lock an account whose tenant allows 8"
+    );
+}
+
+/// No tenant policy falls back to the deployment default.
+///
+/// The safety property behind the fallback: a settings lookup that fails must
+/// not become an open brute-force window.
+#[tokio::test]
+async fn no_tenant_policy_falls_back_to_the_deployment_default() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let mut config = test_config();
+    config.max_failed_login_attempts = 3;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config,
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    for _ in 0..3 {
+        bad_login_with_policy(&svc, tenant_id, org_id, None).await;
+    }
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(user.locked_until.is_some());
+}
+
 #[tokio::test]
 async fn lockout_expires_allows_login() {
     let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =

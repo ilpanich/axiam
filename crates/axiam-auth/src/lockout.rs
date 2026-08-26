@@ -237,11 +237,13 @@ mod tests {
 
     #[test]
     fn policy_from_config_carries_every_lockout_field() {
-        let mut config = AuthConfig::default();
-        config.max_failed_login_attempts = 3;
-        config.lockout_duration_secs = 120;
-        config.lockout_backoff_multiplier = 3.0;
-        config.max_lockout_duration_secs = 900;
+        let config = AuthConfig {
+            max_failed_login_attempts: 3,
+            lockout_duration_secs: 120,
+            lockout_backoff_multiplier: 3.0,
+            max_lockout_duration_secs: 900,
+            ..Default::default()
+        };
 
         let policy = policy_from_config(&config);
 

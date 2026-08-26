@@ -13,6 +13,25 @@ use axiam_db::repository::{
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 
+/// A throwaway password for a fixture user nothing verifies.
+///
+/// Generated rather than written as a literal. A constant here is a hard-coded
+/// credential to any scanner reading the file — CodeQL's "Hard-coded
+/// cryptographic value" rule flags exactly this, at critical severity — and the
+/// rule is not wrong about the shape even in a test: a password sitting in
+/// source is how one ends up copied into a seeder or a fixture that outlives
+/// the test.
+///
+/// Each call returns a distinct value, so a test also cannot pass by
+/// accidentally matching another fixture's password.
+///
+/// The three tests that assert on their password — `create_and_get_user`,
+/// `password_verification`, `password_with_pepper` — keep their literals on
+/// purpose: the value is what they are about.
+fn fixture_password() -> String {
+    format!("fixture-{}", uuid::Uuid::new_v4())
+}
+
 /// Helper: spin up in-memory DB, run migrations, create org + tenant.
 async fn setup() -> (
     Surreal<surrealdb::engine::local::Db>,
@@ -135,7 +154,7 @@ async fn get_user_by_username() {
             tenant_id,
             username: "dave".into(),
             email: "dave@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -155,7 +174,7 @@ async fn get_user_by_email() {
             tenant_id,
             username: "eve".into(),
             email: "eve@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -178,7 +197,7 @@ async fn update_user() {
             tenant_id,
             username: "frank".into(),
             email: "frank@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -222,7 +241,7 @@ async fn delete_anonymises_the_user_and_strips_its_credentials() {
             tenant_id,
             username: "grace".into(),
             email: "grace@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -279,7 +298,7 @@ async fn a_deleted_user_can_register_again_with_the_same_identifiers() {
             tenant_id,
             username: "nina".into(),
             email: "nina@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -292,7 +311,7 @@ async fn a_deleted_user_can_register_again_with_the_same_identifiers() {
             tenant_id,
             username: "nina".into(),
             email: "nina@example.com".into(),
-            password: "a different password".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -323,7 +342,7 @@ async fn erasing_two_users_produces_two_distinct_tombstones() {
                 tenant_id,
                 username: name.into(),
                 email: format!("{name}@example.com"),
-                password: "pass123".into(),
+                password: fixture_password(),
                 metadata: None,
             })
             .await
@@ -352,7 +371,7 @@ async fn erasing_an_already_erased_user_is_not_an_error() {
             tenant_id,
             username: "quinn".into(),
             email: "quinn@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -376,7 +395,7 @@ async fn a_deleted_user_disappears_from_the_listing() {
             tenant_id,
             username: name.into(),
             email: format!("{name}@example.com"),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -412,7 +431,7 @@ async fn a_deleted_users_username_and_email_stop_resolving() {
             tenant_id,
             username: "mallory".into(),
             email: "mallory@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -444,7 +463,7 @@ async fn list_users_with_pagination() {
             tenant_id,
             username: format!("user-{i}"),
             email: format!("user-{i}@example.com"),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -488,7 +507,7 @@ async fn duplicate_username_rejected() {
         tenant_id,
         username: "unique-user".into(),
         email: "first@example.com".into(),
-        password: "pass123".into(),
+        password: fixture_password(),
         metadata: None,
     })
     .await
@@ -499,7 +518,7 @@ async fn duplicate_username_rejected() {
             tenant_id,
             username: "unique-user".into(),
             email: "second@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await;
@@ -516,7 +535,7 @@ async fn duplicate_email_rejected() {
         tenant_id,
         username: "user-a".into(),
         email: "same@example.com".into(),
-        password: "pass123".into(),
+        password: fixture_password(),
         metadata: None,
     })
     .await
@@ -527,7 +546,7 @@ async fn duplicate_email_rejected() {
             tenant_id,
             username: "user-b".into(),
             email: "same@example.com".into(),
-            password: "pass123".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await;
@@ -578,7 +597,7 @@ async fn tenant_isolation() {
             tenant_id: tenant_a.id,
             username: "isolated".into(),
             email: "isolated@example.com".into(),
-            password: "pass".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await

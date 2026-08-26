@@ -427,7 +427,10 @@ async fn seed_identity(db: &Surreal<Db>) -> (Uuid, Uuid, Uuid) {
             tenant_id: tenant.id,
             username: "alice".into(),
             email: "alice@acme.example".into(),
-            password: "correct horse battery staple".into(),
+            // Generated, not a literal: a password in source is a hard-coded
+            // credential to any scanner reading the file, and nothing here
+            // verifies it — the fixture only needs a user to exist.
+            password: format!("fixture-{}", Uuid::new_v4()),
             metadata: None,
         })
         .await

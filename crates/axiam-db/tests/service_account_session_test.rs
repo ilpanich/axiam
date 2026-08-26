@@ -3,7 +3,7 @@
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::service_account::{CreateServiceAccount, UpdateServiceAccount};
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, ServiceAccountRepository, SessionRepository,
@@ -50,6 +50,7 @@ async fn setup() -> (
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,

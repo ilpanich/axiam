@@ -2838,14 +2838,28 @@ mod tests {
         assert!(!SCHEMA_V50.contains("UPDATE"));
     }
 
+    /// The statements SurrealDB actually parses — `--` comment lines removed.
+    ///
+    /// Asserting on the raw constant matches the prose explaining *why* a
+    /// construct is absent, which is the opposite of what these tests mean.
+    /// Both of the assertions below failed against their own comments first.
+    fn v50_statements() -> String {
+        SCHEMA_V50
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn schema_v50_makes_one_organization_tenant_an_invariant() {
         // Two organization tenants would mean two answers to "where do
         // organization-level principals live", and the one that answered would
         // depend on row order. The marker table's record id is what forbids it.
-        assert!(SCHEMA_V50.contains("organization_scope"));
+        let sql = v50_statements();
+        assert!(sql.contains("DEFINE TABLE IF NOT EXISTS organization_scope"));
         assert!(
-            !SCHEMA_V50.contains("UNIQUE"),
+            !sql.contains("UNIQUE"),
             "a plain UNIQUE on (organization_id, kind) would cap a deployment \
              at one standard tenant per organization, and SurrealDB has no \
              partial index to express the constraint that is actually wanted"
@@ -2856,9 +2870,10 @@ mod tests {
     fn schema_v50_uses_no_partial_index() {
         // `DEFINE INDEX ... WHERE ...` does not parse in SurrealDB 3.x; it
         // fails at migration time with `Unexpected token WHERE`, which means a
-        // deployment that upgrades cannot start.
+        // deployment that upgrades cannot start. This test exists because that
+        // is exactly what the first version of this migration did.
         assert!(
-            !SCHEMA_V50.contains("WHERE"),
+            !v50_statements().contains("WHERE"),
             "SurrealDB rejects a WHERE clause on DEFINE INDEX"
         );
     }

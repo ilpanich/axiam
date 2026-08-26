@@ -4,7 +4,7 @@
 
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::pgp_key::{PgpKeyAlgorithm, PgpKeyPurpose, PgpKeyStatus, StorePgpKey};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, PgpKeyRepository, TenantRepository,
 };
@@ -33,6 +33,7 @@ async fn setup() -> (Db, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,
@@ -215,6 +216,7 @@ async fn list_paginates_and_isolates_by_tenant() {
         let tenant = SurrealTenantRepository::new(db.clone())
             .create(CreateTenant {
                 organization_id: org.id,
+                kind: TenantKind::Standard,
                 name: "Other Tenant".into(),
                 slug: "other-tenant".into(),
                 metadata: None,

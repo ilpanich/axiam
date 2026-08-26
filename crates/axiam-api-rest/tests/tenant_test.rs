@@ -8,7 +8,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -74,6 +74,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -486,6 +487,7 @@ async fn get_tenant_wrong_org_returns_404() {
     let other_tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Org B's Tenant".into(),
             slug: "org-b-tenant".into(),
             metadata: None,
@@ -532,6 +534,7 @@ async fn update_tenant_wrong_org_returns_404() {
     let other_tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Org B's Tenant".into(),
             slug: "org-b-tenant-update".into(),
             metadata: None,
@@ -580,6 +583,7 @@ async fn delete_tenant_wrong_org_returns_404() {
     let other_tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Org B's Tenant".into(),
             slug: "org-b-tenant-delete".into(),
             metadata: None,

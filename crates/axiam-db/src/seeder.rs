@@ -570,6 +570,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 mod tests {
     use super::*;
     use axiam_core::models::organization::CreateOrganization;
+    use axiam_core::models::tenant::TenantKind;
     use axiam_core::repository::{OrganizationRepository, PermissionRepository, TenantRepository};
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
@@ -590,6 +591,7 @@ mod tests {
         let tenant = crate::repository::SurrealTenantRepository::new(db.clone())
             .create(axiam_core::models::tenant::CreateTenant {
                 organization_id: org.id,
+                kind: TenantKind::Standard,
                 name: "Tenant".into(),
                 slug: "tenant".into(),
                 metadata: None,

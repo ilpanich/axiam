@@ -29,7 +29,7 @@
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     GroupRepository, OrganizationRepository, RoleRepository, TenantRepository, UserRepository,
@@ -71,6 +71,7 @@ async fn seeded_db() -> (Surreal<Db>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Plan Tenant".into(),
             slug: "plan-tenant".into(),
             metadata: None,

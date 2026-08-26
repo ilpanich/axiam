@@ -18,7 +18,7 @@ use axiam_api_grpc::start_grpc_server;
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -95,6 +95,7 @@ async fn setup() -> (Surreal<TestDb>, SurrealUserRepository<TestDb>) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Boot Tenant".into(),
             slug: "boot-tenant".into(),
             metadata: None,

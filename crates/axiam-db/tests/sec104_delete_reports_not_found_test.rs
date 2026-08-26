@@ -23,7 +23,7 @@ use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
     GroupRepository, OrganizationRepository, PermissionRepository, ResourceRepository,
     RoleRepository, ServiceAccountRepository, TenantRepository,
@@ -57,6 +57,7 @@ async fn setup() -> (Surreal<Db>, Uuid, Uuid) {
     let a = tenants
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "A".into(),
             slug: "sec104-a".into(),
             metadata: None,
@@ -66,6 +67,7 @@ async fn setup() -> (Surreal<Db>, Uuid, Uuid) {
     let b = tenants
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "B".into(),
             slug: "sec104-b".into(),
             metadata: None,

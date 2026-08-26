@@ -20,7 +20,7 @@ use axiam_core::models::mail::OutboundMailMessage;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
 use axiam_core::models::settings::system_defaults;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     MailPublisher, OrganizationRepository, PasswordResetTokenRepository, SettingsRepository,
@@ -88,6 +88,7 @@ async fn setup() -> Fixture {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Reset Gaps Tenant".into(),
             slug: "reset-gaps-tenant".into(),
             metadata: None,

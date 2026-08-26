@@ -26,7 +26,7 @@ use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     OrganizationRepository, PermissionRepository, ResourceRepository, RoleRepository,
@@ -92,6 +92,7 @@ async fn seed(n: usize) -> (Surreal<TestDb>, Vec<AccessRequest>) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Bench Tenant".into(),
             slug: "bench-tenant".into(),
             metadata: None,

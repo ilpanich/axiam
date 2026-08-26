@@ -28,7 +28,7 @@ use axiam_auth::{AuthConfig, AuthService, LoginInput, LoginResult, RefreshInput}
 use axiam_core::error::AxiamResult;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::session::{CreateSession, Session};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, SessionRepository, TenantRepository, UserRepository,
@@ -178,6 +178,7 @@ async fn refresh_rotation_stays_within_its_datastore_round_trip_budget() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Budget Tenant".into(),
             slug: "budget-tenant".into(),
             metadata: None,

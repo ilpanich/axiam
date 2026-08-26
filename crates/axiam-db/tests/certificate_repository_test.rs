@@ -7,7 +7,7 @@ use axiam_core::models::certificate::{
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
     CertificateRepository, OrganizationRepository, Pagination, ServiceAccountRepository,
     TenantRepository,
@@ -39,6 +39,7 @@ async fn setup() -> (Db, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,
@@ -145,6 +146,7 @@ async fn cross_tenant_get_by_id_is_not_found() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b".into(),
             metadata: None,
@@ -249,6 +251,7 @@ async fn bind_to_service_account_cross_tenant_denied() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b-bind".into(),
             metadata: None,

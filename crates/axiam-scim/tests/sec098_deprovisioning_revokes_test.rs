@@ -26,7 +26,7 @@ use axiam_authz::AuthorizationEngine;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, RefreshTokenRepository, RoleRepository, SessionRepository,
@@ -116,6 +116,7 @@ async fn setup_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "SEC-098 Tenant".into(),
             slug: format!("tenant-{}", Uuid::new_v4().simple()),
             metadata: None,

@@ -11,7 +11,7 @@
 //! about the shipped system. `tests/common/mod.rs` has the measurements.
 
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -48,6 +48,7 @@ async fn totp_step_cas_concurrent() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "TOTP CAS Tenant".into(),
             slug: "totp-cas-tenant".into(),
             metadata: None,

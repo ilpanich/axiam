@@ -5,7 +5,7 @@
 
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     OrganizationRepository, PermissionRepository, TenantRepository, UserRepository,
@@ -42,6 +42,7 @@ async fn setup() -> (Db, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,

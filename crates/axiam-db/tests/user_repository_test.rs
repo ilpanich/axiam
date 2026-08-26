@@ -2,7 +2,7 @@
 
 use axiam_auth::password::verify_password;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, TenantRepository, UserRepository,
@@ -55,6 +55,7 @@ async fn setup() -> (
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -576,6 +577,7 @@ async fn tenant_isolation() {
     let tenant_a = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant A".into(),
             slug: "tenant-a".into(),
             metadata: None,
@@ -585,6 +587,7 @@ async fn tenant_isolation() {
     let tenant_b = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b".into(),
             metadata: None,

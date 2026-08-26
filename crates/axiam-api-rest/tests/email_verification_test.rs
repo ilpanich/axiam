@@ -19,7 +19,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::email_verification::CreateEmailVerificationToken;
 use axiam_core::models::mail::OutboundMailMessage;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     EmailVerificationTokenRepository, MailPublisher, OrganizationRepository, TenantRepository,
@@ -92,6 +92,7 @@ async fn setup() -> Fixture {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Verify Tenant".into(),
             slug: "verify-tenant".into(),
             metadata: None,

@@ -224,7 +224,7 @@ mod tests {
     /// Helper: create an org + tenant and return their IDs.
     async fn create_org_tenant(db: &surrealdb::Surreal<Db>) -> (Uuid, Uuid) {
         use axiam_core::models::organization::CreateOrganization;
-        use axiam_core::models::tenant::CreateTenant;
+        use axiam_core::models::tenant::{CreateTenant, TenantKind};
         use axiam_core::repository::{OrganizationRepository, TenantRepository};
         use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository};
 
@@ -242,6 +242,7 @@ mod tests {
         let tenant = tenant_repo
             .create(CreateTenant {
                 organization_id: org.id,
+                kind: TenantKind::Standard,
                 name: "Test Tenant".into(),
                 slug: "test-tenant".into(),
                 metadata: None,

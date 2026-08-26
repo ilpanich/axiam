@@ -7,13 +7,14 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
-use axiam_core::repository::TenantRepository;
+use axiam_core::repository::{TenantRepository, UserRepository};
 use chrono::Utc;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::extractors::auth::AuthenticatedUser;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------

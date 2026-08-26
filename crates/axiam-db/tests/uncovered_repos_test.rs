@@ -12,7 +12,7 @@ use axiam_core::models::oauth2_client::{CreateOAuth2Client, UpdateOAuth2Client};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook};
 use axiam_core::repository::{
@@ -51,6 +51,7 @@ async fn setup() -> (Db, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,

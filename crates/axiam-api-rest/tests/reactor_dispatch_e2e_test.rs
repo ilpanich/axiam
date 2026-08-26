@@ -36,7 +36,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::reactor::{Reactor, SharedReactorGate};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, TenantRepository,
@@ -210,6 +210,7 @@ async fn setup() -> Env {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Reactor E2E Tenant".into(),
             slug: "reactor-e2e-tenant".into(),
             metadata: None,

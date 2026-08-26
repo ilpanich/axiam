@@ -2,7 +2,7 @@
 
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::{SetOrgSettings, SetTenantOverride, system_defaults};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, SettingsRepository, TenantRepository};
 use axiam_db::{SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository};
 use surrealdb::Surreal;
@@ -37,6 +37,7 @@ async fn settings_baseline_propagates() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -122,6 +123,7 @@ async fn store_effective_propagates_baseline() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant2".into(),
             slug: "tenant2".into(),
             metadata: None,

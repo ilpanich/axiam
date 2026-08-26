@@ -22,7 +22,7 @@ use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, PermissionRepository, RoleRepository, TenantRepository,
@@ -146,6 +146,7 @@ async fn setup_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: format!("tenant-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -811,6 +812,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -927,6 +929,7 @@ async fn cross_tenant_group_mutation_is_not_found() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -1008,6 +1011,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,

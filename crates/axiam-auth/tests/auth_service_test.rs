@@ -10,7 +10,7 @@ use axiam_core::models::federation::{
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::MfaPolicy;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, OrganizationRepository, TenantRepository,
@@ -107,6 +107,7 @@ async fn setup() -> (
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,

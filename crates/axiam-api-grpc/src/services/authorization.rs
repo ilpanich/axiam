@@ -230,7 +230,7 @@ mod tests {
     use axiam_core::models::permission::CreatePermission;
     use axiam_core::models::resource::CreateResource;
     use axiam_core::models::role::CreateRole;
-    use axiam_core::models::tenant::CreateTenant;
+    use axiam_core::models::tenant::{CreateTenant, TenantKind};
     use axiam_core::models::user::CreateUser;
     use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
     use axiam_db::repository::{
@@ -268,6 +268,7 @@ mod tests {
         let tenant = tenant_repo
             .create(CreateTenant {
                 organization_id: org.id,
+                kind: TenantKind::Standard,
                 name: "Test Tenant".into(),
                 slug: "test-tenant".into(),
                 metadata: None,

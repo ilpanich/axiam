@@ -28,7 +28,7 @@ use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::uma::UMA_TICKET_GRANT_TYPE;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
@@ -122,6 +122,7 @@ async fn setup() -> Fixture {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "UMA Tenant".into(),
             slug: "tenant-uma".into(),
             metadata: None,

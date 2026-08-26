@@ -25,7 +25,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
@@ -145,6 +145,7 @@ async fn setup_with_org_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Default".into(),
             slug: "default".into(),
             metadata: None,

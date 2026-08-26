@@ -37,7 +37,7 @@ use axiam_api_rest::webhook_consumer::{
     WebhookRetryConfig, backoff_ttl_ms, start_webhook_consumer,
 };
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::webhook::CreateWebhook;
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, TenantRepository,
@@ -176,6 +176,7 @@ async fn setup_db() -> (surrealdb::Surreal<TestDb>, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Webhook Consumer Test Tenant".into(),
             slug: "webhook-consumer-test-tenant".into(),
             metadata: None,

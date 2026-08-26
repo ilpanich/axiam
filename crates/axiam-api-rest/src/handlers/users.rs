@@ -483,6 +483,96 @@ pub async fn delete<C: Connection + Clone>(
 
     state.user_repo.delete(user.tenant_id, target_id).await?;
 
+    // Erase the personal data held OUTSIDE the user row.
+    //
+    // The row itself is anonymised by `user_repo.delete` above, but a user's
+    // personal data is not all in one table. A passkey is a registered
+    // authenticator bound to a person; a federation link is their identifier at
+    // an external provider; password history is a chain of hashes of secrets
+    // they chose. Leaving any of those behind means the account is "deleted"
+    // and the data is not, which is the distinction erasure is entirely about.
+    //
+    // These are the same tables `axiam-server`'s Art. 17 purge clears, and
+    // deliberately so: an administrator's Delete and a data subject's erasure
+    // request must not leave different residue.
+    //
+    // Best-effort with a warning each, like the graph cleanup below: the account
+    // can no longer authenticate by this point, so a row that outlives it grants
+    // nothing and is a cleanup task rather than an open door. Failing the
+    // response instead would invite a retry that 404s on the already-erased row.
+    {
+        use axiam_core::repository::{
+            FederationLinkRepository as _, PasswordHistoryRepository as _,
+            WebauthnCredentialRepository as _,
+        };
+
+        match state
+            .webauthn
+            .webauthn_credential_repo
+            .list_by_user(user.tenant_id, target_id)
+            .await
+        {
+            Ok(creds) => {
+                for cred in creds {
+                    if let Err(e) = state
+                        .webauthn
+                        .webauthn_credential_repo
+                        .delete(user.tenant_id, cred.id)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e, user_id = %target_id, credential_id = %cred.id,
+                            "could not delete a deleted user's passkey"
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e, user_id = %target_id,
+                "could not list a deleted user's passkeys"
+            ),
+        }
+
+        match state
+            .federation
+            .federation_link_repo
+            .get_by_user_id(user.tenant_id, target_id)
+            .await
+        {
+            Ok(links) => {
+                for link in links {
+                    if let Err(e) = state
+                        .federation
+                        .federation_link_repo
+                        .delete(user.tenant_id, link.id)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e, user_id = %target_id, link_id = %link.id,
+                            "could not delete a deleted user's federation link"
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e, user_id = %target_id,
+                "could not list a deleted user's federation links"
+            ),
+        }
+
+        // `keep_count = 0` prunes the whole chain.
+        if let Err(e) = state
+            .password_history_repo
+            .prune(user.tenant_id, target_id, 0)
+            .await
+        {
+            tracing::warn!(
+                error = %e, user_id = %target_id,
+                "could not prune a deleted user's password history"
+            );
+        }
+    }
+
     // Strip the authorization graph: group memberships first, then the direct
     // role assignments that remain once inherited ones have gone with the
     // membership. A tombstone still reachable through `member_of` would keep

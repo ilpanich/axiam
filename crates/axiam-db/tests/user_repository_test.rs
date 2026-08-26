@@ -202,14 +202,18 @@ async fn update_user() {
     assert_eq!(updated.email, "frank@example.com"); // unchanged
 }
 
-/// Delete tombstones the row and strips its credentials.
+/// Delete anonymises the row, strips its credentials, and marks it `Deleted`.
 ///
-/// The regression: this used to set `status = 'Inactive'` — exactly what the
-/// admin UI's Active/Inactive toggle does — so a deleted user stayed in the
-/// list, kept their password hash and MFA secret, and was indistinguishable
-/// from a suspended one. Delete looked like it did nothing.
+/// Two regressions in one. It used to set `status = 'Inactive'` — exactly what
+/// the admin UI's Active/Inactive toggle does — so a deleted user stayed in the
+/// list, kept their password hash and MFA secret, and was indistinguishable from
+/// a suspended one.
+///
+/// And the first fix for that kept `username` and `email` on the tombstone,
+/// which is not erasure: a row holding someone's address indefinitely is
+/// retention with the UI hidden.
 #[tokio::test]
-async fn delete_tombstones_the_user_and_strips_its_credentials() {
+async fn delete_anonymises_the_user_and_strips_its_credentials() {
     let (db, tenant_id) = setup().await;
     let repo = SurrealUserRepository::new(db);
 
@@ -236,12 +240,129 @@ async fn delete_tombstones_the_user_and_strips_its_credentials() {
         "Deleted must be distinguishable from the reversible suspended state"
     );
 
+    // No personal data left on it.
+    assert!(
+        !fetched.username.contains("grace"),
+        "the username must not survive erasure, got `{}`",
+        fetched.username
+    );
+    assert!(
+        !fetched.email.contains("grace"),
+        "the email must not survive erasure, got `{}`",
+        fetched.email
+    );
+    // Derived from the row's own id, which is an internal identifier.
+    assert_eq!(fetched.username, format!("deleted-{}", user.id));
+
     // Nothing left to authenticate with. Argon2 output is never empty, so an
     // empty hash cannot be satisfied by any password even if some future path
     // skipped the status check.
     assert!(fetched.password_hash.is_empty());
     assert!(fetched.mfa_secret.is_none());
     assert!(!fetched.mfa_enabled);
+}
+
+/// The erased person can sign up again with the same username and email.
+///
+/// GDPR erasure has to leave someone able to register afresh. The unique indexes
+/// `idx_user_tenant_username` and `idx_user_tenant_email` are enforced by the
+/// database, so *hiding* a tombstone's identifiers is not enough — a re-signup
+/// would be refused with a duplicate-account error that itself discloses the
+/// deleted account had existed. Overwriting them is what frees the values.
+#[tokio::test]
+async fn a_deleted_user_can_register_again_with_the_same_identifiers() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+
+    let first = repo
+        .create(CreateUser {
+            tenant_id,
+            username: "nina".into(),
+            email: "nina@example.com".into(),
+            password: "pass123".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    repo.delete(tenant_id, first.id).await.unwrap();
+
+    let second = repo
+        .create(CreateUser {
+            tenant_id,
+            username: "nina".into(),
+            email: "nina@example.com".into(),
+            password: "a different password".into(),
+            metadata: None,
+        })
+        .await
+        .expect("the identifiers must be free again after erasure");
+
+    // A genuinely new account, not the old one revived: the audit trail of the
+    // first must not be attributable to the second.
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.status, UserStatus::PendingVerification);
+    assert_eq!(
+        repo.get_by_username(tenant_id, "nina").await.unwrap().id,
+        second.id
+    );
+}
+
+/// Two erased accounts do not collide with each other.
+#[tokio::test]
+async fn erasing_two_users_produces_two_distinct_tombstones() {
+    // The replacements are derived per row id rather than being one constant,
+    // which is what stops the second erasure failing on the unique index.
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+
+    let mut ids = Vec::new();
+    for name in ["oscar", "peggy"] {
+        let u = repo
+            .create(CreateUser {
+                tenant_id,
+                username: name.into(),
+                email: format!("{name}@example.com"),
+                password: "pass123".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        repo.delete(tenant_id, u.id).await.unwrap();
+        ids.push(u.id);
+    }
+
+    let a = repo.get_by_id(tenant_id, ids[0]).await.unwrap();
+    let b = repo.get_by_id(tenant_id, ids[1]).await.unwrap();
+    assert_ne!(a.username, b.username);
+    assert_ne!(a.email, b.email);
+}
+
+/// Erasure is idempotent — the same call twice is not an error.
+#[tokio::test]
+async fn erasing_an_already_erased_user_is_not_an_error() {
+    // The replacements are deterministic, so the second write is a no-op rather
+    // than a unique-index violation. A delete that failed on retry would make a
+    // transient network error look like a corrupted account.
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+
+    let user = repo
+        .create(CreateUser {
+            tenant_id,
+            username: "quinn".into(),
+            email: "quinn@example.com".into(),
+            password: "pass123".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    repo.delete(tenant_id, user.id).await.unwrap();
+    repo.delete(tenant_id, user.id).await.unwrap();
+
+    let fetched = repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert_eq!(fetched.username, format!("deleted-{}", user.id));
 }
 
 /// A deleted user is gone from the list — the actual user-visible symptom.
@@ -301,7 +422,7 @@ async fn a_deleted_users_username_and_email_stop_resolving() {
 
     assert!(
         repo.get_by_username(tenant_id, "mallory").await.is_err(),
-        "login resolves users by username; a tombstone must not be findable"
+        "login resolves users by username, and the erased row no longer carries it"
     );
     assert!(
         repo.get_by_email(tenant_id, "mallory@example.com")

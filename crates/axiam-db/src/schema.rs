@@ -2644,7 +2644,9 @@ DEFINE INDEX IF NOT EXISTS idx_ca_cert_org_tenant ON TABLE ca_certificate \
 // their actor by id, so dropping the row would leave every entry the user ever
 // produced pointing at nothing. `Deleted` is the tombstone marker the listing
 // and credential-lookup queries filter on, and `UserRepository::delete` blanks
-// the credential columns alongside it.
+// the credential columns and overwrites `username`, `email` and `metadata`
+// alongside it — the tombstone carries no personal data, and the identifiers it
+// gives up are freed from their unique indexes so the person can register again.
 //
 // `OVERWRITE` extends the ASSERT the way v-with-Anonymized did; no rows are
 // rewritten, because no row can already hold a value the old ASSERT forbade.

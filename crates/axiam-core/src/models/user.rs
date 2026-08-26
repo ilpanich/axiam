@@ -14,19 +14,30 @@ pub enum UserStatus {
     Anonymized,
     /// Removed by an administrator through `DELETE /api/v1/users/{id}`.
     ///
-    /// A tombstone, not a row deletion. The audit trail is append-only and
-    /// references actors by id, so hard-deleting the row would leave every
-    /// entry the user ever produced pointing at nothing — and an audit log you
-    /// cannot resolve to a person is not an audit log. The row stays, stripped
-    /// of every capability, and is excluded from listings and lookups so the
-    /// account is gone everywhere an operator can see it.
+    /// An anonymised tombstone, not a row deletion. The audit trail is
+    /// append-only and references actors by id, so hard-deleting the row would
+    /// leave every entry the user ever produced pointing at nothing — and an
+    /// audit log you cannot resolve to a person is not an audit log.
     ///
-    /// Distinct from [`Self::Inactive`], which is the reversible "suspended"
-    /// state an administrator sets from the edit dialog, and from
-    /// [`Self::Anonymized`], which is GDPR Art. 17 erasure and additionally
-    /// scrubs the PII columns. Reusing `Inactive` for deletion is what made
-    /// `DELETE` look like it did nothing: the user stayed in the list, in their
-    /// groups, holding their roles, with live sessions.
+    /// What the row keeps is its id. `username` and `email` are overwritten
+    /// with values derived from that id, `metadata` is emptied, and every
+    /// credential is cleared, so the tombstone holds no personal data: keeping
+    /// someone's address on it indefinitely would be retention with the UI
+    /// hidden, not erasure. Overwriting rather than hiding is also what frees
+    /// the identifiers from their unique indexes, so the person can register
+    /// again — which erasure has to leave them able to do.
+    ///
+    /// Distinct from [`Self::Inactive`], the reversible "suspended" state an
+    /// administrator sets from the edit dialog. Reusing that for deletion is
+    /// what made `DELETE` look like it did nothing: the user stayed in the
+    /// list, in their groups, holding their roles, with live sessions.
+    ///
+    /// Distinct from [`Self::Anonymized`] in evidence rather than in effect.
+    /// That is the scheduled Art. 17 pipeline, which does everything this does
+    /// AND pseudonymises the audit log's actor references with a keyed HMAC
+    /// before writing a signed erasure proof. This is the immediate operational
+    /// removal an administrator performs; that is the certified one a data
+    /// subject requests.
     Deleted,
 }
 

@@ -3,7 +3,7 @@
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email_verification::CreateEmailVerificationToken;
-use axiam_core::models::user::{UpdateUser, UserStatus};
+use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     EmailVerificationTokenRepository, FederationLinkRepository, UserRepository,
 };
@@ -125,10 +125,36 @@ where
         Ok(())
     }
 
+    /// Whether a verification mail may be minted for this user.
+    ///
+    /// The predicate is **"is the address still unverified"**, which is the same
+    /// question [`Self::verify_email`] asks when it consumes the token. Those
+    /// two disagreeing is what made "Resend verification email" a button that
+    /// did nothing: it gated on `status == PendingVerification`, while the
+    /// profile page — correctly — offered the button whenever
+    /// `email_verified_at` was unset. Any user who reached `Active` without
+    /// verifying (an administrator creating an account, a status edit, a
+    /// federated first login later given a password) could complete
+    /// verification if they somehow obtained a token, and could never be sent
+    /// one. The endpoint answered 200 either way, so nothing anywhere said so.
+    ///
+    /// Status still has a say, but only to exclude accounts that must not
+    /// receive mail at all: a locked or administratively disabled account
+    /// should not be handed a live token, and a deleted or anonymised
+    /// tombstone has no addressee — its `email` column holds a value derived
+    /// from the row id, not a mailbox.
+    fn may_resend_verification(user: &User) -> bool {
+        user.email_verified_at.is_none()
+            && matches!(
+                user.status,
+                UserStatus::PendingVerification | UserStatus::Active
+            )
+    }
+
     /// Resend verification email for a user identified by email.
     ///
     /// Returns `Ok(Some((raw_token, user_id, expires_at)))` on
-    /// success, `Ok(None)` if the email doesn't exist or user is
+    /// success, `Ok(None)` if the email doesn't exist or the address is
     /// already verified (to prevent user enumeration).
     pub async fn resend_verification(
         &self,
@@ -142,8 +168,7 @@ where
             Err(e) => return Err(e),
         };
 
-        // Only resend for PendingVerification users.
-        if user.status != UserStatus::PendingVerification {
+        if !Self::may_resend_verification(&user) {
             return Ok(None);
         }
 

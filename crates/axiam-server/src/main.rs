@@ -879,11 +879,32 @@ async fn main() -> std::io::Result<()> {
             .map_err(|e| std::io::Error::other(format!("CA key custody: {e}")))?,
     );
     match ca_custodians.default_custody() {
-        Some(custody) => tracing::info!(%custody, "CA signing key custody resolved"),
+        Some(custody) => tracing::info!(
+            %custody,
+            vault_inherited = ca_custodians.vault_inherited(),
+            "CA signing key custody resolved"
+        ),
         None => tracing::info!(
             "no CA signing key custodian configured; CA generation and import will be \
              refused until AXIAM__PKI__ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
         ),
+    }
+    // The arrangement nobody picks deliberately, and the one the 1.0.0-beta01
+    // log showed: a reachable Vault, and every CA signing key sealed into a
+    // `ca_certificate` row anyway. Reachable now only by naming `database`
+    // explicitly, so it is a warning rather than a refusal — but it says what
+    // is actually at stake, because the two differ by whether one database dump
+    // hands over every CA in the deployment.
+    if ca_custodians.database_custody_despite_vault() {
+        tracing::warn!(
+            "CA signing keys are being sealed into the database although Vault custody is \
+             configured and reachable. A database dump plus one process's \
+             AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this \
+             deployment, and nothing records the read. Unset \
+             AXIAM__PKI__CA_KEY_STORE (or set it to `vault`) to hold them in Vault \
+             instead, then migrate the CAs you already have with \
+             `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`."
+        );
     }
 
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());

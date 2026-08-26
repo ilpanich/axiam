@@ -29,7 +29,7 @@ test.describe("Roles list page", () => {
     await expect(page.getByText("super-admin")).toBeVisible();
   });
 
-  test('"New Role" button opens modal with name/description/global toggle fields', async ({
+  test('"New Role" button opens modal with name/description/reach toggle fields', async ({
     page,
   }) => {
     await page.goto("/roles");
@@ -40,19 +40,25 @@ test.describe("Roles list page", () => {
     ).toBeVisible();
     await expect(page.getByLabel("Name *")).toBeVisible();
     await expect(page.getByLabel("Description")).toBeVisible();
-    await expect(
-      page.getByLabel(/Global role/i)
-    ).toBeVisible();
+    // The toggle is the same `is_global` field it always was; the label now
+    // says how far it actually reaches, which depends on where the caller is.
+    // This suite signs in as a tenant administrator, so: tenant-wide.
+    await expect(page.getByLabel(/Tenant-wide role/i)).toBeVisible();
   });
 
-  test("super-admin role shows Global badge (RBAC-gated visibility — T-07-13)", async ({
+  test("super-admin role shows its reach badge (RBAC-gated visibility — T-07-13)", async ({
     page,
   }) => {
     await page.goto("/roles");
     await expect(page).not.toHaveURL(/\/login/);
-    // Admin with super-admin role should see the Roles page and Global badges
-    // This asserts RBAC-gated nav is accessible to the bootstrapped admin (T-07-13)
-    await expect(page.getByText("Global").first()).toBeVisible();
+    // Admin with super-admin role should see the Roles page and the reach
+    // badges. This asserts RBAC-gated nav is accessible to the seeded admin
+    // (T-07-13).
+    //
+    // "Tenant-wide", not "Global": one `is_global` flag reaches an
+    // organization for an organization principal and one tenant for a tenant
+    // principal, and a single word could not honestly cover both.
+    await expect(page.getByText("Tenant-wide").first()).toBeVisible();
   });
 });
 

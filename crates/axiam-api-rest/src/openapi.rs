@@ -236,6 +236,7 @@ use crate::handlers;
         // Email Verification
         handlers::email_verification::verify_email,
         handlers::email_verification::resend_verification,
+        handlers::email_verification::resend_own_verification,
         // Password Reset
         handlers::password_reset::request_reset,
         handlers::password_reset::confirm_reset,

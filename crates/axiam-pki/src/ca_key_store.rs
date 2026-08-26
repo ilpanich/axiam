@@ -1144,11 +1144,11 @@ mod vault_endpoint_tests {
         // `provider=vault`, and every CA key went into a database row anyway.
         let e = vault_endpoint_from(env(&[
             (AUTH_VAULT_ADDR_ENV, "https://vault:8200"),
-            (AUTH_VAULT_TOKEN_ENV, "s.token"),
+            (AUTH_VAULT_TOKEN_ENV, "not-a-real-token"),
         ]))
         .unwrap();
         assert_eq!(e.address.as_deref(), Some("https://vault:8200"));
-        assert_eq!(e.token.as_deref(), Some("s.token"));
+        assert_eq!(e.token.as_deref(), Some("not-a-real-token"));
         assert!(e.inherited, "must be recorded as inherited, not chosen");
     }
 
@@ -1158,13 +1158,13 @@ mod vault_endpoint_tests {
         // separately; inheritance must never silently redirect the PKI one.
         let e = vault_endpoint_from(env(&[
             (AUTH_VAULT_ADDR_ENV, "https://secrets:8200"),
-            (AUTH_VAULT_TOKEN_ENV, "s.secrets"),
+            (AUTH_VAULT_TOKEN_ENV, "not-a-real-secrets-token"),
             (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "s.pki"),
+            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
         ]))
         .unwrap();
         assert_eq!(e.address.as_deref(), Some("https://pki:8200"));
-        assert_eq!(e.token.as_deref(), Some("s.pki"));
+        assert_eq!(e.token.as_deref(), Some("not-a-real-pki-token"));
         assert!(!e.inherited);
     }
 
@@ -1175,7 +1175,7 @@ mod vault_endpoint_tests {
         let e = vault_endpoint_from(env(&[
             (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
             (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "s.pki"),
+            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
         ]))
         .unwrap();
         assert_eq!(
@@ -1187,7 +1187,7 @@ mod vault_endpoint_tests {
             (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
             (CA_VAULT_CA_CERT_ENV, "/etc/axiam/pki-ca.pem"),
             (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "s.pki"),
+            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
         ]))
         .unwrap();
         assert_eq!(
@@ -1214,7 +1214,7 @@ mod vault_endpoint_tests {
             "must not name the PKI variable the operator never touched: {err}"
         );
 
-        let err = vault_endpoint_from(env(&[(CA_VAULT_TOKEN_ENV, "s.pki")]))
+        let err = vault_endpoint_from(env(&[(CA_VAULT_TOKEN_ENV, "not-a-real-pki-token")]))
             .unwrap_err()
             .to_string();
         assert!(err.contains(CA_VAULT_ADDR_ENV), "{err}");
@@ -1238,7 +1238,7 @@ mod vault_endpoint_tests {
             Some(
                 VaultCaKeyStore::new(VaultCaKeyConfig {
                     address: "https://vault:8200".into(),
-                    token: "s.token".into(),
+                    token: "not-a-real-token".into(),
                     mount: DEFAULT_CA_VAULT_MOUNT.into(),
                     prefix: DEFAULT_CA_VAULT_PREFIX.into(),
                     ca_cert_path: None,

@@ -81,6 +81,13 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "§27.0 boundary -- destroying an organization destroys every tenant "
         "under it; deliberately unreachable from an SDK"
     ),
+    ("POST", "/api/v1/users/me/resend-verification"): (
+        "§25 account lifecycle, not §27 management -- this is self-service on "
+        "the caller's OWN record, the authenticated sibling of the excluded "
+        "`auth`-tagged POST /auth/resend-verification. §27 is about "
+        "administering other principals; it is only under the `users` tag "
+        "because of where the route sits"
+    ),
 }
 
 # ---------------------------------------------------------------------------

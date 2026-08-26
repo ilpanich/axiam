@@ -33,7 +33,12 @@ TENANT_A_SLUG="alpha-${RUN_ID}"
 TENANT_B_SLUG="beta-${RUN_ID}"
 TA_USERNAME="tenant-admin-${RUN_ID}"
 TA_EMAIL="tenant-admin-${RUN_ID}@example.invalid"
-TA_PASSWORD="Tenant@Admin123!"
+# Freshly generated per run rather than a literal. This account is created and
+# used inside this script and nowhere else, so there is nothing to be gained by
+# pinning it — and a credential-shaped string in an example is a finding
+# wherever the example gets copied to. `Ax1!` satisfies every character-class
+# rule in the password policy; the hex tail supplies the length.
+TA_PASSWORD="Ax1!$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 
 ORG_JAR="$(mktemp)"
 TA_JAR="$(mktemp)"

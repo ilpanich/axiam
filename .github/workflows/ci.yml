@@ -684,8 +684,6 @@ jobs:
           E2E_TENANT_SLUG: "default"
           E2E_ADMIN_EMAIL: "admin@axiam.dev"
           E2E_ADMIN_PASSWORD: "Test@Admin123!"
-          E2E_TENANT_ADMIN_EMAIL: "tenant-admin@axiam.dev"
-          E2E_TENANT_ADMIN_PASSWORD: "Tenant@Admin123!"
           AXIAM_URL: "http://localhost:8090"
           SURREAL_URL: "http://localhost:8000"
 
@@ -777,8 +775,6 @@ jobs:
           E2E_TENANT_SLUG: "default"
           E2E_ADMIN_EMAIL: "admin@axiam.dev"
           E2E_ADMIN_PASSWORD: "Test@Admin123!"
-          E2E_TENANT_ADMIN_EMAIL: "tenant-admin@axiam.dev"
-          E2E_TENANT_ADMIN_PASSWORD: "Tenant@Admin123!"
 
       - name: Run frontend unit tests
         working-directory: frontend

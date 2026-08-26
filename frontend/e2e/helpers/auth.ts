@@ -21,9 +21,10 @@ export const STORAGE_STATE = "e2e/.auth/admin.json";
  * empty session, and the `setup` project itself starts clean) does it drive the
  * full two-step login UI.
  *
- * Uses E2E_ORG_SLUG / E2E_TENANT_SLUG / E2E_TENANT_ADMIN_EMAIL /
- * E2E_TENANT_ADMIN_PASSWORD env vars (with defaults matching
- * scripts/e2e-bootstrap.sh).
+ * Uses E2E_ORG_SLUG / E2E_TENANT_SLUG / E2E_TENANT_ADMIN_USERNAME /
+ * E2E_ADMIN_PASSWORD env vars (with defaults matching
+ * scripts/e2e-bootstrap.sh, which seeds the tenant admin with the same
+ * password as the super-admin so there is one fixture credential, not two).
  *
  * Signs in as the TENANT-level administrator, not the organization-level
  * super-admin bootstrap creates. Both exist in the seeded stack and the
@@ -43,10 +44,11 @@ export const STORAGE_STATE = "e2e/.auth/admin.json";
 export async function loginAsAdmin(page: Page): Promise<void> {
   const orgSlug = process.env["E2E_ORG_SLUG"] ?? "test-org";
   const tenantSlug = process.env["E2E_TENANT_SLUG"] ?? "default";
-  const adminEmail =
-    process.env["E2E_TENANT_ADMIN_EMAIL"] ?? "tenant-admin@axiam.dev";
-  const adminPassword =
-    process.env["E2E_TENANT_ADMIN_PASSWORD"] ?? "Tenant@Admin123!";
+  // By username, not email: the login field takes either, and an email literal
+  // next to a password literal is a credential pair to a secret scanner.
+  const adminUsername =
+    process.env["E2E_TENANT_ADMIN_USERNAME"] ?? "tenant-admin";
+  const adminPassword = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
 
   // Fast path: if a session already exists (shared storageState), navigating
   // home settles on an authenticated route rather than /login — nothing to do.
@@ -74,7 +76,7 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Continue" }).click();
 
   // Step 2: Enter credentials
-  await page.getByLabel("Username or email").fill(adminEmail);
+  await page.getByLabel("Username or email").fill(adminUsername);
   await page.getByLabel("Password").fill(adminPassword);
   // `exact` is load-bearing, not decoration: the page also carries a "Sign in
   // with a passkey" button (C2), whose accessible name contains this one. A

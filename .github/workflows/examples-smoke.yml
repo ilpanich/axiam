@@ -207,11 +207,12 @@ jobs:
 
       - name: b3-mesh-delegation-grpc
         working-directory: examples/b3-mesh-delegation-grpc
-        # E2E_TENANT_ADMIN_PASSWORD is required and has no in-source default —
-        # the example refuses to carry a credential literal. This is the same
-        # value scripts/e2e-bootstrap.sh seeds the tenant admin with.
+        # E2E_ADMIN_PASSWORD is required and has no in-source default — the
+        # example refuses to carry a credential literal. This is the same
+        # value scripts/e2e-bootstrap.sh seeds the stack with; the tenant admin
+        # it provisions shares it, so one variable covers both accounts.
         env:
-          E2E_TENANT_ADMIN_PASSWORD: Tenant@Admin123!
+          E2E_ADMIN_PASSWORD: Test@Admin123!
         run: cargo run --locked
 
       # b6 is the organization-scope example, so it signs in as the
@@ -219,9 +220,6 @@ jobs:
       # tenant admin the others use. It creates its own tenants and tears
       # nothing down, which is why it runs after the tenant-scoped examples.
       - name: b6-organization-scope
-        env:
-          E2E_ADMIN_EMAIL: admin@axiam.dev
-          E2E_ADMIN_PASSWORD: Test@Admin123!
         run: ./examples/b6-organization-scope/walkthrough.sh
 
       - name: b5-rp-logout-app (build)

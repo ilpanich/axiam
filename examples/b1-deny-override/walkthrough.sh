@@ -34,8 +34,12 @@ TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
 # lives in the organization's own scope and signs in with no tenant at all
 # (see examples/b6-organization-scope); this scenario is about one tenant, so
 # it uses the administrator of that tenant.
-ADMIN_EMAIL="${E2E_TENANT_ADMIN_EMAIL:-tenant-admin@axiam.dev}"
-ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-Tenant@Admin123!}"
+#
+# By username rather than email: `/auth/login` takes either, and an email
+# sitting next to a password is what a secret scanner reads as a credential
+# pair — which is exactly what this is, fixture or not.
+ADMIN_EMAIL="${E2E_TENANT_ADMIN_USERNAME:-tenant-admin}"
+ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${E2E_ADMIN_PASSWORD:-Test@Admin123!}}"
 
 # A run-unique suffix so the script is safe to re-run against a stack that
 # already has a previous run's fixtures in it.

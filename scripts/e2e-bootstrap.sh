@@ -43,7 +43,7 @@
 #   E2E_TENANT_ADMIN_USERNAME — tenant-level admin username
 #                                          (default: tenant-admin)
 #   E2E_TENANT_ADMIN_PASSWORD — tenant-level admin password
-#                                          (default: Tenant@Admin123!)
+#                                          (default: E2E_ADMIN_PASSWORD)
 #   AXIAM_URL         — backend base URL   (default: http://localhost:8090)
 
 set -euo pipefail
@@ -56,7 +56,11 @@ ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
 TENANT_ADMIN_EMAIL="${E2E_TENANT_ADMIN_EMAIL:-tenant-admin@axiam.dev}"
 TENANT_ADMIN_USERNAME="${E2E_TENANT_ADMIN_USERNAME:-tenant-admin}"
-TENANT_ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-Tenant@Admin123!}"
+# Defaults to the super-admin's password rather than a literal of its own: one
+# credential for the whole fixture, and no new credential-shaped string in the
+# tree. A fixture password that only ever guards a throwaway compose stack is
+# still a finding wherever the file gets copied.
+TENANT_ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}"
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 
 command -v jq >/dev/null 2>&1 || { echo "[e2e-bootstrap] ERROR: 'jq' is required on PATH"; exit 1; }

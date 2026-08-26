@@ -42,8 +42,8 @@ AXIAM_URL=http://localhost:8090 ./examples/b1-deny-override/walkthrough.sh
 ```
 
 Or point `AXIAM_URL` (and, if you didn't use the e2e-bootstrap.sh defaults,
-`E2E_ORG_SLUG` / `E2E_TENANT_SLUG` / `E2E_TENANT_ADMIN_EMAIL` /
-`E2E_TENANT_ADMIN_PASSWORD`) at any already-bootstrapped AXIAM deployment.
+`E2E_ORG_SLUG` / `E2E_TENANT_SLUG` / `E2E_TENANT_ADMIN_USERNAME` /
+`E2E_ADMIN_PASSWORD`) at any already-bootstrapped AXIAM deployment.
 
 The credentials are the **tenant** administrator's. Bootstrap's super-admin is
 organization-level — it lives in the organization's own scope and signs in

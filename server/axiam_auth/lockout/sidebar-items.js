@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["is_locked_out","record_failed_login"]};
+window.SIDEBAR_ITEMS = {"fn":["is_locked_out","policy_from_config","record_failed_login"],"struct":["SettingsLockoutPolicy","StaticLockoutPolicy"],"trait":["LockoutPolicySource"]};

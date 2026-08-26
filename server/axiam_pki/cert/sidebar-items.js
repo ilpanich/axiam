@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LEAF_CERT_VALIDITY_DAYS","MAX_LEAF_CERT_VALIDITY_DAYS"],"struct":["CertService"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LEAF_CERT_VALIDITY_DAYS","MAX_LEAF_CERT_VALIDITY_DAYS"],"fn":["issuer_bounded_validity_days"],"struct":["CertService"]};

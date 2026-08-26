@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CreateScope","Scope","UpdateScope"]};
+window.SIDEBAR_ITEMS = {"fn":["default_scope_description","default_scope_name"],"struct":["CreateScope","Scope","UpdateScope"]};

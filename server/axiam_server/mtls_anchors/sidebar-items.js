@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AnchorPlan"],"fn":["apply","plan"]};

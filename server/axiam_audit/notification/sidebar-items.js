@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["NotificationDispatcher"]};
+window.SIDEBAR_ITEMS = {"struct":["NotificationDispatcher","NotificationSink"]};

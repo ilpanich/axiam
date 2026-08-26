@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuditMiddleware","AuditMiddlewareService"]};
+window.SIDEBAR_ITEMS = {"struct":["AuditAttribution","AuditEvent","AuditMiddleware","AuditMiddlewareService"],"trait":["AuditEventSink"]};

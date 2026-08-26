@@ -10,6 +10,8 @@ import {
 } from "@/services/resources";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ResourceTree } from "@/components/ResourceTree";
@@ -186,10 +188,20 @@ export function ResourcesPage() {
   // would misrepresent the new one.
   const [denyResourceIds, setDenyResourceIds] = useState<Set<string>>(new Set());
 
-  const { data: resources = [], isLoading } = useQuery({
-    queryKey: ["resources"],
-    queryFn: () => resourceService.list(),
-  });
+  // Server-paged and server-searched. This page used to fetch the tenant's
+  // entire collection in one request and render all of it, which is fine at ten
+  // rows and unusable at two hundred with no way to find one by name.
+  const {
+    items: resources,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<Resource>(["resources"], "/api/v1/resources");
 
   const selectedResource = resources.find((r) => r.id === selectedId);
 
@@ -514,12 +526,32 @@ export function ResourcesPage() {
           )}
         </div>
       ) : (
-        <DataTable
-          columns={columns}
-          data={resources}
-          isLoading={isLoading}
-          emptyMessage="No resources defined yet."
-        />
+        <>
+          <SearchBox
+            value={search}
+            onChange={setSearch}
+            noun="resources"
+            className="mb-4 max-w-sm"
+          />
+
+          <DataTable
+            columns={columns}
+            data={resources}
+            isLoading={isLoading}
+            emptyMessage={
+              isFiltered
+                ? "No resources match your search."
+                : "No resources defined yet."
+            }
+          />
+
+          <PaginationControls
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            onPageChange={setPage}
+          />
+        </>
       )}
 
       {/* B1: effective-access preview + C4 scopes CRUD, both scoped to the

@@ -171,6 +171,7 @@ impl<R: axiam_core::repository::ReactorRepository> ReactorSource for RepositoryR
                     axiam_core::repository::Pagination {
                         offset: 0,
                         limit: 1,
+                        search: None,
                     },
                 )
                 .await
@@ -516,6 +517,7 @@ pub async fn recent_health<A: axiam_core::repository::AuditLogRepository>(
             Pagination {
                 offset: 0,
                 limit: failure_sample_limit,
+                search: None,
             },
         )
         .await
@@ -550,6 +552,7 @@ pub async fn recent_health<A: axiam_core::repository::AuditLogRepository>(
             Pagination {
                 offset: 0,
                 limit: 1,
+                search: None,
             },
         )
         .await

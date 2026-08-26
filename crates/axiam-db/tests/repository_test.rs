@@ -133,6 +133,7 @@ async fn list_organizations_with_pagination() {
         .list(Pagination {
             offset: 0,
             limit: 3,
+            search: None,
         })
         .await
         .unwrap();
@@ -146,6 +147,7 @@ async fn list_organizations_with_pagination() {
         .list(Pagination {
             offset: 3,
             limit: 3,
+            search: None,
         })
         .await
         .unwrap();

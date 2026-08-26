@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, paginate, take_first_or_not_found};
+use crate::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -271,14 +271,20 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
     ) -> AxiamResult<PaginatedResult<Webhook>> {
         let tid = tenant_id.to_string();
 
+        // See `SurrealUserRepository::list` for why the filter is applied to
+        // both the count and the page.
+        let search = search_filter(&pagination, &["name", "url"]);
+        let search_term = search_bind(&pagination);
+
         let count_result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "SELECT count() AS total FROM webhook \
-                 WHERE tenant_id = $tenant_id GROUP ALL",
-            )
+                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+            ))
             .bind(("tenant_id", tid.clone()))
+            .bind(("search", search_term.clone()))
             .await
             .map_err(DbError::from)?;
         let mut count_result = count_result
@@ -289,13 +295,14 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
         let data_result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "SELECT meta::id(id) AS record_id, * FROM webhook \
-                 WHERE tenant_id = $tenant_id \
+                 WHERE tenant_id = $tenant_id{search} \
                  ORDER BY created_at DESC \
-                 LIMIT $limit START $offset",
-            )
+                 LIMIT $limit START $offset"
+            ))
             .bind(("tenant_id", tid))
+            .bind(("search", search_term))
             .bind(("limit", pagination.limit))
             .bind(("offset", pagination.offset))
             .await

@@ -8,6 +8,8 @@ import {
 } from "@/services/permissions";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -100,10 +102,20 @@ export function PermissionsPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: permissions = [], isLoading } = useQuery({
-    queryKey: ["permissions"],
-    queryFn: () => permissionService.list(),
-  });
+  // Server-paged and server-searched. This page used to fetch the tenant's
+  // entire collection in one request and render all of it, which is fine at ten
+  // rows and unusable at two hundred with no way to find one by name.
+  const {
+    items: permissions,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<Permission>(["permissions"], "/api/v1/permissions");
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
@@ -293,12 +305,30 @@ export function PermissionsPage() {
         }
       />
 
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        noun="permissions"
+        className="mb-4 max-w-sm"
+        />
+
+
       <DataTable
         columns={columns}
         data={permissions}
         isLoading={isLoading}
-        emptyMessage="No permissions defined yet."
-      />
+        emptyMessage={
+          isFiltered ? "No permissions match your search." : "No permissions defined yet."
+        }
+        />
+
+
+      <PaginationControls
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
+        />
 
       {/* Create dialog */}
       <FormDialog

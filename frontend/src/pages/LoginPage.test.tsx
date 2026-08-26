@@ -52,7 +52,7 @@ const loginUser = {
 async function goToCredentials(route = "/login") {
   const utils = renderWithProviders(<LoginPage />, { route });
   await userEvent.type(screen.getByLabelText("Organization slug"), "acme");
-  await userEvent.type(screen.getByLabelText("Tenant slug"), "default");
+  await userEvent.type(screen.getByLabelText(/Tenant slug/), "default");
   await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
   await screen.findByRole("heading", { name: "Sign in" });
   return utils;
@@ -110,19 +110,54 @@ afterEach(() => {
 });
 
 describe("LoginPage — org/tenant step", () => {
-  it("requires both organization and tenant slug", async () => {
+  it("requires the organization slug", async () => {
     renderWithProviders(<LoginPage />);
-    // R4.7: the form no longer sets `noValidate`, so the required org/tenant
-    // fields being empty would block a native submit before the component's
-    // own validation runs — submit the form directly to exercise it.
+    // R4.7: the form no longer sets `noValidate`, so the required org field
+    // being empty would block a native submit before the component's own
+    // validation runs — submit the form directly to exercise it.
     fireEvent.submit(
       screen.getByRole("button", { name: /Continue/ }).closest("form")!,
     );
     expect(
-      await screen.findByText(
-        "Please enter both organization and tenant slug.",
-      ),
+      await screen.findByText("Please enter your organization slug."),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * The tenant is optional now, and omitting it is how an organization-level
+   * principal signs in — including the administrator bootstrap creates, who
+   * belongs to no ordinary tenant at all and could not previously get past
+   * this step.
+   */
+  it("advances with no tenant, and says the workspace is the organization", async () => {
+    renderWithProviders(<LoginPage />);
+    await userEvent.type(screen.getByLabelText("Organization slug"), "acme");
+    await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByRole("heading", { name: "Sign in" });
+    expect(screen.getByText("acme (organization)")).toBeInTheDocument();
+  });
+
+  it("omits tenant_slug from the request when no tenant was given", async () => {
+    // Sent as `""` the server would try to resolve a slug that cannot match;
+    // absent, it reads the request as "sign in at organization level".
+    apiMock.post.mockResolvedValue(res({ user: { id: "u1" } }));
+    apiMock.get.mockResolvedValue(res(null));
+
+    renderWithProviders(<LoginPage />);
+    await userEvent.type(screen.getByLabelText("Organization slug"), "acme");
+    await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByRole("heading", { name: "Sign in" });
+    await userEvent.type(screen.getByLabelText(/Username/), "root");
+    await userEvent.type(screen.getByLabelText(/^Password/), TEST_PASSWORD);
+    await userEvent.click(screen.getByRole("button", { name: /^Sign in$/ }));
+
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalled());
+    const body = apiMock.post.mock.calls.find(
+      (c) => c[0] === "/api/v1/auth/login",
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(body).toBeDefined();
+    expect(body).not.toHaveProperty("tenant_slug");
+    expect(body?.org_slug).toBe("acme");
   });
 
   it("advances to the credentials step once both slugs are filled", async () => {
@@ -157,7 +192,9 @@ describe("LoginPage — credentials step", () => {
     await goToCredentials();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(
-      screen.getByText("Enter your organization and tenant to continue."),
+      screen.getByText(
+        "Enter your organization to continue. Add a tenant only if your account belongs to one.",
+      ),
     ).toBeInTheDocument();
   });
 

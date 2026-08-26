@@ -327,6 +327,7 @@ async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
             Pagination {
                 offset: 0,
                 limit: 50,
+                search: None,
             },
         )
         .await

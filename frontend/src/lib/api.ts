@@ -5,6 +5,8 @@ import axios, {
   type AxiosError,
 } from "axios";
 import { useAuthStore } from "@/stores/auth";
+
+import { ACTIVE_TENANT_HEADER, getActiveTenant } from "@/lib/activeTenant";
 import { queryClient } from "@/lib/queryClient";
 
 const api: AxiosInstance = axios.create({
@@ -27,42 +29,6 @@ function getCookie(name: "axiam_csrf"): string | null {
 // State-changing HTTP methods that need CSRF token
 const CSRF_METHODS = new Set(["post", "put", "patch", "delete"]);
 
-/**
- * The tenant an organization-level principal is currently acting on.
- *
- * Module state rather than a store read, because the interceptor runs outside
- * React and importing the auth store here would make `api.ts` depend on it in
- * the direction that produces a cycle — the store's own actions call `api`.
- * `setActiveTenant` is the one writer, called from the auth store.
- *
- * `null` means "act on my own tenant", which is every ordinary principal and an
- * organization-level one that has not switched. The header is then omitted
- * entirely rather than sent with the caller's own tenant id: the server treats
- * a header naming the principal's own tenant as a no-op anyway, and not sending
- * it keeps ordinary requests byte-identical to what they were.
- */
-let activeTenantId: string | null = null;
-
-/** Header the server reads to decide which tenant a request acts on. */
-export const ACTIVE_TENANT_HEADER = "X-Axiam-Tenant";
-
-/**
- * Set (or clear) the tenant subsequent requests act on.
- *
- * Honoured by the server only for an organization-level principal, and only for
- * a tenant in that principal's own organization — anything else is a 403 rather
- * than a silent fallback. So sending it wrongly fails loudly instead of
- * returning another tenant's data.
- */
-export function setActiveTenant(tenantId: string | null): void {
-  activeTenantId = tenantId;
-}
-
-/** The tenant currently being acted on, or `null` for the caller's own. */
-export function getActiveTenant(): string | null {
-  return activeTenantId;
-}
-
 // Request interceptor: inject X-CSRF-Token header on state-changing requests
 // (per D-03, D-04), and the active tenant when one is selected.
 api.interceptors.request.use(
@@ -74,8 +40,11 @@ api.interceptors.request.use(
         config.headers["X-CSRF-Token"] = csrfToken;
       }
     }
-    if (activeTenantId && config.headers) {
-      config.headers[ACTIVE_TENANT_HEADER] = activeTenantId;
+        // The tenant an organization-level principal is acting on, when it has
+    // switched. Read here rather than held here — see `lib/activeTenant`.
+    const activeTenant = getActiveTenant();
+    if (activeTenant && config.headers) {
+      config.headers[ACTIVE_TENANT_HEADER] = activeTenant;
     }
     return config;
   },

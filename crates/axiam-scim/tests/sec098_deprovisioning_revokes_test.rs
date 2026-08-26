@@ -163,6 +163,7 @@ async fn user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name: &str) 
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await

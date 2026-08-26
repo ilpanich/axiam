@@ -13,6 +13,8 @@ import {
 } from "@/services/webhooks";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -322,10 +324,20 @@ function EditWebhookFields({
 export function WebhooksPage() {
   const queryClient = useQueryClient();
 
-  const { data: webhooks = [], isLoading } = useQuery({
-    queryKey: ["webhooks"],
-    queryFn: () => webhookService.list(),
-  });
+  // Server-paged and server-searched. This page used to fetch the tenant's
+  // entire collection in one request and render all of it, which is fine at ten
+  // rows and unusable at two hundred with no way to find one by name.
+  const {
+    items: webhooks,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<Webhook>(["webhooks"], "/api/v1/webhooks");
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
@@ -549,12 +561,30 @@ export function WebhooksPage() {
         }
       />
 
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        noun="webhooks"
+        className="mb-4 max-w-sm"
+        />
+
+
       <DataTable
         columns={columns}
         data={webhooks}
         isLoading={isLoading}
-        emptyMessage="No webhooks configured."
-      />
+        emptyMessage={
+          isFiltered ? "No webhooks match your search." : "No webhooks configured."
+        }
+        />
+
+
+      <PaginationControls
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
+        />
 
       {/* Create dialog */}
       <FormDialog

@@ -239,6 +239,7 @@ async fn list_paginates_and_isolates_by_tenant() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -252,6 +253,7 @@ async fn list_paginates_and_isolates_by_tenant() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await

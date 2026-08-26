@@ -158,6 +158,7 @@ async fn export_completeness() {
             Pagination {
                 offset: 0,
                 limit: 1_000,
+                search: None,
             },
         )
         .await
@@ -747,6 +748,7 @@ async fn deletion_pseudonymization() {
             Pagination {
                 offset: 0,
                 limit: 100,
+                search: None,
             },
         )
         .await

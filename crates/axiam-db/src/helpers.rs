@@ -329,6 +329,137 @@ pub fn paginate<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Free-text search
+// ---------------------------------------------------------------------------
+
+/// The SurrealQL fragment that narrows a list query to [`Pagination::search`].
+///
+/// Returns a clause to splice in after an existing `WHERE`, beginning with
+/// ` AND ` and empty when no term was given — so a caller concatenates it
+/// unconditionally and a list with no search runs exactly the query it ran
+/// before this existed.
+///
+/// # The binding is unconditional
+///
+/// `$search` is always bound (to the empty string when there is no term), even
+/// though the clause that reads it is then absent. The alternative — binding
+/// only when the clause is present — makes every call site a branch, and a
+/// caller that got the branch wrong would fail at runtime on a query variant
+/// nobody runs locally. An unused binding costs nothing.
+///
+/// # Why `CONTAINS` and not an index
+///
+/// A substring match over a tenant's rows, which is what an operator typing
+/// into a box means. It is not indexed, and the honest reason is that the
+/// alternative — SurrealDB's full-text search — tokenises, so `01a03efd` would
+/// not match `device-01_01a03efd-…` and pasting an id from a log line would
+/// silently find nothing. That is the search operators actually perform. The
+/// term is length-capped at deserialization (see `normalize_search`) so the
+/// scan is bounded.
+///
+/// Both sides are lowercased: the caller's term by
+/// [`Pagination::search_term`], the column by `string::lowercase` here.
+///
+/// # Matching the record id
+///
+/// `meta::id(id)` is always searched in addition to `fields`, so the id an
+/// operator copied out of a log line, an audit entry or a URL finds its row
+/// in the same box as a name. It is compared unlowercased — a UUID has no
+/// case — via a separate disjunct.
+pub fn search_clause(fields: &[&str]) -> String {
+    let mut disjuncts: Vec<String> = fields
+        .iter()
+        .map(|f| format!("string::lowercase({f} ?? '') CONTAINS $search"))
+        .collect();
+    disjuncts.push("meta::id(id) CONTAINS $search".to_string());
+    format!(" AND ({})", disjuncts.join(" OR "))
+}
+
+/// [`search_clause`] when `pagination` carries a term, otherwise empty.
+pub fn search_filter(pagination: &Pagination, fields: &[&str]) -> String {
+    if pagination.search_term().is_some() {
+        search_clause(fields)
+    } else {
+        String::new()
+    }
+}
+
+/// The value to bind to `$search` — lowercased, or empty when unsearched.
+pub fn search_bind(pagination: &Pagination) -> String {
+    pagination.search_term().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn paged(search: Option<&str>) -> Pagination {
+        Pagination {
+            offset: 0,
+            limit: 50,
+            search: search.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_whitespace_only_term_is_no_term() {
+        // `normalize_search` catches this on the serde path, but a `Pagination`
+        // built in code bypasses it — and `Some("   ")` would otherwise ask for
+        // rows containing three spaces, returning nothing while looking like a
+        // working filter.
+        assert_eq!(search_filter(&paged(Some("   ")), &["name"]), "");
+        assert_eq!(search_bind(&paged(Some("   "))), "");
+    }
+
+    #[test]
+    fn a_term_is_trimmed_before_matching() {
+        // Pasting an id out of a log line brings whitespace with it.
+        assert_eq!(search_bind(&paged(Some("  Admin \n"))), "admin");
+    }
+
+    #[test]
+    fn no_term_produces_no_clause() {
+        // The property that keeps an unsearched list byte-identical to what it
+        // was before search existed.
+        assert_eq!(search_filter(&paged(None), &["username"]), "");
+        assert_eq!(search_bind(&paged(None)), "");
+    }
+
+    #[test]
+    fn a_term_lowercases_both_sides() {
+        let clause = search_filter(&paged(Some("AdMiN")), &["username"]);
+        assert!(clause.contains("string::lowercase(username ?? '')"));
+        assert_eq!(search_bind(&paged(Some("AdMiN"))), "admin");
+    }
+
+    #[test]
+    fn the_record_id_is_always_searchable() {
+        // An operator with a UUID from a log line pastes it into the same box
+        // as a name; a search that only matched names would find nothing and
+        // give no hint why.
+        let clause = search_filter(&paged(Some("x")), &["name"]);
+        assert!(clause.contains("meta::id(id) CONTAINS $search"));
+    }
+
+    #[test]
+    fn the_clause_composes_onto_an_existing_where() {
+        // Spliced after `WHERE tenant_id = $tenant_id`, so it has to start with
+        // ` AND ` and bracket its own disjunction — without the brackets, one
+        // `OR` would escape and match rows in every tenant.
+        let clause = search_filter(&paged(Some("x")), &["name", "slug"]);
+        assert!(clause.starts_with(" AND ("));
+        assert!(clause.ends_with(")"));
+    }
+
+    #[test]
+    fn every_named_field_is_searched() {
+        let clause = search_filter(&paged(Some("x")), &["username", "email"]);
+        assert!(clause.contains("username"));
+        assert!(clause.contains("email"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Delete-target existence guard (SEC-104)
 // ---------------------------------------------------------------------------
 
@@ -476,6 +607,7 @@ mod tests {
         let pagination = Pagination {
             offset: 5,
             limit: 10,
+            search: None,
         };
         let result = paginate(vec![1, 2, 3], vec![], &pagination);
         assert_eq!(result.total, 0);
@@ -489,6 +621,7 @@ mod tests {
         let pagination = Pagination {
             offset: 20,
             limit: 50,
+            search: None,
         };
         let count_rows = vec![CountRow { total: 42 }];
         let result: PaginatedResult<i32> = paginate(vec![], count_rows, &pagination);

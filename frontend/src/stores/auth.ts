@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { setActiveTenant } from "@/lib/api";
+import { setActiveTenant } from "@/lib/activeTenant";
 
 export interface AuthUser {
   id: string;

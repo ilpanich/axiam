@@ -338,6 +338,7 @@ where
                 Pagination {
                     offset: req.offset,
                     limit: req.limit,
+                    search: None,
                 },
             )
             .await

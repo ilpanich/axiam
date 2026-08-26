@@ -47,6 +47,7 @@ fn pagination_direct_construction_unaffected() {
     let p = Pagination {
         offset: 0,
         limit: 500,
+        search: None,
     };
     assert_eq!(p.limit, 500, "direct struct construction is not clamped");
 }

@@ -325,6 +325,7 @@ async fn list_roles_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -339,6 +340,7 @@ async fn list_roles_with_pagination() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await

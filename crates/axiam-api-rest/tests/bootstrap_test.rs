@@ -456,6 +456,7 @@ async fn bootstrap_concurrent_race_single_admin() {
             Pagination {
                 offset: 0,
                 limit: 10,
+                search: None,
             },
         )
         .await

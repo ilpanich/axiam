@@ -179,6 +179,7 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
             Pagination {
                 offset: 0,
                 limit: 100,
+                search: None,
             },
         )
         .await

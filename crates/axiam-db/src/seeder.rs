@@ -224,6 +224,7 @@ pub async fn seed_default_roles<C: Connection>(
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -273,6 +274,7 @@ pub async fn seed_default_roles<C: Connection>(
             Pagination {
                 offset: 0,
                 limit: 10_000,
+                search: None,
             },
         )
         .await
@@ -390,6 +392,7 @@ async fn find_or_create_role<C: Connection>(
                             Pagination {
                                 offset: 0,
                                 limit: 1000,
+                                search: None,
                             },
                         )
                         .await
@@ -486,6 +489,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -513,6 +517,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
             Pagination {
                 offset: 0,
                 limit: 10_000,
+                search: None,
             },
         )
         .await

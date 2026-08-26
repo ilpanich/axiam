@@ -28,6 +28,15 @@ export interface Certificate {
   status: CertificateStatus;
   metadata: unknown;
   created_at: string;
+  /**
+   * The service account this certificate authenticates, or `null`.
+   *
+   * Present on list responses (`CertificateWithBinding` on the wire). The
+   * binding is a graph edge server-side, so before it was projected here there
+   * was no way for any page to show whether a certificate was bound — you could
+   * bind one and find no trace of it in the product.
+   */
+  bound_service_account_id?: string | null;
 }
 
 /** The bind endpoint's acknowledgement. */

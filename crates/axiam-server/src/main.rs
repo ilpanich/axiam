@@ -518,6 +518,7 @@ async fn main() -> std::io::Result<()> {
             .list(Pagination {
                 offset: 0,
                 limit: 10_000,
+                search: None,
             })
             .await
             .expect("Failed to list organizations for permission seeding");
@@ -529,6 +530,7 @@ async fn main() -> std::io::Result<()> {
                     Pagination {
                         offset: 0,
                         limit: 10_000,
+                        search: None,
                     },
                 )
                 .await

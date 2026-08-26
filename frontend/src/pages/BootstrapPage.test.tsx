@@ -17,7 +17,7 @@ import { renderWithProviders } from "@/test/renderWithProviders";
 const STRONG_PASSWORD = "StrongPass1!";
 
 // Typing the organization name auto-derives the org slug ("Acme Corp" ->
-// "acme-corp"); the tenant name/slug default to "Default"/"default".
+// "acme-corp"). No tenant fields: bootstrap no longer creates one.
 async function fillValidForm() {
   await userEvent.type(screen.getByLabelText("Organization name"), "Acme Corp");
   await userEvent.type(screen.getByLabelText("Email address"), "admin@example.com");
@@ -28,8 +28,10 @@ async function fillValidForm() {
 const EXPECTED_PAYLOAD = {
   organization_name: "Acme Corp",
   organization_slug: "acme-corp",
-  tenant_name: "Default",
-  tenant_slug: "default",
+  // No tenant. Bootstrap provisions the organization's own scope and puts the
+  // administrator in it, so that administrator reaches every tenant created
+  // afterwards. Creating a tenant here is what used to leave every *later*
+  // tenant unreachable by everybody, the bootstrap admin included.
   email: "admin@example.com",
   username: "admin",
   password: STRONG_PASSWORD,
@@ -103,9 +105,9 @@ describe("BootstrapPage", () => {
         EXPECTED_PAYLOAD
       )
     );
-    expect(navigate).toHaveBeenCalledWith(
-      "/login?bootstrapped=1&org=acme-corp&tenant=default"
-    );
+    // No `tenant` param either: the login page reads a blank tenant as
+    // "sign in at organization level", which is what this administrator is.
+    expect(navigate).toHaveBeenCalledWith("/login?bootstrapped=1&org=acme-corp");
   });
 
   it("includes the setup token when provided", async () => {

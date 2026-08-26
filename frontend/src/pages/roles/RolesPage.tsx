@@ -9,6 +9,8 @@ import {
 } from "@/services/roles";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -19,20 +21,42 @@ import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleField } from "@/components/shared";
 import { useCrudMutations } from "@/hooks/useCrudMutations";
+import {
+  reachLabel,
+  reachTitle,
+  roleReach,
+  useIsOrganizationScope,
+} from "@/lib/grantReach";
 
-// ─── Global badge ─────────────────────────────────────────────────────────────
+// ─── Reach badge ──────────────────────────────────────────────────────────────
 
-function GlobalBadge({ isGlobal }: { isGlobal: boolean }) {
+/**
+ * How far this role's grants reach.
+ *
+ * The previous labels were `is_global ? "Global" : "Tenant"`, which was
+ * backwards in one case and ambiguous in the other: a *resource-scoped* role —
+ * the narrowest kind there is — was labelled "Tenant", and a global role was
+ * labelled "Global" whether it reached one tenant or every tenant in the
+ * organization. See `@/lib/grantReach` for why the underlying `is_global` field
+ * keeps its name.
+ */
+function ReachBadge({ isGlobal }: { isGlobal: boolean }) {
+  const organizationScope = useIsOrganizationScope();
+  const reach = roleReach(isGlobal, organizationScope);
   return (
     <span
+      title={reachTitle(reach)}
       className={cn(
         "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
-        isGlobal
-          ? "bg-purple-500/15 text-purple-400 border-purple-500/30"
-          : "bg-cyan-500/10 text-cyan-400 border-cyan-500/20"
+        reach === "organization" &&
+          "bg-amber-500/15 text-amber-400 border-amber-500/30",
+        reach === "tenant" &&
+          "bg-purple-500/15 text-purple-400 border-purple-500/30",
+        reach === "resource" &&
+          "bg-cyan-500/10 text-cyan-400 border-cyan-500/20"
       )}
     >
-      {isGlobal ? "Global" : "Tenant"}
+      {reachLabel(reach)}
     </span>
   );
 }
@@ -62,6 +86,7 @@ function RoleFormFields({
   descriptionId,
   toggleId,
 }: RoleFormFieldsProps) {
+  const organizationScope = useIsOrganizationScope();
   return (
     <>
       <div className="space-y-2">
@@ -85,9 +110,18 @@ function RoleFormFields({
           placeholder="Optional description…"
         />
       </div>
+      {/* The old label read "applies across all tenants", which was untrue for
+          every tenant-level role ever created: a global role applies to every
+          *resource* in the scope it lives in. It is true only for a role in the
+          organization's own tenant — so the label now says which case you are
+          in rather than asserting the stronger one always. */}
       <ToggleField
         id={toggleId}
-        label="Global role (applies across all tenants)"
+        label={
+          organizationScope
+            ? "Organization-wide role (applies to every tenant)"
+            : "Tenant-wide role (applies to every resource in this tenant)"
+        }
         checked={isGlobal}
         onChange={onIsGlobalChange}
       />
@@ -100,10 +134,20 @@ function RoleFormFields({
 export function RolesPage() {
   const navigate = useNavigate();
 
-  const { data: roles = [], isLoading } = useQuery({
-    queryKey: ["roles"],
-    queryFn: () => roleService.list(),
-  });
+  // Server-paged and server-searched. The page used to fetch every role in the
+  // tenant in one request and render all of them; that is fine at ten roles and
+  // a wall of rows at two hundred, with no way to find one by name.
+  const {
+    items: roles,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<Role>(["roles"], "/api/v1/roles");
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
@@ -208,8 +252,8 @@ export function RolesPage() {
     },
     {
       key: "is_global",
-      header: "Scope",
-      render: (row) => <GlobalBadge isGlobal={row.is_global} />,
+      header: "Reach",
+      render: (row) => <ReachBadge isGlobal={row.is_global} />,
     },
     {
       key: "created_at",
@@ -270,11 +314,27 @@ export function RolesPage() {
         }
       />
 
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        noun="roles"
+        className="mb-4 max-w-sm"
+      />
+
       <DataTable
         columns={columns}
         data={roles}
         isLoading={isLoading}
-        emptyMessage="No roles found."
+        emptyMessage={
+          isFiltered ? "No roles match your search." : "No roles found."
+        }
+      />
+
+      <PaginationControls
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
       />
 
       {/* Create dialog */}

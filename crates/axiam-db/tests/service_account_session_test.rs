@@ -194,6 +194,7 @@ async fn list_service_accounts_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await

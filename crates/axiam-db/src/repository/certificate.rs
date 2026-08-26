@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
+};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -336,13 +338,24 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     ) -> AxiamResult<PaginatedResult<Certificate>> {
         let tenant_id_str = tenant_id.to_string();
 
-        let count_sql = "SELECT count() AS total FROM certificate \
-                         WHERE tenant_id = $tenant_id GROUP ALL";
+        // Free-text filter, applied to BOTH queries below so the
+        // total counts matches rather than rows — a pager whose page
+        // count belongs to a different result set than the page it
+        // shows is worse than no pager. Empty when unsearched, so an
+        // unfiltered list runs exactly the query it always ran.
+        let search = search_filter(&pagination, &["subject", "fingerprint"]);
+        let search_term = search_bind(&pagination);
+
+        let count_sql = format!(
+            "SELECT count() AS total FROM certificate \
+                         WHERE tenant_id = $tenant_id{search} GROUP ALL"
+        );
         let count_result = self
             .db
             .current()
             .query(count_sql)
             .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("search", search_term.clone()))
             .await
             .map_err(DbError::from)?;
         let mut count_result = count_result
@@ -350,15 +363,18 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
 
-        let data_sql = "SELECT meta::id(id) AS record_id, * FROM certificate \
-                        WHERE tenant_id = $tenant_id \
+        let data_sql = format!(
+            "SELECT meta::id(id) AS record_id, * FROM certificate \
+                        WHERE tenant_id = $tenant_id{search} \
                         ORDER BY created_at DESC \
-                        LIMIT $limit START $offset";
+                        LIMIT $limit START $offset"
+        );
         let data_result = self
             .db
             .current()
             .query(data_sql)
             .bind(("tenant_id", tenant_id_str))
+            .bind(("search", search_term))
             .bind(("limit", pagination.limit))
             .bind(("offset", pagination.offset))
             .await
@@ -433,6 +449,53 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             return Err(classify_write_error(msg, "certificate_binding").into());
         }
         Ok(())
+    }
+
+    async fn bound_service_accounts(
+        &self,
+        cert_ids: &[Uuid],
+    ) -> AxiamResult<std::collections::HashMap<Uuid, Uuid>> {
+        use std::collections::HashMap;
+
+        if cert_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        #[derive(Debug, SurrealValue)]
+        struct EdgeRow {
+            cert_id: String,
+            sa_id: String,
+        }
+
+        // One query for the whole page. The `in` side is compared as a record
+        // id, so the list is built from the ids rather than bound as strings —
+        // they are UUIDs that came from the rows this method's caller just
+        // read, so there is nothing here an outside caller can shape.
+        let targets = cert_ids
+            .iter()
+            .map(|id| format!("certificate:`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT meta::id(in) AS cert_id, meta::id(out) AS sa_id \
+             FROM cert_bound_to WHERE in IN [{targets}]"
+        );
+
+        let result = self.db.current().query(&sql).await.map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<EdgeRow> = result.take(0).map_err(DbError::from)?;
+
+        let mut out = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let cert = Uuid::parse_str(&row.cert_id)
+                .map_err(|e| DbError::Migration(format!("invalid certificate UUID: {e}")))?;
+            let sa = Uuid::parse_str(&row.sa_id)
+                .map_err(|e| DbError::Migration(format!("invalid service account UUID: {e}")))?;
+            out.insert(cert, sa);
+        }
+        Ok(out)
     }
 
     async fn get_bound_service_account(&self, cert_id: Uuid) -> AxiamResult<Option<Uuid>> {

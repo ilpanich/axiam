@@ -210,6 +210,7 @@ async fn create_user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name:
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -249,6 +250,7 @@ async fn least_privilege_scim_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uui
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await

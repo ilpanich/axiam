@@ -184,7 +184,14 @@ pub async fn set_org_settings<C: Connection + Clone>(
         loop {
             let page = state
                 .tenant_repo
-                .list_by_organization(org_id, Pagination { offset, limit: 200 })
+                .list_by_organization(
+                    org_id,
+                    Pagination {
+                        offset,
+                        limit: 200,
+                        search: None,
+                    },
+                )
                 .await?;
             let count = page.items.len() as u64;
             for tenant in page.items {

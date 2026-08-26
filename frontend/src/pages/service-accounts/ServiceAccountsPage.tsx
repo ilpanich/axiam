@@ -1,7 +1,15 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, RotateCw, FileKey } from "lucide-react";
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  RotateCw,
+  FileKey,
+  ShieldCheck,
+  ShieldOff,
+} from "lucide-react";
 import {
   serviceAccountService,
   type ServiceAccount,
@@ -21,7 +29,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDate } from "@/lib/utils";
 import { ToggleField } from "@/components/shared";
-import { certificateService, type CertificateType } from "@/services/certificates";
+import {
+  certificateService,
+  type Certificate,
+  type CertificateType,
+} from "@/services/certificates";
 import { usePermissions } from "@/hooks/usePermissions";
 import { invalidateEntity } from "@/lib/queryInvalidation";
 
@@ -302,8 +314,24 @@ export function ServiceAccountsPage() {
   const { data: allCertificates = [] } = useQuery({
     queryKey: ["certificates"],
     queryFn: () => certificateService.list(),
-    enabled: canBindCertificate && bindAccount !== null,
+    // Not gated on the bind dialog any more. The "Certificate" column below
+    // needs this on every render — gating it meant the page could only learn
+    // about bindings *while* someone was creating one, which is the moment they
+    // least need telling.
+    enabled: canBindCertificate,
   });
+
+  // Which service account each certificate authenticates, keyed the way the
+  // table reads it. Built once per render rather than scanned per row.
+  const certificateBySaId = useMemo(() => {
+    const map = new Map<string, Certificate>();
+    for (const cert of allCertificates) {
+      if (cert.bound_service_account_id) {
+        map.set(cert.bound_service_account_id, cert);
+      }
+    }
+    return map;
+  }, [allCertificates]);
 
   // Device certificates belong here as much as Service ones. An IoT device
   // authenticating by mTLS *is* a machine principal, and binding its
@@ -390,6 +418,37 @@ export function ServiceAccountsPage() {
           {row.client_id}
         </span>
       ),
+    },
+    {
+      key: "certificate",
+      header: "Certificate",
+      render: (row) => {
+        const cert = certificateBySaId.get(row.id);
+        if (!cert) {
+          return (
+            <span
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground/60"
+              title="No certificate is bound — this account authenticates by client secret only"
+            >
+              <ShieldOff size={12} aria-hidden="true" />
+              None
+            </span>
+          );
+        }
+        const expired = new Date(cert.not_after) < new Date();
+        return (
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 text-xs font-mono max-w-[200px] truncate",
+              expired ? "text-amber-400" : "text-emerald-400"
+            )}
+            title={`${cert.subject}\nFingerprint ${cert.fingerprint}\nExpires ${formatDate(cert.not_after)}`}
+          >
+            <ShieldCheck size={12} aria-hidden="true" className="shrink-0" />
+            {cert.fingerprint.slice(0, 12)}…
+          </span>
+        );
+      },
     },
     {
       key: "status",

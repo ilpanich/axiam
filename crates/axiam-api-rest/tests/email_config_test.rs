@@ -173,6 +173,7 @@ async fn create_admin(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await

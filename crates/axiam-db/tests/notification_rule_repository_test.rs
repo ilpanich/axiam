@@ -199,6 +199,7 @@ async fn list_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 2,
+                search: None,
             },
         )
         .await

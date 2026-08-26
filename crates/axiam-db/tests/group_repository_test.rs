@@ -170,6 +170,7 @@ async fn list_groups_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -184,6 +185,7 @@ async fn list_groups_with_pagination() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -243,6 +245,7 @@ async fn add_and_get_members() {
             Pagination {
                 offset: 0,
                 limit: 10,
+                search: None,
             },
         )
         .await
@@ -285,6 +288,7 @@ async fn remove_member() {
             Pagination {
                 offset: 0,
                 limit: 10,
+                search: None,
             },
         )
         .await

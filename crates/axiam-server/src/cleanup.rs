@@ -772,6 +772,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     Pagination {
                         offset,
                         limit: AUDIT_PAGE_SIZE,
+                        search: None,
                     },
                 )
                 .await?;

@@ -10,8 +10,9 @@
 
 ### Where the SDKs live
 
-Each SDK is its own repository — the AXIAM repository keeps only this contract and
-[`openapi.json`](openapi.json), which are the two inputs every SDK builds against:
+Each SDK is its own repository — the AXIAM repository keeps only this contract,
+[`openapi.json`](openapi.json) and [`management-registry.json`](management-registry.json),
+which are the three inputs every SDK builds against:
 
 | Language | Repository |
 |----------|------------|
@@ -28,8 +29,11 @@ Each SDK is its own repository — the AXIAM repository keeps only this contract
 | C++ | [`ilpanich/axiam-cplusplus-sdk`](https://github.com/ilpanich/axiam-cplusplus-sdk) |
 
 **This file is the source of truth.** A copy is vendored at the root of every SDK repository
-(alongside a copy of `openapi.json` and of `proto/`); when this file changes, the copies must
-be re-synced. File paths quoted below (`crates/…`, `proto/…`) are relative to the AXIAM
+(alongside a copy of `openapi.json`, of `management-registry.json`, and of `proto/`); when
+this file changes, the copies must be re-synced. `management-registry.json` is *generated*
+(`scripts/gen-management-registry.py`) and is re-synced downstream like the others; it is
+never edited in an SDK repository, and §27.8 requires each SDK's CI to regenerate its
+management layer from it and diff. File paths quoted below (`crates/…`, `proto/…`) are relative to the AXIAM
 repository; SDK source paths are relative to that SDK's own repository root.
 
 ---
@@ -3088,6 +3092,18 @@ stated by name when shipped:
 
 > "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17 and §19."
 
+§27 (management API, SHOULD) is stated by name for the same reason §14/§15 are — several
+SDKs have already published a §1–§13 claim, and widening a range silently would turn a
+true statement into a false one without anyone editing it:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19 and §27."
+
+An SDK that ships §27's imperative surface but not the §27.6 declarative manifest states
+§27 all the same — the manifest is SHOULD-level *within* a SHOULD-level section — but its
+README MUST say which of the two it has, because "supports management" is otherwise read
+as both. As with every other section here, the statement follows the code in that
+repository, never this contract's expectation of it.
+
 Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
 shipped).
@@ -3125,6 +3141,18 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-08 (§27 — management API, contract 1.30)** — **not breaking.** Recorded here
+  because of its size rather than its risk: it is the largest single addition this
+  contract has taken, and an SDK author reading only this log would otherwise miss it.
+  §27 adds 146 operations across 24 namespaces, all of them additive and all of them on
+  namespace handles rather than on the client object, so §1's vocabulary lock is
+  untouched and no existing name changes meaning. The three error sub-types it introduces
+  (`NotFoundError`, `ConflictError`, `ValidationError`) are language-idiomatic sub-types
+  of existing §2 types, as §2 already permits, so code catching the parents keeps
+  compiling and keeps working. The one genuinely new artifact is
+  `management-registry.json`, which every SDK now vendors alongside `openapi.json` and
+  regenerates its management layer from.
 
 - **2026-08 (§25.2 rule 1 — `login` gains a third outcome, contract 1.28)** —
   **breaking for any SDK whose login result is exhaustively matched by callers.**
@@ -5647,6 +5675,541 @@ is not sensitive.
   debug rendering — scan the serialized output for the fixture values.
 - An end-to-end assertion that the `code_verifier` surviving from `oidc_begin`
   through the push is the one `oidc_exchange` sends.
+
+---
+
+## §27 Management API (M1)
+
+**Requirement level: SHOULD (v1.0), contract 1.30.** Every section before this one
+assumes a populated tenant. §1 logs a user in; §10 guards a route with a role; §13
+verifies a webhook's signature; §22 runs a reactor. None of them can create the user,
+define the role, register the webhook, or declare the reactor — so until now an
+application built on an AXIAM SDK authenticated users it could not create and checked
+access to resources it could not declare. The tenant had to be built first, by hand,
+through `curl` or the admin UI, and every application that needed to build one at
+runtime hand-rolled HTTP against paths its SDK already knew.
+
+That is the same gap [§25](#§25-account-lifecycle-and-mfa-enrolment-w2) closed for the
+nine account-lifecycle endpoints, at sixteen times the surface area. This section closes
+it for the rest: **146 operations across 24 namespaces**, which is the entire server API
+minus the routes other sections already own and minus the two the
+[§27.0](#§270-the-boundary) boundary deliberately excludes.
+
+An SDK that ships §1–§26 without this section remains conformant. An SDK that ships it
+states §27 by name (see [Conformance Statement](#conformance-statement)) — by name rather
+than by extending a range, for the reason §14/§15 are: several SDKs have already stated
+their conformance, and silently widening a range turns a true statement into a false one
+without anyone editing it.
+
+### §27.0 The boundary
+
+**In scope: everything in [`management-registry.json`](management-registry.json).** That
+file is generated from [`openapi.json`](openapi.json) by
+`scripts/gen-management-registry.py` and is the normative vocabulary of this section —
+not the tables below, which are rendered from it for a human reader and which a
+disagreement resolves *against*.
+
+Two routes are excluded by this contract rather than by belonging to another section:
+
+| Route | Why it is not SDK surface |
+|-------|---------------------------|
+| `POST /api/v1/organizations` | Provisioning an organization is a platform-operator act. It allocates the CA trust root every tenant beneath it chains to, and it happens once, out of band, before any SDK client has a tenant to be constructed with. |
+| `DELETE /api/v1/organizations/{org_id}` | Destroying an organization destroys every tenant, user, role and certificate under it. There is no application-level use for it and no undo, so it is deliberately unreachable from a client library. |
+
+Everything else an organization-scoped route offers **is** in scope, including
+`ca_certificates` and org-level `settings` and `email_config` — a client that could not
+reach them could not create a tenant or issue a device certificate, which is most of what
+this section exists for.
+
+The remaining server routes belong to sections that already specify them, and are
+excluded by tag:
+
+| Tag | Owned by |
+|-----|----------|
+| `auth` | §1 login/MFA/refresh/logout, §23 OPAQUE, §25 account lifecycle |
+| `authz` | §1 `check_access` / `batch_check` |
+| `oauth2` | §12 RP helpers, §14 device grant, §15 token exchange, §26 PAR |
+| `oidc` | §12 discovery/JWKS; `/oauth2/userinfo` is §1.1 gRPC-only by design |
+| `uma` | §20 UMA 2.0 protection API and ticket grant |
+| `webauthn` | §24 ceremonies — credential I/O, not administration |
+| `federation-sso` | §12 public SSO entry points |
+| `device` | §14 device-grant user-interaction endpoints |
+
+**The vocabulary is derived, not declared.** §1 locks eight method names in a table a
+human reviews. That does not scale to 146 across eleven languages: the table would be
+wrong by the next release. So an SDK's §27 surface **MUST** be generated from
+`management-registry.json` and **MUST NOT** be hand-maintained. Two gates in the AXIAM
+repository's CI enforce the registry's own correctness — one fails when it names a route
+the server no longer serves, the other when a live management route is claimed by no
+namespace and excluded by no stated reason. The second is the one that matters: without
+it, adding a handler to `axiam-api-rest` silently creates surface no SDK can reach.
+
+### §27.1 Namespaces and the canonical operation set
+
+Rendered from `management-registry.json`. The five CRUD verbs read identically in every
+namespace that has them — `list`, `create`, `get`, `update`, `delete` — and anything
+beyond CRUD says what it does. `generate` rather than `create` marks the namespaces where
+the server mints key material the caller never supplies.
+
+| Namespace | Ops | Operations |
+|-----------|-----|------------|
+| `organizations` | 3 | `list`, `get`, `update` |
+| `tenants` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `users` | 10 | `list`, `create`, `get`, `update`, `delete`, `list_mfa_methods`, `delete_mfa_method`, `reset_mfa`, `unlock`, `list_roles` |
+| `groups` | 9 | `list`, `create`, `get`, `update`, `delete`, `list_members`, `add_member`, `remove_member`, `list_roles` |
+| `roles` | 14 | `list`, `create`, `get`, `update`, `delete`, `list_users`, `assign_to_user`, `unassign_from_user`, `list_groups`, `assign_to_group`, `unassign_from_group`, `list_permissions`, `grant_permission`, `revoke_permission` |
+| `permissions` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `resources` | 7 | `list`, `create`, `get`, `update`, `delete`, `list_children`, `list_ancestors` |
+| `scopes` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `service_accounts` | 7 | `list`, `create`, `get`, `update`, `delete`, `rotate_secret`, `bind_certificate` |
+| `certificates` | 4 | `list`, `generate`, `get`, `revoke` |
+| `ca_certificates` | 10 | `list`, `generate`, `import_ca`, `get`, `revoke`, `migrate_custody`, `set_mtls_trust_anchor`, `list_signing_cas`, `generate_signing_ca`, `sign_signing_ca_csr` |
+| `pgp_keys` | 6 | `list`, `generate`, `get`, `revoke`, `encrypt`, `sign_audit_batch` |
+| `webhooks` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `oauth2_clients` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `federation` | 9 | `list_configs`, `create_config`, `get_config`, `update_config`, `delete_config`, `list_user_links`, `delete_link`, `oidc_authorize`, `oidc_callback` |
+| `notification_rules` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `email_config` | 8 | `get_org`, `set_org`, `delete_org`, `test_org`, `get_tenant`, `set_tenant`, `delete_tenant`, `test_tenant` |
+| `settings` | 7 | `get_org`, `set_org`, `get_effective`, `set_effective`, `get_tenant_override`, `set_tenant_override`, `delete_tenant_override` |
+| `scim_tokens` | 3 | `list`, `create`, `revoke` |
+| `reactors` | 6 | `list`, `create`, `get`, `update`, `delete`, `list_events` |
+| `webauthn_policy` | 3 | `get`, `set`, `compliance_report` |
+| `audit` | 2 | `list`, `list_system` |
+| `privacy` | 4 | `request_export`, `download_export`, `request_delete`, `cancel_delete` |
+| `platform` | 4 | `health`, `ready`, `mds_status`, `mds_refresh` |
+
+### §27.2 The surface is namespaced, not flat
+
+§1's eight operations sit directly on the client. This section's 146 **MUST NOT**. An SDK
+exposes each namespace as a handle reached from the client, and the operations on that
+handle:
+
+```
+client.users().list()            client.roles().assign_to_user(role_id, user_id)
+client.tenants().create(spec)    client.certificates().generate(spec)
+```
+
+Three reasons this is normative rather than stylistic:
+
+1. **The names collide.** Twenty namespaces have a `list`; fourteen have a `get`. Flattened,
+   every one needs a disambiguating prefix, and `listUsers`/`listRoles`/`listRolePermissions`
+   is a naming scheme that has to be invented once per operation and remembered by every
+   caller. Namespaced, `list` means `list` everywhere.
+2. **146 methods on one object is not an API.** It is a wall. Every SDK's client already
+   carries §1, §12, §14, §15, §20, §24, §25 and §26; adding the management surface flat
+   would roughly quintuple it and bury the eight operations most callers actually want.
+3. **It keeps §1's vocabulary lock meaningful.** §1 forbids new login/auth/authz method
+   names on the client. Namespacing means this section adds *no* names to that object at
+   all — only namespace accessors — so the lock stays exactly as tight as it was.
+
+**Handle rules (normative).**
+
+1. A namespace handle is **cheap and stateless**. It borrows or references the client and
+   carries no configuration, no connection and no cached data of its own. Acquiring one
+   performs **no I/O**. An SDK MAY return a fresh handle on every access or memoize one; a
+   caller MUST NOT be able to tell the difference.
+2. A handle **MUST NOT** outlive its client, and where the language can express that
+   (Rust lifetimes, C++ references, a C handle that borrows), it MUST.
+3. Handles **MUST NOT** be constructible independently of a client. There is no
+   `new UsersApi(baseUrl)` — that would be a second client, with none of §3–§9's
+   machinery attached to it.
+4. The whole management surface **SHOULD** additionally be reachable behind one accessor
+   (`client.management()`, `client.admin`) for SDKs whose client object is already large;
+   where an SDK offers both, the two MUST return equivalent handles.
+
+### §27.3 Per-language naming map
+
+The namespace name is `snake_case` in the registry; each SDK casts it and the operation
+name into its own §1 convention. Nothing here introduces a new convention — this is the
+existing per-language casing applied to a derived vocabulary.
+
+| Language | Accessor | Example |
+|----------|----------|---------|
+| Rust | method, `snake_case` | `client.service_accounts().rotate_secret(id)` |
+| TypeScript | property, `camelCase` | `client.serviceAccounts.rotateSecret(id)` |
+| Python | property, `snake_case` | `client.service_accounts.rotate_secret(id)` |
+| Java | method, `camelCase` | `client.serviceAccounts().rotateSecret(id)` |
+| C# | property, `PascalCase`, `Async` suffix | `client.ServiceAccounts.RotateSecretAsync(id)` |
+| PHP | method, `camelCase` | `$client->serviceAccounts()->rotateSecret($id)` |
+| Go | method, `PascalCase` | `client.ServiceAccounts().RotateSecret(ctx, id)` |
+| Kotlin | property, `camelCase`, `suspend` | `client.serviceAccounts.rotateSecret(id)` |
+| Swift | property, `camelCase`, `async` | `client.serviceAccounts.rotateSecret(id)` |
+| C++ | method, `snake_case` | `client.service_accounts().rotate_secret(id)` |
+| C | free function, `axiam_<ns>_<op>` | `axiam_service_accounts_rotate_secret(client, id, &out)` |
+
+C has no handle to hang operations on, so it keeps §1's flat prefixed-function shape and
+carries the namespace in the symbol. That is the same accommodation §1 already makes for
+it, and it is why the registry's namespace names are chosen to read as identifier
+fragments.
+
+The §1.1 async-naming rule applies unchanged: a language whose §1 surface is
+`suspend`/`async`/`*Async` keeps that discipline here, and an SDK that ships both
+synchronous and asynchronous twins ships them for all 146 operations or for none.
+
+### §27.4 Semantics (normative, identical in all SDKs)
+
+1. **Authentication precondition.** Every operation but the four in `platform` and
+   `privacy.cancel_delete` carries `security: [bearer]`. Calling one with no token MUST
+   raise the §2 `AuthError` **client-side, with zero wire calls** — the same rule §1.1
+   rule 3 states for `get_user_info`. An SDK that lets the request go out trades a clear
+   local error for a 401 that then enters the §9 refresh guard and fails there, which is
+   two indirections away from the actual mistake.
+
+2. **Identifiers are UUIDs.** Every `{…_id}` path parameter on this surface is a UUID.
+   Slugs are **not** accepted — unlike `login`, which takes a tenant slug because it must
+   work before the caller knows any UUID. An SDK MUST reject a non-UUID identifier
+   client-side (§2 `NetworkError`, "SDK programming error"), with no wire call.
+
+3. **Implicit path context.** `{org_id}` and `{tenant_id}` appear in 30 of the 146 routes,
+   and in almost every call they are the client's own. An SDK MUST default them from the
+   client's configured `org_id`/`tenant_id`, and MUST accept an explicit argument that
+   overrides the default (a platform-admin token legitimately administers a tenant other
+   than the one the client was constructed with).
+   - A client constructed with `tenant_slug` but no `tenant_id`, calling a route that
+     needs `{tenant_id}`, MUST fail **client-side** with a §2 `NetworkError` naming the
+     missing configuration. It MUST NOT resolve the slug behind the caller's back — a
+     silent extra round-trip on an admin path is exactly the behaviour §12.1 rule 2
+     forbids for the same reason.
+   - The `X-Tenant-ID` header of §5 rule 2 is still sent on every request regardless, and
+     is **not** a substitute for the path parameter.
+
+4. **Pagination.** Twenty operations take `offset`/`limit` and return the envelope
+   `{ items, total, offset, limit }`. An SDK MUST:
+   - return a typed `Page<T>` (or the language's equivalent) exposing all four fields —
+     never a bare list, which throws away `total` and leaves the caller unable to tell a
+     complete result from a truncated one;
+   - offer an auto-paging form (`list_all`, an iterator, an async stream) that walks to
+     exhaustion; and
+   - **never silently truncate.** An SDK MUST NOT quietly apply a default `limit` and
+     return the first page as though it were the whole set. Where a default is applied it
+     is the server's, and `total` tells the caller the rest exists.
+   The remaining thirteen collection reads return a **bare array** and are not paginated
+   (`scopes.list`, `users.list_roles`, `roles.list_permissions`, …). An SDK MUST NOT
+   invent pagination for them, and MUST NOT model them as `Page<T>` — the registry's
+   `paginated` flag says which is which.
+
+5. **Update has two shapes, and confusing them destroys data.** The registry's
+   `update_style` distinguishes them:
+   - **`sparse` (17 operations).** The body's fields are all optional; an absent field
+     means *leave unchanged*. `users().update(id, { email })` changes the email and
+     nothing else.
+   - **`replace` (4 operations: `settings.set_org`, `email_config.set_org`,
+     `webauthn_policy.set`, `ca_certificates.set_mtls_trust_anchor`).** The body's fields
+     are required. This is a **replacement**: what is omitted is not preserved, it is
+     gone. `SetOrgSettings` requires twenty fields, and a PUT carrying only the two
+     somebody meant to change silently resets the other eighteen to whatever the request
+     type's defaults are.
+
+   An SDK MUST model the two differently — an all-optional patch type for `sparse`, an
+   all-required value type for `replace` — so that the compiler, not a runbook, is what
+   stops someone raising a lockout threshold and wiping the password policy on the way
+   past. For every `replace` operation the SDK MUST document the read-modify-write pattern
+   beside it, and SHOULD offer the composed form (`settings().update_org(|s| …)`) that
+   performs the `get` first.
+
+   **Null is not absent.** In a `sparse` body, omitting a field leaves it unchanged;
+   sending it as `null` sets it to null where the field is nullable. A language whose
+   serializer emits every field of a struct — including the ones the caller never set —
+   turns every sparse update into a replacement. An SDK MUST ensure unset fields are
+   omitted from the wire body, and MUST have a test that asserts on the **exact** key set
+   of the serialized request, not on the presence of the field that was set.
+
+6. **Deletes are not idempotent, and MUST NOT be made to look it.** A second `delete`
+   returns 404. An SDK MUST surface that as `NotFoundError` (rule 7) and MUST NOT swallow
+   it into a success — a caller retrying a failed delete needs to know whether it is
+   finishing the job or looking at someone else's.
+
+7. **Error mapping.** §2 governs, unchanged, with three sub-types this section adds. Each
+   is a **language-idiomatic sub-type of an existing §2 type**, as §2's opening paragraph
+   permits, so a caller catching the parent keeps working and this is additive:
+
+   | Status | Type | Parent | Why that parent |
+   |--------|------|--------|-----------------|
+   | 404 | `NotFoundError` | `AuthzError` | §2 has no 404 row because nothing before this section could produce one. In a multi-tenant IAM "does not exist" and "is not yours" are **deliberately** indistinguishable: the server answers 404 for a resource in another tenant precisely so that a probing caller cannot enumerate one. Sorting it under `AuthzError` says what it means. |
+   | 409 | `ConflictError` | `AuthzError` | §2 already maps 409 to `AuthzError`, described as "resource-level access denied". On this surface it is nearly always a uniqueness violation — a role by that name exists. The sub-type keeps §2's mapping while giving the caller something to act on. |
+   | 400, 422 | `ValidationError` | `NetworkError` | §2 maps 400 to `NetworkError` as "SDK programming error". On this surface a 400 is usually a *user's* invalid input, not the SDK's. The parent is inherited from §2 rather than chosen here; the sub-type exists so an application can tell a rejected email address from a broken connection without matching on strings. |
+
+   `ValidationError` SHOULD carry the server's field-level detail where the response body
+   provides it. None of the three may be raised for a status the table does not name.
+
+8. **Retry.** [§16](#§16-retry-policy-d5) governs and is not widened. Every `GET` on this
+   surface is read-only and therefore retry-eligible under §16.2; every `POST`, `PUT` and
+   `DELETE` is **not**, including the ones that look idempotent. `roles.assign_to_user`
+   twice is harmless, but `certificates.generate` twice mints two certificates and
+   `service_accounts.rotate_secret` twice invalidates the secret the first call returned
+   and the caller has already stored. An SDK MUST NOT special-case any write here as
+   retriable, and MUST NOT retry on a `ConflictError` — a 409 is the server telling the
+   truth, not a transient fault.
+
+9. **`Sensitive<T>`.** See [§27.5](#§275-sensitivet-applicability). §7 applies in full.
+
+10. **No caching.** An SDK MUST NOT cache management reads. The §17 decision memo is
+    scoped to authorization decisions and does not extend here; a stale role list is how
+    an administrator concludes a permission change did not take.
+
+11. **Telemetry.** Where the SDK ships [§19](#§19-telemetry-hooks-d5), management calls
+    emit the same request/response events as any other REST call, with the namespace and
+    operation as the operation label (`management.users.create`). Event payloads MUST NOT
+    carry any field named in §27.5.
+
+### §27.5 `Sensitive<T>` applicability
+
+Fourteen operations carry secret material. The registry names them and the exact fields,
+under `sensitive_request_fields` / `sensitive_response_fields`, so this is a generated
+property of the surface rather than a list somebody remembers to update.
+
+| Operation | Direction | Field | Note |
+|-----------|-----------|-------|------|
+| `users.create` | request | `password` | The initial password. Supplied by the caller, never returned. |
+| `service_accounts.create` | response | `client_secret` | Returned **once**. Only its hash is kept server-side. |
+| `service_accounts.rotate_secret` | response | `client_secret` | Returned **once**, and invalidates the previous secret. |
+| `certificates.generate` | response | `private_key_pem` | The device/service private key. Returned once and never stored — §27.6's device flow is built around this. |
+| `ca_certificates.generate` | response | `private_key_pem` | Absent under `vault_pki` custody, where the key was born inside Vault. Optional, and still `Sensitive` when present. |
+| `ca_certificates.import_ca` | request | `private_key_pem` | The caller's own CA key, travelling to the server. |
+| `ca_certificates.generate_signing_ca` | response | `private_key_pem` | The tenant signing CA's key, returned once. |
+| `pgp_keys.generate` | response | `private_key_armored` | Present for `Export` keys only; `null` for `AuditSigning`, whose key stays server-side. |
+| `webhooks.create` | request | `secret` | The HMAC signing secret the §13 verifier will need. |
+| `webhooks.update` | request | `secret` | As above; rotating it re-keys every subsequent delivery. |
+| `oauth2_clients.create` | response | `client_secret` | Returned **once**; the client cannot read it back. |
+| `federation.create_config` | request | `client_secret` | The upstream IdP's client secret. |
+| `federation.update_config` | request | `client_secret` | As above. |
+| `scim_tokens.create` | response | `provisioning_token` | The plaintext provisioning handle. Shown once, never retrievable. |
+
+**Rules.**
+
+1. Every field above MUST be `Sensitive<T>` in the SDK's model type, in both directions.
+   A request-side secret is wrapped for the same reason a response-side one is: the
+   request object reaches a debug log just as easily as the response does, and
+   `users().create(spec)` with a plaintext password in `spec` is the most-logged object on
+   this surface.
+2. **Nothing else on this surface is wrapped.** `SecuritySettings.password` is a
+   `PasswordPolicy` object, not a password; `token_endpoint_auth_method` is an enum;
+   `access_token_lifetime_secs` is an integer. A name-based rule wraps all three, and an
+   SDK annoying enough to fight gets unwrapped everywhere, which is how the real secrets
+   end up bare. This is why the registry curates `(schema, field)` pairs.
+3. The **once** in the table is literal. `service_accounts.create`,
+   `oauth2_clients.create`, `scim_tokens.create`, `certificates.generate`,
+   `ca_certificates.generate`, `ca_certificates.generate_signing_ca` and
+   `pgp_keys.generate` return material that no subsequent `get` will ever return again.
+   An SDK MUST document that at each call site — a caller who discards the result because
+   they can "fetch it later" has destroyed the credential, and the corresponding `get`
+   returns the non-secret projection with no indication that anything is missing.
+4. §7 rule 1's redaction covers these fields in every stringification sink the language
+   has, and §27.4 rule 11 keeps them out of telemetry payloads.
+
+### §27.6 Declarative management — the manifest
+
+**Requirement level: SHOULD where the SDK ships §27.** The 146 imperative operations are
+the floor, not the ceiling. Almost nobody actually wants to call them one at a time:
+what an application does at start-up, in a migration, or in a test fixture is *assert a
+shape* — this tenant has these resources, with these scopes, these permissions, these
+roles, and these role bindings — and let the SDK work out which calls that takes.
+
+Written imperatively, that assertion is forty calls wrapped in exists-checks, and it is
+wrong the second time it runs. The declarative layer is one object and one call.
+
+**The vocabulary.**
+
+| Canonical | Semantics |
+|-----------|-----------|
+| `ManagementManifest` | The desired state. A value, inert, constructible without a client and comparable without one. |
+| `plan(manifest)` | Reads current state, returns a `ManagementPlan` — the ordered list of actions that would reconcile it. **Performs no writes.** |
+| `apply(manifest)` | `plan` followed by execution. Returns the plan that was executed, each action carrying its outcome. |
+
+**Semantics (normative).**
+
+1. **`plan` writes nothing.** Not "writes nothing important" — nothing. It issues `GET`s
+   only. This is what makes the layer safe to point at production, and it is testable by
+   asserting that a mock transport saw no non-`GET` method during a `plan`.
+
+2. **Reconciliation is by natural key, not by UUID.** A manifest is written before the
+   things in it exist, so it cannot name them by id. Each spec carries the natural key its
+   namespace is unique on within a tenant (`users` → `username`, `roles` → `name`,
+   `resources` → `name` within a parent, `scopes` → `name` within a resource, and so on).
+   Cross-references between specs use a manifest-local `key`, resolved to UUIDs during
+   `plan`. An SDK MUST reject a manifest containing a dangling `key` **before** issuing
+   any request.
+
+3. **Three actions, and only three.** Each spec resolves to `Create`, `Update` or
+   `NoChange`. `Update` is emitted only when a field the manifest *states* differs from
+   the server's value — a manifest that omits a field is silent about it, never an
+   assertion that it should be cleared. This is what makes `apply` safe to run against a
+   tenant that also has hand-made state in it.
+
+4. **Deletion is opt-in, per namespace, and never a default.** An `apply` MUST NOT delete
+   anything unless the caller explicitly enables pruning, and pruning MUST be selectable
+   per namespace rather than globally. A manifest is usually a *subset* of a tenant's
+   truth; a global prune turns "make sure these three roles exist" into "delete the other
+   forty".
+
+5. **Ordering is derived, and dependencies are real.** Actions are ordered
+   resources → scopes → permissions → roles → role/permission grants → groups →
+   group/role bindings → users → user/role bindings → service accounts → webhooks, and
+   `resources` is additionally sorted topologically so a parent is created before its
+   children. An SDK MUST detect a cycle in the resource parent graph and reject the
+   manifest client-side.
+
+6. **Idempotence is the acceptance test.** `apply(m)` followed by `plan(m)` MUST yield a
+   plan whose actions are all `NoChange`. An SDK that cannot make that assertion pass has
+   a drift-detection bug, and the test is worth more than any other in this section.
+
+7. **There is no transaction, and the SDK MUST NOT pretend otherwise.** These are 146
+   independent HTTP endpoints; nothing spans them. If action 12 of 30 fails, actions 1–11
+   have happened and will not be undone. `apply` MUST therefore return the outcome of
+   *every* action attempted, MUST stop at the first failure rather than continuing
+   blindly, and MUST document that re-running after fixing the cause is the recovery path
+   — which rule 6 makes safe. An SDK MUST NOT offer a `rollback`; it could not honour one.
+
+8. **`plan` is stable.** Two `plan` calls against unchanged state produce equal plans, in
+   the same order. A plan that reorders between runs cannot be diffed, and diffing it is
+   most of why it exists.
+
+**What a manifest covers.** `resources`, `scopes`, `permissions`, `roles`, `groups`,
+`users`, `service_accounts` and `webhooks` — the namespaces that describe a tenant's
+*shape*. Deliberately **not** covered: `certificates`, `ca_certificates`, `pgp_keys` and
+`scim_tokens`, because they mint one-time secrets (§27.5). A declarative layer that
+"ensures a certificate exists" either re-mints one on every run or silently accepts drift,
+and both are worse than an imperative call the caller makes once, on purpose, and stores
+the result of.
+
+### §27.7 Per-language declarative form
+
+The manifest is a value type, so every language can build one from plain constructors —
+and every SDK MUST support that, because it is what deserializing a manifest from
+configuration produces. On top of it, each SDK SHOULD offer the declarative form its
+users would expect:
+
+| Language | Form |
+|----------|------|
+| Rust | `manifest!` macro (a `declare!`-style DSL), plus `#[derive(AxiamSpec)]` on a caller's own struct |
+| TypeScript | `defineManifest({...})` with full type inference, plus `@AxiamRole()` / `@AxiamResource()` decorators |
+| Python | dataclass specs plus `@axiam_role` / `@axiam_resource` decorators |
+| Java | `@AxiamRole` / `@AxiamResource` / `@AxiamPermission` annotations, scanned into a manifest |
+| Kotlin | type-safe builder DSL (`manifest { role("editor") { … } }`) |
+| C# | `[AxiamRole]` / `[AxiamResource]` attributes, plus an object-initializer manifest |
+| PHP | `#[AxiamRole]` / `#[AxiamResource]` attributes |
+| Go | struct tags (`axiam:"role,name=editor"`) over a declared manifest struct |
+| Swift | `@resultBuilder` DSL (`Manifest { Role("editor") { … } }`) |
+| C++ | designated-initializer aggregate specs plus an `AXIAM_MANIFEST(...)` macro |
+| C | static `axiam_manifest_spec_t` tables plus `AXIAM_MANIFEST_ROLE(...)` initializer macros |
+
+Whatever the surface syntax, it MUST lower to the same `ManagementManifest` value and go
+through the same `plan`/`apply`. A declarative form that talks to the network itself is a
+second implementation of §27.6, and the two will disagree.
+
+### §27.8 How an SDK builds this
+
+**Generated core, hand-written facade.** The 146 operations and their model types are
+**generated** from `management-registry.json`; the ergonomics are not.
+
+Generated, and regenerated whenever the registry changes:
+- the model types, including `Sensitive<T>` placement (§27.5) and the sparse/replace
+  split (§27.4 rule 5);
+- one raw call per operation — path interpolation, query assembly, body serialization,
+  response deserialization, status→error mapping.
+
+Hand-written, once, per SDK:
+- the namespace handles and their §27.3 naming;
+- `Page<T>` and the auto-paging form;
+- the §27.6 manifest, `plan`/`apply`, and the §27.7 declarative form;
+- the composed helpers, examples and prose docs.
+
+**The generated layer MUST sit on the SDK's existing request path** — the same one §1 uses
+— and MUST NOT open its own connection, build its own client, or re-implement any of §3
+(CSRF), §4 (cookie jar), §5 (tenant/org headers), §6 (TLS), §9 (single-flight refresh),
+§16 (retry) or §19 (telemetry). Everything in this section inherits all of it by
+construction; an SDK whose management layer has its own HTTP client has 146 endpoints
+outside its own refresh guard.
+
+Generated files MUST be committed (not produced at build time), MUST carry a
+"generated — do not edit" header naming the registry and generator, and MUST be verified
+in the SDK's CI by regenerating and diffing.
+
+### §27.9 Required tests
+
+Every assertion below exists because the thing it checks is easy to get wrong and silent
+when wrong. Coverage MUST NOT fall in the SDK's existing modules as a result of adding
+this section.
+
+**Surface and generation**
+- The generated surface covers **all 146** operations — assert the count and the namespace
+  set against `management-registry.json`, so a partial regeneration fails rather than
+  quietly shipping 140.
+- Regenerating from the committed registry produces no diff (the CI gate of §27.8).
+- A namespace handle performs **no I/O** when acquired — assert the mock transport saw
+  zero requests.
+
+**Context and identifiers**
+- `{org_id}` / `{tenant_id}` default from the client's configuration, and an explicit
+  argument overrides them — assert on the request **path**, not on the arguments.
+- A slug-only client calling a `{tenant_id}` route fails client-side with **zero** wire
+  calls.
+- A non-UUID identifier fails client-side with zero wire calls.
+- `X-Tenant-ID` is still present on management requests (§5 rule 2 does not lapse here).
+
+**Pagination**
+- A `Page<T>` exposes `total` as distinct from `len(items)` — assert against a mocked
+  envelope where the two differ, because a `Page` that reports `total = items.len()` passes
+  every test written against a single-page fixture.
+- The auto-paging form walks to exhaustion and issues exactly the expected number of
+  requests, with the expected `offset` on each.
+- A bare-array operation (`scopes.list`) is **not** modelled as a page.
+
+**Update shapes** — the two assertions this section most needs
+- A sparse update carrying one field serializes a body with **exactly that one key**.
+  Assert on the full key set; asserting the field is present passes even when every other
+  field went along as `null`.
+- A `replace` operation's type does not compile — or, in a dynamic language, does not
+  serialize — with a field omitted.
+
+**Secrets**
+- Each of the fourteen §27.5 fields is `Sensitive<T>`, and its value does not appear in
+  the object's debug/stringified rendering — scan the serialized output for the fixture
+  value rather than asserting the type.
+- A one-time-reveal response and the corresponding `get` differ: the `get` projection has
+  no secret field at all.
+
+**Errors**
+- 404 → `NotFoundError`, and it is catchable as `AuthzError`.
+- 409 → `ConflictError`, catchable as `AuthzError`, and **not** retried.
+- 400 → `ValidationError`, catchable as `NetworkError`.
+- An ordinary REST 403 still maps to plain `AuthzError` (§2's rewrite note).
+- A second `delete` surfaces `NotFoundError` and is not swallowed into success.
+
+**Retry and refresh**
+- A `GET` retries per §16; a `POST`/`PUT`/`DELETE` on this surface issues **exactly one**
+  request on a 5xx.
+- A 401 on a management call enters the §9 single-flight refresh guard and the call is
+  retried once after a successful refresh.
+- Calling any authenticated operation with no token raises `AuthError` with zero wire calls.
+
+**Manifest**
+- `plan` issues **no** non-`GET` request.
+- `apply(m)` then `plan(m)` yields an all-`NoChange` plan (§27.6 rule 6).
+- A manifest with a dangling cross-reference `key` is rejected before any request.
+- A cycle in the resource parent graph is rejected client-side.
+- Ordering: a resource is created before its child, and a role before the binding that
+  uses it.
+- A failure at action *n* reports outcomes for `1..n` and does not attempt `n+1..`.
+- Pruning is off by default: a manifest omitting an existing role produces no `Delete`.
+- Two `plan` calls against unchanged state produce equal plans in the same order.
+
+### §27.10 Per-SDK posture
+
+§27 is SHOULD-level and lands per repository, exactly as §12.7, §14, §15, §16 and §18 did.
+An SDK states it only once the code is in that repository — the statement follows the
+code, never the contract's expectation of it.
+
+| SDK | §27 status |
+|-----|-----------|
+| Rust | reference implementation (contract 1.30) |
+| TypeScript | reference implementation (contract 1.30) |
+| Python, Java, C#, PHP, Go, Kotlin, Swift, C, C++ | registry and contract vendored; implementation follows |
+
+The two reference implementations exist to prove the section is buildable as written
+before nine more repositories commit to it, and to give the remaining SDKs a generator and
+a test suite to port rather than a specification to interpret. The C and C++ ports carry
+the §27.3 flat-symbol accommodation; every other SDK carries the namespace handle.
 
 ---
 

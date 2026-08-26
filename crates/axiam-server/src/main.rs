@@ -1686,6 +1686,12 @@ async fn main() -> std::io::Result<()> {
         let mail_audit_repo = audit_repo.clone();
         let mail_user_repo = user_repo.clone();
         let mail_template_repo = SurrealEmailTemplateRepository::new(db_handle.clone());
+        // The tenant and organization the mail is about, so `{{tenant_name}}`
+        // and `{{org_name}}` resolve. Every built-in template uses them and no
+        // publisher supplied them, so activation mail went out reading
+        // "activate your {{tenant_name}} account".
+        let mail_tenant_repo = SurrealTenantRepository::new(db_handle.clone());
+        let mail_org_repo = SurrealOrganizationRepository::new(db_handle.clone());
         tokio::spawn(async move {
             axiam_amqp::start_mail_consumer(
                 mail_channel,
@@ -1693,6 +1699,8 @@ async fn main() -> std::io::Result<()> {
                 mail_audit_repo,
                 mail_user_repo,
                 mail_template_repo,
+                mail_tenant_repo,
+                mail_org_repo,
             )
             .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");

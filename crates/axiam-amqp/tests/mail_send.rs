@@ -16,11 +16,13 @@ use axiam_core::models::email::{
 };
 use axiam_core::models::email_template::{EmailTemplate, SetEmailTemplate, TemplateKind};
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
+use axiam_core::models::organization::{CreateOrganization, Organization, UpdateOrganization};
 use axiam_core::models::settings::SettingsScope;
+use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, EmailConfigRepository, EmailTemplateRepository,
-    PaginatedResult, Pagination, UserRepository,
+    OrganizationRepository, PaginatedResult, Pagination, TenantRepository, UserRepository,
 };
 use chrono::Utc;
 use uuid::Uuid;
@@ -144,6 +146,68 @@ impl EmailTemplateRepository for MockTemplateRepo {
 // ---------------------------------------------------------------------------
 // UserRepository mock
 // ---------------------------------------------------------------------------
+
+// The two lookups the consumer makes to fill `{{tenant_name}}` and
+// `{{org_name}}`. Both answer not-found here on purpose: `identity_context`
+// degrades to omitting those keys rather than failing the send, and these tests
+// are about transport and audit behaviour, not about greetings.
+#[derive(Clone, Copy)]
+struct MissingTenantRepo;
+
+impl TenantRepository for MissingTenantRepo {
+    async fn create(&self, _i: CreateTenant) -> AxiamResult<Tenant> {
+        unimplemented!()
+    }
+    async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
+        Err(AxiamError::NotFound {
+            entity: "tenant".into(),
+            id: id.to_string(),
+        })
+    }
+    async fn get_by_slug(&self, _o: Uuid, _s: &str) -> AxiamResult<Tenant> {
+        unimplemented!()
+    }
+    async fn update(&self, _id: Uuid, _i: UpdateTenant) -> AxiamResult<Tenant> {
+        unimplemented!()
+    }
+    async fn delete(&self, _id: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn list_by_organization(
+        &self,
+        _o: Uuid,
+        _p: Pagination,
+    ) -> AxiamResult<PaginatedResult<Tenant>> {
+        unimplemented!()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MissingOrgRepo;
+
+impl OrganizationRepository for MissingOrgRepo {
+    async fn create(&self, _i: CreateOrganization) -> AxiamResult<Organization> {
+        unimplemented!()
+    }
+    async fn get_by_id(&self, id: Uuid) -> AxiamResult<Organization> {
+        Err(AxiamError::NotFound {
+            entity: "organization".into(),
+            id: id.to_string(),
+        })
+    }
+    async fn get_by_slug(&self, _s: &str) -> AxiamResult<Organization> {
+        unimplemented!()
+    }
+    async fn update(&self, _id: Uuid, _i: UpdateOrganization) -> AxiamResult<Organization> {
+        unimplemented!()
+    }
+    async fn delete(&self, _id: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn list(&self, _p: Pagination) -> AxiamResult<PaginatedResult<Organization>> {
+        unimplemented!()
+    }
+}
 
 #[derive(Clone, Copy)]
 struct MockUserRepo {
@@ -306,6 +370,8 @@ async fn no_email_config_returns_send_error() {
         &audit,
         &MockUserRepo { found: true },
         &MockTemplateRepo { fail_fetch: false },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap_err();
@@ -326,6 +392,8 @@ async fn disabled_email_config_returns_send_error() {
         &audit,
         &MockUserRepo { found: true },
         &MockTemplateRepo { fail_fetch: false },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap_err();
@@ -345,6 +413,8 @@ async fn transient_failure_with_retries_remaining_signals_retry() {
         &audit,
         &MockUserRepo { found: true },
         &MockTemplateRepo { fail_fetch: false },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap();
@@ -371,6 +441,8 @@ async fn exhausted_retries_writes_pii_minimal_audit() {
         &audit,
         &MockUserRepo { found: true },
         &MockTemplateRepo { fail_fetch: false },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap();
@@ -401,6 +473,8 @@ async fn template_fetch_failure_falls_back_and_still_processes() {
         &audit,
         &MockUserRepo { found: true },
         &MockTemplateRepo { fail_fetch: true },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap();
@@ -420,6 +494,8 @@ async fn user_lookup_failure_falls_back_to_advisory_address() {
         &audit,
         &MockUserRepo { found: false },
         &MockTemplateRepo { fail_fetch: false },
+        &MissingTenantRepo,
+        &MissingOrgRepo,
     )
     .await
     .unwrap();

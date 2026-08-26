@@ -15,7 +15,8 @@ use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
 use axiam_core::repository::{
-    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, UserRepository,
+    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, OrganizationRepository,
+    TenantRepository, UserRepository,
 };
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
@@ -104,6 +105,57 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
     map
 }
 
+/// The recipient's identity, as template placeholders.
+///
+/// Public so it can be tested directly: `send_with_retry_and_audit` does not
+/// return the rendered message, so "did `{{username}}` resolve?" is not
+/// observable through it.
+///
+/// Fills `username`, `email`, `tenant_name` and `org_name` — the four keys every
+/// built-in template uses and no publisher supplies. See the call site in
+/// [`send_with_retry_and_audit`] for why this lives here.
+///
+/// Never fails. A lookup that does not resolve simply contributes no keys, and
+/// the renderer leaves those placeholders standing. That is a cosmetic loss;
+/// refusing to send the mail would not be.
+///
+/// A notification rule's mail is addressed to an administrator's distribution
+/// list rather than to a user, so `msg.user_id` there is the *actor* who
+/// triggered the event — which is exactly who the reader wants named. Tenant and
+/// organization are the event's, which is also right.
+pub async fn identity_context<U, N, O>(
+    msg: &OutboundMailMessage,
+    user_repo: &U,
+    tenant_repo: &N,
+    org_repo: &O,
+) -> TemplateContext
+where
+    U: UserRepository,
+    N: TenantRepository,
+    O: OrganizationRepository,
+{
+    let mut ctx = TemplateContext::new();
+
+    if !msg.user_id.is_nil()
+        && let Ok(user) = user_repo.get_by_id(msg.tenant_id, msg.user_id).await
+    {
+        ctx.insert("username".into(), user.username);
+        ctx.insert("email".into(), user.email);
+    }
+
+    if let Ok(tenant) = tenant_repo.get_by_id(msg.tenant_id).await {
+        ctx.insert("tenant_name".into(), tenant.name);
+    }
+
+    if !msg.org_id.is_nil()
+        && let Ok(org) = org_repo.get_by_id(msg.org_id).await
+    {
+        ctx.insert("org_name".into(), org.name);
+    }
+
+    ctx
+}
+
 // ---------------------------------------------------------------------------
 // Core send-with-retry-and-audit helper (broker-free, testable directly)
 // ---------------------------------------------------------------------------
@@ -126,18 +178,23 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
 /// The actual recipient email is always resolved from `user_id` + `tenant_id`
 /// via the user repository, preventing recipient hijacking if a message is
 /// intercepted and tampered with in transit.
-pub async fn send_with_retry_and_audit<E, A, U, T>(
+#[allow(clippy::too_many_arguments)]
+pub async fn send_with_retry_and_audit<E, A, U, T, N, O>(
     msg: &OutboundMailMessage,
     email_config_repo: &E,
     audit_repo: &A,
     user_repo: &U,
     template_repo: &T,
+    tenant_repo: &N,
+    org_repo: &O,
 ) -> Result<SendOutcome, SendError>
 where
     E: EmailConfigRepository,
     A: AuditLogRepository,
     U: UserRepository,
     T: EmailTemplateRepository,
+    N: TenantRepository,
+    O: OrganizationRepository,
 {
     // 1. Resolve effective email config (tenant → org cascade).
     let email_config = email_config_repo
@@ -187,8 +244,28 @@ where
 
     let template = resolve_template(kind, org_template.as_ref(), tenant_template.as_ref());
 
-    // 4. Build template context from message.
-    let ctx = build_template_context(&msg.template_context);
+    // 4. Build the template context: the recipient's identity first, then the
+    //    message's own keys over the top.
+    //
+    //    Every built-in template — activation, password reset, deletion,
+    //    export — greets the reader with `{{username}}` and names
+    //    `{{tenant_name}}`, and NO publisher supplied either. Unknown
+    //    placeholders are left as-is by the renderer, so the activation email a
+    //    new user received opened "Welcome, {{username}}!" and asked them to
+    //    activate their "{{tenant_name}}" account. The emails were being sent;
+    //    they were unreadable.
+    //
+    //    Resolved here rather than at each publisher because it is the same four
+    //    facts every time and the consumer already looks two of them up: a
+    //    publisher that forgot one would reintroduce exactly this, and there is
+    //    no reason a handler enqueuing a password reset should have to know
+    //    which placeholders its template happens to use.
+    //
+    //    Each lookup degrades to omitting its keys rather than failing the send.
+    //    A greeting rendered without a name is worse than one with it and far
+    //    better than a password-reset link that never arrives.
+    let mut ctx = identity_context(msg, user_repo, tenant_repo, org_repo).await;
+    ctx.extend(build_template_context(&msg.template_context));
 
     // 5. SEC-055: Resolve recipient from user repository instead of trusting to_address.
     //    This prevents recipient hijacking if the AMQP message is tampered with.
@@ -345,17 +422,22 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// SEC-055: The `user_repo` is used to resolve the actual recipient email
 /// address from `user_id + tenant_id`, preventing recipient hijacking via
 /// a tampered `to_address` field in the AMQP message.
-pub async fn start_mail_consumer<E, A, U, T>(
+#[allow(clippy::too_many_arguments)]
+pub async fn start_mail_consumer<E, A, U, T, N, O>(
     channel: Channel,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
     template_repo: T,
+    tenant_repo: N,
+    org_repo: O,
 ) where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
     U: UserRepository + 'static,
     T: EmailTemplateRepository + 'static,
+    N: TenantRepository + 'static,
+    O: OrganizationRepository + 'static,
 {
     info!("Starting mail AMQP consumer");
 
@@ -412,6 +494,8 @@ pub async fn start_mail_consumer<E, A, U, T>(
             &audit_repo,
             &user_repo,
             &template_repo,
+            &tenant_repo,
+            &org_repo,
         )
         .await;
 

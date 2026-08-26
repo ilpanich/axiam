@@ -28,6 +28,17 @@ import { getApiErrorMessage } from "@/lib/apiError";
 import { invalidateEntity } from "@/lib/queryInvalidation";
 
 /**
+ * The CA/Browser Forum leaf maximum, mirroring `MAX_LEAF_CERT_VALIDITY_DAYS` in
+ * `axiam-pki`.
+ *
+ * Duplicated here rather than fetched: it is a Baseline Requirements constant,
+ * not deployment configuration, and the server enforces it regardless. The
+ * value's only job on this side is to stop the form offering a number that will
+ * be refused.
+ */
+const MAX_LEAF_VALIDITY_DAYS = 825;
+
+/**
  * Map the backend's PascalCase `CertificateStatus` onto the lowercase
  * variants accepted by the shared `StatusBadge`. `Expired` has no badge
  * variant of its own, so it renders with the neutral `inactive` style.
@@ -88,6 +99,32 @@ function GenerateFields({
   caSetupHref,
 }: GenerateFieldsProps) {
   const noCas = !caLoading && caOptions.length === 0;
+
+  // The issuing CA's remaining life, floored at one day and capped by the
+  // CA/Browser Forum leaf maximum the server enforces (825 days). Rounded down
+  // to whole days for the same reason the server rounds down: a CA with 36
+  // hours left can grant one day, not two.
+  // `now` is captured once, in a lazy initialiser, rather than read on every
+  // render: reading the clock during render is impure and makes the cap drift
+  // between renders for no benefit — the number is in whole days and the form
+  // is open for seconds.
+  const [now] = useState(() => Date.now());
+  const selectedCa = caOptions.find((ca) => ca.id === issuerCaId);
+  // `NaN` when the CA carries no parseable expiry. Every real response does,
+  // but a form that throws `RangeError: Invalid time value` and blanks the page
+  // is a worse answer to a malformed field than falling back to the standards
+  // cap, so both the number below and the hint are guarded on it.
+  const caExpiresAt = selectedCa ? new Date(selectedCa.not_after).getTime() : NaN;
+  const caExpiryKnown = Number.isFinite(caExpiresAt);
+  const maxValidityDays = caExpiryKnown
+    ? Math.max(
+        1,
+        Math.min(
+          MAX_LEAF_VALIDITY_DAYS,
+          Math.floor((caExpiresAt - now) / 86_400_000)
+        )
+      )
+    : MAX_LEAF_VALIDITY_DAYS;
 
   return (
     <>
@@ -192,10 +229,29 @@ function GenerateFields({
           id="cert-validity-days"
           type="number"
           min={1}
-          max={3650}
+          max={maxValidityDays}
           value={validityDays}
           onChange={(e) => onValidityDaysChange(Number(e.target.value))}
+          aria-describedby="cert-validity-help"
         />
+        {/* A certificate cannot outlive the CA that signed it — past the
+            issuer's notAfter the chain stops validating, so the extra days are
+            time the holder believes they have and does not. The server refuses
+            such a request outright (it used to truncate silently); saying the
+            limit here means an operator picks a real number instead of
+            discovering it on submit. */}
+        <p id="cert-validity-help" className="text-xs text-muted-foreground">
+          {selectedCa && caExpiryKnown ? (
+            <>
+              Up to <strong>{maxValidityDays}</strong> day
+              {maxValidityDays === 1 ? "" : "s"} — this CA expires on{" "}
+              {formatDate(selectedCa.not_after)}, and a certificate cannot
+              outlive its issuer.
+            </>
+          ) : (
+            <>Capped by the CA/Browser Forum limit and by the issuing CA's own expiry.</>
+          )}
+        </p>
       </div>
     </>
   );

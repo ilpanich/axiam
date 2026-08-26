@@ -201,19 +201,42 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
              Set it up here: {{action_url}}\n\n\
              If you have already set up MFA, ignore this reminder.",
         ),
+        // Notification-rule mail. The subject and body name the EVENT, because
+        // that is the only thing the reader has: this goes to whatever addresses
+        // an administrator typed into a rule — a SOC alias, an on-call list —
+        // and "an event occurred, go look at the audit log" is a page they now
+        // have to search.
+        //
+        // `event`, `action` and `outcome` come from `NotificationDispatcher`;
+        // `username`, `tenant_name` and `org_name` are filled by the mail
+        // consumer. The old body used only the second group and none of the
+        // first, so a security alert said which tenant something happened in and
+        // never what happened.
+        //
+        // `{{username}}` is the ACTOR here, not the recipient — the rule's
+        // recipients are not users of the tenant at all.
         TemplateKind::AdminNotification => (
-            "[{{org_name}}] Admin notification",
+            "[{{org_name}}] {{event}} in {{tenant_name}}",
             r#"<!DOCTYPE html>
 <html><body>
-<h1>Admin Notification — {{org_name}}</h1>
-<p>An event occurred in <strong>{{tenant_name}}</strong>:</p>
-<p>User: {{username}} ({{email}})</p>
-<p>Please review the audit log for details.</p>
+<h1>{{event}}</h1>
+<p><strong>{{tenant_name}}</strong> ({{org_name}})</p>
+<table>
+  <tr><td>Event</td><td>{{event}}</td></tr>
+  <tr><td>Request</td><td>{{action}}</td></tr>
+  <tr><td>Outcome</td><td>{{outcome}}</td></tr>
+  <tr><td>Actor</td><td>{{username}}</td></tr>
+</table>
+<p>{{details}}</p>
+<p>Review the tenant's audit log for the full record.</p>
 </body></html>"#,
-            "Admin Notification — {{org_name}}\n\n\
-             An event occurred in {{tenant_name}}:\n\
-             User: {{username}} ({{email}})\n\n\
-             Please review the audit log for details.",
+            "{{event}} — {{tenant_name}} ({{org_name}})\n\n\
+             Event:   {{event}}\n\
+             Request: {{action}}\n\
+             Outcome: {{outcome}}\n\
+             Actor:   {{username}}\n\n\
+             {{details}}\n\n\
+             Review the tenant's audit log for the full record.",
         ),
         // D-09: deletion-cancel link email.
         TemplateKind::DeletionScheduled => (

@@ -6204,12 +6204,30 @@ code, never the contract's expectation of it.
 |-----|-----------|
 | Rust | reference implementation (contract 1.30) |
 | TypeScript | reference implementation (contract 1.30) |
-| Python, Java, C#, PHP, Go, Kotlin, Swift, C, C++ | registry and contract vendored; implementation follows |
+| Python, Go, Java, Kotlin, C#, PHP, Swift, C, C++ | implemented (contract 1.30) |
 
-The two reference implementations exist to prove the section is buildable as written
-before nine more repositories commit to it, and to give the remaining SDKs a generator and
-a test suite to port rather than a specification to interpret. The C and C++ ports carry
-the §27.3 flat-symbol accommodation; every other SDK carries the namespace handle.
+**All eleven now implement it.** The two reference implementations existed to prove the
+section was buildable as written before nine more repositories committed to it, and to
+give the rest a generator and a test suite to port rather than a specification to
+interpret. That is what happened: each of the nine carries its own generator over
+`management-registry.json`, its own committed output, and a CI job that regenerates and
+diffs (§27.8).
+
+**C is the only SDK with flat symbols.** §27.3's table gives C
+`axiam_service_accounts_rotate_secret(client, id, &out)` and every other language a
+namespace handle — C++ included, whose row reads
+`client.service_accounts().rotate_secret(id)`. The sentence that stood here previously
+said "the C and C++ ports carry the §27.3 flat-symbol accommodation", which contradicted
+the table two sections above it and the prose beneath that table granting the
+accommodation to C alone, on the stated ground that "C has no handle to hang operations
+on". C++ has one and uses it.
+
+**Both accessor forms are present everywhere.** §27.2 rule 4 makes the single
+`client.management()` accessor an *addition* to the per-namespace accessors §27.3's table
+specifies, and requires the two to return equivalent handles where an SDK offers both.
+Five SDKs first shipped the addition without the baseline — reading "additionally" as
+"instead" — and now ship both, with the direct accessors delegating to `management()` so
+the equivalence is structural rather than a promise two code paths have to keep.
 
 ---
 

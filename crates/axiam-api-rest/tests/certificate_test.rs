@@ -394,7 +394,7 @@ async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    // The CA is issued for 365 days; ask the leaf for appreciably more.
+    // The CA is issued for 365 days a moment ago, so it has 364 WHOLE days left.
     let ca_id = generate_ca!(app, org_id, token);
 
     let req = test::TestRequest::post()
@@ -408,7 +408,13 @@ async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
             "subject": "too-long",
             "cert_type": "Service",
             "key_algorithm": "Ed25519",
-            "validity_days": 800
+            // 365, not something larger. A bigger number never reaches the
+            // issuer-expiry check at all: the tenant's own `max_validity_days`
+            // cap (365 by default) refuses it first, with a message about the
+            // tenant policy that says nothing about the CA. 365 is the smallest
+            // request that clears every earlier gate and still outlives this
+            // issuer — by the seconds that elapsed between the two calls.
+            "validity_days": 365
         }))
         .to_request();
 

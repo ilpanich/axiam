@@ -17,6 +17,7 @@ called for these four specifically: B1, B2, B3, B5).
 | [`b2-iot-device-quickstart/`](b2-iot-device-quickstart/README.md) | OAuth2 Device Authorization Grant (RFC 8628) on a headless device, both sides of the ceremony | Bash + curl | `docs/api/device-flow.md` |
 | [`b3-mesh-delegation-grpc/`](b3-mesh-delegation-grpc/README.md) | OAuth2 Token Exchange (RFC 8693) delegation, end to end onto the gRPC `AuthorizationService` — the service-mesh scenario | Rust (own Cargo workspace) | `docs/api/token-exchange.md` |
 | [`b5-rp-logout-app/`](b5-rp-logout-app/README.md) | A relying-party app: OIDC login (authorization_code + PKCE, pushed through PAR), RP-Initiated Logout, Back-Channel Logout | TypeScript / Express | New — no RP example app existed anywhere in the repo before this |
+| [`b6-organization-scope/`](b6-organization-scope/README.md) | Organization-level access: one administrator creating two tenants and administering both with no grant written into either, and the boundary that stops a tenant administrator doing the same | Bash + curl (protocol-level, language-neutral) | [`docs/admin/organization-scope.md`](../docs/admin/organization-scope.md) |
 
 ## Running any of these
 

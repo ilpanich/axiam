@@ -168,11 +168,64 @@ mod tests {
     fn sample_request(scope: Option<&str>) -> AccessRequest {
         AccessRequest {
             tenant_id: Uuid::new_v4(),
+            subject_scope: SubjectScope::Tenant,
             subject_id: Uuid::new_v4(),
             action: "read".to_string(),
             resource_id: Uuid::new_v4(),
             scope: scope.map(|s| s.to_string()),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // `SubjectScope` — the type exists to make one dangerous claim unwritable
+    // by accident, so these assert that it is.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_tenant_subject_never_crosses_a_boundary() {
+        // Whatever tenant is named, an ordinary principal's grants are read
+        // from the tenant being acted upon. There is no value it could carry
+        // that says otherwise — which is the whole reason this is an enum and
+        // not an `Option<Uuid>` whose two ids merely differ.
+        let req = sample_request(None);
+        assert!(!req.crosses_tenant_boundary());
+        assert_eq!(req.assignment_tenant_id(), req.tenant_id);
+    }
+
+    #[test]
+    fn an_organization_subject_reads_its_grants_from_the_organization_tenant() {
+        let org_tenant = Uuid::new_v4();
+        let req = AccessRequest {
+            subject_scope: SubjectScope::Organization {
+                tenant_id: org_tenant,
+            },
+            ..sample_request(None)
+        };
+        assert!(req.crosses_tenant_boundary());
+        assert_eq!(req.assignment_tenant_id(), org_tenant);
+    }
+
+    #[test]
+    fn an_organization_subject_in_its_own_tenant_is_not_crossing() {
+        // Otherwise every check an organization administrator makes inside the
+        // organization scope would silently drop resource-scoped grants —
+        // which is where it does most of its work.
+        let same = Uuid::new_v4();
+        let req = AccessRequest {
+            tenant_id: same,
+            subject_scope: SubjectScope::Organization { tenant_id: same },
+            ..sample_request(None)
+        };
+        assert!(!req.crosses_tenant_boundary());
+        assert_eq!(req.assignment_tenant_id(), same);
+    }
+
+    #[test]
+    fn the_default_scope_is_the_pre_existing_behaviour() {
+        // `Tenant` is what every request meant before organization scope, so a
+        // `Default` that meant anything else would change decisions for code
+        // that never opted in.
+        assert_eq!(SubjectScope::default(), SubjectScope::Tenant);
     }
 
     #[test]

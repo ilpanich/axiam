@@ -2608,8 +2608,75 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: 100_000,
+            search: None,
         };
         assert_eq!(p.limit, 100_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // `search` — normalised on the serde path, and again in `search_term`.
+    //
+    // The two are not redundant. `normalize_search` sees a query string;
+    // `search_term` is what every repository actually calls, and it also sees
+    // every `Pagination` built in code — a test, an internal caller, an SDK
+    // assembling the struct. A term that only the serde path cleaned would be
+    // clean "usually", which for a filter that decides what rows a caller sees
+    // is not a property worth having.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_blank_search_deserialises_to_no_search() {
+        // A UI sends `?search=` on every keystroke, including after the box is
+        // cleared. That must mean "no filter", not "rows containing the empty
+        // string" — a different query plan for the same intent.
+        assert_eq!(from_query(r#"{"search":""}"#).search, None);
+        assert_eq!(from_query(r#"{"search":"   "}"#).search, None);
+        assert_eq!(from_query(r#"{"search":"\t\n"}"#).search, None);
+        assert_eq!(from_query("{}").search, None);
+    }
+
+    #[test]
+    fn a_deserialised_search_is_trimmed() {
+        assert_eq!(
+            from_query(r#"{"search":"  admin  "}"#).search.as_deref(),
+            Some("admin")
+        );
+    }
+
+    #[test]
+    fn a_search_term_is_length_capped() {
+        // The term reaches a substring scan over every row in the tenant, so an
+        // unbounded one is CPU a caller gets to spend. The cap is generous
+        // enough for a full UUID, which is the longest thing anyone pastes.
+        let long = "a".repeat(10_000);
+        let p = from_query(&format!(r#"{{"search":"{long}"}}"#));
+        assert_eq!(p.search.as_deref().map(str::len), Some(128));
+    }
+
+    #[test]
+    fn search_term_lowercases_and_trims_however_the_struct_was_built() {
+        // Direct construction bypasses serde — deliberately, for `limit`. It
+        // must NOT bypass this: `Some("   ")` reaching a repository asks for
+        // rows containing three spaces, returns nothing, and looks like a
+        // working filter that found no matches.
+        let built = Pagination {
+            offset: 0,
+            limit: 50,
+            search: Some("  AdMiN \n".into()),
+        };
+        assert_eq!(built.search_term().as_deref(), Some("admin"));
+
+        let blank = Pagination {
+            offset: 0,
+            limit: 50,
+            search: Some("   ".into()),
+        };
+        assert_eq!(blank.search_term(), None);
+    }
+
+    #[test]
+    fn no_search_stays_no_search() {
+        assert_eq!(Pagination::default().search_term(), None);
     }
 
     #[test]

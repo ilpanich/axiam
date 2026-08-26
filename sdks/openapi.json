@@ -3930,6 +3930,10 @@
                             ],
                             "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
                           },
+                          "mtls_trust_anchor": {
+                            "type": "boolean",
+                            "description": "Whether this CA is offered as a trust anchor for mutual TLS.\n\nWhen set, the server exports this CA's **public** certificate to the\nbundle named by `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` at startup\nand turns client-certificate authentication on (`optional`) if the\noperator has not configured it explicitly. A client presenting a\ncertificate that chains to this CA is then verified by the TLS layer\nitself, which is what `axiam_pki::mtls` needs to authenticate an IoT\ndevice or a service account by certificate rather than by secret.\n\n# What is and is not copied\n\nOnly `public_cert_pem` — the certificate. The **private key stays where\nits custodian put it** (Vault, or sealed into the row) and is never\nwritten to the server volume. A trust anchor is public by construction:\nit is what the server hands every client during the TLS handshake, and\nevery device that has to validate the chain already holds a copy.\n\n# Why a restart\n\nrustls builds its `RootCertStore` once, when the listener is\nconstructed, and actix-web binds that config for the process's life.\nToggling this changes what the *next* boot trusts, and the API says so\nin its response rather than pretending the change took effect.\n\nDefaults to `false`, so a deployment that never touches this keeps\nexactly the TLS posture it has today."
+                          },
                           "not_after": {
                             "type": "string",
                             "format": "date-time",
@@ -4141,6 +4145,129 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody": {
+      "post": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`",
+        "description": "Move this CA's signing key to the custodian the deployment is configured for.\n\nCustody is recorded per CA rather than read from configuration, so adopting\nVault does not move the CAs that already exist — their keys stay sealed in\ntheir rows until something moves them. This is that something, and without\nit the only route out of database custody is to generate a new CA and\nre-issue every leaf beneath it, which for a trust anchor means touching every\nrelying party.\n\nTakes effect immediately; no restart. The row is the authority on where a key\nlives, and the signing path reads it per request.",
+        "operationId": "migrate_custody",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "CA certificate ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key moved to the configured custodian",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrateCustodyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Already there, nothing to move, or a custodian that will not hand its key over"
+          },
+          "403": {
+            "description": "Different organization"
+          },
+          "404": {
+            "description": "CA certificate not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor": {
+      "put": {
+        "tags": [
+          "ca-certificates"
+        ],
+        "summary": "`PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor`",
+        "description": "Offer this CA — or stop offering it — as a trust anchor for mutual TLS.\n\nWhen enabled, the next server start exports this CA's **public** certificate\ninto the client-CA bundle and turns on client-certificate verification in\n`optional` mode, unless the operator has configured\n`AXIAM__SERVER__TLS__CLIENT_AUTH` / `CLIENT_CA_PATH` themselves, which is\nnever overridden. The signing key is not copied and stays with its custodian.\n\n`restart_required` is always true, and is the point of the response: there is\nno supported way to add a root to a rustls listener that is already serving.",
+        "operationId": "set_mtls_trust_anchor",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "CA certificate ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMtlsTrustAnchor"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Flag updated; takes effect at the next server start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MtlsTrustAnchorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Different organization"
+          },
+          "404": {
+            "description": "CA certificate not found"
           }
         },
         "security": [
@@ -4881,6 +5008,10 @@
                               "null"
                             ],
                             "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
+                          },
+                          "mtls_trust_anchor": {
+                            "type": "boolean",
+                            "description": "Whether this CA is offered as a trust anchor for mutual TLS.\n\nWhen set, the server exports this CA's **public** certificate to the\nbundle named by `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` at startup\nand turns client-certificate authentication on (`optional`) if the\noperator has not configured it explicitly. A client presenting a\ncertificate that chains to this CA is then verified by the TLS layer\nitself, which is what `axiam_pki::mtls` needs to authenticate an IoT\ndevice or a service account by certificate rather than by secret.\n\n# What is and is not copied\n\nOnly `public_cert_pem` — the certificate. The **private key stays where\nits custodian put it** (Vault, or sealed into the row) and is never\nwritten to the server volume. A trust anchor is public by construction:\nit is what the server hands every client during the TLS handshake, and\nevery device that has to validate the chain already holds a copy.\n\n# Why a restart\n\nrustls builds its `RootCertStore` once, when the listener is\nconstructed, and actix-web binds that config for the process's life.\nToggling this changes what the *next* boot trusts, and the API says so\nin its response rather than pretending the change took effect.\n\nDefaults to `false`, so a deployment that never touches this keeps\nexactly the TLS posture it has today."
                           },
                           "not_after": {
                             "type": "string",
@@ -7031,13 +7162,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Permission grants for role",
+            "description": "Permission grants for role, with scopes resolved",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/PermissionGrant"
+                    "$ref": "#/components/schemas/ResolvedPermissionGrant"
                   }
                 }
               }
@@ -10077,6 +10208,10 @@
             ],
             "description": "Where the custodian put the key. A Vault path under its mount; `None`\nfor database custody, whose locator is the row itself."
           },
+          "mtls_trust_anchor": {
+            "type": "boolean",
+            "description": "Whether this CA is offered as a trust anchor for mutual TLS.\n\nWhen set, the server exports this CA's **public** certificate to the\nbundle named by `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` at startup\nand turns client-certificate authentication on (`optional`) if the\noperator has not configured it explicitly. A client presenting a\ncertificate that chains to this CA is then verified by the TLS layer\nitself, which is what `axiam_pki::mtls` needs to authenticate an IoT\ndevice or a service account by certificate rather than by secret.\n\n# What is and is not copied\n\nOnly `public_cert_pem` — the certificate. The **private key stays where\nits custodian put it** (Vault, or sealed into the row) and is never\nwritten to the server volume. A trust anchor is public by construction:\nit is what the server hands every client during the TLS handshake, and\nevery device that has to validate the chain already holds a copy.\n\n# Why a restart\n\nrustls builds its `RootCertStore` once, when the listener is\nconstructed, and actix-web binds that config for the process's life.\nToggling this changes what the *next* boot trusts, and the API says so\nin its response rather than pretending the change took effect.\n\nDefaults to `false`, so a deployment that never touches this keeps\nexactly the TLS posture it has today."
+          },
           "not_after": {
             "type": "string",
             "format": "date-time",
@@ -12018,6 +12153,31 @@
           }
         }
       },
+      "GrantedScope": {
+        "type": "object",
+        "description": "A scope named by a grant, resolved to something a human can read.",
+        "required": [
+          "id",
+          "name",
+          "resource_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The scope's id, as it appears in the grant's `scope_ids`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The scope's name, e.g. `invoices`."
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The resource the scope belongs to."
+          }
+        }
+      },
       "Group": {
         "type": "object",
         "description": "A group of users that can access resources based on their roles\nand permissions. Groups simplify role management by allowing roles\nto be assigned to a group rather than individual users.",
@@ -12712,6 +12872,68 @@
           },
           "totp_code": {
             "type": "string"
+          }
+        }
+      },
+      "MigrateCustodyResponse": {
+        "type": "object",
+        "description": "What a custody migration did.",
+        "required": [
+          "ca_certificate_id",
+          "previous_custody",
+          "key_custody"
+        ],
+        "properties": {
+          "ca_certificate_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The CA whose key moved."
+          },
+          "key_custody": {
+            "type": "string",
+            "description": "Where it is now.",
+            "example": "vault"
+          },
+          "key_locator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the new custodian filed it, when the custodian has a path."
+          },
+          "previous_custody": {
+            "type": "string",
+            "description": "Where the key was.",
+            "example": "database"
+          }
+        }
+      },
+      "MtlsTrustAnchorResponse": {
+        "type": "object",
+        "description": "The acknowledgement, which is mostly about the restart.",
+        "required": [
+          "ca_certificate_id",
+          "mtls_trust_anchor",
+          "restart_required",
+          "message"
+        ],
+        "properties": {
+          "ca_certificate_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The CA this is about."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence an operator can act on, rather than a bare boolean."
+          },
+          "mtls_trust_anchor": {
+            "type": "boolean",
+            "description": "The flag as now stored."
+          },
+          "restart_required": {
+            "type": "boolean",
+            "description": "Always `true`: rustls builds its client trust store once, when the\nlistener is constructed, so this takes effect at the next start."
           }
         }
       },
@@ -14448,6 +14670,41 @@
           }
         }
       },
+      "ResolvedPermissionGrant": {
+        "type": "object",
+        "description": "A permission grant with its scopes resolved.\n\nA superset of [`PermissionGrant`]: `scope_ids` is still present and still\nauthoritative, so a client written before `scopes` existed is unaffected.",
+        "required": [
+          "permission",
+          "scope_ids",
+          "effect",
+          "scopes"
+        ],
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/PermissionEffect",
+            "description": "Whether the grant permits or refuses."
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission",
+            "description": "The permission this grant is about."
+          },
+          "scope_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The scope ids the grant is constrained to. Empty is the wildcard."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantedScope"
+            },
+            "description": "The scopes `scope_ids` names, in the same order where resolvable.\n\nA scope that cannot be resolved is **omitted** rather than represented\nby a placeholder, so this can be shorter than `scope_ids`. That happens\nwhen a scope was deleted while a grant still referenced it, and showing\na name for something that no longer exists would be worse than showing\none fewer chip beside a count that still says how many ids the grant\ncarries."
+          }
+        }
+      },
       "Resource": {
         "type": "object",
         "required": [
@@ -15060,6 +15317,19 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "SetMtlsTrustAnchor": {
+        "type": "object",
+        "description": "Body for `PUT .../ca-certificates/{id}/mtls-trust-anchor`.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this CA should be trusted for client-certificate authentication."
           }
         }
       },
@@ -17092,7 +17362,8 @@
           "Inactive",
           "Locked",
           "PendingVerification",
-          "Anonymized"
+          "Anonymized",
+          "Deleted"
         ]
       },
       "VerifyEmailRequest": {

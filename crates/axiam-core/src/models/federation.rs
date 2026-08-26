@@ -497,6 +497,7 @@ mod tests {
             encrypted_private_key: Some(KEY_MARKER.to_vec()),
             key_custody: crate::ca_keys::CaKeyCustody::Database,
             key_locator: None,
+            mtls_trust_anchor: false,
             created_at: Utc::now(),
         };
 

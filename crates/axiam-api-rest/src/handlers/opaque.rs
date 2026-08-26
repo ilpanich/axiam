@@ -242,11 +242,31 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
                 user_id: Some(user_id),
             } = rejection
             {
+                // Meter against the tenant's own threshold, the same one
+                // `/auth/login` uses — otherwise the accounts that adopted
+                // OPAQUE would lock on a different (and higher, deployment
+                // default) count than the administrator configured.
+                //
+                // Resolving it needs the organization, and the only thing in
+                // hand at this point is the tenant: `login_finish` rejected
+                // before establishing anything else. A lookup failure falls
+                // through to `None`, which meters against the deployment
+                // default rather than not metering at all.
+                let lockout_policy = match state.tenant_repo.get_by_id(tenant_id).await {
+                    Ok(tenant) => state
+                        .settings_repo
+                        .get_effective_settings(tenant.organization_id, tenant_id)
+                        .await
+                        .ok()
+                        .map(|s| s.lockout),
+                    Err(_) => None,
+                };
+
                 // Best-effort: a bookkeeping failure must not turn a 401 into
                 // a 500 and hand the caller a way to tell the two apart.
                 if let Err(e) = state
                     .auth_service
-                    .record_failed_opaque_attempt(tenant_id, user_id)
+                    .record_failed_opaque_attempt(tenant_id, user_id, lockout_policy.as_ref())
                     .await
                 {
                     tracing::warn!(

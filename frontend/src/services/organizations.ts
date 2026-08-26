@@ -61,6 +61,19 @@ export interface CaCertificate {
   /** Optional so a server older than the field does not fail the type. */
   key_custody?: CaKeyCustody;
   /**
+   * Whether this CA is offered as a trust anchor for mutual TLS.
+   *
+   * When set, the server exports this CA's **public** certificate to the
+   * client-CA bundle at startup and enables client-certificate verification, so
+   * an IoT device or service account holding a certificate this CA issued is
+   * authenticated by the TLS layer itself. The signing key is not copied and
+   * stays with its custodian.
+   *
+   * Takes effect at the next server start: rustls builds its client trust store
+   * once, when the listener is constructed.
+   */
+  mtls_trust_anchor?: boolean;
+  /**
    * The issuers above `public_cert_pem`, concatenated PEM, root last.
    *
    * Present for a `vault_pki` CA, where the certificate that signs is an
@@ -395,7 +408,66 @@ export const caCertService = {
     api
       .post(`/api/v1/organizations/${orgId}/ca-certificates/${certId}/revoke`)
       .then(() => undefined),
+
+  /**
+   * Offer this CA — or stop offering it — as an mTLS client trust anchor.
+   *
+   * The response's `restart_required` is always true and is the point of it:
+   * there is no supported way to add a root to a rustls listener that is
+   * already serving, so the change applies at the next server start. Surface
+   * that to the operator rather than letting the toggle imply it took effect.
+   */
+  setMtlsTrustAnchor: (
+    orgId: string,
+    certId: string,
+    enabled: boolean
+  ): Promise<MtlsTrustAnchorResponse> =>
+    api
+      .put<MtlsTrustAnchorResponse>(
+        `/api/v1/organizations/${orgId}/ca-certificates/${certId}/mtls-trust-anchor`,
+        { enabled }
+      )
+      .then((r) => r.data),
+
+  /**
+   * Move this CA's signing key to the custodian the deployment is configured
+   * for — in practice, out of the database and into Vault.
+   *
+   * Custody is recorded per CA rather than read from configuration, so adopting
+   * Vault does not move the CAs that already exist. Without this the only route
+   * out of database custody is to generate a new CA and re-issue every leaf
+   * beneath it, which for a trust anchor means touching every relying party.
+   *
+   * Takes effect immediately — no restart. The row is the authority on where a
+   * key lives and the signing path reads it per request.
+   */
+  migrateCustody: (
+    orgId: string,
+    certId: string
+  ): Promise<MigrateCustodyResponse> =>
+    api
+      .post<MigrateCustodyResponse>(
+        `/api/v1/organizations/${orgId}/ca-certificates/${certId}/migrate-custody`
+      )
+      .then((r) => r.data),
 };
+
+/** What a `migrateCustody` call moved. */
+export interface MigrateCustodyResponse {
+  ca_certificate_id: string;
+  previous_custody: CaKeyCustody;
+  key_custody: CaKeyCustody;
+  key_locator: string | null;
+}
+
+/** Acknowledgement of a `setMtlsTrustAnchor` call. */
+export interface MtlsTrustAnchorResponse {
+  ca_certificate_id: string;
+  mtls_trust_anchor: boolean;
+  /** Always true — see `caCertService.setMtlsTrustAnchor`. */
+  restart_required: boolean;
+  message: string;
+}
 
 // ─── Tenant signing CAs ───────────────────────────────────────────────────────
 //

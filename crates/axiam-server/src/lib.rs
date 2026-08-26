@@ -15,4 +15,5 @@
 pub mod cleanup;
 pub mod job_health;
 pub mod mds_job;
+pub mod mtls_anchors;
 pub mod tls;

@@ -34,7 +34,7 @@ use axiam_core::models::email_template::{EmailTemplate, SetEmailTemplate, Templa
 use axiam_core::repository::{EmailConfigRepository, EmailTemplateRepository};
 use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
-    SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::Utc;
 use surrealdb::Surreal;
@@ -218,6 +218,10 @@ async fn custom_tenant_template_is_used_when_present() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+    // The mail consumer resolves `{{tenant_name}}` and `{{org_name}}` from
+    // these — every built-in template names them.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     const CUSTOM_MARKER: &str = "CUSTOM-TENANT-SUBJECT-MARKER-9f3a";
     template_repo
@@ -248,6 +252,8 @@ async fn custom_tenant_template_is_used_when_present() {
         &audit_repo,
         &user_repo,
         &template_repo,
+        &tenant_repo,
+        &org_repo,
     )
     .await
     .expect("delivery attempt must still proceed (built-in-vs-custom is orthogonal to transport)");
@@ -287,6 +293,8 @@ async fn template_fetch_error_falls_back_to_builtin_and_still_attempts_delivery(
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = FailingTemplateRepo;
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     let log_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
@@ -297,8 +305,16 @@ async fn template_fetch_error_falls_back_to_builtin_and_still_attempts_delivery(
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo).await;
+    let outcome = send_with_retry_and_audit(
+        &msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+        &tenant_repo,
+        &org_repo,
+    )
+    .await;
 
     drop(_guard);
 

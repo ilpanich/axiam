@@ -523,7 +523,10 @@ where
             })?;
         match user.status {
             UserStatus::Active | UserStatus::PendingVerification => {}
-            UserStatus::Locked | UserStatus::Inactive | UserStatus::Anonymized => {
+            UserStatus::Locked
+            | UserStatus::Inactive
+            | UserStatus::Anonymized
+            | UserStatus::Deleted => {
                 return Err(ExternalSubjectError::UserNotActive);
             }
         }

@@ -1544,6 +1544,50 @@ pub trait CaCertificateRepository: Send + Sync {
     /// (SEC-024) where the issuer_ca_id is already known from the leaf cert.
     fn get_by_issuer_id(&self, id: Uuid)
     -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
+
+    /// Turn [`CaCertificate::mtls_trust_anchor`] on or off for one CA.
+    ///
+    /// Takes effect at the server's next start — see the field's docs for why
+    /// rustls cannot be told about a new anchor while it is listening.
+    fn set_mtls_trust_anchor(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        enabled: bool,
+    ) -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
+
+    /// Record that a CA's signing key now lives with a different custodian.
+    ///
+    /// The row is the authority on where a key is: the signing path asks the
+    /// record, not the environment, which is what lets a deployment that adopts
+    /// Vault keep issuing from the CAs it already had. Moving a key is therefore
+    /// two acts — copy the material, then update this — and this is the second.
+    ///
+    /// `encrypted_private_key` is cleared unconditionally. A key that has been
+    /// copied into Vault and *also* left sealed in its row has not been moved
+    /// out of the database at all; it has been duplicated, which is strictly
+    /// worse than either state alone.
+    fn update_key_custody(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        custody: crate::ca_keys::CaKeyCustody,
+        key_locator: Option<String>,
+    ) -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
+
+    /// Every active CA flagged as an mTLS trust anchor, across all organizations.
+    ///
+    /// Deliberately **not** organization-scoped: there is one TLS listener per
+    /// process and it presents one trust store to every client, so the question
+    /// this answers is "what does this server trust", not "what does this
+    /// organization trust". Read once at startup to build the client-CA bundle.
+    ///
+    /// Revoked and expired CAs are excluded. Trusting a revoked CA would let a
+    /// certificate the operator has already disowned authenticate a client —
+    /// the one outcome revocation exists to prevent.
+    fn list_mtls_trust_anchors(
+        &self,
+    ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {

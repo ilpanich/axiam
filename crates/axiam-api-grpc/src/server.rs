@@ -143,6 +143,13 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // listener with its own instance would silently double the bound.
     // `UserService/ValidateCredentials` is this listener's only consumer.
     crypto_semaphore: Arc<Semaphore>,
+    // Where `UserService/ValidateCredentials` reads the tenant's
+    // `max_failed_login_attempts` and backoff. MUST resolve from the same
+    // settings store REST's login handler reads, or the same account locks
+    // after a different number of failures depending on which transport the
+    // attacker used. `axiam_auth::lockout::SettingsLockoutPolicy` is that
+    // resolver; `StaticLockoutPolicy` is the deployment-default fallback.
+    lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -209,7 +216,12 @@ where
     // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
     // as AuthorizationService so every gRPC call requires a verified bearer JWT.
     let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(user_repo.clone(), auth_config.clone(), crypto_semaphore),
+        UserServiceImpl::new(
+            user_repo.clone(),
+            auth_config.clone(),
+            crypto_semaphore,
+            lockout_policy,
+        ),
         AuthInterceptor::new(auth_config.clone()),
     );
     // UserInfoService: OIDC-style self lookup — identity derived entirely from

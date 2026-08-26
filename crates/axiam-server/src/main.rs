@@ -1189,7 +1189,70 @@ async fn main() -> std::io::Result<()> {
     // Direct-TLS is opt-in (default: terminate at the proxy layer). Cloned out
     // of `config.server` before `server_config` is moved into the App factory
     // closure below so the bind decision can still read it (F-04).
-    let tls_config = config.server.tls.clone();
+    let mut tls_config = config.server.tls.clone();
+
+    // Build the mTLS client trust store from the organization CAs an operator
+    // flagged in the admin UI (`mtls_trust_anchor`). Only their PUBLIC
+    // certificates are exported; the signing keys stay with their custodian.
+    // See `axiam_server::mtls_anchors` for the whole argument, including why an
+    // operator's own `client_auth` / `client_ca_path` is never overridden.
+    //
+    // Read here rather than at the bind below because rustls builds its
+    // `RootCertStore` once, from this config — and because a flagged CA has to
+    // reach `tls_config` before it is moved into the App factory.
+    let anchor_result = {
+        use axiam_core::repository::CaCertificateRepository as _;
+        // A fresh handle: `ca_cert_repo` was moved into the CA service above,
+        // and the repositories are cheap clones over one shared pool.
+        SurrealCaCertificateRepository::new(pool.handle_for_repo())
+            .list_mtls_trust_anchors()
+            .await
+    };
+    match anchor_result {
+        Ok(anchors) => {
+            let plan = axiam_server::mtls_anchors::plan(&tls_config, &anchors);
+            match &plan {
+                axiam_server::mtls_anchors::AnchorPlan::NoAnchors => {}
+                axiam_server::mtls_anchors::AnchorPlan::NoBundlePath => {
+                    tracing::warn!(
+                        anchors = anchors.len(),
+                        "CA certificates are flagged as mTLS trust anchors but there is \
+                         nowhere to write the bundle — set \
+                         AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH (or \
+                         AXIAM__SERVER__TLS__CERT_PATH, beside which it defaults). \
+                         Client-certificate authentication is NOT enabled."
+                    );
+                }
+                axiam_server::mtls_anchors::AnchorPlan::Write { anchor_count, .. } => {
+                    match axiam_server::mtls_anchors::apply(&mut tls_config, &plan) {
+                        Ok(Some(path)) => tracing::info!(
+                            anchors = anchor_count,
+                            bundle = %path.display(),
+                            client_auth = ?tls_config.client_auth,
+                            "mTLS client trust store built from flagged organization CAs"
+                        ),
+                        Ok(None) => {}
+                        // Warn rather than refuse to boot. The flag is set at
+                        // runtime through the API, so failing startup here would
+                        // let one admin request brick the next restart. The
+                        // failure is permissive (client auth stays off), not a
+                        // hole: `optional` rejects nobody it would otherwise
+                        // have admitted.
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "could not write the mTLS client-CA bundle — \
+                             client-certificate authentication is NOT enabled"
+                        ),
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "could not read the mTLS trust anchors — \
+             client-certificate authentication is left as configured"
+        ),
+    }
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = pool;
@@ -1623,6 +1686,12 @@ async fn main() -> std::io::Result<()> {
         let mail_audit_repo = audit_repo.clone();
         let mail_user_repo = user_repo.clone();
         let mail_template_repo = SurrealEmailTemplateRepository::new(db_handle.clone());
+        // The tenant and organization the mail is about, so `{{tenant_name}}`
+        // and `{{org_name}}` resolve. Every built-in template uses them and no
+        // publisher supplied them, so activation mail went out reading
+        // "activate your {{tenant_name}} account".
+        let mail_tenant_repo = SurrealTenantRepository::new(db_handle.clone());
+        let mail_org_repo = SurrealOrganizationRepository::new(db_handle.clone());
         tokio::spawn(async move {
             axiam_amqp::start_mail_consumer(
                 mail_channel,
@@ -1630,6 +1699,8 @@ async fn main() -> std::io::Result<()> {
                 mail_audit_repo,
                 mail_user_repo,
                 mail_template_repo,
+                mail_tenant_repo,
+                mail_org_repo,
             )
             .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");
@@ -1835,6 +1906,18 @@ async fn main() -> std::io::Result<()> {
     // bounds peak concurrent ~19 MiB Argon2id arenas process-wide, and
     // `UserService/ValidateCredentials` verifies passwords just like REST login.
     let grpc_crypto_semaphore = Arc::clone(&crypto_semaphore);
+    // The tenant-effective lockout policy, resolved from the SAME settings and
+    // tenant repositories the REST login handler reads. Both transports check
+    // credentials, so both must meter failures against the administrator's
+    // configured `max_failed_login_attempts` — a gRPC path still counting to the
+    // deployment default would be a brute-force budget the admin UI does not
+    // show and cannot lower.
+    let grpc_lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource> =
+        Arc::new(axiam_auth::lockout::SettingsLockoutPolicy::new(
+            settings_repo.clone(),
+            tenant_repo.clone(),
+            axiam_auth::lockout::policy_from_config(&config.auth),
+        ));
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -1851,6 +1934,7 @@ async fn main() -> std::io::Result<()> {
             grpc_reactor_routing_invalidator,
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
+            grpc_lockout_policy,
         )
         .await
         {
@@ -1859,7 +1943,17 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
+    // Notification rules reach the audit stream here, and only here. Without
+    // this sink `NotificationDispatcher` is constructed nowhere and every rule an
+    // administrator configures is inert — stored, listed by the API, shown in the
+    // admin UI, and consulted by nothing.
+    let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
+        Arc::new(axiam_audit::NotificationSink::new(
+            notification_rule_repo.clone(),
+            mail_outbound_publisher.clone(),
+        ));
+    let audit_middleware =
+        AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so
@@ -2033,6 +2127,7 @@ async fn main() -> std::io::Result<()> {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),
             cert_repo: cert_repo.clone(),
+            ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),
             device_auth_service: device_auth_service.clone(),
         },

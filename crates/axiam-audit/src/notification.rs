@@ -59,6 +59,32 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
             .get_by_events(tenant_id, &event_strings)
             .await?;
 
+        // Built once for the whole dispatch: it is the same for every rule and
+        // every recipient, and it is the one place `username` is decided.
+        //
+        // `username` is present ONLY when there is no actor to name. The mail
+        // consumer resolves it from `user_id` and its answer is the better one,
+        // but a message's own context is overlaid on top of what the consumer
+        // resolved — so supplying a placeholder unconditionally would mask every
+        // real actor. It cannot be a JSON `null` either: the consumer
+        // stringifies non-string values, so a null would arrive as the literal
+        // word "null". The key has to be genuinely absent, which is why this is
+        // assembled rather than written as one `json!` literal.
+        //
+        // Supplying nothing at all would instead leave the consumer's generic
+        // "unknown" on the events an administrator most wants alerting on — a
+        // failed login, a lockout — which have no authenticated actor by
+        // definition.
+        // `event` is not here: it is the one key that varies per rule, and is
+        // inserted into the clone below.
+        let mut context = serde_json::Map::new();
+        context.insert("details".into(), details.into());
+        context.insert("action".into(), action.into());
+        context.insert("outcome".into(), outcome.into());
+        if actor_id.is_none() {
+            context.insert("username".into(), "an unauthenticated caller".into());
+        }
+
         let mut enqueued = 0usize;
         for rule in rules {
             if rule.recipient_emails.is_empty() {
@@ -75,6 +101,10 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
                 None => continue,
             };
 
+            let mut context = context.clone();
+            context.insert("event".into(), event_name.clone().into());
+            let template_context = serde_json::Value::Object(context);
+
             // Enqueue one OutboundMailMessage per recipient.
             for recipient in &rule.recipient_emails {
                 let msg = OutboundMailMessage {
@@ -83,15 +113,11 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
                     org_id,
                     user_id: actor_id.unwrap_or(Uuid::nil()),
                     to_address: recipient.clone(),
-                    template_context: serde_json::json!({
-                        "event": event_name,
-                        "details": details,
-                        "action": action,
-                        "outcome": outcome,
-                    }),
+                    template_context: template_context.clone(),
                     attempt_count: 0,
                     enqueued_at: Utc::now(),
                 };
+
                 match mail_publisher.publish(msg).await {
                     Ok(()) => {
                         enqueued += 1;
@@ -114,6 +140,100 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
         }
 
         Ok(enqueued)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit-stream adapter
+// ---------------------------------------------------------------------------
+
+/// Connects a [`NotificationDispatcher`] to the audit event stream.
+///
+/// This is the piece that was missing. `NotificationDispatcher` was complete,
+/// tested, and exported — and constructed nowhere outside its own crate, so no
+/// notification rule an administrator configured had any effect. The rules were
+/// stored, listed by the API and rendered in the admin UI; nothing consulted
+/// them.
+///
+/// Implements [`crate::middleware::AuditEventSink`] so
+/// `AuditMiddleware::spawn_with_sink` can drive it on the audit worker's task,
+/// off the request path.
+pub struct NotificationSink<N: NotificationRuleRepository, P: MailPublisher> {
+    dispatcher: NotificationDispatcher<N>,
+    mail_publisher: P,
+}
+
+impl<N: NotificationRuleRepository, P: MailPublisher> NotificationSink<N, P> {
+    /// Build a sink over a rule repository and a mail publisher.
+    pub fn new(rule_repo: N, mail_publisher: P) -> Self {
+        Self {
+            dispatcher: NotificationDispatcher::new(rule_repo),
+            mail_publisher,
+        }
+    }
+}
+
+impl<N, P> crate::middleware::AuditEventSink for NotificationSink<N, P>
+where
+    N: NotificationRuleRepository + 'static,
+    P: MailPublisher + 'static,
+{
+    fn on_event<'a>(
+        &'a self,
+        event: &'a crate::middleware::AuditEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let entry = &event.entry;
+
+            // Rules are looked up by tenant; a nil tenant is an event the
+            // middleware could attribute to nobody (an unauthenticated request
+            // to a handler that sets no `AuditAttribution`). Skipping it here
+            // avoids a repository round-trip per health-adjacent request.
+            if entry.tenant_id.is_nil() {
+                return;
+            }
+
+            let outcome = format!("{:?}", entry.outcome);
+            let actor_id = if entry.actor_id.is_nil() {
+                None
+            } else {
+                Some(entry.actor_id)
+            };
+
+            // The rendered body's `details`. Deliberately the action and the
+            // HTTP status only: an audit notification goes to whatever addresses
+            // an administrator typed into a rule, which are not necessarily
+            // addresses cleared to see request contents (D-16).
+            let details = format!("{} ({outcome})", entry.action);
+
+            match self
+                .dispatcher
+                .dispatch(
+                    entry.tenant_id,
+                    event.org_id,
+                    &entry.action,
+                    &outcome,
+                    actor_id,
+                    &details,
+                    &self.mail_publisher,
+                )
+                .await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!(
+                    enqueued = n,
+                    action = %entry.action,
+                    "notification rule matched; mail enqueued"
+                ),
+                // Swallowed on purpose: the audit entry is already written, and
+                // `AuditEventSink` is best-effort by contract.
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    action = %entry.action,
+                    "failed to dispatch notification rules for an audit event"
+                ),
+            }
+        })
     }
 }
 
@@ -298,12 +418,12 @@ mod tests {
         let dispatcher = NotificationDispatcher::new(repo);
         let publisher = RecordingPublisher::new();
 
-        // "POST /auth/login" + "Failure" → LoginFailure event type
+        // "POST /api/v1/auth/login" + "Failure" → LoginFailure event type
         let count = dispatcher
             .dispatch(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
-                "POST /auth/login",
+                "POST /api/v1/auth/login",
                 "Failure",
                 Some(Uuid::new_v4()),
                 "too many attempts",
@@ -337,7 +457,7 @@ mod tests {
             .dispatch(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
-                "POST /auth/login",
+                "POST /api/v1/auth/login",
                 "Failure",
                 None,
                 "",
@@ -361,7 +481,7 @@ mod tests {
             .dispatch(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
-                "POST /auth/login",
+                "POST /api/v1/auth/login",
                 "Failure",
                 None,
                 "",
@@ -399,7 +519,7 @@ mod tests {
             .dispatch(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
-                "POST /auth/login",
+                "POST /api/v1/auth/login",
                 "Failure",
                 None,
                 "details",
@@ -426,7 +546,7 @@ mod tests {
             .dispatch(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
-                "POST /auth/login",
+                "POST /api/v1/auth/login",
                 "Failure",
                 Some(Uuid::new_v4()),
                 "too many attempts",
@@ -437,5 +557,233 @@ mod tests {
 
         // Both publishes failed, so nothing counted, but dispatch still succeeds.
         assert_eq!(count, 0, "failed publishes must not be counted");
+    }
+
+    // -----------------------------------------------------------------------
+    // NotificationSink — the audit-stream adapter
+    // -----------------------------------------------------------------------
+
+    use crate::middleware::{AuditEvent, AuditEventSink};
+    use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+
+    fn entry(tenant_id: Uuid, action: &str, outcome: AuditOutcome) -> CreateAuditLogEntry {
+        CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::User,
+            action: action.to_string(),
+            resource_id: None,
+            outcome,
+            ip_address: Some("203.0.113.7".into()),
+            metadata: None,
+        }
+    }
+
+    /// The regression this whole adapter exists for: a rule that matches an
+    /// audit event produces mail. `NotificationDispatcher` could always do this;
+    /// nothing ever called it, because nothing connected it to the audit stream.
+    #[tokio::test]
+    async fn a_matching_audit_event_enqueues_mail_for_every_recipient() {
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let repo = MockRuleRepo::new(vec![make_rule(vec![
+            "soc@example.com",
+            "oncall@example.com",
+        ])]);
+        let publisher = RecordingPublisher::new();
+        let sink = NotificationSink::new(repo, publisher.clone());
+
+        sink.on_event(&AuditEvent {
+            entry: entry(tenant_id, "POST /api/v1/auth/login", AuditOutcome::Failure),
+            org_id,
+        })
+        .await;
+
+        assert_eq!(publisher.count(), 2, "one message per configured recipient");
+        let msgs = publisher.messages();
+        assert!(msgs.iter().all(|m| m.mail_type == MailType::Notification));
+        assert!(msgs.iter().all(|m| m.tenant_id == tenant_id));
+        assert!(
+            msgs.iter().all(|m| m.org_id == org_id),
+            "the organization must reach the message so the consumer can resolve \
+             the effective email config"
+        );
+
+        let addresses: Vec<_> = msgs.iter().map(|m| m.to_address.as_str()).collect();
+        assert!(addresses.contains(&"soc@example.com"));
+        assert!(addresses.contains(&"oncall@example.com"));
+    }
+
+    /// `AuditOutcome`'s `Debug` form is what `from_audit_action` matches on
+    /// ("Failure", "Success", "Denied"). If the sink formatted the outcome any
+    /// other way, every rule would silently stop matching.
+    #[tokio::test]
+    async fn the_outcome_is_formatted_the_way_the_event_table_matches_on() {
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let sink = NotificationSink::new(repo, publisher.clone());
+
+        // Success on the same path maps to no event; only Failure does.
+        sink.on_event(&AuditEvent {
+            entry: entry(
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                AuditOutcome::Success,
+            ),
+            org_id: Uuid::new_v4(),
+        })
+        .await;
+        assert_eq!(publisher.count(), 0);
+
+        sink.on_event(&AuditEvent {
+            entry: entry(
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                AuditOutcome::Failure,
+            ),
+            org_id: Uuid::new_v4(),
+        })
+        .await;
+        assert_eq!(publisher.count(), 1);
+    }
+
+    /// A nil tenant is an event the middleware could attribute to nobody. Rules
+    /// are looked up by tenant, so there is nothing to match — and short-cutting
+    /// saves a repository round-trip on every unattributable request.
+    #[tokio::test]
+    async fn an_unattributed_event_is_skipped_without_touching_the_repository() {
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let sink = NotificationSink::new(repo, publisher.clone());
+
+        sink.on_event(&AuditEvent {
+            entry: entry(
+                Uuid::nil(),
+                "POST /api/v1/auth/login",
+                AuditOutcome::Failure,
+            ),
+            org_id: Uuid::nil(),
+        })
+        .await;
+
+        assert_eq!(publisher.count(), 0);
+    }
+
+    /// A publisher outage must not escape the sink: the audit entry is already
+    /// written by the time this runs, and `AuditEventSink` is best-effort by
+    /// contract. `on_event` returns `()` — this test is that the future
+    /// completes rather than panicking.
+    #[tokio::test]
+    async fn a_publisher_failure_is_swallowed() {
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let sink = NotificationSink::new(repo, FailingPublisher);
+
+        sink.on_event(&AuditEvent {
+            entry: entry(
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                AuditOutcome::Failure,
+            ),
+            org_id: Uuid::new_v4(),
+        })
+        .await;
+    }
+
+    /// The rendered `details` names the action and its outcome and nothing else.
+    /// These emails go to whatever addresses an administrator typed into a rule,
+    /// which are not necessarily cleared to see request contents (D-16).
+    #[tokio::test]
+    async fn the_details_carry_the_action_and_outcome_only() {
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let sink = NotificationSink::new(repo, publisher.clone());
+
+        sink.on_event(&AuditEvent {
+            entry: entry(
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                AuditOutcome::Failure,
+            ),
+            org_id: Uuid::new_v4(),
+        })
+        .await;
+
+        let msg = publisher.messages().into_iter().next().unwrap();
+        let details = msg.template_context["details"].as_str().unwrap();
+        assert!(details.contains("POST /api/v1/auth/login"));
+        assert!(details.contains("Failure"));
+        assert!(
+            !details.contains("203.0.113.7"),
+            "the client IP must not reach a rule's recipients"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_actor_is_named_rather_than_left_unknown() {
+        // A failed login has no authenticated actor by definition, and it is
+        // exactly the event an administrator most wants alerting on. The mail
+        // consumer's generic fallback would render "Actor: unknown"; saying what
+        // actually happened is more use to the reader.
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let dispatcher = NotificationDispatcher::new(repo);
+
+        dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                "Failure",
+                None, // no actor
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        let msg = publisher.messages().into_iter().next().unwrap();
+        assert_eq!(
+            msg.template_context["username"].as_str(),
+            Some("an unauthenticated caller")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_known_actor_is_left_for_the_consumer_to_resolve() {
+        // The complement. The consumer resolves `username` from `user_id` and
+        // its value is the better one, but the message's own context is overlaid
+        // on top — so the placeholder has to be dropped when there is a real
+        // actor, or it would win and the alert would name nobody.
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
+        let publisher = RecordingPublisher::new();
+        let dispatcher = NotificationDispatcher::new(repo);
+
+        let actor = Uuid::new_v4();
+        dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                "Failure",
+                Some(actor),
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        let msg = publisher.messages().into_iter().next().unwrap();
+        // Genuinely absent, not null. The consumer stringifies non-string
+        // values, so a null would arrive as the literal word "null" and mask the
+        // name it resolved from `user_id`.
+        assert!(
+            msg.template_context
+                .as_object()
+                .unwrap()
+                .get("username")
+                .is_none(),
+            "a resolvable actor must be left to the consumer, not overlaid"
+        );
+        assert_eq!(msg.user_id, actor);
     }
 }

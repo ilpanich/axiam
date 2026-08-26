@@ -46,6 +46,11 @@ pub struct PkiState<C: Connection + Clone> {
     pub ca_service: CaServiceT<C>,
     pub cert_service: CertServiceT<C>,
     pub cert_repo: SurrealCertificateRepository<C>,
+    /// The CA rows themselves, for the handful of operations that are about a
+    /// CA record rather than about signing with it — today, toggling
+    /// `mtls_trust_anchor`. `CaService` owns issuance; a flag that changes what
+    /// the TLS listener trusts is not issuance and does not belong behind it.
+    pub ca_cert_repo: axiam_db::SurrealCaCertificateRepository<C>,
     pub pgp_service: PgpServiceT<C>,
     pub device_auth_service: DeviceAuthServiceT<C>,
 }

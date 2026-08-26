@@ -189,6 +189,12 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         // B1: in production this is a clone of `AppState`'s process-wide gate;
         // these tests only need the boot path to accept one.
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        // In production this resolves the tenant's configured
+        // `max_failed_login_attempts` from the settings store; the boot path
+        // only needs to accept a source.
+        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
+            axiam_auth::lockout::policy_from_config(&test_auth_config()),
+        )),
     );
 
     // The server serves indefinitely; time out once all setup has run and it
@@ -262,6 +268,12 @@ async fn start_grpc_server_boots_in_tls_mode() {
         // B1: in production this is a clone of `AppState`'s process-wide gate;
         // these tests only need the boot path to accept one.
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        // In production this resolves the tenant's configured
+        // `max_failed_login_attempts` from the settings store; the boot path
+        // only needs to accept a source.
+        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
+            axiam_auth::lockout::policy_from_config(&test_auth_config()),
+        )),
     );
 
     let result = tokio::time::timeout(Duration::from_millis(400), server).await;
@@ -359,6 +371,9 @@ async fn start_grpc_server_panics_when_cert_file_unreadable() {
         // B1: in production this is a clone of `AppState`'s process-wide gate;
         // these tests only need the boot path to accept one.
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
+            axiam_auth::lockout::policy_from_config(&test_auth_config()),
+        )),
     )
     .await;
 }
@@ -419,6 +434,9 @@ async fn start_grpc_server_panics_when_key_file_unreadable() {
         // B1: in production this is a clone of `AppState`'s process-wide gate;
         // these tests only need the boot path to accept one.
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
+            axiam_auth::lockout::policy_from_config(&test_auth_config()),
+        )),
     )
     .await;
 }

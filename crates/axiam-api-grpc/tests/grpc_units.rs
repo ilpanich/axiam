@@ -568,7 +568,7 @@ impl UserRepository for MockUserRepo {
 
 #[tokio::test]
 async fn get_user_missing_claims_unauthenticated() {
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -583,7 +583,7 @@ async fn get_user_missing_claims_unauthenticated() {
 
 #[tokio::test]
 async fn get_user_tenant_mismatch_permission_denied() {
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -601,7 +601,7 @@ async fn get_user_tenant_mismatch_permission_denied() {
 async fn get_user_success() {
     let tenant = Uuid::new_v4();
     let user = active_user(tenant, "hash".into());
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -621,7 +621,7 @@ async fn get_user_success() {
 #[tokio::test]
 async fn get_user_not_found() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -638,7 +638,7 @@ async fn get_user_not_found() {
 #[tokio::test]
 async fn get_user_invalid_uuid_argument() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -657,7 +657,7 @@ async fn validate_credentials_success() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -680,7 +680,7 @@ async fn validate_credentials_wrong_password_records_failure() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -698,7 +698,7 @@ async fn validate_credentials_wrong_password_records_failure() {
 #[tokio::test]
 async fn validate_credentials_unknown_user_is_invalid() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -715,7 +715,7 @@ async fn validate_credentials_unknown_user_is_invalid() {
 
 #[tokio::test]
 async fn validate_credentials_tenant_mismatch_denied() {
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -736,7 +736,7 @@ async fn validate_credentials_inactive_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.status = UserStatus::Inactive;
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -829,7 +829,7 @@ async fn get_user_renders_all_status_variants() {
     ] {
         let mut user = active_user(tenant, "hash".into());
         user.status = status;
-        let svc = UserServiceImpl::new(
+        let svc = UserServiceImpl::with_static_lockout_policy(
             MockUserRepo {
                 user: Some(user.clone()),
             },
@@ -850,7 +850,7 @@ async fn get_user_renders_all_status_variants() {
 #[tokio::test]
 async fn get_user_internal_error_maps_to_internal() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         ScriptedUserRepo {
             fail_get_by_id: true,
             ..Default::default()
@@ -869,7 +869,7 @@ async fn get_user_internal_error_maps_to_internal() {
 
 #[tokio::test]
 async fn validate_credentials_missing_claims_is_unauthenticated() {
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -893,7 +893,7 @@ async fn validate_credentials_with_pepper_succeeds() {
     let hash =
         axiam_auth::password::hash_password(&test_password(), Some("test-pepper-value")).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -934,7 +934,7 @@ async fn validate_credentials_saturated_hash_gate_is_unavailable_not_internal() 
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         cfg,
         // Zero permits: the gate is saturated, nothing can be acquired.
@@ -963,7 +963,7 @@ async fn validate_credentials_succeeds_when_hash_gate_has_capacity() {
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         cfg,
         std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
@@ -991,7 +991,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -1034,7 +1034,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
 async fn validate_credentials_bad_hash_maps_to_internal() {
     let tenant = Uuid::new_v4();
     let user = active_user(tenant, "not-a-valid-phc-hash".into());
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -1056,7 +1056,7 @@ async fn validate_credentials_failed_login_record_error_maps_to_internal() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         ScriptedUserRepo {
             user: Some(user),
             fail_increment: true,
@@ -1081,7 +1081,7 @@ async fn validate_credentials_locked_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.locked_until = Some(Utc::now() + chrono::Duration::hours(1));
-    let svc = UserServiceImpl::new(
+    let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),

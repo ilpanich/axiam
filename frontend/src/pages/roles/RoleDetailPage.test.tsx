@@ -313,7 +313,64 @@ describe("RoleDetailPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("badges a granted permission that is constrained to scopes", async () => {
+  it("names the scopes a granted permission is constrained to", async () => {
+    // The reported bug: "if a permission is scoped there is no way to see which
+    // are the scopes... it just shows a chip with a filter icon and the count".
+    // The only route to the answer was opening the resource, listing its scopes
+    // and matching UUIDs by eye — for a fact the row itself is about.
+    routeGet(
+      defaultData({
+        [URLS.perms]: [
+          {
+            permission: allPermissions[0],
+            scope_ids: ["sc1", "sc2"],
+            effect: "allow",
+            scopes: [
+              { id: "sc1", name: "invoices", resource_id: "res1" },
+              { id: "sc2", name: "reports", resource_id: "res1" },
+            ],
+          },
+        ],
+      })
+    );
+    renderPage();
+    expect(await screen.findByText("invoices")).toBeInTheDocument();
+    expect(screen.getByText("reports")).toBeInTheDocument();
+  });
+
+  it("collapses a long scope list behind a +N chip that still carries the names", async () => {
+    // Rendering a dozen names inline would push the description column off the
+    // row; the information still has to be reachable without leaving the page.
+    routeGet(
+      defaultData({
+        [URLS.perms]: [
+          {
+            permission: allPermissions[0],
+            scope_ids: ["sc1", "sc2", "sc3", "sc4", "sc5"],
+            effect: "allow",
+            scopes: [
+              { id: "sc1", name: "invoices", resource_id: "res1" },
+              { id: "sc2", name: "reports", resource_id: "res1" },
+              { id: "sc3", name: "ledgers", resource_id: "res1" },
+              { id: "sc4", name: "refunds", resource_id: "res1" },
+              { id: "sc5", name: "disputes", resource_id: "res1" },
+            ],
+          },
+        ],
+      })
+    );
+    renderPage();
+    expect(await screen.findByText("invoices")).toBeInTheDocument();
+    expect(screen.getByText("ledgers")).toBeInTheDocument();
+    const more = screen.getByText("+2 more");
+    expect(more).toBeInTheDocument();
+    expect(more).toHaveAttribute("title", "refunds, disputes");
+  });
+
+  it("falls back to the count when the server resolved no scope names", async () => {
+    // An older server, or every named scope since deleted. Showing nothing
+    // would make a scoped grant look like a wildcard, which overstates what it
+    // allows — and, for a deny, what it masks.
     routeGet(
       defaultData({
         [URLS.perms]: [
@@ -327,6 +384,19 @@ describe("RoleDetailPage", () => {
     );
     renderPage();
     expect(await screen.findByText("2 scopes")).toBeInTheDocument();
+  });
+
+  it("says nothing about scopes for an unscoped grant", async () => {
+    routeGet(
+      defaultData({
+        [URLS.perms]: [
+          { permission: allPermissions[0], scope_ids: [], effect: "allow" },
+        ],
+      })
+    );
+    renderPage();
+    await screen.findByText(allPermissions[0].action);
+    expect(screen.queryByText(/scope/)).not.toBeInTheDocument();
   });
 
   // ─── B1/C4 — deny-override in the editor ─────────────────────────────────

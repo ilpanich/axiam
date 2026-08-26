@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Mail type variants for async outbound delivery (D-14).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` because the consumer branches on the variant: notification mail
+/// addresses a rule's recipient list rather than a user record, so it is exempt
+/// from SEC-055 recipient re-resolution (see `axiam-amqp`'s mail consumer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailType {
     PasswordReset,

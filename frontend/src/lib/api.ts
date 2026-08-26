@@ -131,6 +131,40 @@ api.interceptors.response.use(
         processQueue(null);
         return api(originalRequest);
       } catch (refreshError) {
+        // A failed refresh is not by itself proof that the session is gone.
+        //
+        // Refresh tokens are single-use with rotation, and `isRefreshing` is
+        // module state — it serializes refreshes within ONE tab and knows
+        // nothing about the others. Two tabs open on the admin UI both hit a
+        // 401 as the access token ages out, both POST `/auth/refresh`, and the
+        // slower one presents a token the faster one already consumed. The
+        // server correctly answers "already used"; the session is perfectly
+        // alive, and the cookies in this very browser have already been rotated
+        // by the other tab.
+        //
+        // Logging out here is what turned that race into the reported symptom:
+        // working normally, then thrown back to the login page for no visible
+        // reason — and in both tabs at once, because each reached this branch.
+        //
+        // So ask before concluding. Cookies are shared across tabs, so if
+        // anyone rotated them the replayed request now carries a fresh access
+        // cookie and simply succeeds. Only when the replay ALSO comes back
+        // unauthenticated is the session genuinely gone.
+        try {
+          const replayed = await api(originalRequest);
+          processQueue(null);
+          return replayed;
+        } catch (replayError) {
+          const status = (replayError as AxiosError)?.response?.status;
+          if (status !== 401) {
+            // Something else went wrong with the replay (a 500, a network
+            // drop). Report that, and leave the session alone — this is not
+            // evidence about the credentials.
+            processQueue(replayError);
+            return Promise.reject(replayError);
+          }
+        }
+
         processQueue(refreshError);
         queryClient.clear();
         useAuthStore.getState().clearAuth();

@@ -31,7 +31,16 @@ import { CertificateViewDialog } from "@/components/CertificateViewDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Pencil, Trash2, Plus, Upload, ChevronLeft, Loader2 } from "lucide-react";
+import {
+  Pencil,
+  Trash2,
+  Plus,
+  Upload,
+  ChevronLeft,
+  Loader2,
+  ShieldCheck,
+} from "lucide-react";
+import { useToast } from "@/hooks/useToast";
 import { cn, formatDate, slugify } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -443,6 +452,7 @@ const CA_CUSTODY_DESCRIPTION: Record<CaKeyCustody, string> = {
 
 function CaCertificatesTab({ orgId }: { orgId: string }) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: certs = [], isLoading } = useQuery({
     queryKey: ["ca-certificates", orgId],
@@ -587,6 +597,58 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
     },
   });
 
+  // Toggling the mTLS trust anchor.
+  //
+  // The toast is the feature, not decoration: rustls builds its client trust
+  // store once, when the listener is constructed, so the flag changes what the
+  // NEXT boot trusts. A toggle that flipped silently would leave an operator
+  // testing a device against a server that has not been told about the CA yet,
+  // and concluding the certificate is wrong.
+  const anchorMutation = useMutation({
+    mutationFn: ({ certId, enabled }: { certId: string; enabled: boolean }) =>
+      caCertService.setMtlsTrustAnchor(orgId, certId, enabled),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["ca-certificates", orgId],
+      });
+      toast({
+        description: result.message,
+        variant: result.mtls_trust_anchor ? "default" : "destructive",
+      });
+    },
+    onError: (err: unknown) =>
+      toast({
+        description: getApiErrorMessage(err),
+        variant: "destructive",
+      }),
+  });
+
+  // Moving a CA's signing key out of the database and into Vault.
+  //
+  // Custody is recorded per CA, not read from configuration, so a deployment
+  // that adopts Vault keeps its existing CAs in the database indefinitely. The
+  // alternative to this button is generating a new CA and re-issuing every leaf
+  // beneath it — for a trust anchor, that means touching every relying party.
+  const migrateCustodyMutation = useMutation({
+    mutationFn: (certId: string) =>
+      caCertService.migrateCustody(orgId, certId),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["ca-certificates", orgId],
+      });
+      toast({
+        description: `Signing key moved from ${
+          CA_CUSTODY_LABEL[result.previous_custody]
+        } to ${CA_CUSTODY_LABEL[result.key_custody]}. Effective immediately.`,
+      });
+    },
+    onError: (err: unknown) =>
+      toast({
+        description: getApiErrorMessage(err),
+        variant: "destructive",
+      }),
+  });
+
   const columns: Column<CaCertificate>[] = [
     {
       key: "subject",
@@ -613,13 +675,47 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       key: "key_custody",
       header: "Key",
       render: (row) => (
-        <span
-          className="text-xs text-muted-foreground"
-          title={CA_CUSTODY_DESCRIPTION[row.key_custody ?? "database"]}
-        >
-          {CA_CUSTODY_LABEL[row.key_custody ?? "database"]}
+        <span className="inline-flex items-center gap-2">
+          <span
+            className="text-xs text-muted-foreground"
+            title={CA_CUSTODY_DESCRIPTION[row.key_custody ?? "database"]}
+          >
+            {CA_CUSTODY_LABEL[row.key_custody ?? "database"]}
+          </span>
+          {/* Offered only for a live CA whose key is in the database — the one
+              state a migration improves. `external` has no key to move, and
+              `vault_pki` never hands its key over, which is the stronger
+              property rather than one to migrate away from. */}
+          {(row.key_custody ?? "database") === "database" &&
+            row.status === "Active" && (
+              <button
+                aria-label={`Move the signing key for ${row.subject} out of the database`}
+                onClick={() => migrateCustodyMutation.mutate(row.id)}
+                disabled={migrateCustodyMutation.isPending}
+                title="Move this CA's signing key to the configured custodian (Vault). Effective immediately."
+                className="px-2 py-0.5 rounded text-[10px] font-medium border border-white/10 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+              >
+                Move to Vault
+              </button>
+            )}
         </span>
       ),
+    },
+    {
+      key: "mtls_trust_anchor",
+      header: "mTLS anchor",
+      render: (row) =>
+        row.mtls_trust_anchor ? (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-primary/15 text-primary border border-primary/30"
+            title="Clients presenting a certificate this CA issued are verified by TLS itself. Applied at the next server start."
+          >
+            <ShieldCheck size={9} aria-hidden="true" />
+            Trusted
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground/50">—</span>
+        ),
     },
     {
       key: "not_after",
@@ -651,6 +747,33 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             className="px-2.5 py-1 rounded text-xs font-medium border border-white/10 text-muted-foreground transition-colors hover:text-foreground"
           >
             View
+          </button>
+          {/* Only a live CA can anchor trust: a revoked one in the client
+              trust store would let a certificate the operator has already
+              disowned authenticate a client. */}
+          <button
+            aria-label={
+              row.mtls_trust_anchor
+                ? `Stop trusting ${row.subject} for mTLS`
+                : `Trust ${row.subject} for mTLS`
+            }
+            onClick={() =>
+              anchorMutation.mutate({
+                certId: row.id,
+                enabled: !row.mtls_trust_anchor,
+              })
+            }
+            disabled={row.status === "Revoked" || anchorMutation.isPending}
+            className={cn(
+              "px-2.5 py-1 rounded text-xs font-medium border transition-colors",
+              row.status === "Revoked"
+                ? "opacity-40 cursor-not-allowed border-white/10 text-muted-foreground"
+                : row.mtls_trust_anchor
+                  ? "border-primary/30 text-primary hover:bg-primary/10"
+                  : "border-white/10 text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {row.mtls_trust_anchor ? "Untrust" : "Trust for mTLS"}
           </button>
           <button
             aria-label={`Revoke ${row.subject}`}

@@ -24,6 +24,7 @@ import { getApiErrorMessage } from "@/lib/apiError";
 import { ToggleField } from "@/components/shared";
 import { buildEnrollmentForUser } from "@/services/opaque";
 import { useAuthStore } from "@/stores/auth";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Locked Badge ─────────────────────────────────────────────────────────────
 
@@ -228,7 +229,7 @@ export function UsersPage() {
   const createMutation = useMutation({
     mutationFn: (payload: CreateUserPayload) => userService.create(payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setCreateOpen(false);
       resetCreateForm();
     },
@@ -293,7 +294,7 @@ export function UsersPage() {
     mutationFn: ({ id, payload }: { id: string; payload: UpdateUserPayload }) =>
       userService.update(id, payload),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setEditUser(null);
     },
     onError: (err: unknown) => {
@@ -334,7 +335,7 @@ export function UsersPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => userService.remove(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setDeleteUser(null);
     },
     onError: (err: unknown) => {
@@ -348,7 +349,7 @@ export function UsersPage() {
   const unlockMutation = useMutation({
     mutationFn: (userId: string) => userService.unlock(userId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      invalidateEntity(queryClient, "users");
       setUserToUnlock(null);
     },
     onError: (err: unknown) => {
@@ -594,7 +595,13 @@ export function UsersPage() {
         onClose={() => setDeleteUser(null)}
         onConfirm={() => deleteUser && deleteMutation.mutate(deleteUser.id)}
         title="Delete User"
-        description={`Are you sure you want to delete "${deleteUser?.username}"? This action cannot be undone.`}
+        // Says what actually happens, because it is irreversible and more
+        // thorough than "delete" usually implies: the account's personal data is
+        // overwritten, not merely hidden, so there is nothing to restore from.
+        // The freed username is worth stating too — an administrator who
+        // expected the name to stay reserved would otherwise find out by
+        // accident.
+        description={`Permanently delete "${deleteUser?.username}"? Their sessions end immediately and their personal data, passkeys and sign-in history are erased. The username and email become available again. This cannot be undone.`}
         isLoading={deleteMutation.isPending}
       />
 

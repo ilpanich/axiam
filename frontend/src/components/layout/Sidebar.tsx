@@ -1,212 +1,13 @@
-import { NavLink, useLocation } from "react-router";
+// `Link`, not `NavLink`, on purpose. `NavLink` sets `aria-current="page"`
+// itself from its own internal prefix match, which cannot be told about
+// `alsoMatches` and silently overrode the value computed here — a tenant detail
+// page lit Organizations however `activeNavPath` answered. With `Link` the
+// active state has exactly one source.
+import { Link, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 import { usePermissions } from "@/hooks/usePermissions";
-import {
-  LayoutDashboard,
-  Users,
-  UsersRound,
-  Shield,
-  Lock,
-  Database,
-  Building2,
-  Network,
-  Award,
-  Key,
-  Webhook,
-  Code2,
-  ScrollText,
-  UserCircle,
-  Settings,
-  X,
-  ChevronRight,
-  KeyRound,
-  Globe,
-  BellRing,
-  Zap,
-  MonitorSmartphone,
-  ShieldCheck,
-} from "lucide-react";
-
-interface NavItem {
-  to: string;
-  label: string;
-  icon: React.ReactNode;
-  /**
-   * Permission required to access this nav target. `null` means the
-   * item is always visible (self-service surfaces: Dashboard, Audit
-   * Logs, Profile).
-   */
-  requiredPermission: string | null;
-}
-
-interface NavSection {
-  title: string;
-  items: NavItem[];
-}
-
-const navSections: NavSection[] = [
-  {
-    title: "Overview",
-    items: [
-      {
-        to: "/dashboard",
-        label: "Dashboard",
-        icon: <LayoutDashboard size={18} />,
-        requiredPermission: null,
-      },
-    ],
-  },
-  {
-    title: "Identity",
-    items: [
-      {
-        to: "/users",
-        label: "Users",
-        icon: <Users size={18} />,
-        requiredPermission: "users:list",
-      },
-      {
-        to: "/groups",
-        label: "Groups",
-        icon: <UsersRound size={18} />,
-        requiredPermission: "groups:list",
-      },
-      {
-        to: "/roles",
-        label: "Roles",
-        icon: <Shield size={18} />,
-        requiredPermission: "roles:list",
-      },
-      {
-        to: "/permissions",
-        label: "Permissions",
-        icon: <Lock size={18} />,
-        requiredPermission: "permissions:list",
-      },
-      {
-        to: "/resources",
-        label: "Resources",
-        icon: <Database size={18} />,
-        requiredPermission: "resources:list",
-      },
-      {
-        to: "/scim-tokens",
-        label: "SCIM Provisioning",
-        icon: <KeyRound size={18} />,
-        requiredPermission: "scim_tokens:list",
-      },
-      {
-        to: "/service-accounts",
-        label: "Service Accounts",
-        icon: <KeyRound size={18} />,
-        requiredPermission: "service_accounts:list",
-      },
-      {
-        to: "/federation",
-        label: "Federation",
-        icon: <Globe size={18} />,
-        requiredPermission: "federation:list",
-      },
-    ],
-  },
-  {
-    title: "Infrastructure",
-    items: [
-      {
-        to: "/organizations",
-        label: "Organizations",
-        icon: <Building2 size={18} />,
-        requiredPermission: "organizations:list",
-      },
-      {
-        to: "/tenants",
-        label: "Tenants",
-        icon: <Network size={18} />,
-        requiredPermission: "tenants:list",
-      },
-      {
-        to: "/certificates",
-        label: "Certificates",
-        icon: <Award size={18} />,
-        requiredPermission: "certificates:list",
-      },
-      {
-        to: "/pgp-keys",
-        label: "PGP Keys",
-        icon: <Key size={18} />,
-        requiredPermission: "pgp_keys:list",
-      },
-      {
-        to: "/webhooks",
-        label: "Webhooks",
-        icon: <Webhook size={18} />,
-        requiredPermission: "webhooks:list",
-      },
-      {
-        to: "/reactors",
-        label: "Reactors",
-        icon: <Zap size={18} />,
-        requiredPermission: "reactors:list",
-      },
-    ],
-  },
-  {
-    title: "Developers",
-    items: [
-      {
-        to: "/oauth2-clients",
-        label: "OAuth2 Clients",
-        icon: <Code2 size={18} />,
-        requiredPermission: "oauth2_clients:list",
-      },
-      {
-        to: "/audit-logs",
-        label: "Audit Logs",
-        icon: <ScrollText size={18} />,
-        requiredPermission: null,
-      },
-      {
-        to: "/notification-rules",
-        label: "Notification Rules",
-        icon: <BellRing size={18} />,
-        requiredPermission: "notification_rules:list",
-      },
-      {
-        // B2/R4.1: self-service (any authenticated user can approve a device
-        // they're holding), so no permission gate -- matches Dashboard/Profile.
-        to: "/device",
-        label: "Connect a Device",
-        icon: <MonitorSmartphone size={18} />,
-        requiredPermission: null,
-      },
-    ],
-  },
-  {
-    title: "Account",
-    items: [
-      {
-        to: "/profile",
-        label: "Profile",
-        icon: <UserCircle size={18} />,
-        requiredPermission: null,
-      },
-      {
-        // GDPR Art. 15/17 self-service console -- every authenticated user
-        // manages their own export/erasure requests here.
-        to: "/privacy",
-        label: "Privacy & Data",
-        icon: <ShieldCheck size={18} />,
-        requiredPermission: null,
-      },
-      {
-        to: "/settings",
-        label: "Settings",
-        icon: <Settings size={18} />,
-        requiredPermission: "settings:get",
-      },
-    ],
-  },
-];
+import { X, ChevronRight } from "lucide-react";
+import { activeNavPath, navSections } from "@/components/layout/navSections";
 
 interface SidebarProps {
   onClose?: () => void;
@@ -216,6 +17,11 @@ interface SidebarProps {
 export function Sidebar({ onClose, mobile = false }: SidebarProps) {
   const location = useLocation();
   const { can } = usePermissions();
+
+  // Exactly one entry is active, chosen by longest matching prefix — see
+  // `activeNavPath`. Computing it once per render also means two entries can
+  // never both light up, which the old per-item `startsWith` allowed.
+  const activePath = activeNavPath(location.pathname);
 
   return (
     <aside
@@ -257,16 +63,13 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
             </p>
             <ul className="space-y-0.5" role="list">
               {section.items.map((item) => {
-                const isActive =
-                  location.pathname === item.to ||
-                  (item.to !== "/dashboard" &&
-                    location.pathname.startsWith(item.to));
+                const isActive = activePath === item.to;
                 const isDisabled =
                   item.requiredPermission !== null &&
                   !can(item.requiredPermission);
                 return (
                   <li key={item.to}>
-                    <NavLink
+                    <Link
                       to={item.to}
                       onClick={
                         isDisabled
@@ -306,7 +109,7 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
                           aria-hidden="true"
                         />
                       )}
-                    </NavLink>
+                    </Link>
                   </li>
                 );
               })}

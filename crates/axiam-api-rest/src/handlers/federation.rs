@@ -1545,7 +1545,9 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
-            state.auth_config.access_token_lifetime_secs,
+            // Session lifetime, not access-token lifetime — see the note in
+            // `handlers::auth`'s login response.
+            state.auth_config.refresh_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
         // See the matching comment on handlers/auth.rs's login handler —
@@ -1788,7 +1790,9 @@ pub async fn saml_acs_public<C: Connection + Clone>(
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
-            state.auth_config.access_token_lifetime_secs,
+            // Session lifetime, not access-token lifetime — see the note in
+            // `handlers::auth`'s login response.
+            state.auth_config.refresh_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
         // See the matching comment on handlers/auth.rs's login handler —

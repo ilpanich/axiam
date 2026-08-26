@@ -35,6 +35,93 @@ pub struct ResendVerificationRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Shared enqueue helper
+// ---------------------------------------------------------------------------
+
+/// Mint a verification token for `user_id` and enqueue the activation email.
+///
+/// Two callers, and they must produce the same email: `POST /api/v1/users`
+/// (an administrator creating an account, which is the account's *first*
+/// activation link) and `POST /api/v1/auth/resend-verification` (the user
+/// asking for another). Before this existed only the second one sent anything,
+/// so an administrator created a user, the user was written as
+/// `PendingVerification`, and nobody was ever told — the account simply could
+/// not be activated unless someone knew to call the resend endpoint by hand.
+///
+/// Best-effort by construction: it returns `()` and logs its failures. A user
+/// row that has already been committed must not be reported as a failed
+/// creation because the mail queue was unreachable, and the resend endpoint
+/// must answer identically whatever happened (D-15). The account stays
+/// activatable either way — `resend-verification` mints a fresh token.
+///
+/// The `action_url` is a relative frontend route carrying the raw token and the
+/// tenant id, matching the `VerifyEmailPage` route (`/auth/verify-email?token=…
+/// &tenant_id=…`) and the shape `gdpr.rs` uses for its cancel link.
+pub(crate) async fn enqueue_verification_email<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    email: &str,
+) {
+    let (raw_token, expires_at) = match state
+        .mail
+        .email_verification_service
+        .initiate_verification(tenant_id, user_id)
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                %tenant_id,
+                %user_id,
+                "could not mint an email-verification token; no activation mail enqueued"
+            );
+            return;
+        }
+    };
+
+    let org_id = match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => tenant.organization_id,
+        Err(e) => {
+            // Nil rather than abandoning the send: the mail consumer resolves
+            // the effective email config by (org, tenant) and a tenant-level
+            // config still matches. Losing the org fallback is better than
+            // losing the only activation link the account will be offered.
+            tracing::warn!(
+                error = %e,
+                %tenant_id,
+                "failed to resolve org_id for activation mail; using nil"
+            );
+            Uuid::nil()
+        }
+    };
+
+    let verify_url = format!("/auth/verify-email?token={raw_token}&tenant_id={tenant_id}");
+
+    let msg = OutboundMailMessage {
+        mail_type: MailType::EmailVerification,
+        tenant_id,
+        org_id,
+        user_id,
+        to_address: email.to_owned(),
+        template_context: serde_json::json!({
+            "token": raw_token,
+            "action_url": verify_url,
+            "expiry_time": expires_at.to_rfc3339(),
+        }),
+        attempt_count: 0,
+        enqueued_at: Utc::now(),
+    };
+
+    if let Err(e) = state.mail.mail_outbound_publisher.publish(msg).await {
+        tracing::warn!(error = %e, "failed to enqueue activation mail; continuing");
+    } else {
+        tracing::debug!(%tenant_id, %user_id, "activation email enqueued");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -96,55 +183,13 @@ pub async fn resend_verification<C: Connection + Clone>(
         .resend_verification(req.tenant_id, &req.email)
         .await
     {
-        Ok(Some((raw_token, user_id, expires_at))) => {
-            // Resolve org_id from tenant for the mail message.
-            // On failure, log and continue — D-15: never propagate to client.
-            let org_id = match state.tenant_repo.get_by_id(req.tenant_id).await {
-                Ok(tenant) => tenant.organization_id,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        tenant_id = %req.tenant_id,
-                        "failed to resolve org_id for email-verification mail; using nil"
-                    );
-                    Uuid::nil()
-                }
-            };
-
-            // PHASE-DEFINING (23-RESEARCH Pattern 6 / Pitfall 3): build the
-            // action_url the same way gdpr.rs builds cancel_url — a
-            // relative-path frontend route carrying the raw token plus the
-            // raw tenant_id UUID (Open Question 2, mirroring the
-            // already-shipped VerifyEmailPage `?token=…&tenant_id=…`).
-            let verify_url = format!(
-                "/auth/verify-email?token={}&tenant_id={}",
-                raw_token, req.tenant_id
-            );
-
-            let msg = OutboundMailMessage {
-                mail_type: MailType::EmailVerification,
-                tenant_id: req.tenant_id,
-                org_id,
-                user_id,
-                to_address: req.email.clone(),
-                template_context: serde_json::json!({
-                    "token": raw_token,
-                    "action_url": verify_url,
-                    "expiry_time": expires_at.to_rfc3339(),
-                }),
-                attempt_count: 0,
-                enqueued_at: Utc::now(),
-            };
-
-            if let Err(e) = state.mail.mail_outbound_publisher.publish(msg).await {
-                // D-15: log warn but do NOT propagate — uniform 200 regardless
-                tracing::warn!(
-                    error = %e,
-                    "failed to enqueue email-verification mail; continuing"
-                );
-            } else {
-                tracing::debug!(email = %req.email, "verification email enqueued");
-            }
+        Ok(Some((_raw_token, user_id, _expires_at))) => {
+            // The token minted above is discarded and a fresh one minted inside
+            // the shared helper. That costs one extra row and buys the guarantee
+            // that a resent activation email is byte-for-byte the one account
+            // creation sends — same URL shape, same context keys, same template.
+            // Two hand-rolled copies of this block is how they drift.
+            enqueue_verification_email(&state, req.tenant_id, user_id, &req.email).await;
         }
         Ok(None) => {
             // User not found or already verified — silently ignore (D-15).

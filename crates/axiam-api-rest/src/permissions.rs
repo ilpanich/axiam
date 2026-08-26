@@ -84,6 +84,10 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("ca_certificates:get", "Retrieve a single CA certificate"),
     ("ca_certificates:generate", "Generate a new CA certificate"),
     ("ca_certificates:revoke", "Revoke a CA certificate"),
+    (
+        "ca_certificates:manage",
+        "Change what a CA certificate is used for (e.g. offer it as an mTLS trust anchor)",
+    ),
     // Audit Logs
     ("audit_logs:list", "List audit logs for the tenant"),
     (
@@ -464,6 +468,22 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "POST",
         "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
         "ca_certificates:revoke",
+    ),
+    // Its own permission, not `:generate` or `:revoke`. Flagging a CA as an
+    // mTLS trust anchor changes what the deployment's TLS listener will accept
+    // as a client identity — a different and broader act from issuing under
+    // that CA, and one an operator may want to grant separately.
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
+        "ca_certificates:manage",
+    ),
+    // Moving a CA's signing key between custodians is likewise about what the
+    // CA *is* rather than about issuing with it.
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody",
+        "ca_certificates:manage",
     ),
     // Tenant signing CAs. Creating one and signing a CSR for one are the same
     // act — both mint a CA beneath the organization's anchor — so both carry

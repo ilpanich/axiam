@@ -205,6 +205,7 @@ fn login(f: &Fixture) -> LoginInput {
         ip_address: Some("203.0.113.7".into()),
         user_agent: Some("curl/8".into()),
         mfa_policy: None,
+        lockout_policy: None,
     }
 }
 

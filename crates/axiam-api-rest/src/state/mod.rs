@@ -704,6 +704,7 @@ impl<C: Connection + Clone> AppState<C> {
                 ca_service,
                 cert_service,
                 cert_repo,
+                ca_cert_repo: axiam_db::SurrealCaCertificateRepository::new(db.clone()),
                 pgp_service,
                 device_auth_service,
             },

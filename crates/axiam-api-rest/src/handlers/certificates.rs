@@ -1,9 +1,10 @@
 //! Tenant certificate management endpoints.
 
 use actix_web::{HttpResponse, web};
+use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
-    BindCertificate, Certificate, CertificateType, CreateCertificate, GeneratedCertificate,
-    KeyAlgorithm,
+    BindCertificate, Certificate, CertificateStatus, CertificateType, CreateCertificate,
+    GeneratedCertificate, KeyAlgorithm,
 };
 use axiam_core::repository::{
     CertificateRepository, PaginatedResult, Pagination, TenantRepository,
@@ -190,6 +191,29 @@ pub async fn bind<C: Connection + Clone>(
         .cert_repo
         .get_by_id(user.tenant_id, input.certificate_id)
         .await?;
+
+    // And that it can actually authenticate anything. A revoked or expired
+    // certificate binds happily and then fails every handshake, so the operator
+    // sees a service account that is configured for mTLS and cannot connect,
+    // with nothing on either record saying why. The admin UI already filters
+    // its picker to Active certificates; this is the same rule where it is
+    // enforceable, for the API clients that do not go through that picker.
+    if cert.status != CertificateStatus::Active {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "certificate is {:?} and cannot authenticate a service account",
+                cert.status
+            ),
+        }));
+    }
+    if cert.not_after <= chrono::Utc::now() {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "certificate expired on {} and cannot authenticate a service account",
+                cert.not_after.format("%Y-%m-%d")
+            ),
+        }));
+    }
 
     // Verify the service account belongs to the same tenant.
     use axiam_core::repository::ServiceAccountRepository;

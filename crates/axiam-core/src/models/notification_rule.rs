@@ -75,27 +75,40 @@ impl NotificationEventType {
     /// `POST /api/v1/users/9d2f…`). This method normalises dynamic
     /// path segments (UUIDs, hex IDs) to `{id}` before matching, so
     /// both route templates and real paths are handled correctly.
+    ///
+    /// # The paths must be the ones actually served
+    ///
+    /// Five arms of this table used to read `/auth/…` while every auth route is
+    /// mounted under `/api/v1/auth/…` (see `axiam-api-rest`'s `auth_scope`), so
+    /// `login_failure`, `account_locked`, `password_changed`,
+    /// `password_reset_requested` and `mfa_enrollment_changed` — the five
+    /// security events an administrator is most likely to want an alert for —
+    /// could never match anything. A prefix that is merely *plausible* is not
+    /// checked by the compiler; `notification_event_paths_match_served_routes`
+    /// in `axiam-api-rest`'s tests is what checks it now.
     pub fn from_audit_action(action: &str, outcome: &str) -> Vec<Self> {
         let normalised = normalise_audit_action(action);
         match (normalised.as_str(), outcome) {
             // Security events
-            ("POST /auth/login", "Failure") => {
+            ("POST /api/v1/auth/login", "Failure") => {
                 vec![Self::LoginFailure]
             }
-            ("POST /auth/login", "Denied") => {
+            ("POST /api/v1/auth/login", "Denied") => {
                 vec![Self::AccountLocked]
             }
-            ("POST /auth/mfa/enroll", "Success") | ("POST /auth/mfa/confirm", "Success") => {
+            ("POST /api/v1/auth/mfa/enroll", "Success")
+            | ("POST /api/v1/auth/mfa/confirm", "Success")
+            | ("POST /api/v1/auth/mfa/setup/confirm", "Success") => {
                 vec![Self::MfaEnrollmentChanged]
             }
             ("PUT /api/v1/users/{id}", "Success") => {
                 // Password changes are tracked via a dedicated action
                 vec![Self::UserUpdated]
             }
-            ("POST /auth/reset/confirm", "Success") => {
+            ("POST /api/v1/auth/reset/confirm", "Success") => {
                 vec![Self::PasswordChanged]
             }
-            ("POST /auth/reset", "Success") => {
+            ("POST /api/v1/auth/reset", "Success") => {
                 vec![Self::PasswordResetRequested]
             }
             // Privilege events
@@ -308,8 +321,70 @@ mod tests {
 
     #[test]
     fn from_audit_action_login_failure() {
-        let events = NotificationEventType::from_audit_action("POST /auth/login", "Failure");
+        // The path the audit middleware actually records — the auth routes are
+        // mounted under `/api/v1/auth`, and this arm used to read `/auth/login`,
+        // which nothing ever produced.
+        let events = NotificationEventType::from_audit_action("POST /api/v1/auth/login", "Failure");
         assert_eq!(events, vec![NotificationEventType::LoginFailure]);
+    }
+
+    #[test]
+    fn every_unauthenticated_security_event_matches_its_served_path() {
+        // The five arms that were unreachable. Each is asserted against the
+        // exact string `AuditMiddleware` builds — `"{method} {path}"` with the
+        // path as served — because a plausible-looking prefix is exactly the
+        // kind of mistake that compiles and then silently matches nothing.
+        for (action, outcome, expected) in [
+            (
+                "POST /api/v1/auth/login",
+                "Denied",
+                NotificationEventType::AccountLocked,
+            ),
+            (
+                "POST /api/v1/auth/reset",
+                "Success",
+                NotificationEventType::PasswordResetRequested,
+            ),
+            (
+                "POST /api/v1/auth/reset/confirm",
+                "Success",
+                NotificationEventType::PasswordChanged,
+            ),
+            (
+                "POST /api/v1/auth/mfa/enroll",
+                "Success",
+                NotificationEventType::MfaEnrollmentChanged,
+            ),
+            (
+                "POST /api/v1/auth/mfa/confirm",
+                "Success",
+                NotificationEventType::MfaEnrollmentChanged,
+            ),
+        ] {
+            assert_eq!(
+                NotificationEventType::from_audit_action(action, outcome),
+                vec![expected],
+                "`{action}` ({outcome}) must map to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_old_unprefixed_auth_paths_match_nothing() {
+        // Pins the direction of the fix: if someone "restores" the short form,
+        // this fails rather than quietly reintroducing five dead rules.
+        for action in [
+            "POST /auth/login",
+            "POST /auth/reset",
+            "POST /auth/reset/confirm",
+            "POST /auth/mfa/enroll",
+        ] {
+            assert!(
+                NotificationEventType::from_audit_action(action, "Success").is_empty()
+                    && NotificationEventType::from_audit_action(action, "Failure").is_empty(),
+                "`{action}` is not a path this server serves"
+            );
+        }
     }
 
     #[test]

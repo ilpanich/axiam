@@ -1,6 +1,6 @@
 //! Authentication endpoints — login, logout, refresh, and MFA.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
 use axiam_auth::token::{issue_service_account_token, validate_access_token};
@@ -253,7 +253,29 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            config.access_token_lifetime_secs,
+            // The CSRF cookie's lifetime tracks the SESSION (the refresh
+            // token), not the access token.
+            //
+            // It used to be `access_token_lifetime_secs`, and that was the
+            // random-logout bug. `/api/v1/auth/refresh` is not CSRF-exempt — it
+            // is a state-changing POST made from a browser that does hold a
+            // session, so it must not be — which means renewing an access token
+            // requires the `axiam_csrf` cookie. Giving that cookie the access
+            // token's own 15-minute Max-Age meant the browser dropped the token
+            // needed to refresh at the *exact* moment refreshing became
+            // necessary: the interceptor's refresh POST went out with no
+            // `X-CSRF-Token`, was refused, and the failure path logged the user
+            // out. Anyone idle across one token lifetime was thrown back to the
+            // login page mid-task.
+            //
+            // Nothing is weakened by the longer life. A double-submit token's
+            // security comes from being unguessable and unreadable
+            // cross-origin (`SameSite=Strict`, and an attacker cannot read it
+            // to echo it back), not from expiring quickly, and it is rotated on
+            // every refresh regardless. Outliving the session it protects would
+            // be the real mistake, and it does not: `clear_csrf_cookie` removes
+            // it on logout.
+            config.refresh_token_lifetime_secs,
             config.cookie_secure,
         ))
         // CONTRACT.md §3 "Non-browser SDKs": echo the freshly-minted CSRF
@@ -365,6 +387,17 @@ pub async fn login<C: Connection + Clone>(
     }
     let org_id = tenant.organization_id;
 
+    // Tell the audit middleware which tenant this request is about.
+    //
+    // A login carries no access token — proving an identity is the point — so
+    // the middleware would otherwise write the entry with a nil tenant, under
+    // `ActorType::System`. Notification rules are looked up by tenant, which is
+    // why `login_failure` and `account_locked` rules matched nothing however
+    // they were configured. The pair below is the one this handler just proved
+    // consistent (see the NEW-1 check above), not anything the client claimed.
+    req.extensions_mut()
+        .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+
     // Fetch the effective security policy for the tenant.
     // Propagate errors instead of silently falling back to no-enforcement,
     // which could bypass MFA during DB outages.
@@ -390,6 +423,13 @@ pub async fn login<C: Connection + Clone>(
     }
 
     let mfa_policy = Some(settings.mfa);
+    // The organization's `max_failed_login_attempts` and backoff, narrowed by
+    // any tenant override. These settings were already being fetched here for
+    // OPAQUE and MFA and then dropped on the floor, so `AuthService::login`
+    // metered failures against the deployment-wide `AuthConfig` instead: an
+    // administrator lowering the threshold in the admin UI saw no change,
+    // because the login path never read what they set.
+    let lockout_policy = Some(settings.lockout);
 
     let input = LoginInput {
         tenant_id,
@@ -399,6 +439,7 @@ pub async fn login<C: Connection + Clone>(
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),
         mfa_policy,
+        lockout_policy,
     };
 
     let result = state.auth_service.login(input).await?;
@@ -554,7 +595,10 @@ pub async fn refresh<C: Connection + Clone>(
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            state.auth_config.access_token_lifetime_secs,
+            // See the matching note on the login response: the CSRF cookie
+            // tracks the session, not the access token, or the refresh it
+            // guards expires with the thing it exists to renew.
+            state.auth_config.refresh_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
         // See the matching comment on the login handler above — non-browser

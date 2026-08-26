@@ -155,6 +155,42 @@ link, and a 30-day grace period before the purge pipeline above runs; the
 grace period can be aborted via `POST /api/v1/account/delete/cancel`
 (`cancel_account_delete`, proven by `deletion_cancel`).
 
+### Administrative deletion (`DELETE /api/v1/users/{id}`)
+
+A second, immediate path: an administrator removing an account from the Users
+page. It is **not** an Art. 17 erasure request — nobody exercised a right, there
+is no grace period and no cancel link — but it must not leave personal data
+behind either, so it erases the same data the purge pipeline does.
+
+`UserRepository::delete` overwrites `username`, `email` and `metadata` with
+values derived from the row's own id (an internal identifier, not personal
+data), clears every credential column, and sets `status = 'Deleted'`. The
+handler additionally revokes all sessions **before** the row is touched, then
+deletes the user's WebAuthn credentials, federation identity links and password
+history, and strips their group memberships and role assignments.
+
+The row itself survives, holding its id and nothing identifying. Audit entries
+are append-only and reference their actor by id; dropping the row would leave
+every entry the user ever produced pointing at nothing, and an audit trail that
+cannot be resolved to a person is not an audit trail.
+
+**Re-registration.** Overwriting the identifiers rather than merely hiding the
+row is what frees them from `idx_user_tenant_username` and
+`idx_user_tenant_email`. Those uniqueness constraints are enforced by the
+database, so a tombstone still holding an address would refuse any new account
+carrying it — whether created by an administrator through `POST /api/v1/users`
+or provisioned over SCIM, both of which go through the same repository — and the
+duplicate-account error would itself disclose that the deleted account had
+existed. Proven by
+`a_deleted_user_can_register_again_with_the_same_identifiers`.
+
+**What this path does not do**, and why it is not a substitute for the pipeline
+above: it does not pseudonymize the audit log's actor references, and it writes
+no `erasure_proof` row. Both leave the account unable to authenticate and
+holding no personal data; only the Art. 17 pipeline produces durable evidence of
+it. A data subject's erasure request must therefore go through
+`POST /api/v1/account/delete`, not through an administrator pressing Delete.
+
 ---
 
 ## 3. Consent (Art. 7 — Conditions for Consent)

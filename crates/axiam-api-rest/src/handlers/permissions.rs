@@ -285,7 +285,8 @@ pub async fn grant_to_role<C: Connection + Clone>(
     tag = "permissions",
     params(("role_id" = Uuid, Path, description = "Role ID")),
     responses(
-        (status = 200, description = "Permission grants for role", body = Vec<PermissionGrant>),
+        (status = 200, description = "Permission grants for role, with scopes resolved",
+         body = Vec<ResolvedPermissionGrant>),
     ),
     security(("bearer" = []))
 )]
@@ -302,7 +303,114 @@ pub async fn list_role_permissions<C: Connection + Clone>(
         .permission_repo
         .get_role_permission_grants(user.tenant_id, path.into_inner())
         .await?;
-    Ok(HttpResponse::Ok().json(grants))
+
+    // Resolve each grant's `scope_ids` to the scopes they name.
+    //
+    // The grant edge stores scope UUIDs and nothing else, so the admin UI could
+    // only ever render "3 scopes" — a number with no way to find out which
+    // three. Answering "which scopes does this grant cover?" from the client
+    // would have meant listing every resource in the tenant and then every
+    // resource's scopes, just to turn three UUIDs into three names. The ids are
+    // resolved here instead, where one lookup answers it.
+    let resolved = resolve_grant_scopes(&state, user.tenant_id, grants).await;
+    Ok(HttpResponse::Ok().json(resolved))
+}
+
+/// A scope named by a grant, resolved to something a human can read.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct GrantedScope {
+    /// The scope's id, as it appears in the grant's `scope_ids`.
+    pub id: Uuid,
+    /// The scope's name, e.g. `invoices`.
+    pub name: String,
+    /// The resource the scope belongs to.
+    pub resource_id: Uuid,
+}
+
+/// A permission grant with its scopes resolved.
+///
+/// A superset of [`PermissionGrant`]: `scope_ids` is still present and still
+/// authoritative, so a client written before `scopes` existed is unaffected.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ResolvedPermissionGrant {
+    /// The permission this grant is about.
+    pub permission: Permission,
+    /// The scope ids the grant is constrained to. Empty is the wildcard.
+    pub scope_ids: Vec<Uuid>,
+    /// Whether the grant permits or refuses.
+    pub effect: PermissionEffect,
+    /// The scopes `scope_ids` names, in the same order where resolvable.
+    ///
+    /// A scope that cannot be resolved is **omitted** rather than represented
+    /// by a placeholder, so this can be shorter than `scope_ids`. That happens
+    /// when a scope was deleted while a grant still referenced it, and showing
+    /// a name for something that no longer exists would be worse than showing
+    /// one fewer chip beside a count that still says how many ids the grant
+    /// carries.
+    pub scopes: Vec<GrantedScope>,
+}
+
+/// Turn each grant's `scope_ids` into [`GrantedScope`]s.
+///
+/// One lookup per distinct scope across the whole response, not per grant:
+/// several grants on the same role commonly name the same scopes, and issuing
+/// the same read once per grant would make a role page's cost quadratic in how
+/// carefully its grants were narrowed — penalising exactly the operators doing
+/// the right thing.
+///
+/// A failed lookup drops the scope and logs; it never fails the request. The
+/// caller asked for the role's grants, and `scope_ids` — the authoritative
+/// part — is already in hand.
+async fn resolve_grant_scopes<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    grants: Vec<PermissionGrant>,
+) -> Vec<ResolvedPermissionGrant> {
+    use axiam_core::repository::ScopeRepository as _;
+    use std::collections::HashMap;
+
+    let mut cache: HashMap<Uuid, Option<GrantedScope>> = HashMap::new();
+    for grant in &grants {
+        for scope_id in &grant.scope_ids {
+            if cache.contains_key(scope_id) {
+                continue;
+            }
+            let resolved = match state.scope_repo.get_by_id(tenant_id, *scope_id).await {
+                Ok(scope) => Some(GrantedScope {
+                    id: scope.id,
+                    name: scope.name,
+                    resource_id: scope.resource_id,
+                }),
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        %tenant_id,
+                        %scope_id,
+                        "a grant names a scope that no longer resolves"
+                    );
+                    None
+                }
+            };
+            cache.insert(*scope_id, resolved);
+        }
+    }
+
+    grants
+        .into_iter()
+        .map(|grant| {
+            let scopes = grant
+                .scope_ids
+                .iter()
+                .filter_map(|id| cache.get(id).and_then(|s| s.clone()))
+                .collect();
+            ResolvedPermissionGrant {
+                permission: grant.permission,
+                scope_ids: grant.scope_ids,
+                effect: grant.effect,
+                scopes,
+            }
+        })
+        .collect()
 }
 
 /// `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`

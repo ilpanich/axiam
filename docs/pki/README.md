@@ -169,6 +169,53 @@ is the truth of what exists, and AXIAM will not sign with a revoked CA whatever
 the custodian still holds. What is left behind is an orphaned secret: a cleanup
 task, not a security failure.
 
+### Moving a CA you already have into Vault
+
+Because custody is recorded **per CA**, configuring Vault does not move the CAs
+that already exist — their keys stay sealed in their rows, and the signing path
+keeps reading the record rather than the environment. That is what lets adoption
+be non-disruptive, and it is also why adopting Vault alone does not get your
+existing keys out of the database.
+
+Move one explicitly:
+
+```
+POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody
+```
+
+or press **Move to Vault** beside the CA's *Key* column in the admin UI. Both
+require `ca_certificates:manage`.
+
+The response names both ends of the move:
+
+```json
+{
+  "ca_certificate_id": "…",
+  "previous_custody": "database",
+  "key_custody": "vault",
+  "key_locator": "axiam/ca-keys/<org_id>/<ca_id>"
+}
+```
+
+**Effective immediately — no restart.** The row is the authority on where a key
+lives and the signing path reads it per request.
+
+The order is copy, record, then release: the key is loaded from the custodian
+the row names, handed to the configured one, and only then is the row updated
+and the old copy deleted. A failure before the record is written leaves the CA
+exactly as it was and issuance is unaffected; a failure of the final delete
+leaves an orphaned secret behind, which is a cleanup task and the same trade-off
+revocation already makes. The row's own ciphertext is cleared in the same
+statement that records the new custodian — a key in Vault *and* still sealed in
+its row has not been moved, it has been duplicated.
+
+Three cases are refused rather than silently doing nothing:
+
+- the CA is already under the configured custodian;
+- the CA is `external` — AXIAM holds no key for it, so there is nothing to move;
+- the CA is under `vault_pki`, which never hands its key over. That is the
+  stronger property, and migrating out of it would weaken the CA.
+
 ### What KV custody is not
 
 Under `vault` custody the key still reaches AXIAM's memory to sign with. Vault
@@ -349,6 +396,119 @@ issuing organization's CA certificate before accepting the connection. If no
 active CA certificate for that organization exists, the check fails
 closed — a fingerprint match alone is never sufficient to authenticate a
 device.
+
+## Turn on mutual TLS using a CA AXIAM generated
+
+Binding a certificate (above) tells AXIAM which principal a certificate
+belongs to. It does not tell the **TLS listener** to ask for one. That is a
+separate switch, and this section is about setting it without hand-copying
+certificates onto the server.
+
+### The two settings, and why they used to be manual
+
+The rustls listener verifies client certificates when two environment
+variables are set:
+
+| Variable | Meaning |
+|---|---|
+| `AXIAM__SERVER__TLS__CLIENT_AUTH` | `off` (default), `optional`, or `required` |
+| `AXIAM__SERVER__TLS__CLIENT_CA_PATH` | PEM bundle of the CAs client certificates may chain to |
+
+Setting them by hand means getting a copy of your organization CA's
+certificate onto the server volume yourself, keeping it in step with the CA
+you actually issue from, and remembering to replace it when you rotate — for
+a CA that AXIAM generated, holds, and already shows you on a page.
+
+### Flagging a CA instead
+
+Mark an organization CA as an mTLS trust anchor, from the organization's
+**Certificates** tab (the *Trust for mTLS* action) or over the API:
+
+```
+PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor
+{ "enabled": true }
+```
+
+Requires `ca_certificates:manage` — its own permission, because deciding what
+the deployment accepts as a client identity is a broader act than issuing
+under a CA.
+
+At the **next server start**, AXIAM then:
+
+1. collects every flagged CA that is `Active` and unexpired, across all
+   organizations (there is one TLS listener per process, presenting one trust
+   store);
+2. writes their **public** certificates as a single PEM bundle to
+   `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` — defaulting to
+   `client-ca-bundle.pem` beside `AXIAM__SERVER__TLS__CERT_PATH`;
+3. sets `CLIENT_AUTH=optional` and points `CLIENT_CA_PATH` at that bundle.
+
+`optional`, never `required`: a server that suddenly refuses every client
+without a certificate would lock every browser out of the admin UI the moment
+you flag a CA — including yours. `optional` verifies a certificate when one is
+offered and leaves password and passkey logins working, which is what an IoT
+deployment actually wants: devices authenticate by certificate, people do not.
+
+### Your own settings always win
+
+If you have set `CLIENT_AUTH` or `CLIENT_CA_PATH` yourself, AXIAM fills in only
+what you left unset and logs what it did. A `required` you configured is never
+relaxed to `optional`, and a bundle you curated is never replaced with one
+assembled from database rows.
+
+### The private key never leaves its custodian
+
+Only `public_cert_pem` is written to the volume. The CA's signing key stays
+wherever its custodian put it — in Vault, under your own policy (see
+[CA key custody](#ca-key-custody)) — and is never copied to disk.
+
+Nothing is weakened by the copy. A trust anchor is public by construction: it
+is what the server hands every client during the handshake, and every device
+that validates an AXIAM-issued chain already holds it.
+
+### Why a restart
+
+rustls builds its `RootCertStore` once, when the listener is constructed, and
+actix-web binds that config for the life of the process. There is no supported
+way to add a root to a server that is already serving, so flagging a CA changes
+what the *next* boot trusts. The API says so — `restart_required` is always
+`true` in the response — rather than letting the toggle imply otherwise.
+
+### Full walkthrough
+
+```bash
+# 1. Generate the organization CA in the admin UI, or:
+curl -X POST https://axiam.example.com/api/v1/organizations/$ORG/ca-certificates \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"subject":"CN=Acme Root CA","key_algorithm":"Ed25519","validity_days":3650}'
+# With Vault custody configured, the signing key is created in Vault and the
+# response carries no private_key_pem. That is the intended shape.
+
+# 2. Flag it as an mTLS trust anchor.
+curl -X PUT \
+  https://axiam.example.com/api/v1/organizations/$ORG/ca-certificates/$CA/mtls-trust-anchor \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":true}'
+# → {"restart_required":true, "message":"This CA will be added to the mTLS
+#    client trust store when the server next starts. …"}
+
+# 3. Make sure the bundle has somewhere to go. Skip if CERT_PATH is set —
+#    the bundle defaults to that directory.
+export AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH=/etc/axiam/tls/client-ca-bundle.pem
+
+# 4. Restart. The startup log names the bundle and the resulting mode:
+#    "mTLS client trust store built from flagged organization CAs"
+#      anchors=1 bundle=/etc/axiam/tls/client-ca-bundle.pem client_auth=Optional
+
+# 5. Issue a Device certificate under that CA and hand it to the device
+#    (see "Issue a leaf certificate" above). It now authenticates by mTLS.
+```
+
+If flagged CAs exist but no bundle path can be derived, startup logs a warning
+and leaves client authentication **off** — a permissive failure, not a hole,
+since `optional` admits nobody it would otherwise have refused. It never
+refuses to boot: the flag is set at runtime through the API, and failing
+startup would let one admin request brick the next restart.
 
 ## Revoke a certificate
 

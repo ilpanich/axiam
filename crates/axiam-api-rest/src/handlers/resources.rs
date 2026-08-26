@@ -65,6 +65,43 @@ pub async fn create<C: Connection + Clone>(
         metadata: req.metadata,
     };
     let resource = state.resource_repo.create(input).await?;
+
+    // Seed the resource's default scope.
+    //
+    // A resource with no scopes can only ever take all-or-nothing grants: the
+    // "limit to scopes" picker in the role editor shows an empty list, and the
+    // operator has to leave, invent a scope, and come back before they can
+    // narrow anything. One scope named after the resource makes it usable in a
+    // scoped grant immediately. See `default_scope_name` for the naming rule
+    // (spaces become hyphens) and why it is a domain function rather than a
+    // `format!` here.
+    //
+    // Best-effort: the resource is already committed, and failing the response
+    // over a convenience scope would invite a retry that then collides on the
+    // resource's unique name. The operator can add the scope by hand, which is
+    // exactly where they were before this existed.
+    if let Some(scope_name) = axiam_core::models::scope::default_scope_name(&resource.name) {
+        use axiam_core::repository::ScopeRepository as _;
+        let description = axiam_core::models::scope::default_scope_description(&resource.name);
+        if let Err(e) = state
+            .scope_repo
+            .create(axiam_core::models::scope::CreateScope {
+                tenant_id: resource.tenant_id,
+                resource_id: resource.id,
+                name: scope_name,
+                description,
+            })
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                tenant_id = %resource.tenant_id,
+                resource_id = %resource.id,
+                "could not create the default scope for a new resource"
+            );
+        }
+    }
+
     Ok(HttpResponse::Created().json(resource))
 }
 

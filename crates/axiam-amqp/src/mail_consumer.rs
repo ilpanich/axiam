@@ -15,7 +15,8 @@ use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
 use axiam_core::repository::{
-    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, UserRepository,
+    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, OrganizationRepository,
+    TenantRepository, UserRepository,
 };
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
@@ -104,6 +105,75 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
     map
 }
 
+/// The recipient's identity, as template placeholders.
+///
+/// Public so it can be tested directly: `send_with_retry_and_audit` does not
+/// return the rendered message, so "did `{{username}}` resolve?" is not
+/// observable through it.
+///
+/// Fills `username`, `email`, `tenant_name` and `org_name` — the four keys every
+/// built-in template uses and no publisher supplies. See the call site in
+/// [`send_with_retry_and_audit`] for why this lives here.
+///
+/// Never fails. A lookup that does not resolve simply contributes no keys, and
+/// the renderer leaves those placeholders standing. That is a cosmetic loss;
+/// refusing to send the mail would not be.
+///
+/// A notification rule's mail is addressed to an administrator's distribution
+/// list rather than to a user, so `msg.user_id` there is the *actor* who
+/// triggered the event — which is exactly who the reader wants named. Tenant and
+/// organization are the event's, which is also right.
+pub async fn identity_context<U, N, O>(
+    msg: &OutboundMailMessage,
+    user_repo: &U,
+    tenant_repo: &N,
+    org_repo: &O,
+) -> TemplateContext
+where
+    U: UserRepository,
+    N: TenantRepository,
+    O: OrganizationRepository,
+{
+    let mut ctx = TemplateContext::new();
+
+    // Every key the built-in templates use is inserted, resolved or not.
+    //
+    // The renderer leaves an UNKNOWN placeholder standing — that is the whole
+    // reason these emails read "Welcome, {{username}}!" — so an unresolvable
+    // lookup that simply skipped its key would reproduce the bug in miniature
+    // for whichever fact was missing. A notification about a failed login, for
+    // instance, has no actor to name, and would otherwise render
+    // "Actor: {{username}}".
+    //
+    // `UNRESOLVED` is what an honest email says instead. A publisher with a
+    // better word for its own case overlays it — see the dispatcher, which
+    // names an unauthenticated actor as such.
+    const UNRESOLVED: &str = "unknown";
+    ctx.insert("username".into(), UNRESOLVED.into());
+    ctx.insert("email".into(), UNRESOLVED.into());
+    ctx.insert("tenant_name".into(), UNRESOLVED.into());
+    ctx.insert("org_name".into(), UNRESOLVED.into());
+
+    if !msg.user_id.is_nil()
+        && let Ok(user) = user_repo.get_by_id(msg.tenant_id, msg.user_id).await
+    {
+        ctx.insert("username".into(), user.username);
+        ctx.insert("email".into(), user.email);
+    }
+
+    if let Ok(tenant) = tenant_repo.get_by_id(msg.tenant_id).await {
+        ctx.insert("tenant_name".into(), tenant.name);
+    }
+
+    if !msg.org_id.is_nil()
+        && let Ok(org) = org_repo.get_by_id(msg.org_id).await
+    {
+        ctx.insert("org_name".into(), org.name);
+    }
+
+    ctx
+}
+
 // ---------------------------------------------------------------------------
 // Core send-with-retry-and-audit helper (broker-free, testable directly)
 // ---------------------------------------------------------------------------
@@ -126,18 +196,23 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
 /// The actual recipient email is always resolved from `user_id` + `tenant_id`
 /// via the user repository, preventing recipient hijacking if a message is
 /// intercepted and tampered with in transit.
-pub async fn send_with_retry_and_audit<E, A, U, T>(
+#[allow(clippy::too_many_arguments)]
+pub async fn send_with_retry_and_audit<E, A, U, T, N, O>(
     msg: &OutboundMailMessage,
     email_config_repo: &E,
     audit_repo: &A,
     user_repo: &U,
     template_repo: &T,
+    tenant_repo: &N,
+    org_repo: &O,
 ) -> Result<SendOutcome, SendError>
 where
     E: EmailConfigRepository,
     A: AuditLogRepository,
     U: UserRepository,
     T: EmailTemplateRepository,
+    N: TenantRepository,
+    O: OrganizationRepository,
 {
     // 1. Resolve effective email config (tenant → org cascade).
     let email_config = email_config_repo
@@ -187,23 +262,61 @@ where
 
     let template = resolve_template(kind, org_template.as_ref(), tenant_template.as_ref());
 
-    // 4. Build template context from message.
-    let ctx = build_template_context(&msg.template_context);
+    // 4. Build the template context: the recipient's identity first, then the
+    //    message's own keys over the top.
+    //
+    //    Every built-in template — activation, password reset, deletion,
+    //    export — greets the reader with `{{username}}` and names
+    //    `{{tenant_name}}`, and NO publisher supplied either. Unknown
+    //    placeholders are left as-is by the renderer, so the activation email a
+    //    new user received opened "Welcome, {{username}}!" and asked them to
+    //    activate their "{{tenant_name}}" account. The emails were being sent;
+    //    they were unreadable.
+    //
+    //    Resolved here rather than at each publisher because it is the same four
+    //    facts every time and the consumer already looks two of them up: a
+    //    publisher that forgot one would reintroduce exactly this, and there is
+    //    no reason a handler enqueuing a password reset should have to know
+    //    which placeholders its template happens to use.
+    //
+    //    Each lookup degrades to omitting its keys rather than failing the send.
+    //    A greeting rendered without a name is worse than one with it and far
+    //    better than a password-reset link that never arrives.
+    let mut ctx = identity_context(msg, user_repo, tenant_repo, org_repo).await;
+    ctx.extend(build_template_context(&msg.template_context));
 
     // 5. SEC-055: Resolve recipient from user repository instead of trusting to_address.
     //    This prevents recipient hijacking if the AMQP message is tampered with.
-    let resolved_address = user_repo
-        .get_by_id(msg.tenant_id, msg.user_id)
-        .await
-        .map(|u| u.email)
-        .unwrap_or_else(|_| {
-            warn!(
-                user_id = %msg.user_id,
-                tenant_id = %msg.tenant_id,
-                "SEC-055: could not resolve user email — falling back to message to_address"
-            );
-            msg.to_address.clone()
-        });
+    //
+    //    Notification mail is the one exception, and must be: its recipients are
+    //    addresses an administrator typed into a notification rule — a security
+    //    distribution list, an on-call alias — and are not users of the tenant at
+    //    all. Resolving them "back" to a user would have sent every rule's mail to
+    //    whoever happened to trigger the event (`user_id` there is the *actor*),
+    //    telling the person who just failed a login that someone failed a login,
+    //    and telling the administrators who asked to be told nothing.
+    //
+    //    The hijacking SEC-055 defends against does not apply to this type: the
+    //    address is not derived from a user record on either side, so there is no
+    //    authoritative value to prefer over the message's. What protects it is
+    //    that only `NotificationDispatcher` produces `MailType::Notification`, and
+    //    it reads the address straight from the rule row.
+    let resolved_address = if msg.mail_type == MailType::Notification {
+        msg.to_address.clone()
+    } else {
+        user_repo
+            .get_by_id(msg.tenant_id, msg.user_id)
+            .await
+            .map(|u| u.email)
+            .unwrap_or_else(|_| {
+                warn!(
+                    user_id = %msg.user_id,
+                    tenant_id = %msg.tenant_id,
+                    "SEC-055: could not resolve user email — falling back to message to_address"
+                );
+                msg.to_address.clone()
+            })
+    };
 
     // 6. Render HTML-safe email (D-18).
     let email_message = render_email(&template, &resolved_address, &ctx);
@@ -327,17 +440,22 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// SEC-055: The `user_repo` is used to resolve the actual recipient email
 /// address from `user_id + tenant_id`, preventing recipient hijacking via
 /// a tampered `to_address` field in the AMQP message.
-pub async fn start_mail_consumer<E, A, U, T>(
+#[allow(clippy::too_many_arguments)]
+pub async fn start_mail_consumer<E, A, U, T, N, O>(
     channel: Channel,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
     template_repo: T,
+    tenant_repo: N,
+    org_repo: O,
 ) where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
     U: UserRepository + 'static,
     T: EmailTemplateRepository + 'static,
+    N: TenantRepository + 'static,
+    O: OrganizationRepository + 'static,
 {
     info!("Starting mail AMQP consumer");
 
@@ -394,6 +512,8 @@ pub async fn start_mail_consumer<E, A, U, T>(
             &audit_repo,
             &user_repo,
             &template_repo,
+            &tenant_repo,
+            &org_repo,
         )
         .await;
 

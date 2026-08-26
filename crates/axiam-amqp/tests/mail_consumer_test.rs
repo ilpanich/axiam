@@ -14,7 +14,7 @@ use axiam_core::repository::{
 };
 use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
-    SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::Utc;
 use surrealdb::Surreal;
@@ -105,12 +105,23 @@ async fn delivery_failure_first_attempt_returns_retry_needed() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+    // The mail consumer resolves `{{tenant_name}}` and `{{org_name}}` from
+    // these — every built-in template names them.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
-            .await
-            .unwrap();
+    let outcome = send_with_retry_and_audit(
+        &msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+        &tenant_repo,
+        &org_repo,
+    )
+    .await
+    .unwrap();
 
     assert!(
         matches!(outcome, SendOutcome::RetryNeeded { .. }),
@@ -133,15 +144,26 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+    // The mail consumer resolves `{{tenant_name}}` and `{{org_name}}` from
+    // these — every built-in template names them.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     // Set attempt_count to MAX_RETRIES - 1 so this is the exhausting attempt.
     let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, MAX_RETRIES - 1);
     msg.user_id = user_id;
 
-    let outcome =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
-            .await
-            .unwrap();
+    let outcome = send_with_retry_and_audit(
+        &msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+        &tenant_repo,
+        &org_repo,
+    )
+    .await
+    .unwrap();
 
     assert!(
         matches!(outcome, SendOutcome::Exhausted),
@@ -203,10 +225,22 @@ async fn missing_email_config_returns_send_error() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+    // The mail consumer resolves `{{tenant_name}}` and `{{org_name}}` from
+    // these — every built-in template names them.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
-    let result =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo).await;
+    let result = send_with_retry_and_audit(
+        &msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+        &tenant_repo,
+        &org_repo,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -247,16 +281,27 @@ async fn export_ready_resolves_real_org_id() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
     let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+    // The mail consumer resolves `{{tenant_name}}` and `{{org_name}}` from
+    // these — every built-in template names them.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
 
     // ExportReady message carrying the real org_id, mirroring cleanup.rs's
     // post-25-05 enqueue shape (action_url/expiry_time template context).
     let mut msg = make_msg(MailType::ExportReady, org_id, tenant_id, 0);
     msg.user_id = user_id;
 
-    let outcome =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
-            .await
-            .expect("a real org_id must resolve an email config and reach the render/send attempt");
+    let outcome = send_with_retry_and_audit(
+        &msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+        &tenant_repo,
+        &org_repo,
+    )
+    .await
+    .expect("a real org_id must resolve an email config and reach the render/send attempt");
 
     assert!(
         matches!(outcome, SendOutcome::RetryNeeded { .. }),
@@ -274,6 +319,8 @@ async fn export_ready_resolves_real_org_id() {
         &audit_repo,
         &user_repo,
         &template_repo,
+        &tenant_repo,
+        &org_repo,
     )
     .await;
 
@@ -334,4 +381,220 @@ async fn successful_send_via_mock_config_returns_delivered() {
         "mock provider send must succeed: {:?}",
         result
     );
+}
+
+// ---------------------------------------------------------------------------
+// Template identity placeholders
+// ---------------------------------------------------------------------------
+//
+// Every built-in template greets the reader with `{{username}}` and names
+// `{{tenant_name}}`, and no publisher supplied either — the renderer leaves an
+// unknown placeholder standing, so a new user's activation email opened
+// "Welcome, {{username}}!" and asked them to activate their "{{tenant_name}}"
+// account. The mail was being delivered; it was unreadable.
+//
+// Filling them in the consumer rather than at each publisher is what makes that
+// unrepeatable: it is the same four facts for every mail type, and a publisher
+// that forgot one would reintroduce exactly this.
+
+use axiam_amqp::mail_consumer::identity_context;
+use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::user::CreateUser;
+use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+
+/// Seed an org + tenant + user and return their ids.
+async fn seed_identity(db: &Surreal<Db>) -> (Uuid, Uuid, Uuid) {
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Acme Corporation".into(),
+            slug: "acme".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org.id,
+            name: "Acme Production".into(),
+            slug: "prod".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: tenant.id,
+            username: "alice".into(),
+            email: "alice@acme.example".into(),
+            // Generated, not a literal: a password in source is a hard-coded
+            // credential to any scanner reading the file, and nothing here
+            // verifies it — the fixture only needs a user to exist.
+            password: format!("fixture-{}", Uuid::new_v4()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    (org.id, tenant.id, user.id)
+}
+
+#[tokio::test]
+async fn the_identity_context_fills_every_placeholder_the_templates_use() {
+    let db = setup_db().await;
+    let (org_id, tenant_id, user_id) = seed_identity(&db).await;
+
+    let mut msg = make_msg(MailType::EmailVerification, org_id, tenant_id, 0);
+    msg.user_id = user_id;
+
+    let ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+
+    assert_eq!(ctx.get("username").map(String::as_str), Some("alice"));
+    assert_eq!(
+        ctx.get("email").map(String::as_str),
+        Some("alice@acme.example")
+    );
+    assert_eq!(
+        ctx.get("tenant_name").map(String::as_str),
+        Some("Acme Production")
+    );
+    assert_eq!(
+        ctx.get("org_name").map(String::as_str),
+        Some("Acme Corporation")
+    );
+}
+
+#[tokio::test]
+async fn a_missing_user_costs_the_greeting_and_not_the_email() {
+    // A lookup that does not resolve contributes no keys. The greeting renders
+    // without a name, which is worse than with one and far better than a
+    // password-reset link that never arrives.
+    let db = setup_db().await;
+    let (org_id, tenant_id, _) = seed_identity(&db).await;
+
+    let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    msg.user_id = Uuid::new_v4(); // no such user
+
+    let ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+
+    // Present, but the honest placeholder rather than a name — the renderer
+    // leaves an ABSENT key standing as a literal `{{username}}`, which is the
+    // very bug this context exists to close.
+    assert_eq!(ctx.get("username").map(String::as_str), Some("unknown"));
+    // The tenant and organization still resolve — one missing lookup must not
+    // take the others with it.
+    assert_eq!(
+        ctx.get("tenant_name").map(String::as_str),
+        Some("Acme Production")
+    );
+    assert_eq!(
+        ctx.get("org_name").map(String::as_str),
+        Some("Acme Corporation")
+    );
+}
+
+#[tokio::test]
+async fn a_nil_user_id_is_not_looked_up() {
+    // Notification-rule mail carries `Uuid::nil()` when the audit event had no
+    // attributable actor. Looking that up is a guaranteed-miss round trip.
+    let db = setup_db().await;
+    let (org_id, tenant_id, _) = seed_identity(&db).await;
+
+    let mut msg = make_msg(MailType::Notification, org_id, tenant_id, 0);
+    msg.user_id = Uuid::nil();
+
+    let ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+
+    assert_eq!(ctx.get("username").map(String::as_str), Some("unknown"));
+    assert_eq!(ctx.get("email").map(String::as_str), Some("unknown"));
+    assert_eq!(
+        ctx.get("tenant_name").map(String::as_str),
+        Some("Acme Production")
+    );
+}
+
+#[tokio::test]
+async fn a_messages_own_context_wins_over_the_resolved_identity() {
+    // The overlay order matters: the consumer fills identity first and the
+    // message's own keys go over the top. A publisher that has a better value —
+    // the address a reset was requested for, say — must not have it overwritten
+    // by a lookup.
+    let db = setup_db().await;
+    let (org_id, tenant_id, user_id) = seed_identity(&db).await;
+
+    let mut msg = make_msg(MailType::EmailVerification, org_id, tenant_id, 0);
+    msg.user_id = user_id;
+
+    // `make_msg` puts `username: "alice"` and `tenant_name: "Test Tenant"` in
+    // the message context; the seeded tenant is "Acme Production".
+    let mut ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+    assert_eq!(
+        ctx.get("tenant_name").map(String::as_str),
+        Some("Acme Production")
+    );
+
+    // The same overlay `send_with_retry_and_audit` performs.
+    if let serde_json::Value::Object(obj) = &msg.template_context {
+        for (k, v) in obj {
+            if let serde_json::Value::String(s) = v {
+                ctx.insert(k.clone(), s.clone());
+            }
+        }
+    }
+    assert_eq!(
+        ctx.get("tenant_name").map(String::as_str),
+        Some("Test Tenant"),
+        "the message's own value must win"
+    );
+}
+
+#[tokio::test]
+async fn every_key_the_templates_use_is_always_present() {
+    // The invariant that makes "Welcome, {{username}}!" impossible to
+    // reintroduce: the renderer leaves an unknown placeholder standing, so a
+    // key that is sometimes absent is a literal `{{…}}` in somebody's inbox.
+    // Nothing resolves here — no user, no tenant, no org — and all four keys
+    // still come back.
+    let db = setup_db().await;
+    let mut msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
+    msg.user_id = Uuid::new_v4();
+
+    let ctx = identity_context(
+        &msg,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealTenantRepository::new(db.clone()),
+        &SurrealOrganizationRepository::new(db.clone()),
+    )
+    .await;
+
+    for key in ["username", "email", "tenant_name", "org_name"] {
+        assert_eq!(
+            ctx.get(key).map(String::as_str),
+            Some("unknown"),
+            "`{key}` must always be present, resolved or not"
+        );
+    }
 }

@@ -277,6 +277,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_signing_cas",
         sql: SCHEMA_V47,
     },
+    Migration {
+        version: 48,
+        name: "user_status_deleted",
+        sql: SCHEMA_V48,
+    },
+    Migration {
+        version: 49,
+        name: "ca_mtls_trust_anchor",
+        sql: SCHEMA_V49,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2621,9 +2631,95 @@ DEFINE INDEX IF NOT EXISTS idx_ca_cert_org_tenant ON TABLE ca_certificate \
     COLUMNS organization_id, tenant_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v48 — `Deleted` becomes a user status
+// -----------------------------------------------------------------------
+//
+// `DELETE /api/v1/users/{id}` used to set `status = 'Inactive'` — the same
+// value the admin UI's Active/Inactive toggle writes — so a deleted user stayed
+// in the list, indistinguishable from a suspended one, and Delete appeared to do
+// nothing.
+//
+// The row itself is still not removed: audit entries are append-only and name
+// their actor by id, so dropping the row would leave every entry the user ever
+// produced pointing at nothing. `Deleted` is the tombstone marker the listing
+// and credential-lookup queries filter on, and `UserRepository::delete` blanks
+// the credential columns and overwrites `username`, `email` and `metadata`
+// alongside it — the tombstone carries no personal data, and the identifiers it
+// gives up are freed from their unique indexes so the person can register again.
+//
+// `OVERWRITE` extends the ASSERT the way v-with-Anonymized did; no rows are
+// rewritten, because no row can already hold a value the old ASSERT forbade.
+const SCHEMA_V48: &str = "\
+DEFINE FIELD OVERWRITE status ON TABLE user TYPE string
+    ASSERT $value IN ['Active', 'Inactive', 'Locked', 'PendingVerification',
+                      'Anonymized', 'Deleted'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v49 — an organization CA can be an mTLS trust anchor
+// -----------------------------------------------------------------------
+//
+// Opt-in per CA. When set, the server exports that CA's PUBLIC certificate to
+// the client-CA bundle at startup and enables client-certificate
+// authentication, so an IoT device or service account holding a certificate
+// this CA issued is verified by the TLS layer itself.
+//
+// The private key is not involved and is never copied out of its custodian — a
+// trust anchor is the certificate, which the server already hands to every
+// client during the handshake.
+//
+// `DEFAULT false` with no backfill: every CA that already exists is not an
+// anchor, which is exactly the posture the deployment has today.
+//
+// The index makes the startup read — "every anchor, across all organizations" —
+// a lookup rather than a scan of every CA in the deployment.
+const SCHEMA_V49: &str = "\
+DEFINE FIELD IF NOT EXISTS mtls_trust_anchor ON TABLE ca_certificate TYPE bool
+    DEFAULT false;
+DEFINE INDEX IF NOT EXISTS idx_ca_cert_mtls_anchor ON TABLE ca_certificate \
+    COLUMNS mtls_trust_anchor;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v49_defaults_the_anchor_flag_off_and_backfills_nothing() {
+        // Default false is the whole compatibility story: every CA that exists
+        // today is not an anchor, so the deployment's TLS posture is unchanged
+        // until an operator flags one.
+        assert!(SCHEMA_V49.contains("mtls_trust_anchor ON TABLE ca_certificate TYPE bool"));
+        assert!(SCHEMA_V49.contains("DEFAULT false"));
+        assert!(!SCHEMA_V49.contains("UPDATE"));
+        // The startup read asks for every anchor across all organizations, so
+        // without this index it scans every CA in the deployment.
+        assert!(SCHEMA_V49.contains("idx_ca_cert_mtls_anchor"));
+    }
+
+    #[test]
+    fn schema_v48_extends_the_status_assert_without_dropping_a_value() {
+        // Extending an enum ASSERT means re-stating every value: an OVERWRITE
+        // that listed only the new one would make every existing row invalid on
+        // its next write.
+        for status in [
+            "Active",
+            "Inactive",
+            "Locked",
+            "PendingVerification",
+            "Anonymized",
+            "Deleted",
+        ] {
+            assert!(
+                SCHEMA_V48.contains(status),
+                "the extended ASSERT must still admit `{status}`"
+            );
+        }
+        // No UPDATE: no existing row can hold a value the previous ASSERT
+        // rejected, so there is nothing to backfill.
+        assert!(!SCHEMA_V48.contains("UPDATE"));
+    }
 
     #[test]
     fn schema_v47_adds_tenant_scope_without_touching_existing_rows() {

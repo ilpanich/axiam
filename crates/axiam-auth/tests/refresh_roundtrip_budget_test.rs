@@ -231,6 +231,7 @@ async fn refresh_rotation_stays_within_its_datastore_round_trip_budget() {
             ip_address: None,
             user_agent: None,
             mfa_policy: None,
+            lockout_policy: None,
         })
         .await
         .expect("login")

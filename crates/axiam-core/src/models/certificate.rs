@@ -103,6 +103,35 @@ pub struct CaCertificate {
     /// Where the custodian put the key. A Vault path under its mount; `None`
     /// for database custody, whose locator is the row itself.
     pub key_locator: Option<String>,
+    /// Whether this CA is offered as a trust anchor for mutual TLS.
+    ///
+    /// When set, the server exports this CA's **public** certificate to the
+    /// bundle named by `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` at startup
+    /// and turns client-certificate authentication on (`optional`) if the
+    /// operator has not configured it explicitly. A client presenting a
+    /// certificate that chains to this CA is then verified by the TLS layer
+    /// itself, which is what `axiam_pki::mtls` needs to authenticate an IoT
+    /// device or a service account by certificate rather than by secret.
+    ///
+    /// # What is and is not copied
+    ///
+    /// Only `public_cert_pem` — the certificate. The **private key stays where
+    /// its custodian put it** (Vault, or sealed into the row) and is never
+    /// written to the server volume. A trust anchor is public by construction:
+    /// it is what the server hands every client during the TLS handshake, and
+    /// every device that has to validate the chain already holds a copy.
+    ///
+    /// # Why a restart
+    ///
+    /// rustls builds its `RootCertStore` once, when the listener is
+    /// constructed, and actix-web binds that config for the process's life.
+    /// Toggling this changes what the *next* boot trusts, and the API says so
+    /// in its response rather than pretending the change took effect.
+    ///
+    /// Defaults to `false`, so a deployment that never touches this keeps
+    /// exactly the TLS posture it has today.
+    #[serde(default)]
+    pub mtls_trust_anchor: bool,
     pub created_at: DateTime<Utc>,
 }
 

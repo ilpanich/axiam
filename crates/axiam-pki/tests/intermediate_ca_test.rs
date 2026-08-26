@@ -148,13 +148,13 @@ async fn generated_intermediate_is_a_ca_constrained_to_signing_leaves() {
 }
 
 #[tokio::test]
-async fn generated_intermediate_never_outlives_its_parent() {
+async fn an_intermediate_outliving_its_parent_is_refused_with_the_achievable_number() {
     let svc = setup().await;
     let org_id = Uuid::new_v4();
     // A parent with ten days left, and a child asking for a year.
     let parent = root_ca(&svc, org_id, 10).await;
 
-    let generated = svc
+    let err = svc
         .generate_intermediate(CreateIntermediateCa {
             organization_id: org_id,
             tenant_id: Uuid::new_v4(),
@@ -164,15 +164,45 @@ async fn generated_intermediate_never_outlives_its_parent() {
             validity_days: 365,
         })
         .await
-        .expect("intermediate");
+        .expect_err("an intermediate cannot outlive the CA that signs it");
 
-    // Capped rather than refused: the request is reasonable, and the answer is
-    // the shorter of the two windows.
+    // Refused rather than silently capped. Capping produced a ten-day CA out of
+    // a request for a year with nothing said, so the operator's renewal calendar
+    // was built on a date the certificate did not carry.
+    let msg = err.to_string();
     assert!(
-        generated.certificate.not_after <= parent.not_after,
-        "an intermediate that outlives its issuer is rejected by every validator \
-         for the whole of its extra life"
+        msg.contains("cannot outlive"),
+        "the error must say why, got: {msg}"
     );
+    assert!(
+        msg.contains("10 days") || msg.contains("9 days"),
+        "the error must name the validity the parent can actually grant, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn an_intermediate_within_its_parents_window_is_granted_in_full() {
+    let svc = setup().await;
+    let org_id = Uuid::new_v4();
+    let parent = root_ca(&svc, org_id, 3650).await;
+
+    let generated = svc
+        .generate_intermediate(CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: parent.id,
+            subject: "Well-behaved Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("a request inside the parent's window is granted");
+
+    // The whole point of refusing the over-long case: what is granted is exactly
+    // what was asked for, so the notAfter matches the operator's expectation.
+    let span = generated.certificate.not_after - generated.certificate.not_before;
+    assert_eq!(span.num_days(), 365, "the full requested window is granted");
+    assert!(generated.certificate.not_after < parent.not_after);
 }
 
 #[tokio::test]

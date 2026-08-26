@@ -32,6 +32,7 @@ et al.) in the trusted path. Two new config keys control it:
 |---------|--------|---------|---------|
 | `AXIAM__SERVER__TLS__CLIENT_AUTH` | `off` \| `optional` \| `required` | `off` | client-cert policy |
 | `AXIAM__SERVER__TLS__CLIENT_CA_PATH` | PEM bundle path | — | trust anchors for client certs |
+| `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` | path | beside `CERT_PATH` | where the bundle built from CAs flagged `mtls_trust_anchor` is written |
 
 - **`off`** — server-auth only (unchanged behaviour; the config is built with
   `with_no_client_auth()`).

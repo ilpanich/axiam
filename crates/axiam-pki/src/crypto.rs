@@ -12,17 +12,93 @@ use aes_gcm::aead::{Aead, Generate};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::KeyAlgorithm;
-use rcgen::KeyPair;
+use rcgen::{KeyPair, PKCS_RSA_SHA256};
+use rsa::RsaPrivateKey;
+use rsa::pkcs8::EncodePrivateKey;
 use sha2::{Digest, Sha256};
 
+/// Modulus size, in bits, of the RSA keys AXIAM issues.
+///
+/// Named rather than inlined because it also documents the lower bound *ring*
+/// will accept when it later loads the key back for signing: ring refuses a
+/// PKCS#8 RSA key below 2048 bits outright, so a future "RSA-2048 for
+/// constrained devices" option is a change to this constant plus a new
+/// [`KeyAlgorithm`] variant, not a change to the mechanism below.
+const RSA_MODULUS_BITS: usize = 4096;
+
 /// Generate an X.509 key pair for the given algorithm.
+///
+/// # Why RSA takes the long way round
+///
+/// rcgen delegates its crypto to *ring*, and ring deliberately implements no
+/// RSA key **generation** — only signing and verification. `KeyPair::generate_for`
+/// therefore answered every RSA-4096 request with
+/// `"There is no support for generating keys for the given algorithm"`, which
+/// reached the operator as a 500 on an algorithm the API advertises. Ring *can*
+/// sign with an RSA key it is handed (see rcgen's `PKCS_RSA_SHA256` arm of
+/// `from_pkcs8_der_and_sign_algo`), so the missing half is generation alone.
+///
+/// The `rsa` crate supplies exactly that half: generate the key, serialize it as
+/// PKCS#8 DER, and hand it to rcgen with the signature algorithm named
+/// explicitly. The resulting [`KeyPair`] is indistinguishable from one rcgen
+/// generated itself — same type, same `serialize_pem`, same signing path — so no
+/// caller needs to know which algorithm it asked for.
+///
+/// Switching rcgen to its `aws_lc_rs` backend would also work and is the more
+/// usual answer, but it swaps the crypto provider under *every* algorithm and
+/// pulls a C toolchain (cmake, and NASM on Windows) into the build. This keeps
+/// the provider, the build, and the Ed25519 path exactly as they were.
+///
+/// # Cost
+///
+/// RSA-4096 generation is seconds of CPU, not milliseconds, and it is a
+/// rejection-sampling loop whose duration varies run to run. Every call site in
+/// this crate already runs inside `tokio::task::spawn_blocking`, which is what
+/// keeps that off the async runtime's worker threads; a new call site must do
+/// the same.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Inside a blocking context — never directly on an async worker.
+/// let key_pair = tokio::task::spawn_blocking(move || {
+///     generate_keypair(&KeyAlgorithm::Rsa4096)
+/// })
+/// .await??;
+/// assert!(key_pair.serialize_pem().contains("PRIVATE KEY"));
+/// ```
 pub(crate) fn generate_keypair(algorithm: &KeyAlgorithm) -> AxiamResult<KeyPair> {
     match algorithm {
         KeyAlgorithm::Ed25519 => KeyPair::generate_for(&rcgen::PKCS_ED25519)
             .map_err(|e| AxiamError::Certificate(format!("Ed25519 keygen failed: {e}"))),
-        KeyAlgorithm::Rsa4096 => KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
-            .map_err(|e| AxiamError::Certificate(format!("RSA-4096 keygen failed: {e}"))),
+        KeyAlgorithm::Rsa4096 => generate_rsa_keypair(),
     }
+}
+
+/// Generate an RSA-4096 key pair and load it into rcgen for signing.
+fn generate_rsa_keypair() -> AxiamResult<KeyPair> {
+    let mut rng = rand_core::OsRng;
+    let private_key = RsaPrivateKey::new(&mut rng, RSA_MODULUS_BITS)
+        .map_err(|e| AxiamError::Certificate(format!("RSA-4096 keygen failed: {e}")))?;
+
+    // PKCS#8 PEM rather than DER purely to keep the hand-off inside rcgen's own
+    // public API: `from_pkcs8_der_and_sign_algo` takes a `PrivatePkcs8KeyDer`,
+    // a rustls-pki-types type rcgen does not re-export, so reaching it would
+    // mean depending on rustls-pki-types directly and pinning its version
+    // against rcgen's. `pkcs8::LineEnding` is already in the tree via `rsa`.
+    //
+    // `to_pkcs8_pem` returns a `Zeroizing<String>`, so the intermediate copy of
+    // the private key is wiped when this scope ends. rcgen keeps its own copy
+    // inside the returned `KeyPair` for as long as it needs to sign.
+    let pkcs8_pem = private_key
+        .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+        .map_err(|e| {
+            AxiamError::Certificate(format!("RSA-4096 key could not be encoded as PKCS#8: {e}"))
+        })?;
+
+    KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem, &PKCS_RSA_SHA256).map_err(|e| {
+        AxiamError::Certificate(format!("RSA-4096 key was rejected by the signer: {e}"))
+    })
 }
 
 /// Compute SHA-256 fingerprint from DER-encoded certificate bytes.
@@ -77,17 +153,52 @@ mod tests {
     }
 
     #[test]
-    fn generate_keypair_rsa4096_errors_under_ring_backend() {
-        // SURFACED LIMITATION (not endorsed): rcgen's `ring` backend cannot
-        // *generate* RSA keys, so `generate_keypair(Rsa4096)` returns an error
-        // today, even though RSA-4096 is a documented certificate target. This
-        // test pins the current behavior and covers the RSA error arm; if RSA
-        // key generation becomes available, update this assertion.
-        let result = generate_keypair(&KeyAlgorithm::Rsa4096);
+    fn generate_keypair_rsa4096_produces_a_usable_signing_key() {
+        // The regression this pins: rcgen's `ring` backend cannot *generate*
+        // RSA keys, so this arm used to fail with "There is no support for
+        // generating keys for the given algorithm" and surface as a 500 on an
+        // algorithm the certificate API advertises. Generating with the `rsa`
+        // crate and handing ring the PKCS#8 gets a key ring will sign with.
+        let kp = generate_keypair(&KeyAlgorithm::Rsa4096).expect("RSA-4096 keygen must succeed");
+        let pem = kp.serialize_pem();
         assert!(
-            result.is_err(),
-            "expected RSA-4096 keygen to error under the ring backend"
+            pem.contains("PRIVATE KEY"),
+            "expected a PKCS#8 PEM, got: {pem}"
         );
+        assert!(
+            KeyPair::from_pem(&pem).is_ok(),
+            "the serialized key must round-trip back through rcgen"
+        );
+    }
+
+    #[test]
+    fn generate_keypair_rsa4096_signs_a_self_signed_certificate() {
+        // Loading the key is not the same fact as ring accepting it for
+        // signature generation: `from_pkcs8_der_and_sign_algo` only parses.
+        // Actually signing something is what proves the whole path works.
+        let kp = generate_keypair(&KeyAlgorithm::Rsa4096).expect("RSA-4096 keygen must succeed");
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("empty SAN list is valid");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "rsa-keygen-test");
+        let cert = params
+            .self_signed(&kp)
+            .expect("an RSA-4096 key must be able to self-sign");
+        assert!(cert.pem().contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn generate_keypair_rsa4096_is_not_deterministic() {
+        // A generator that returned the same key twice would be catastrophic
+        // and is exactly the shape a stubbed-out implementation takes.
+        let a = generate_keypair(&KeyAlgorithm::Rsa4096)
+            .unwrap()
+            .serialize_pem();
+        let b = generate_keypair(&KeyAlgorithm::Rsa4096)
+            .unwrap()
+            .serialize_pem();
+        assert_ne!(a, b, "two RSA keygens must not produce the same key");
     }
 
     #[test]

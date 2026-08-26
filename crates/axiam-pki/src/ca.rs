@@ -740,6 +740,129 @@ impl<R: CaCertificateRepository> CaService<R> {
         self.repo.get_by_id(organization_id, id).await
     }
 
+    /// Move a CA's signing key to the deployment's currently configured
+    /// custodian.
+    ///
+    /// # Why this exists
+    ///
+    /// Custody is recorded per CA, not read from configuration, and that is
+    /// deliberate: a deployment that adopts Vault keeps issuing from the CAs it
+    /// already has, whose keys are still sealed into their rows. The cost of
+    /// that design is that adopting Vault changes nothing about the keys you
+    /// already have — they stay in the database, forever, unless something
+    /// moves them. This is that something.
+    ///
+    /// Without it the only route from database custody to Vault is to generate
+    /// a new CA and re-issue every leaf certificate beneath it, which for a
+    /// trust anchor means touching every relying party. That is a real
+    /// migration for a real reason; it is not a reasonable price for changing
+    /// where a key is filed.
+    ///
+    /// # Order of operations
+    ///
+    /// Copy first, record second, delete last:
+    ///
+    /// 1. Load the key from the custodian the **row** names.
+    /// 2. Hand it to the configured custodian.
+    /// 3. Update the row — new custody, new locator, and the row's own
+    ///    ciphertext cleared in the same statement.
+    /// 4. Best-effort release from the old custodian.
+    ///
+    /// A failure at step 1 or 2 leaves the CA exactly as it was: the row still
+    /// names the old custodian, which still holds the key, and issuance is
+    /// unaffected. A failure at step 4 leaves an orphaned secret behind — a
+    /// cleanup task, not a security failure, and the same trade-off revocation
+    /// already makes. What must never happen is the reverse order, which would
+    /// delete a key the new custodian had not accepted.
+    ///
+    /// # Errors
+    ///
+    /// - No custodian configured, or the CA is already under the configured one.
+    /// - The CA is under `external` custody: AXIAM holds no key to move.
+    /// - The CA is under a custodian that will not hand its key over
+    ///   (`vault_pki`). That is the stronger property, not a limitation to work
+    ///   around, and moving *out* of it would weaken the CA.
+    pub async fn migrate_key_custody(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+    ) -> AxiamResult<CaCertificate> {
+        let certificate = self.repo.get_by_id(organization_id, id).await?;
+        let target = self.custodians.default_store()?;
+
+        if certificate.key_custody == target.custody() {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "this CA's key is already held by the `{}` custodian",
+                    target.custody()
+                ),
+            });
+        }
+        if certificate.key_custody == CaKeyCustody::External {
+            return Err(AxiamError::Validation {
+                message: "AXIAM holds no private key for this CA, so there is nothing to \
+                          move. It was imported as a trust anchor only."
+                    .into(),
+            });
+        }
+
+        let source = self.custodians.store_for(certificate.key_custody)?;
+        if source.signs_remotely() {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "this CA's key is held by the `{}` custodian, which never hands it \
+                     over — that is a stronger property than the target offers, and \
+                     moving out of it would weaken the CA",
+                    certificate.key_custody
+                ),
+            });
+        }
+
+        let key_ref = Self::key_ref(&certificate);
+        let private_key_pem = source
+            .load(&key_ref, certificate.encrypted_private_key.as_deref())
+            .await?;
+
+        // `import_ca` rather than `store`: a custodian that is a PKI rather
+        // than a safe needs the certificate alongside the key, and every other
+        // custodian's default body ignores it and calls `store`.
+        let stored = target
+            .import_ca(
+                organization_id,
+                id,
+                &certificate.public_cert_pem,
+                &private_key_pem,
+            )
+            .await?;
+        let (_, locator) = split_stored(stored);
+
+        let updated = self
+            .repo
+            .update_key_custody(organization_id, id, target.custody(), locator)
+            .await?;
+
+        if let Err(e) = source.delete(&key_ref).await {
+            tracing::warn!(
+                error = %e,
+                %organization_id,
+                ca_id = %id,
+                from = %certificate.key_custody,
+                "could not release the CA key from its previous custodian after \
+                 migration; the key has moved and this leaves an orphaned copy to \
+                 clean up"
+            );
+        }
+
+        tracing::info!(
+            %organization_id,
+            ca_id = %id,
+            from = %certificate.key_custody,
+            to = %updated.key_custody,
+            "CA signing key custody migrated"
+        );
+        Ok(updated)
+    }
+
     pub async fn revoke(&self, organization_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let certificate = self.repo.get_by_id(organization_id, id).await?;
         self.repo.revoke(organization_id, id).await?;
@@ -855,7 +978,24 @@ fn intermediate_window(
         .ok_or_else(|| AxiamError::Validation {
             message: "validity_days produces a date out of range".into(),
         })?;
-    Ok((not_before, std::cmp::min(requested, parent.not_after)))
+    // Same rule, and the same reasoning, as the leaf path in `cert.rs`: an
+    // intermediate that outlives its parent stops validating the day the parent
+    // expires, so the surplus is time the operator thinks they have and does
+    // not. This used to silently truncate to the parent's notAfter; refusing and
+    // naming the achievable number is what lets them pick a real one.
+    if requested > parent.not_after {
+        let available = crate::cert::issuer_bounded_validity_days(not_before, parent.not_after);
+        return Err(AxiamError::Validation {
+            message: format!(
+                "validity_days is {validity_days} but the parent CA expires on {} — an \
+                 intermediate cannot outlive the CA that signs it. The most this parent can \
+                 grant today is {available} day{}.",
+                parent.not_after.format("%Y-%m-%d"),
+                if available == 1 { "" } else { "s" },
+            ),
+        });
+    }
+    Ok((not_before, requested))
 }
 
 /// A window expressed back in whole days, for a custodian whose API takes a TTL.

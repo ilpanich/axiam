@@ -66,3 +66,37 @@ describe("slugify", () => {
     expect(slugify("@@@")).toBe("");
   });
 });
+
+describe("formatDate — invalid input", () => {
+  // `Intl.DateTimeFormat.format` throws `RangeError: Invalid time value` rather
+  // than returning something useless. Thrown from a render that takes down the
+  // whole page: a table of a hundred rows blanks to an error boundary because
+  // one row has a malformed timestamp.
+  it("renders a dash instead of throwing on an unparseable date", () => {
+    expect(formatDate("not-a-date")).toBe("—");
+    expect(formatDate("")).toBe("—");
+  });
+
+  it("renders a dash for a missing value rather than 'Invalid Date'", () => {
+    // Reached when an API response omits an optional timestamp; the cast
+    // mirrors what a `string | undefined` field does at runtime.
+    expect(formatDate(undefined as unknown as string)).toBe("—");
+  });
+
+  it("still formats a real date", () => {
+    expect(formatDate("2026-01-15T00:00:00Z")).not.toBe("—");
+  });
+
+  it("formatDateTime has the same guard", () => {
+    expect(formatDateTime("not-a-date")).toBe("—");
+    expect(formatDateTime("2026-01-15T10:30:00Z")).not.toBe("—");
+  });
+
+  it("formatRelativeTime renders a dash rather than 'NaN years ago'", () => {
+    // This one never threw — NaN compares false against everything, so it fell
+    // through every branch to the last. The quieter failure, and the one more
+    // likely to reach a user.
+    expect(formatRelativeTime("not-a-date")).toBe("—");
+    expect(formatRelativeTime(new Date().toISOString())).toBe("just now");
+  });
+});

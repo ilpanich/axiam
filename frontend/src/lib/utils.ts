@@ -11,6 +11,11 @@ export function cn(...inputs: ClassValue[]) {
  */
 export function formatRelativeTime(dateStr: string): string {
   const date = new Date(dateStr);
+  // An unparseable date makes every comparison below false — NaN compares false
+  // against everything — so it falls all the way through and renders
+  // "NaN years ago". It does not throw, which makes it the quieter of the two
+  // failure modes and the easier one to ship.
+  if (Number.isNaN(date.getTime())) return "—";
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffSec = Math.floor(diffMs / 1000);
@@ -37,19 +42,31 @@ export function formatRelativeTime(dateStr: string): string {
  * Formats an ISO date string as a medium-length date, e.g. "Jan 15, 2026"
  */
 export function formatDate(iso: string): string {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
+  // `Intl.DateTimeFormat.format` THROWS `RangeError: Invalid time value` on an
+  // unparseable date rather than returning something useless. Thrown from a
+  // render, that takes down the whole page — a table of a hundred rows blanks
+  // because one of them has a malformed timestamp, and the operator sees an
+  // error boundary instead of the ninety-nine good rows.
+  //
+  // A dash is the right answer for a date that is not a date: it is what an
+  // absent value renders as everywhere else in this UI, and the row stays
+  // readable.
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
 }
 
 /**
  * Formats an ISO date string as date + time, e.g. "Jan 15, 2026, 10:30 AM"
  */
 export function formatDateTime(iso: string): string {
+  // Same hazard as `formatDate` — see the note there.
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
-  }).format(new Date(iso));
+  }).format(date);
 }
 
 /**

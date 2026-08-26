@@ -162,8 +162,12 @@ if [ -z "${TA_ROLE}" ] || [ "${TA_ROLE}" = "null" ]; then
 fi
 ok "the new tenant was seeded with its default roles"
 
-api_expect POST "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${TA_USER}/roles" \
-  "{\"role_id\":\"${TA_ROLE}\"}" 201 "${TENANT_A}" >/dev/null
+# Assignment goes on the *role*, not the user: `/users/{id}/roles` is a
+# read-only view of what a user holds. No `resource_id`, which makes this a
+# global grant inside the tenant — the tenant admin administers all of
+# `alpha` and, as the boundary check below proves, nothing outside it.
+api_expect POST "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/roles/${TA_ROLE}/users" \
+  "{\"user_id\":\"${TA_USER}\"}" 204 "${TENANT_A}" >/dev/null
 
 log "signing in as the tenant admin (tenant named, as it must be)"
 HDRS="$(mktemp)"

@@ -306,7 +306,11 @@ async fn get_certificate_by_id() {
             "subject": "user-cert",
             "cert_type": "User",
             "key_algorithm": "Ed25519",
-            "validity_days": 365
+            // Inside the CA's window. The CA above is issued for 365 days a
+            // moment earlier, so 365 here would end a few seconds AFTER its
+            // issuer — which is now refused rather than silently truncated, the
+            // truncation being the reported bug.
+            "validity_days": 180
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -373,6 +377,58 @@ async fn revoke_certificate() {
     let resp = test::call_service(&app, req).await;
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["status"], "Revoked");
+}
+
+/// A leaf that would outlive its issuer is refused, and the error says by how
+/// much it may live instead.
+///
+/// It used to be silently shortened to the CA's expiry: an operator asked for a
+/// year against a 30-day CA, got 30 days, and nothing said so. A certificate
+/// whose holder believes it is valid for longer than its chain validates is a
+/// renewal that does not happen and an outage nobody predicted.
+#[actix_rt::test]
+async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // The CA is issued for 365 days; ask the leaf for appreciably more.
+    let ca_id = generate_ca!(app, org_id, token);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": ca_id,
+            "subject": "too-long",
+            "cert_type": "Service",
+            "key_algorithm": "Ed25519",
+            "validity_days": 800
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "body: {body}");
+
+    // The number is the point: an error that only says "too long" leaves the
+    // operator guessing at the value the form should have offered. The CA was
+    // issued moments ago for 365 days, so whole days remaining is 364.
+    let message = body.to_string();
+    assert!(
+        message.contains("cannot outlive its issuer"),
+        "the refusal must say why, got: {message}"
+    );
+    assert!(
+        message.contains("364 days"),
+        "the refusal must quote the maximum the issuer can grant, got: {message}"
+    );
 }
 
 #[actix_rt::test]

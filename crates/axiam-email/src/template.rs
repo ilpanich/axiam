@@ -213,8 +213,12 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
         // first, so a security alert said which tenant something happened in and
         // never what happened.
         //
-        // `{{username}}` is the ACTOR here, not the recipient — the rule's
-        // recipients are not users of the tenant at all.
+        // `{{username}}` and `{{email}}` are the ACTOR's, not the recipient's —
+        // a rule's recipients are addresses an administrator typed in and are
+        // not users of the tenant at all. Naming the actor's address is the
+        // pre-existing behaviour and worth keeping: an alert about a failed
+        // login is not actionable without knowing whose account it was, and the
+        // recipients are a tenant administrator's own choice of who may see it.
         TemplateKind::AdminNotification => (
             "[{{org_name}}] {{event}} in {{tenant_name}}",
             r#"<!DOCTYPE html>
@@ -225,7 +229,7 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
   <tr><td>Event</td><td>{{event}}</td></tr>
   <tr><td>Request</td><td>{{action}}</td></tr>
   <tr><td>Outcome</td><td>{{outcome}}</td></tr>
-  <tr><td>Actor</td><td>{{username}}</td></tr>
+  <tr><td>Actor</td><td>{{username}} ({{email}})</td></tr>
 </table>
 <p>{{details}}</p>
 <p>Review the tenant's audit log for the full record.</p>
@@ -234,7 +238,7 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
              Event:   {{event}}\n\
              Request: {{action}}\n\
              Outcome: {{outcome}}\n\
-             Actor:   {{username}}\n\n\
+             Actor:   {{username}} ({{email}})\n\n\
              {{details}}\n\n\
              Review the tenant's audit log for the full record.",
         ),

@@ -506,7 +506,61 @@ async fn list_scopes_returns_scopes() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body.is_array());
-    assert_eq!(body.as_array().unwrap().len(), 2);
+    // Three, not two: creating a resource seeds a default scope named after it,
+    // so a resource is usable in a scoped grant without the operator having to
+    // leave and invent one first.
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 3, "got {names:?}");
+    assert!(names.contains(&"read:users"));
+    assert!(names.contains(&"write:users"));
+    assert!(
+        names.contains(&"API"),
+        "the resource's default scope must be present, got {names:?}"
+    );
+}
+
+/// Creating a resource seeds one scope named after it, spaces to hyphens.
+#[actix_rt::test]
+async fn creating_a_resource_seeds_a_default_scope() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/resources")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            // Spaces, so the hyphen rule is actually exercised: a scope name is
+            // typed into policy and pasted into SDK calls.
+            "name": "Customer Billing",
+            "resource_type": "service"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let resource: serde_json::Value = test::read_body_json(resp).await;
+    let resource_id = resource["id"].as_str().unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/resources/{resource_id}/scopes"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let scopes = body.as_array().unwrap();
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0]["name"], "Customer-Billing");
 }
 
 #[actix_rt::test]

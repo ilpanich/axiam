@@ -6245,6 +6245,14 @@ differ somewhere, whatever their versions say.
 version. The digest answers the other question — *is this the same document?* — which a
 semantic version was never able to.
 
+**The version is part of what is digested**, so a release bump changes the digest even when
+no path did. That is deliberate: "same document" is a claim that can be checked, where "same
+API" would need an argument about whether a `description`, a `tag` or an example counts as
+part of the API. A consumer who wants the narrower question can compare the members they
+care about; this field answers the wider one exactly. Both directions of the failure are now
+visible — `1.0.0-alpha44` and `1.0.0-beta01` were the same document under two versions, and
+`1.0.0-alpha44` on two branches was two documents under one.
+
 **For SDK authors.** Nothing is required of you: the field is an OpenAPI `x-` extension, so
 a validator and a code generator both ignore it, and no SDK's generated surface changes.
 It is there for the tooling around the SDK — a generator deciding whether to re-run, a

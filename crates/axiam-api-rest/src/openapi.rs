@@ -602,6 +602,11 @@ pub const SPEC_DIGEST_KEY: &str = "x-axiam-spec-digest";
 /// keep reading it as one. This is the other question — "is this the same document?" —
 /// answered separately and exactly.
 ///
+/// **`info.version` is inside the digest**, so a release bump changes it even when no path
+/// did. Deliberate: "same document" is checkable, where "same API" would need an argument
+/// about whether a description, a tag or an example counts. A consumer wanting the narrower
+/// question can compare the members they care about.
+///
 /// Computed over the document with this field ABSENT, so the digest is a function of the
 /// spec's content rather than of itself, and so re-stamping an already-stamped document is
 /// idempotent.

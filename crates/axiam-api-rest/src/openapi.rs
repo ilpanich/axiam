@@ -579,6 +579,58 @@ pub fn api_doc() -> utoipa::openapi::OpenApi {
     let doc = ApiDoc::openapi();
     #[cfg(feature = "saml")]
     let doc = doc.merge_from(SamlApiDoc::openapi());
+    stamp_spec_digest(doc)
+}
+
+/// The extension key carrying the specification's content digest.
+///
+/// `x-`-prefixed, which is what the OpenAPI specification reserves for extensions, so a
+/// validator and a code generator both ignore it.
+pub const SPEC_DIGEST_KEY: &str = "x-axiam-spec-digest";
+
+/// Stamp `info.x-axiam-spec-digest` with a SHA-256 over this document's own content.
+///
+/// **Why `info.version` is not enough.** It tracks `CARGO_PKG_VERSION`, which is the
+/// release version — it moves when a release is cut, not when a path is added. Two builds
+/// can therefore describe genuinely different APIs under the same string, and they have:
+/// `main` and a release branch both reported `1.0.0-alpha44` while differing by two paths
+/// (`ca-certificates/{id}/migrate-custody` and `.../mtls-trust-anchor`). A consumer pinning
+/// on `info.version` — an SDK deciding whether to regenerate, a gateway caching a spec, a
+/// contract test asserting it is current — could not tell those exports apart, and nothing
+/// in the document let it.
+///
+/// The version keeps its meaning: it is the API's semantic version, and consumers should
+/// keep reading it as one. This is the other question — "is this the same document?" —
+/// answered separately and exactly.
+///
+/// **`info.version` is inside the digest**, so a release bump changes it even when no path
+/// did. Deliberate: "same document" is checkable, where "same API" would need an argument
+/// about whether a description, a tag or an example counts. A consumer wanting the narrower
+/// question can compare the members they care about.
+///
+/// Computed over the document with this field ABSENT, so the digest is a function of the
+/// spec's content rather than of itself, and so re-stamping an already-stamped document is
+/// idempotent.
+fn stamp_spec_digest(mut doc: utoipa::openapi::OpenApi) -> utoipa::openapi::OpenApi {
+    use sha2::{Digest, Sha256};
+
+    // Absent, not empty: an empty `extensions` map serializes as no key at all here (the
+    // field is `Option` and flattened), but clearing it explicitly is what makes the digest
+    // computed below independent of whatever was there before.
+    doc.info.extensions = None;
+
+    let canonical = serde_json::to_vec(&doc).expect("OpenAPI serialization failed");
+    let digest = hex::encode(Sha256::digest(&canonical));
+
+    // Exactly one extension, deliberately. `Extensions` is a flattened `HashMap`, whose
+    // iteration order is not stable across runs, so two or more entries here would make the
+    // serialized bytes vary between builds — and the SDK OpenAPI drift gate compares them
+    // byte for byte. A second extension needs an ordered map first.
+    doc.info.extensions = Some(
+        utoipa::openapi::extensions::ExtensionsBuilder::new()
+            .add(SPEC_DIGEST_KEY, format!("sha256:{digest}"))
+            .build(),
+    );
     doc
 }
 
@@ -596,6 +648,133 @@ impl utoipa::Modify for SecurityAddon {
                     .bearer_format("JWT")
                     .build(),
             ),
+        );
+    }
+}
+
+#[cfg(test)]
+mod spec_digest_tests {
+    use super::{SPEC_DIGEST_KEY, api_doc};
+
+    /// The digest is present, and says which algorithm produced it.
+    #[test]
+    fn the_document_carries_a_digest() {
+        let doc = api_doc();
+        let extensions = doc
+            .info
+            .extensions
+            .as_ref()
+            .expect("info carries no extensions");
+        let value = extensions
+            .get(SPEC_DIGEST_KEY)
+            .and_then(|v| v.as_str())
+            .expect("info carries no spec digest");
+
+        // `sha256:` + 64 hex characters. Naming the algorithm inline is what lets this
+        // change one day without every consumer having to guess from the length.
+        assert!(
+            value.starts_with("sha256:"),
+            "unexpected digest form: {value}"
+        );
+        assert_eq!(value.len(), "sha256:".len() + 64);
+        assert!(
+            value["sha256:".len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        );
+    }
+
+    /// Two exports of the same build agree.
+    ///
+    /// Not a tautology: the digest is computed over a serialization of the whole document,
+    /// and if any part of that serialization were order-unstable — a `HashMap` somewhere in
+    /// the tree — this would flake. It is the same property the SDK OpenAPI drift gate
+    /// depends on, asserted here where the failure names its cause.
+    #[test]
+    fn the_digest_is_stable_across_exports() {
+        let first = api_doc();
+        let second = api_doc();
+        assert_eq!(
+            first.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+            second
+                .info
+                .extensions
+                .as_ref()
+                .unwrap()
+                .get(SPEC_DIGEST_KEY),
+        );
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap(),
+        );
+    }
+
+    /// A document that differs by one path gets a different digest.
+    ///
+    /// This is the whole point of the field, and the reason `info.version` could not serve:
+    /// the version is the release version and moves when a release is cut, so two builds
+    /// describing genuinely different APIs can and do report the same string. `main` and a
+    /// release branch both said `1.0.0-alpha44` while differing by two paths.
+    #[test]
+    fn removing_a_path_changes_the_digest() {
+        let full = api_doc();
+        let before = full
+            .info
+            .extensions
+            .as_ref()
+            .unwrap()
+            .get(SPEC_DIGEST_KEY)
+            .cloned()
+            .unwrap();
+
+        let mut trimmed = api_doc();
+        let victim = trimmed
+            .paths
+            .paths
+            .keys()
+            .next()
+            .expect("the spec has no paths")
+            .clone();
+        // `remove`, not `shift_remove`: `preserve_path_order` is off in this build, so
+        // `PathsMap` is a `BTreeMap`. That is also why the digest is stable — a BTreeMap
+        // serializes in key order rather than in insertion order.
+        trimmed.paths.paths.remove(&victim);
+        let after = super::stamp_spec_digest(trimmed)
+            .info
+            .extensions
+            .as_ref()
+            .unwrap()
+            .get(SPEC_DIGEST_KEY)
+            .cloned()
+            .unwrap();
+
+        assert_ne!(
+            before, after,
+            "dropping {victim} left the digest unchanged, so it does not distinguish content"
+        );
+    }
+
+    /// Re-stamping an already-stamped document is a no-op.
+    ///
+    /// The digest is computed with the field cleared, so it is a function of the content
+    /// rather than of itself. Were it not, stamping twice would produce a different value
+    /// the second time and the field would be unusable for comparison.
+    #[test]
+    fn stamping_is_idempotent() {
+        let once = api_doc();
+        let expected = once
+            .info
+            .extensions
+            .as_ref()
+            .unwrap()
+            .get(SPEC_DIGEST_KEY)
+            .cloned()
+            .unwrap();
+
+        let twice = super::stamp_spec_digest(once);
+        assert_eq!(
+            twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+            Some(&expected)
         );
     }
 }

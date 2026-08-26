@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axiam_authz::types::{AccessDecision, AccessRequest};
-use axiam_authz::{AuthorizationEngine, BatchStrategy};
+use axiam_authz::{AuthorizationEngine, BatchStrategy, types::SubjectScope};
 use axiam_core::error::AxiamResult;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::permission::{

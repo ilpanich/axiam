@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_authz::{
     AuthorizationEngine, BatchStrategy, DecisionCache, DecisionCacheConfig,
     InvalidationBroadcaster, InvalidationEvent,

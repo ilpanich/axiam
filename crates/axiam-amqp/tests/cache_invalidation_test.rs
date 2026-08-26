@@ -38,7 +38,7 @@ use axiam_amqp::messages::{
 };
 use axiam_authz::invalidation::InvalidationEvent;
 use axiam_authz::types::{AccessDecision, AccessRequest};
-use axiam_authz::{AuthzConfig, DecisionCache, DecisionCacheConfig};
+use axiam_authz::{AuthzConfig, DecisionCache, DecisionCacheConfig, types::SubjectScope};
 use chrono::Utc;
 use lapin::ExchangeKind;
 use uuid::Uuid;

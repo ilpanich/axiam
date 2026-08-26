@@ -21,7 +21,7 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
+use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine, types::SubjectScope};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;

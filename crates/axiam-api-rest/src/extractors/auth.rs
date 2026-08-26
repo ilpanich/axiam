@@ -4,6 +4,7 @@
 //! It extracts the JWT from the `axiam_access` httpOnly cookie (browser clients)
 //! or falls back to `Authorization: Bearer <token>` header (service clients).
 
+use axiam_authz::types::SubjectScope;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -168,13 +169,13 @@ impl AuthenticatedUser {
     /// [`Self::organization_level`] was set by the tenant lookup in
     /// [`resolve_active_tenant`], so the claim can never be made on the
     /// strength of request input alone.
-    pub fn subject_scope(&self) -> axiam_authz::types::SubjectScope {
+    pub fn subject_scope(&self) -> SubjectScope {
         if self.organization_level {
-            axiam_authz::types::SubjectScope::Organization {
+            SubjectScope::Organization {
                 tenant_id: self.principal_tenant_id,
             }
         } else {
-            axiam_authz::types::SubjectScope::Tenant
+            SubjectScope::Tenant
         }
     }
 }

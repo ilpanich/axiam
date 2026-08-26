@@ -1269,8 +1269,21 @@ async fn login_rejects_missing_org_identifier() {
     assert_eq!(resp.status().as_u16(), 400);
 }
 
+/// Omitting the tenant is a request to sign in at **organization level**, not
+/// a malformed request.
+///
+/// It used to be a 400: every principal belonged to a tenant, so a login with
+/// no tenant could only be a mistake. Organization principals changed that —
+/// they live in the organization's own reserved tenant and name no tenant at
+/// all (see `claude_dev/organization-scope-design.md`).
+///
+/// So the interesting property is no longer the status code but who is found:
+/// `alice` is a tenant user, and looking her up in the organization scope
+/// finds nobody. The answer is 401 — the same enumeration-safe refusal as a
+/// wrong password, so a tenant user learns nothing from omitting the tenant,
+/// and certainly not a session.
 #[actix_rt::test]
-async fn login_rejects_missing_tenant_identifier() {
+async fn login_without_a_tenant_does_not_find_a_tenant_user() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config();
     let app = test_app!(db, auth);
@@ -1286,7 +1299,12 @@ async fn login_rejects_missing_tenant_identifier() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 400);
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "a tenant user omitting the tenant must be refused, and refused the \
+         same way a wrong password is"
+    );
 }
 
 #[actix_rt::test]

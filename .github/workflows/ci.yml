@@ -87,6 +87,18 @@ jobs:
       - name: §27 management registry is in sync with openapi.json
         run: python3 scripts/gen-management-registry.py --check
 
+      # The registry gate above copies info.x-axiam-spec-digest out of the spec
+      # verbatim, so it agrees with a stale digest; sdk-openapi-drift.yml would
+      # catch one but needs a full server build, so it is path-filtered. That
+      # left a gap a release bump fell straight through: 1.0.0-beta02 shipped
+      # carrying the beta01 digest, because mass-tag.sh rewrote info.version --
+      # which the digest covers -- without re-stamping. This gate needs no
+      # toolchain and no build, so it can ask on every commit.
+      - name: Spec digest gate self-test (fixtures)
+        run: python3 scripts/check-spec-digest.py --self-test
+      - name: openapi.json's spec digest matches its content
+        run: python3 scripts/check-spec-digest.py
+
       # The advisory ignore-list has to be written twice -- cargo-deny reads
       # deny.toml, cargo-audit reads the `ignore:` input below and never looks
       # at deny.toml -- and until now "keep them in sync" was a comment and

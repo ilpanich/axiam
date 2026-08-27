@@ -544,38 +544,33 @@ bump_cargo_lock_axiam() {
 # LITERAL is rewritten, so the file's pretty-printing is untouched and the drift
 # gate still compares equal to a fresh --dump-openapi.
 restamp_openapi_digest() {
-  local file="sdks/openapi.json" old new
+  local file="sdks/openapi.json" gate="scripts/check-spec-digest.py"
   [[ -f "$file" ]] || return 0
+  [[ -f "$gate" ]] || die \
+    "$gate is missing; it is what re-stamps $file's spec digest after a version
+   bump. Without it the release would ship a spec whose digest does not match
+   its own content -- the defect the step exists to prevent. Restore the script,
+   or re-run with --no-bump and bump the platform repo by hand."
   command -v python3 >/dev/null 2>&1 || die \
-    "python3 is required to re-stamp $file's spec digest after a version bump.
-   Without it the release would ship a spec whose digest does not match its own
-   content, which is the defect this step exists to prevent. Install python3, or
-   re-run with --no-bump and bump the platform repo by hand."
+    "python3 is required to run $gate. See the note above; the same applies."
 
-  old="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"].get("x-axiam-spec-digest",""))' "$file")"
-  [[ -n "$old" ]] || return 0    # a spec predating the digest field: nothing to re-stamp
-
-  new="$(python3 - "$file" <<'PYEOF'
-import hashlib, json, sys
-
-# Mirrors stamp_spec_digest() in crates/axiam-api-rest/src/openapi.rs: the digest
-# is taken over the document with this field ABSENT, so it is a function of the
-# spec's content rather than of itself and re-stamping is idempotent.
-doc = json.load(open(sys.argv[1]))
-doc["info"].pop("x-axiam-spec-digest", None)
-canonical = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode()
-print("sha256:" + hashlib.sha256(canonical).hexdigest())
-PYEOF
-)"
-
-  [[ "$old" == "$new" ]] && return 0
+  # --write is idempotent (the digest is taken over the document with the
+  # digest field absent), so the dry-run path can ask the same question by
+  # checking instead of writing.
   if $DRY_RUN; then
-    printf '      [dry-run] %s: spec digest "%s" -> "%s"\n' "$file" "$old" "$new"
-  else
-    OLD="$old" NEW="$new" perl -pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$file"
-    printf '      %s: spec digest "%s" -> "%s"\n' "$file" "$old" "$new"
+    if python3 "$gate" >/dev/null 2>&1; then
+      printf '      [dry-run] %s: spec digest already current\n' "$file"
+      return 0
+    fi
+    printf '      [dry-run] %s: spec digest would be re-stamped\n' "$file"
+    BUMP_FILES+=("$file")
+    return 0
   fi
-  BUMP_FILES+=("$file")
+
+  local out
+  out="$(python3 "$gate" --write)" || die "$gate --write failed; $file would ship a stale digest"
+  printf '      %s\n' "$out"
+  [[ "$out" == *"already current"* ]] || BUMP_FILES+=("$file")
 }
 
 # Regenerate sdks/management-registry.json after the spec has been bumped and

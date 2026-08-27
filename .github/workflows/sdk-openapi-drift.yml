@@ -1,6 +1,7 @@
 name: SDK OpenAPI Drift Gate
 
-# D-03: Path-filtered per-PR drift gate — runs when REST API or server crates change.
+# D-03: Path-filtered per-PR drift gate — runs when the REST API or server crates
+# change, or when the committed spec itself is edited.
 # D-04: Release-tag re-export — belt-and-suspenders final confirm before any release.
 # Fails the job if the committed sdks/openapi.json diverges from a fresh --dump-openapi
 # export built with --no-default-features (SAML excluded; deterministic across hosts).
@@ -11,11 +12,18 @@ on:
     paths:
       - 'crates/axiam-api-rest/**'
       - 'crates/axiam-server/**'
+      # The committed spec is watched alongside the crates that generate it.
+      # Without this, a commit editing ONLY sdks/openapi.json -- which is
+      # exactly what a release version bump is -- skipped the gate entirely.
+      # That is how 1.0.0-beta02 shipped a spec whose own digest did not match
+      # it. The generating crates are not the only way the file can change.
+      - 'sdks/openapi.json'
   push:
     branches: [main]
     paths:
       - 'crates/axiam-api-rest/**'
       - 'crates/axiam-server/**'
+      - 'sdks/openapi.json'   # see the note on the pull_request paths above
     tags:
       - 'v*'
 

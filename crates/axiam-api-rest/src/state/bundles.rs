@@ -53,6 +53,16 @@ pub struct PkiState<C: Connection + Clone> {
     pub ca_cert_repo: axiam_db::SurrealCaCertificateRepository<C>,
     pub pgp_service: PgpServiceT<C>,
     pub device_auth_service: DeviceAuthServiceT<C>,
+    /// Applies the current mTLS trust anchor set to the live TLS listener.
+    ///
+    /// `None` when nothing registered one: a plaintext deployment, or a test
+    /// harness. Toggling an anchor then updates the row and reports that a
+    /// restart is needed, which is exactly what it used to do.
+    ///
+    /// The implementation lives in `axiam-server` because it is the crate that
+    /// owns the listener; this is the seam that lets a handler reach it without
+    /// the layering pointing outward.
+    pub trust_anchor_reloader: Option<std::sync::Arc<dyn crate::TrustAnchorReloader>>,
 }
 
 /// WebAuthn ceremonies, attestation policy and FIDO MDS metadata.

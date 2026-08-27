@@ -448,9 +448,17 @@ pub struct MtlsTrustAnchorResponse {
     pub ca_certificate_id: Uuid,
     /// The flag as now stored.
     pub mtls_trust_anchor: bool,
-    /// Always `true`: rustls builds its client trust store once, when the
-    /// listener is constructed, so this takes effect at the next start.
+    /// Whether the change still needs a restart to take effect.
+    ///
+    /// `false` when the live listener accepted the new anchor set — the
+    /// ordinary case on a TLS deployment. `true` only when there was no
+    /// listener to reload into (plaintext, or `client_auth = off`), where the
+    /// flag is stored and applies at the next start.
     pub restart_required: bool,
+    /// How many CAs the listener now trusts for client authentication, when it
+    /// was reloaded. `None` when nothing was reloaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_anchors: Option<usize>,
     /// A sentence an operator can act on, rather than a bare boolean.
     pub message: String,
 }
@@ -459,14 +467,21 @@ pub struct MtlsTrustAnchorResponse {
 ///
 /// Offer this CA — or stop offering it — as a trust anchor for mutual TLS.
 ///
-/// When enabled, the next server start exports this CA's **public** certificate
-/// into the client-CA bundle and turns on client-certificate verification in
+/// When enabled, this CA's **public** certificate is exported into the
+/// client-CA bundle and client-certificate verification is turned on in
 /// `optional` mode, unless the operator has configured
 /// `AXIAM__SERVER__TLS__CLIENT_AUTH` / `CLIENT_CA_PATH` themselves, which is
 /// never overridden. The signing key is not copied and stays with its custodian.
 ///
-/// `restart_required` is always true, and is the point of the response: there is
-/// no supported way to add a root to a rustls listener that is already serving.
+/// The change applies to the **running listener**. rustls consults its client
+/// certificate verifier per handshake rather than only at construction, so a
+/// verifier that delegates to a swappable anchor set can be updated in place;
+/// see `axiam_server::tls::ReloadableClientCertVerifier`. Connections already
+/// established keep the verifier they handshook with, which is correct — a
+/// certificate accepted a moment ago does not become invalid mid-connection.
+///
+/// `restart_required` is therefore `false` on a TLS deployment, and `true` only
+/// when there is no listener to reload into.
 #[utoipa::path(
     put,
     path = "/api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
@@ -517,22 +532,64 @@ pub async fn set_mtls_trust_anchor<C: Connection + Clone>(
         .set_mtls_trust_anchor(org_id, id, enabled)
         .await?;
 
-    let message = if updated.mtls_trust_anchor {
-        "This CA will be added to the mTLS client trust store when the server \
-         next starts. Clients presenting a certificate it issued will then be \
-         verified by TLS itself."
-            .to_string()
-    } else {
-        "This CA will be removed from the mTLS client trust store when the \
-         server next starts. Certificates it issued will no longer authenticate \
-         a client."
-            .to_string()
+    // Apply it to the listener that is serving this very request.
+    //
+    // Deliberately after the row is written and deliberately fallible-but-not-
+    // fatal: the stored flag is the source of truth that the next boot reads,
+    // so a reload failure must not roll it back. What it must do is *say so*,
+    // rather than reporting success for a change that did not take effect —
+    // that is the difference between "restart to apply" and "applied".
+    let reload = match state.pki.trust_anchor_reloader.as_ref() {
+        Some(reloader) => reloader.reload().await,
+        None => Ok(None),
+    };
+
+    let (restart_required, trusted_anchors, applied) = match reload {
+        Ok(Some(count)) => (false, Some(count), true),
+        Ok(None) => (true, None, false),
+        Err(e) => {
+            // The anchor set on the listener is unchanged — the replacement is
+            // built completely before anything is swapped — so the deployment
+            // is still verifying clients exactly as it was a moment ago.
+            tracing::error!(
+                ca_certificate_id = %updated.id,
+                error = %e,
+                "trust anchor flag saved but the live reload failed; the listener \
+                 is unchanged and the flag applies at the next start"
+            );
+            (true, None, false)
+        }
+    };
+
+    let message = match (updated.mtls_trust_anchor, applied) {
+        (true, true) => format!(
+            "This CA is now in the mTLS client trust store. Clients presenting a \
+             certificate it issued are verified by TLS itself, on connections \
+             opened from now on. {} CA(s) are trusted.",
+            trusted_anchors.unwrap_or_default()
+        ),
+        (true, false) => "This CA will be added to the mTLS client trust store when the \
+             server next starts. Clients presenting a certificate it issued will \
+             then be verified by TLS itself."
+            .to_string(),
+        (false, true) => format!(
+            "This CA is no longer in the mTLS client trust store. Certificates it \
+             issued no longer authenticate a client on connections opened from \
+             now on; established connections keep the verifier they handshook \
+             with. {} CA(s) remain trusted.",
+            trusted_anchors.unwrap_or_default()
+        ),
+        (false, false) => "This CA will be removed from the mTLS client trust store when \
+             the server next starts. Certificates it issued will no longer \
+             authenticate a client."
+            .to_string(),
     };
 
     Ok(HttpResponse::Ok().json(MtlsTrustAnchorResponse {
         ca_certificate_id: updated.id,
         mtls_trust_anchor: updated.mtls_trust_anchor,
-        restart_required: true,
+        restart_required,
+        trusted_anchors,
         message,
     }))
 }

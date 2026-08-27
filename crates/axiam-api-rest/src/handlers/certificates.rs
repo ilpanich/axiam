@@ -82,6 +82,42 @@ pub async fn generate<C: Connection + Clone>(
 }
 
 /// `GET /api/v1/certificates`
+/// A certificate plus the service account it authenticates, if any.
+///
+/// The binding is a `cert_bound_to` graph edge, so it appeared on neither the
+/// certificate row nor the service account row and the admin UI had nothing to
+/// render — which is why it was "almost impossible to understand if a
+/// certificate was bound to the service account or not". You could perform the
+/// binding and then find no trace of it anywhere in the product.
+///
+/// A response wrapper rather than a field on
+/// [`axiam_core::models::certificate::Certificate`]: the domain type describes
+/// what a certificate *is*, and what it happens to be attached to is a fact
+/// about the graph. Flattened on the wire, so a client that already parses a
+/// certificate keeps working and simply gains a field.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CertificateWithBinding {
+    #[serde(flatten)]
+    pub certificate: Certificate,
+    /// The service account this certificate authenticates, or `null`.
+    pub bound_service_account_id: Option<Uuid>,
+}
+
+impl CertificateWithBinding {
+    fn attach(
+        certificates: Vec<Certificate>,
+        bindings: &std::collections::HashMap<Uuid, Uuid>,
+    ) -> Vec<Self> {
+        certificates
+            .into_iter()
+            .map(|certificate| Self {
+                bound_service_account_id: bindings.get(&certificate.id).copied(),
+                certificate,
+            })
+            .collect()
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/certificates",
@@ -89,7 +125,7 @@ pub async fn generate<C: Connection + Clone>(
     params(Pagination),
     responses(
         (status = 200, description = "List of certificates",
-         body = inline(PaginatedResult<Certificate>)),
+         body = inline(PaginatedResult<CertificateWithBinding>)),
     ),
     security(("bearer" = []))
 )]
@@ -107,7 +143,22 @@ pub async fn list<C: Connection + Clone>(
         .cert_service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
-    Ok(HttpResponse::Ok().json(result))
+
+    // One extra query for the whole page, not one per row — see
+    // `CertificateRepository::bound_service_accounts` for why the per-row form
+    // is what kept this off the page in the first place.
+    let ids: Vec<Uuid> = result.items.iter().map(|c| c.id).collect();
+    let bindings = {
+        use axiam_core::repository::CertificateRepository as _;
+        state.pki.cert_repo.bound_service_accounts(&ids).await?
+    };
+
+    Ok(HttpResponse::Ok().json(PaginatedResult {
+        items: CertificateWithBinding::attach(result.items, &bindings),
+        total: result.total,
+        offset: result.offset,
+        limit: result.limit,
+    }))
 }
 
 /// `GET /api/v1/certificates/{id}`

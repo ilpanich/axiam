@@ -3,7 +3,7 @@
 
 use axiam_core::models::email_template::{SetEmailTemplate, TemplateKind};
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{EmailTemplateRepository, OrganizationRepository, TenantRepository};
 use axiam_db::repository::{
     SurrealEmailTemplateRepository, SurrealOrganizationRepository, SurrealTenantRepository,
@@ -30,6 +30,7 @@ async fn setup() -> (Db, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant-tmpl".into(),
             metadata: None,

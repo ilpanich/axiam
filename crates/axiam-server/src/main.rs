@@ -518,6 +518,7 @@ async fn main() -> std::io::Result<()> {
             .list(Pagination {
                 offset: 0,
                 limit: 10_000,
+                search: None,
             })
             .await
             .expect("Failed to list organizations for permission seeding");
@@ -529,6 +530,7 @@ async fn main() -> std::io::Result<()> {
                     Pagination {
                         offset: 0,
                         limit: 10_000,
+                        search: None,
                     },
                 )
                 .await
@@ -666,6 +668,18 @@ async fn main() -> std::io::Result<()> {
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
+    // Organization scope: resolves the tenant named in `X-Axiam-Tenant` so the
+    // `AuthenticatedUser` extractor can decide whether this caller may act on
+    // it. Registered as its own app_data for the same reason
+    // `session_validator` is — the extractor's `FromRequest` impl is
+    // non-generic and cannot name `AppState<C>`.
+    //
+    // Without it the extractor fails closed and *every* `X-Axiam-Tenant`
+    // request is refused, which would leave an organization-level super-admin
+    // unable to act on any tenant — the exact gap organization scope exists to
+    // close. See `claude_dev/organization-scope-design.md`.
+    let tenant_scope_resolver: std::sync::Arc<dyn axiam_api_rest::TenantScopeResolver> =
+        std::sync::Arc::new(SurrealTenantRepository::new(pool.handle_for_repo()));
     // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
     // on /scim/v2 into the tenant user it is bound to. Registered as its own
     // app_data (rather than reached through AppState) for the same reason
@@ -879,11 +893,32 @@ async fn main() -> std::io::Result<()> {
             .map_err(|e| std::io::Error::other(format!("CA key custody: {e}")))?,
     );
     match ca_custodians.default_custody() {
-        Some(custody) => tracing::info!(%custody, "CA signing key custody resolved"),
+        Some(custody) => tracing::info!(
+            %custody,
+            vault_inherited = ca_custodians.vault_inherited(),
+            "CA signing key custody resolved"
+        ),
         None => tracing::info!(
             "no CA signing key custodian configured; CA generation and import will be \
              refused until AXIAM__PKI__ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
         ),
+    }
+    // The arrangement nobody picks deliberately, and the one the 1.0.0-beta01
+    // log showed: a reachable Vault, and every CA signing key sealed into a
+    // `ca_certificate` row anyway. Reachable now only by naming `database`
+    // explicitly, so it is a warning rather than a refusal — but it says what
+    // is actually at stake, because the two differ by whether one database dump
+    // hands over every CA in the deployment.
+    if ca_custodians.database_custody_despite_vault() {
+        tracing::warn!(
+            "CA signing keys are being sealed into the database although Vault custody is \
+             configured and reachable. A database dump plus one process's \
+             AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this \
+             deployment, and nothing records the read. Unset \
+             AXIAM__PKI__CA_KEY_STORE (or set it to `vault`) to hold them in Vault \
+             instead, then migrate the CAs you already have with \
+             `POST /api/v1/organizations/{{org_id}}/ca-certificates/{{id}}/migrate-custody`."
+        );
     }
 
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
@@ -1253,6 +1288,22 @@ async fn main() -> std::io::Result<()> {
              client-certificate authentication is left as configured"
         ),
     }
+
+    // The seam that lets flagging a CA take effect without a restart.
+    //
+    // Built from the bundle path resolved against the *final* `tls_config`, so
+    // a reload writes the same file the next boot reads and the two cannot
+    // drift. Constructed even when nothing is flagged today: the whole point is
+    // that the first CA an operator flags applies immediately, and a reloader
+    // that only existed when anchors already existed would miss exactly that
+    // case.
+    let trust_anchor_reloader: Option<Arc<dyn axiam_api_rest::TrustAnchorReloader>> = Some(
+        Arc::new(axiam_server::mtls_anchors::TrustAnchorReload::new(
+            SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+            axiam_server::mtls_anchors::bundle_path(&tls_config),
+        )),
+    );
+
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = pool;
@@ -1954,6 +2005,11 @@ async fn main() -> std::io::Result<()> {
         ));
     let audit_middleware =
         AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
+    // A handle kept outside the App factory closure, which takes ownership of
+    // the middleware. Cloning shares the shutdown flag — see
+    // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
+    // after `http_server.run()` returns.
+    let audit_shutdown = audit_middleware.clone();
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so
@@ -2130,6 +2186,7 @@ async fn main() -> std::io::Result<()> {
             ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),
             device_auth_service: device_auth_service.clone(),
+            trust_anchor_reloader: trust_anchor_reloader.clone(),
         },
         webauthn: bundles::WebauthnState {
             webauthn_service: webauthn_service.clone(),
@@ -2241,6 +2298,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(tenant_scope_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
@@ -2337,6 +2395,12 @@ async fn main() -> std::io::Result<()> {
         http_server.bind(&bind_addr)?
     };
     http_server.run().await?;
+
+    // Tell the audit worker its channel is about to close on purpose, before
+    // anything drops the senders. Without this the orderly stop below logs
+    // `Audit worker channel closed` at WARN on every single clean shutdown —
+    // see `AuditMiddleware::begin_shutdown` for why that matters.
+    audit_shutdown.begin_shutdown();
 
     // Signal the cleanup task to shut down and wait for it to finish.
     let _ = cleanup_shutdown_tx.send(true);

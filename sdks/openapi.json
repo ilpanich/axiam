@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta01",
-    "x-axiam-spec-digest": "sha256:6b0353849bedf04f9641c3fa87a9751ff363c8eb7e565cea2c8b27b9f14d7f56"
+    "x-axiam-spec-digest": "sha256:b5cc414403057815c8626630df6fd17176fade8c59a8d3d55105891044739c8e"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -179,6 +179,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -383,6 +395,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -1562,7 +1586,6 @@
         "tags": [
           "certificates"
         ],
-        "summary": "`GET /api/v1/certificates`",
         "operationId": "list",
         "parameters": [
           {
@@ -1584,6 +1607,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1604,77 +1639,25 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "description": "A tenant-level certificate for users, services, or IoT devices.\n\nCertificates are signed by the organization's CA. The private key is\nreturned once on generation and never stored by AXIAM.",
-                        "required": [
-                          "id",
-                          "tenant_id",
-                          "issuer_ca_id",
-                          "subject",
-                          "public_cert_pem",
-                          "fingerprint",
-                          "cert_type",
-                          "key_algorithm",
-                          "not_before",
-                          "not_after",
-                          "status",
-                          "metadata",
-                          "created_at"
-                        ],
-                        "properties": {
-                          "cert_type": {
-                            "$ref": "#/components/schemas/CertificateType"
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/Certificate"
                           },
-                          "created_at": {
-                            "type": "string",
-                            "format": "date-time"
-                          },
-                          "fingerprint": {
-                            "type": "string",
-                            "description": "SHA-256 fingerprint of the certificate."
-                          },
-                          "id": {
-                            "type": "string",
-                            "format": "uuid"
-                          },
-                          "issuer_ca_id": {
-                            "type": "string",
-                            "format": "uuid",
-                            "description": "The CA certificate that signed this certificate."
-                          },
-                          "key_algorithm": {
-                            "$ref": "#/components/schemas/KeyAlgorithm"
-                          },
-                          "metadata": {
-                            "description": "Arbitrary key-value metadata (e.g., device serial, user ID binding)."
-                          },
-                          "not_after": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "Validity end."
-                          },
-                          "not_before": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "Validity start."
-                          },
-                          "public_cert_pem": {
-                            "type": "string",
-                            "description": "PEM-encoded public certificate."
-                          },
-                          "status": {
-                            "$ref": "#/components/schemas/CertificateStatus"
-                          },
-                          "subject": {
-                            "type": "string",
-                            "description": "The certificate subject (e.g., `CN=device-001`)."
-                          },
-                          "tenant_id": {
-                            "type": "string",
-                            "format": "uuid",
-                            "description": "The tenant this certificate belongs to."
+                          {
+                            "type": "object",
+                            "properties": {
+                              "bound_service_account_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "format": "uuid",
+                                "description": "The service account this certificate authenticates, or `null`."
+                              }
+                            }
                           }
-                        }
+                        ],
+                        "description": "`GET /api/v1/certificates`\nA certificate plus the service account it authenticates, if any.\n\nThe binding is a `cert_bound_to` graph edge, so it appeared on neither the\ncertificate row nor the service account row and the admin UI had nothing to\nrender — which is why it was \"almost impossible to understand if a\ncertificate was bound to the service account or not\". You could perform the\nbinding and then find no trace of it anywhere in the product.\n\nA response wrapper rather than a field on\n[`axiam_core::models::certificate::Certificate`]: the domain type describes\nwhat a certificate *is*, and what it happens to be attached to is a fact\nabout the graph. Flattened on the wire, so a client that already parses a\ncertificate keeps working and simply gains a field."
                       }
                     },
                     "limit": {
@@ -1913,6 +1896,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -2351,6 +2346,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -2629,6 +2636,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -2957,6 +2976,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3232,6 +3263,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -3584,6 +3627,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3861,6 +3916,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -4219,7 +4286,7 @@
           "ca-certificates"
         ],
         "summary": "`PUT /api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor`",
-        "description": "Offer this CA — or stop offering it — as a trust anchor for mutual TLS.\n\nWhen enabled, the next server start exports this CA's **public** certificate\ninto the client-CA bundle and turns on client-certificate verification in\n`optional` mode, unless the operator has configured\n`AXIAM__SERVER__TLS__CLIENT_AUTH` / `CLIENT_CA_PATH` themselves, which is\nnever overridden. The signing key is not copied and stays with its custodian.\n\n`restart_required` is always true, and is the point of the response: there is\nno supported way to add a root to a rustls listener that is already serving.",
+        "description": "Offer this CA — or stop offering it — as a trust anchor for mutual TLS.\n\nWhen enabled, this CA's **public** certificate is exported into the\nclient-CA bundle and client-certificate verification is turned on in\n`optional` mode, unless the operator has configured\n`AXIAM__SERVER__TLS__CLIENT_AUTH` / `CLIENT_CA_PATH` themselves, which is\nnever overridden. The signing key is not copied and stays with its custodian.\n\nThe change applies to the **running listener**. rustls consults its client\ncertificate verifier per handshake rather than only at construction, so a\nverifier that delegates to a swappable anchor set can be updated in place;\nsee `axiam_server::tls::ReloadableClientCertVerifier`. Connections already\nestablished keep the verifier they handshook with, which is correct — a\ncertificate accepted a moment ago does not become invalid mid-connection.\n\n`restart_required` is therefore `false` on a TLS deployment, and `true` only\nwhen there is no listener to reload into.",
         "operationId": "set_mtls_trust_anchor",
         "parameters": [
           {
@@ -4600,6 +4667,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -4640,6 +4719,10 @@
                           "id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "kind": {
+                            "$ref": "#/components/schemas/TenantKind",
+                            "description": "Whether this is an ordinary tenant or the organization's own scope.\n\n`#[serde(default)]` so every row written before organization scope\nexisted reads back as [`TenantKind::Standard`], which is what it is."
                           },
                           "metadata": {
                             "description": "Arbitrary key-value metadata."
@@ -4941,6 +5024,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5236,6 +5331,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5502,6 +5609,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -5812,6 +5931,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -6157,6 +6288,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -6762,6 +6905,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -7522,6 +7677,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -8354,6 +8521,18 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -8499,6 +8678,32 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/me/resend-verification": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "`POST /api/v1/users/me/resend-verification`",
+        "description": "Resend the caller's **own** verification email, and say what happened.\n\n# Why this exists beside the public endpoint\n\n`POST /auth/resend-verification` answers a constant `200 {\"sent\": true}`\nwhatever the outcome, and it must: it takes an address from an\nunauthenticated caller, so a 404 for \"no such user\" or a 429 for \"rate\nlimited\" would be an oracle for which addresses have accounts.\n\nThat reasoning does not apply here. The caller is authenticated and asking\nabout the address on its own record — it already knows the account exists,\nbecause it is signed in to it. Reusing the enumeration-safe endpoint for\nthis is what made the profile page's button report success while doing\nnothing: the address was already verified, or the account was locked, or the\ndaily limit was reached, and the response looked identical in every case.\n\nSo this one tells the truth:\n\n* `200 {\"sent\": true}` — a token was minted and the mail enqueued.\n* `409` — the address is already verified, or the account is in a state that\n  must not be sent a live token.\n* `429` — the daily resend limit is reached.\n\nNone of those disclose anything the caller did not bring with it.\n\nNote what \"sent\" means: the mail is *enqueued*. Delivery is asynchronous and\ncan still fail at the provider — which is worth knowing, because a mail\nqueue that accepts everything and a provider that rejects it looks exactly\nlike this endpoint working.",
+        "operationId": "resend_own_verification",
+        "responses": {
+          "200": {
+            "description": "Verification email enqueued"
+          },
+          "409": {
+            "description": "Already verified, or the account may not be sent one"
+          },
+          "429": {
+            "description": "Daily resend limit reached"
           }
         },
         "security": [
@@ -8885,6 +9090,18 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -12550,6 +12767,10 @@
             ],
             "description": "26-05 (D-14): same contract as `tenant_slug`, resolved via the\ntenant's `organization_id`."
           },
+          "organization_level": {
+            "type": "boolean",
+            "description": "Whether the caller is an **organization-level** principal — one whose\nrecord lives in the organization's reserved tenant, and whose global\ngrants therefore apply to every tenant in the organization.\n\nThe admin UI needs this to decide what its tenant selector can do. An\norganization-level principal switches the tenant it is acting on with a\nheader on the next request; an ordinary tenant principal cannot switch\nat all, because it is not a principal of any other tenant, and its\nselector has to say so rather than offer a switch that would fail.\n\nResolved from the caller's own tenant record, never from request input.\nDefaults to `false` when the lookup fails, which is the safe direction:\nthe UI then offers no cross-tenant action."
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid",
@@ -12934,7 +13155,15 @@
           },
           "restart_required": {
             "type": "boolean",
-            "description": "Always `true`: rustls builds its client trust store once, when the\nlistener is constructed, so this takes effect at the next start."
+            "description": "Whether the change still needs a restart to take effect.\n\n`false` when the live listener accepted the new anchor set — the\nordinary case on a TLS deployment. `true` only when there was no\nlistener to reload into (plaintext, or `client_auth = off`), where the\nflag is stored and applies at the next start."
+          },
+          "trusted_anchors": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many CAs the listener now trusts for client authentication, when it\nwas reloaded. `None` when nothing was reloaded.",
+            "minimum": 0
           }
         }
       },
@@ -13967,6 +14196,14 @@
             "format": "int64",
             "default": 0,
             "minimum": 0
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "default": null
           }
         }
       },
@@ -15771,6 +16008,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "kind": {
+            "$ref": "#/components/schemas/TenantKind",
+            "description": "Whether this is an ordinary tenant or the organization's own scope.\n\n`#[serde(default)]` so every row written before organization scope\nexisted reads back as [`TenantKind::Standard`], which is what it is."
+          },
           "metadata": {
             "description": "Arbitrary key-value metadata."
           },
@@ -15796,6 +16037,14 @@
             "format": "date-time"
           }
         }
+      },
+      "TenantKind": {
+        "type": "string",
+        "description": "What a tenant *is*, as distinct from what state it is in.\n\nReserved rather than inferred: an organization has exactly one tenant of\nkind [`Self::Organization`], enforced by a unique index rather than by\nconvention. Deriving it from a magic slug or from \"the oldest tenant\" would\nmake the organization scope something an operator could rename or delete by\naccident, and it is the scope the super-admin lives in.",
+        "enum": [
+          "standard",
+          "organization"
+        ]
       },
       "TenantSettingsOverride": {
         "type": "object",

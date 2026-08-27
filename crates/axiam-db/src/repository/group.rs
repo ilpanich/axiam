@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
+};
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -317,14 +319,23 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
     ) -> AxiamResult<PaginatedResult<Group>> {
         let tenant_id_str = tenant_id.to_string();
 
+        // Free-text filter, applied to BOTH queries below so the
+        // total counts matches rather than rows — a pager whose page
+        // count belongs to a different result set than the page it
+        // shows is worse than no pager. Empty when unsearched, so an
+        // unfiltered list runs exactly the query it always ran.
+        let search = search_filter(&pagination, &["name", "description"]);
+        let search_term = search_bind(&pagination);
+
         let mut count_result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "SELECT count() AS total FROM group \
-                 WHERE tenant_id = $tenant_id GROUP ALL",
-            )
+                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+            ))
             .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("search", search_term.clone()))
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
@@ -332,13 +343,14 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let mut result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "SELECT meta::id(id) AS record_id, * FROM group \
-                 WHERE tenant_id = $tenant_id \
+                 WHERE tenant_id = $tenant_id{search} \
                  ORDER BY created_at ASC \
-                 LIMIT $limit START $offset",
-            )
+                 LIMIT $limit START $offset"
+            ))
             .bind(("tenant_id", tenant_id_str))
+            .bind(("search", search_term))
             .bind(("limit", pagination.limit))
             .bind(("offset", pagination.offset))
             .await

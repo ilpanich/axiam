@@ -30,8 +30,8 @@ describe("RolesPage", () => {
     expect(await screen.findByText("Admin")).toBeInTheDocument();
     expect(screen.getByText("Viewer")).toBeInTheDocument();
     expect(screen.getByText("Full access")).toBeInTheDocument();
-    expect(screen.getByText("Global")).toBeInTheDocument();
-    expect(screen.getByText("Tenant")).toBeInTheDocument();
+    expect(screen.getByText("Tenant-wide")).toBeInTheDocument();
+    expect(screen.getByText("Resource-scoped")).toBeInTheDocument();
   });
 
   it("shows the empty state when there are no roles", async () => {
@@ -67,7 +67,7 @@ describe("RolesPage", () => {
     await userEvent.type(within(dialog).getByLabelText("Name *"), "Editor");
     await userEvent.type(within(dialog).getByLabelText("Description"), "can edit");
     await userEvent.click(
-      within(dialog).getByLabelText("Global role (applies across all tenants)")
+      within(dialog).getByLabelText(/Tenant-wide role/)
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
     await waitFor(() =>

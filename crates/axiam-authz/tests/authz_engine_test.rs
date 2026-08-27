@@ -1,13 +1,13 @@
 //! Integration tests for the authorization engine.
 
-use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
+use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine, types::SubjectScope};
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     GroupRepository, OrganizationRepository, PermissionRepository, ResourceRepository,
@@ -55,6 +55,7 @@ async fn setup() -> (
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -222,6 +223,7 @@ async fn direct_role_grants_access() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -242,6 +244,7 @@ async fn default_deny_no_role() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -272,6 +275,7 @@ async fn default_deny_wrong_action() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "write".into(), // user only has "read"
             resource_id,
@@ -342,6 +346,7 @@ async fn group_membership_inherits_roles() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -368,6 +373,7 @@ async fn global_role_applies_to_any_resource() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -401,6 +407,7 @@ async fn resource_scoped_role_denied_on_unrelated_resource() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id: resource_b, // different resource
@@ -438,6 +445,7 @@ async fn hierarchy_inheritance() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "deploy".into(),
             resource_id: child_id,
@@ -474,6 +482,7 @@ async fn hierarchy_does_not_go_up() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id: parent_id,
@@ -519,6 +528,7 @@ async fn scope_validation() {
     let allowed = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -532,6 +542,7 @@ async fn scope_validation() {
     let denied = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -586,6 +597,7 @@ async fn scoped_permission_grants_matching_scope() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -639,6 +651,7 @@ async fn scoped_permission_denies_wrong_scope() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -682,6 +695,7 @@ async fn wildcard_permission_grants_any_scope() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -735,6 +749,7 @@ async fn multiple_scopes_in_grant() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -748,6 +763,7 @@ async fn multiple_scopes_in_grant() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -781,6 +797,7 @@ async fn tenant_isolation() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id: other_tenant,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -835,6 +852,7 @@ async fn one_of_two_applicable_roles_has_no_grants_still_allows() {
     let decision = engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id,
@@ -993,6 +1011,7 @@ async fn check(
     engine
         .check_access(&AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: action.into(),
             resource_id,
@@ -1321,6 +1340,7 @@ async fn the_batch_path_applies_deny_override_identically() {
     let requests = vec![
         AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id: fleet,
@@ -1328,6 +1348,7 @@ async fn the_batch_path_applies_deny_override_identically() {
         },
         AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user_id,
             action: "read".into(),
             resource_id: unit7,

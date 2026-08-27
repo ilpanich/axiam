@@ -138,6 +138,50 @@ only outcome is being forgotten is not a safety feature. Setting
 operator who asked for Vault and silently got the database would have exactly
 the property they were trying to stop having.
 
+#### One Vault, addressed once
+
+If you have already pointed the **secret provider** at Vault, you do not need
+any of the `AXIAM__PKI__VAULT_*` variables. With no PKI-specific address and
+token set, CA key custody inherits `AXIAM__AUTH__VAULT_ADDR` and
+`AXIAM__AUTH__VAULT_TOKEN`, and the startup log says so:
+
+```
+INFO  CA signing key custody resolved  custody=vault  vault_inherited=true
+```
+
+This is not a convenience. Before it, a deployment that set the secret
+provider's pair, saw `secret provider ready provider=vault` at startup, and
+reasonably concluded its CA keys were in Vault got this instead:
+
+```
+INFO  secret provider ready              provider=vault
+INFO  CA signing key custody resolved    custody=database
+```
+
+Every organization and tenant CA private key sealed into a `ca_certificate`
+row, because custody read a second, independent variable pair and found
+neither. One Vault addressed by two independent pairs is a trap whichever way
+an operator falls into it.
+
+Set the `AXIAM__PKI__VAULT_*` pair only when PKI keys genuinely live in a
+**different** Vault; it wins outright when present. `VAULT_CA_CERT_PATH` falls
+back independently of the credentials, since a separate token against the same
+listener still needs the same trust anchor.
+
+The remaining way to end up with database custody beside a working Vault is to
+write `AXIAM__PKI__CA_KEY_STORE=database` yourself, and that is now a startup
+warning naming what is at stake:
+
+```
+WARN  CA signing keys are being sealed into the database although Vault custody
+      is configured and reachable. A database dump plus one process's
+      AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this
+      deployment, and nothing records the read.
+```
+
+If you see that line and did not intend it, unset `AXIAM__PKI__CA_KEY_STORE`
+and migrate the CAs you already have — the next section.
+
 `VAULT_CA_CERT_PATH` is required whenever Vault's listener certificate comes
 from an internal PKI. reqwest is built with `rustls-tls`, whose roots are
 compiled in, so there is no `SSL_CERT_FILE` to fall back on and the handshake
@@ -433,7 +477,7 @@ Requires `ca_certificates:manage` — its own permission, because deciding what
 the deployment accepts as a client identity is a broader act than issuing
 under a CA.
 
-At the **next server start**, AXIAM then:
+AXIAM then, **immediately and without a restart**:
 
 1. collects every flagged CA that is `Active` and unexpired, across all
    organizations (there is one TLS listener per process, presenting one trust
@@ -441,7 +485,11 @@ At the **next server start**, AXIAM then:
 2. writes their **public** certificates as a single PEM bundle to
    `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH` — defaulting to
    `client-ca-bundle.pem` beside `AXIAM__SERVER__TLS__CERT_PATH`;
-3. sets `CLIENT_AUTH=optional` and points `CLIENT_CA_PATH` at that bundle.
+3. sets `CLIENT_AUTH=optional` and points `CLIENT_CA_PATH` at that bundle;
+4. installs the new anchor set on the running listener.
+
+The same three steps run at every boot, from the same bundle, so a restart
+reaches exactly the same state by the same path.
 
 `optional`, never `required`: a server that suddenly refuses every client
 without a certificate would lock every browser out of the admin UI the moment
@@ -466,13 +514,39 @@ Nothing is weakened by the copy. A trust anchor is public by construction: it
 is what the server hands every client during the handshake, and every device
 that validates an AXIAM-issued chain already holds it.
 
-### Why a restart
+### How it applies without a restart
 
 rustls builds its `RootCertStore` once, when the listener is constructed, and
-actix-web binds that config for the life of the process. There is no supported
-way to add a root to a server that is already serving, so flagging a CA changes
-what the *next* boot trusts. The API says so — `restart_required` is always
-`true` in the response — rather than letting the toggle imply otherwise.
+actix-web binds that config for the life of the process — which is why this
+used to take effect only at the next boot.
+
+What rustls *does* consult per handshake is the **verifier**. AXIAM installs a
+`ReloadableClientCertVerifier` that delegates to a swappable anchor set, so the
+config has something permanent to hold while what it trusts changes underneath
+it. Flagging a CA rebuilds the set from the database, writes the bundle, and
+swaps it in.
+
+The verifier is installed even when `client_auth` is `off`, and starts in
+exactly that posture: it offers no client authentication until anchors exist.
+That is what lets a deployment that boots with no flagged CA reach the anchored
+state without a restart — the decision made when the listener is constructed is
+the one that cannot be revisited.
+
+Three properties worth knowing:
+
+- **Connections already established keep the verifier they handshook with.**
+  That is correct rather than a limitation: a certificate accepted a moment ago
+  does not become invalid mid-connection. Ending a session that is already
+  authenticated is what session revocation is for.
+- **A failed reload changes nothing.** The replacement set is parsed and the
+  verifier fully built before anything is swapped, so a malformed bundle leaves
+  the listener verifying exactly as it was. The flag is still saved — it is
+  what the next boot reads — and the response says `restart_required: true`
+  rather than reporting success for a change that did not take effect.
+- **`restart_required` is now usually `false`.** It is `true` only when there
+  was no listener to reload into: a plaintext deployment, or one whose operator
+  set `client_auth = off`. The response also carries `trusted_anchors`, the
+  number of CAs the listener now trusts.
 
 ### Full walkthrough
 
@@ -489,19 +563,25 @@ curl -X PUT \
   https://axiam.example.com/api/v1/organizations/$ORG/ca-certificates/$CA/mtls-trust-anchor \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"enabled":true}'
-# → {"restart_required":true, "message":"This CA will be added to the mTLS
-#    client trust store when the server next starts. …"}
+# → {"restart_required":false, "trusted_anchors":1,
+#    "message":"This CA is now in the mTLS client trust store. Clients
+#    presenting a certificate it issued are verified by TLS itself, on
+#    connections opened from now on. 1 CA(s) are trusted."}
 
-# 3. Make sure the bundle has somewhere to go. Skip if CERT_PATH is set —
-#    the bundle defaults to that directory.
+# 3. Make sure the bundle has somewhere to go — set this BEFORE step 2 if you
+#    can. Skip if CERT_PATH is set; the bundle defaults to that directory.
+#    Without a path there is nothing for the next boot to read, and the
+#    response says restart_required.
 export AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH=/etc/axiam/tls/client-ca-bundle.pem
 
-# 4. Restart. The startup log names the bundle and the resulting mode:
+# 4. No restart. Issue a Device certificate under that CA and hand it to the
+#    device (see "Issue a leaf certificate" above). It authenticates by mTLS on
+#    its next connection.
+#
+#    A restart is still fine and reaches the same state — the startup log names
+#    the bundle and the resulting mode:
 #    "mTLS client trust store built from flagged organization CAs"
 #      anchors=1 bundle=/etc/axiam/tls/client-ca-bundle.pem client_auth=Optional
-
-# 5. Issue a Device certificate under that CA and hand it to the device
-#    (see "Issue a leaf certificate" above). It now authenticates by mTLS.
 ```
 
 If flagged CAs exist but no bundle path can be derived, startup logs a warning

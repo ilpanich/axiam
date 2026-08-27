@@ -52,18 +52,31 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BootstrapRequest {
     /// Display name of the organization to create (required). On a fresh
-    /// deployment nothing exists yet, so bootstrap provisions the org and its
-    /// default tenant itself rather than requiring pre-existing IDs.
+    /// deployment nothing exists yet, so bootstrap provisions the organization
+    /// and its own reserved scope itself rather than requiring pre-existing IDs.
     pub organization_name: String,
     /// URL-safe slug for the organization. Derived from `organization_name`
     /// when omitted or blank.
     #[serde(default)]
     pub organization_slug: Option<String>,
-    /// Display name of the default tenant. Defaults to `"Default"`.
+    /// **Deprecated and ignored.** Bootstrap no longer creates an ordinary
+    /// tenant.
+    ///
+    /// The super-admin it provisions is organization-level, so it administers
+    /// every tenant the organization has — including ones created long
+    /// afterwards. Creating a tenant here is what produced the opposite: the
+    /// super-admin's grants were rows in one tenant, and every tenant created
+    /// later was unreachable by everyone.
+    ///
+    /// Still accepted so an older client's request succeeds rather than failing
+    /// on an unknown field. Create tenants through
+    /// `POST /api/v1/organizations/{org_id}/tenants` once you are signed in.
     #[serde(default)]
+    #[deprecated(note = "bootstrap no longer creates a tenant; this value is ignored")]
     pub tenant_name: Option<String>,
-    /// URL-safe slug for the default tenant. Defaults to `"default"`.
+    /// **Deprecated and ignored.** See [`Self::tenant_name`].
     #[serde(default)]
+    #[deprecated(note = "bootstrap no longer creates a tenant; this value is ignored")]
     pub tenant_slug: Option<String>,
     /// Admin email address.
     pub email: String,
@@ -312,23 +325,6 @@ pub async fn bootstrap<C: Connection + Clone>(
             message: "organization_name must contain at least one alphanumeric character".into(),
         }));
     }
-    let tenant_name = req
-        .tenant_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Default")
-        .to_string();
-    let tenant_slug = req
-        .tenant_slug
-        .as_deref()
-        .map(slugify)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            let s = slugify(&tenant_name);
-            if s.is_empty() { "default".into() } else { s }
-        });
-
     // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
     //    the system has been initialized. The authoritative guard is the
     //    `bootstrap_lock:global` CREATE inside the atomic transaction below;
@@ -378,34 +374,79 @@ pub async fn bootstrap<C: Connection + Clone>(
         }));
     }
 
+    // Get-or-create, then get again if the create lost. Two concurrent
+    // first-run requests both read "absent" and both try to create; exactly one
+    // wins the slug's uniqueness invariant and the loser must fall back to the
+    // row the winner just wrote, not fail. Reporting the loser's create error
+    // would surface a 500 for a race the deployment recovers from perfectly —
+    // the single-admin guarantee is `bootstrap_lock:global` below, not this.
     let org = match state.org_repo.get_by_slug(&org_slug).await {
         Ok(o) => o,
-        Err(_) => state
-            .org_repo
-            .create(CreateOrganization {
-                name: req.organization_name.trim().to_string(),
-                slug: org_slug.clone(),
-                metadata: None,
-            })
-            .await
-            .map_err(|e| {
-                AxiamApiError(AxiamError::Internal(format!("create organization: {e}")))
-            })?,
+        Err(_) => {
+            let created = state
+                .org_repo
+                .create(CreateOrganization {
+                    name: req.organization_name.trim().to_string(),
+                    slug: org_slug.clone(),
+                    metadata: None,
+                })
+                .await;
+            match created {
+                Ok(o) => o,
+                Err(create_err) => state.org_repo.get_by_slug(&org_slug).await.map_err(|_| {
+                    AxiamApiError(AxiamError::Internal(format!(
+                        "create organization: {create_err}"
+                    )))
+                })?,
+            }
+        }
     };
-    let tenant = match state.tenant_repo.get_by_slug(org.id, &tenant_slug).await {
+    // Bootstrap provisions the organization's **own scope**, not an ordinary
+    // tenant. The super-admin created below lives here, which is what makes it
+    // an administrator of every tenant the organization ever has — including
+    // the ones created months later — rather than of one tenant chosen on the
+    // first screen of a first-run wizard.
+    //
+    // That first-screen choice is precisely what left new tenants unreachable:
+    // the super-admin's grants were rows in the tenant bootstrap happened to
+    // create, and the authorization engine filters every lookup by tenant. See
+    // `claude_dev/organization-scope-design.md`.
+    //
+    // `tenant_name` / `tenant_slug` are still accepted and now ignored, so an
+    // older client's request still succeeds rather than failing on an unknown
+    // field. Nothing reads them — which is what `#[deprecated]` on the fields
+    // enforces under CI's `-D warnings`, and why the locals that used to
+    // normalise them are gone rather than bound to `_`.
+    //
+    // Same get-create-get shape as the organization above: the organization
+    // scope is unique per organization (`organization_scope:<org_id>`), so a
+    // concurrent racer's create loses and must read the winner's row.
+    let tenant = match state.tenant_repo.get_organization_tenant(org.id).await {
         Ok(t) => t,
-        Err(_) => state
-            .tenant_repo
-            .create(CreateTenant {
-                organization_id: org.id,
-                name: tenant_name,
-                slug: tenant_slug.clone(),
-                metadata: None,
-            })
-            .await
-            .map_err(|e| AxiamApiError(AxiamError::Internal(format!("create tenant: {e}"))))?,
+        Err(_) => {
+            let created = state
+                .tenant_repo
+                .create(CreateTenant::organization_scope(org.id))
+                .await;
+            match created {
+                Ok(t) => t,
+                Err(create_err) => state
+                    .tenant_repo
+                    .get_organization_tenant(org.id)
+                    .await
+                    .map_err(|_| {
+                        AxiamApiError(AxiamError::Internal(format!(
+                            "create organization tenant: {create_err}"
+                        )))
+                    })?,
+            }
+        }
     };
     let tenant_id = tenant.id;
+    // The organization tenant's own slug, reported so a client knows where the
+    // administrator it just created lives. Read off the row rather than from
+    // the request, which no longer carries one.
+    let tenant_slug = tenant.slug.clone();
 
     // 4b. Seed the organization's security baseline, including the OPAQUE
     // policy validated above. Written before the admin transaction so the
@@ -637,7 +678,8 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     // 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
-        message: "Organization, tenant and admin user created. Login via /api/v1/auth/login."
+        message: "Organization and organization-level admin user created. Login \
+                  via /api/v1/auth/login with no tenant."
             .into(),
         organization_id: org.id,
         organization_slug: org_slug,

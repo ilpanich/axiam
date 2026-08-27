@@ -6,7 +6,7 @@ use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::{CreateRole, UpdateRole};
 use axiam_core::models::scope::CreateScope;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     GroupRepository, OrganizationRepository, Pagination, PermissionRepository, ResourceRepository,
@@ -46,6 +46,7 @@ async fn setup() -> (
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -202,6 +203,7 @@ async fn delete_role_does_not_strip_foreign_tenant_edge() {
     let tenant_b = tenant_repo
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b".into(),
             metadata: None,
@@ -325,6 +327,7 @@ async fn list_roles_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -339,6 +342,7 @@ async fn list_roles_with_pagination() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -763,6 +767,7 @@ async fn batched_grants_group_by_role() {
     let tenant_b = tenant_repo
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "TenantB".into(),
             slug: "tenant-b".into(),
             metadata: None,

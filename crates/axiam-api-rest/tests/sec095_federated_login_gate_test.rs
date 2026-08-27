@@ -52,7 +52,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::reactor::{DynReactorGate, ReactorOutcome, SharedReactorGate};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::repository::{SurrealOrganizationRepository, SurrealTenantRepository};
 use axiam_federation::jwks_cache::JwksCache;
@@ -230,6 +230,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "SEC095 Tenant".into(),
             slug: "sec095-tenant".into(),
             metadata: None,

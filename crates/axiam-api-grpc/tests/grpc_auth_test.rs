@@ -11,7 +11,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -145,6 +145,7 @@ async fn setup() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Auth Test Tenant".into(),
             slug: "auth-test-tenant".into(),
             metadata: None,
@@ -184,6 +185,7 @@ async fn setup_second_tenant(db: &Surreal<TestDb>) -> (Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Auth Test Tenant B".into(),
             slug: "auth-test-tenant-b".into(),
             metadata: None,

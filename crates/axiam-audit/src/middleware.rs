@@ -10,6 +10,7 @@
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
@@ -106,6 +107,7 @@ const CHANNEL_CAPACITY: usize = 4096;
 #[derive(Clone)]
 pub struct AuditMiddleware {
     tx: mpsc::Sender<AuditEvent>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl AuditMiddleware {
@@ -132,8 +134,36 @@ impl AuditMiddleware {
         sink: Option<Arc<dyn AuditEventSink>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        tokio::spawn(audit_worker(rx, repo, sink));
-        Self { tx }
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        tokio::spawn(audit_worker(rx, repo, sink, Arc::clone(&shutting_down)));
+        Self { tx, shutting_down }
+    }
+
+    /// Tell the worker that the channel is about to close on purpose.
+    ///
+    /// The worker cannot tell the two reasons apart on its own. Its channel
+    /// closes when the last sender drops, and at shutdown that is exactly what
+    /// a clean teardown does — so every orderly stop logged
+    /// `Audit worker channel closed — no more entries will be written` at WARN,
+    /// once per boot, describing nothing wrong. A warning that fires on every
+    /// healthy run is one operators learn to scroll past, which is precisely
+    /// the wrong reflex for the one line that says the audit trail stopped
+    /// while the server was still answering requests.
+    ///
+    /// The composition root calls this immediately before it begins tearing
+    /// down. Anything that closes the channel *without* this having been called
+    /// keeps the warning, because that case is real: audit entries are being
+    /// discarded by a process that is still serving.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`Self::begin_shutdown`] has been called.
+    ///
+    /// The worker consults this when its channel closes, to decide whether the
+    /// close was the orderly one it was told to expect.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 }
 
@@ -141,7 +171,9 @@ async fn audit_worker<A: AuditLogRepository>(
     mut rx: mpsc::Receiver<AuditEvent>,
     repo: A,
     sink: Option<Arc<dyn AuditEventSink>>,
+    shutting_down: Arc<AtomicBool>,
 ) {
+    let mut written: u64 = 0;
     while let Some(event) = rx.recv().await {
         // Append first. The audit record is the guarantee; a notification is
         // best-effort on top of it, and an event nobody was emailed about is a
@@ -150,11 +182,24 @@ async fn audit_worker<A: AuditLogRepository>(
             tracing::warn!(error = %e, "Failed to write audit log entry");
         }
 
+        written += 1;
+
         if let Some(ref sink) = sink {
             sink.on_event(&event).await;
         }
     }
-    tracing::warn!("Audit worker channel closed — no more entries will be written");
+    if shutting_down.load(Ordering::SeqCst) {
+        tracing::info!(
+            entries_written = written,
+            "audit worker drained and stopped"
+        );
+    } else {
+        tracing::warn!(
+            entries_written = written,
+            "Audit worker channel closed while the server is still running — no more \
+             entries will be written"
+        );
+    }
 }
 
 impl<S, B> Transform<S, ServiceRequest> for AuditMiddleware

@@ -21,7 +21,7 @@ use axiam_auth::token::{AUD_USER, issue_access_token, issue_id_token};
 use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OAuth2ClientRepository, OrganizationRepository, SessionClientRepository, SessionRepository,
@@ -89,6 +89,7 @@ async fn setup() -> Fixture {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Logout Tenant".into(),
             slug: "tenant-logout".into(),
             metadata: None,

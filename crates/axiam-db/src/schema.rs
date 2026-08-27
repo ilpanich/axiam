@@ -287,6 +287,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ca_mtls_trust_anchor",
         sql: SCHEMA_V49,
     },
+    Migration {
+        version: 50,
+        name: "tenant_kind_organization_scope",
+        sql: SCHEMA_V50,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2292,11 +2297,113 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
         }
     }
 
+    // Data, not schema: every organization needs the reserved tenant that
+    // organization-level principals live in, and an organization created before
+    // v50 has none. Runs under the startup lock, after the DDL that defines
+    // `kind`, and is idempotent — a deployment that is already migrated does
+    // one SELECT and stops.
+    backfill_organization_tenants(db).await?;
+
     // Release the startup lock now that migrations are complete.
     db.query("DELETE _migration_lock:`startup`")
         .await?
         .check()
         .map_err(|e| DbError::Migration(format!("failed to release migration lock: {e}")))?;
+
+    Ok(())
+}
+
+/// Give every organization the reserved tenant its organization-level
+/// principals live in.
+///
+/// # What this does not do
+///
+/// It creates the scope and moves **nobody into it**. An existing deployment's
+/// users stay in the tenants they are in, holding the grants they hold, and
+/// nothing about who can reach what changes on upgrade. Promoting an existing
+/// super-admin to organization level is a deliberate act performed through the
+/// API, because relocating accounts between tenants is not something a version
+/// upgrade should decide on an operator's behalf — and the deployment that most
+/// needs the promotion is exactly the one where a human should look at it
+/// first.
+///
+/// # Idempotency
+///
+/// Keyed on `kind = 'organization'`, which the v50 unique index makes singular.
+/// A second concurrent starter racing this loses on that index, and losing is
+/// the correct outcome: the row it wanted already exists.
+async fn backfill_organization_tenants<C: Connection>(db: &Surreal<C>) -> Result<(), DbError> {
+    #[derive(Debug, SurrealValue)]
+    struct IdRow {
+        record_id: String,
+    }
+
+    // Two flat reads and a set difference, rather than one correlated
+    // subquery. The organizations in a deployment number in the tens, the
+    // query is unambiguous in a way a nested `WHERE !(SELECT …)` is not, and it
+    // runs once per boot.
+    let mut orgs = db
+        .query("SELECT meta::id(id) AS record_id FROM organization")
+        .await?;
+    let orgs: Vec<IdRow> = orgs.take(0)?;
+
+    let mut scoped = db
+        .query("SELECT organization_id AS record_id FROM tenant WHERE kind = 'organization'")
+        .await?;
+    let scoped: Vec<IdRow> = scoped.take(0)?;
+    let have: std::collections::HashSet<&str> =
+        scoped.iter().map(|r| r.record_id.as_str()).collect();
+
+    for org in orgs.iter().filter(|o| !have.contains(o.record_id.as_str())) {
+        let tenant_id = axiam_core::id::new_id().to_string();
+        // `IF NOT EXISTS` cannot guard a CREATE, so the v50 unique index is the
+        // guard: a racing starter's CREATE fails, and that failure means the
+        // row it wanted now exists — which is the desired state, not an error.
+        let created = db
+            .query(
+                "CREATE type::record('tenant', $id) SET \
+                 organization_id = $org_id, \
+                 name = 'Organization', slug = 'organization', \
+                 status = 'Active', kind = 'organization', \
+                 metadata = {}; \
+                 CREATE type::record('organization_scope', $org_id) \
+                 SET tenant_id = $id;",
+            )
+            .bind(("id", tenant_id.clone()))
+            .bind(("org_id", org.record_id.clone()))
+            .await;
+
+        let outcome = match created {
+            Ok(r) => r.check().map(|_| ()).map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+
+        match outcome {
+            Ok(()) => info!(
+                organization_id = %org.record_id,
+                tenant_id = %tenant_id,
+                "created organization tenant"
+            ),
+            Err(e) => {
+                // Re-read rather than parse the error text: if the scope exists
+                // now, someone else created it and there is nothing to do.
+                let mut check = db
+                    .query(
+                        "SELECT meta::id(id) AS record_id FROM tenant \
+                         WHERE organization_id = $org_id AND kind = 'organization'",
+                    )
+                    .bind(("org_id", org.record_id.clone()))
+                    .await?;
+                let existing: Vec<IdRow> = check.take(0)?;
+                if existing.is_empty() {
+                    return Err(DbError::Migration(format!(
+                        "failed to create organization tenant for {}: {e}",
+                        org.record_id
+                    )));
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -2681,9 +2788,100 @@ DEFINE INDEX IF NOT EXISTS idx_ca_cert_mtls_anchor ON TABLE ca_certificate \
     COLUMNS mtls_trust_anchor;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v50 — organization scope
+// -----------------------------------------------------------------------
+//
+// One reserved tenant per organization holds the principals that operate
+// across every tenant in it. See `claude_dev/organization-scope-design.md`.
+//
+// `kind` defaults to `standard`, so every tenant row that exists today reads
+// back as exactly what it is and every grant keeps meaning what it meant. The
+// organization tenants themselves are created by `backfill_organization_tenants`
+// after the DDL runs — a row per organization is data, not schema, and it has
+// to be idempotent against a deployment that is already partly migrated.
+const SCHEMA_V50: &str = "\
+DEFINE FIELD IF NOT EXISTS kind ON TABLE tenant TYPE string
+    DEFAULT 'standard'
+    ASSERT $value IN ['standard', 'organization'];
+DEFINE INDEX IF NOT EXISTS idx_tenant_org_kind ON TABLE tenant \
+    COLUMNS organization_id, kind;
+-- One organization tenant per organization, enforced rather than assumed.
+--
+-- A partial UNIQUE index would say this directly, and SurrealDB has no such
+-- thing: `DEFINE INDEX ... UNIQUE WHERE ...` does not parse. A plain UNIQUE on
+-- (organization_id, kind) is not the constraint wanted either — it would allow
+-- one *standard* tenant per organization, which is the opposite of the point.
+--
+-- So the record id is the constraint, the same way `bootstrap_lock` is: one row
+-- per organization, whose id IS the organization id. A second organization
+-- tenant means a second CREATE of the same record, which fails. Written in the
+-- same statement batch as the tenant it marks.
+DEFINE TABLE IF NOT EXISTS organization_scope SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE organization_scope TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE organization_scope
+    TYPE datetime DEFAULT time::now();
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v50_defaults_existing_tenants_to_standard() {
+        // The whole compatibility story: a tenant row written before
+        // organization scope existed is an ordinary tenant, and reads back as
+        // one without being rewritten.
+        assert!(SCHEMA_V50.contains("kind ON TABLE tenant TYPE string"));
+        assert!(SCHEMA_V50.contains("DEFAULT 'standard'"));
+        // No UPDATE: the migration must not reclassify anyone's tenants.
+        assert!(!SCHEMA_V50.contains("UPDATE"));
+    }
+
+    /// The statements SurrealDB actually parses — `--` comment lines removed.
+    ///
+    /// Asserting on the raw constant matches the prose explaining *why* a
+    /// construct is absent, which is the opposite of what these tests mean.
+    /// Both of the assertions below failed against their own comments first.
+    fn v50_statements() -> String {
+        SCHEMA_V50
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn schema_v50_makes_one_organization_tenant_an_invariant() {
+        // Two organization tenants would mean two answers to "where do
+        // organization-level principals live", and the one that answered would
+        // depend on row order. The marker table's record id is what forbids it.
+        let sql = v50_statements();
+        assert!(sql.contains("DEFINE TABLE IF NOT EXISTS organization_scope"));
+        assert!(
+            !sql.contains("UNIQUE"),
+            "a plain UNIQUE on (organization_id, kind) would cap a deployment \
+             at one standard tenant per organization, and SurrealDB has no \
+             partial index to express the constraint that is actually wanted"
+        );
+    }
+
+    #[test]
+    fn schema_v50_uses_no_partial_index() {
+        // `DEFINE INDEX ... WHERE ...` does not parse in SurrealDB 3.x; it
+        // fails at migration time with `Unexpected token WHERE`, which means a
+        // deployment that upgrades cannot start. This test exists because that
+        // is exactly what the first version of this migration did.
+        assert!(
+            !v50_statements().contains("WHERE"),
+            "SurrealDB rejects a WHERE clause on DEFINE INDEX"
+        );
+    }
+
+    #[test]
+    fn schema_v50_admits_exactly_the_two_kinds() {
+        assert!(SCHEMA_V50.contains("ASSERT $value IN ['standard', 'organization']"));
+    }
 
     #[test]
     fn schema_v49_defaults_the_anchor_flag_off_and_backfills_nothing() {

@@ -81,12 +81,18 @@ AXIAM_URL=http://localhost:8090 AXIAM_GRPC_URL=http://127.0.0.1:50051 \
   cargo run --manifest-path examples/b3-mesh-delegation-grpc/Cargo.toml
 ```
 
-`E2E_ADMIN_PASSWORD` is **required** and has no default. It is the seeded admin
-password from `docker/docker-compose.e2e.yml`, shown above for convenience —
-it is deliberately not a literal in `src/main.rs`, because example code gets
-copied and a credential in source is a real finding wherever it lands. The
-second account this example provisions gets a freshly generated password per
-run for the same reason.
+`E2E_ADMIN_PASSWORD` is **required** and has no default. It is the password
+`scripts/e2e-bootstrap.sh` seeds the stack with — the tenant administrator this
+example signs in as shares it — shown above for convenience — it is deliberately not a literal in
+`src/main.rs`, because example code gets copied and a credential in source is a
+real finding wherever it lands. The second account this example provisions gets
+a freshly generated password per run for the same reason.
+
+The tenant admin, not bootstrap's super-admin: the super-admin is
+organization-level, signs in naming no tenant, and administers every tenant in
+the organization. This example works inside one tenant, so it holds that
+tenant's own administrator. Both are seeded; see
+[`examples/b6-organization-scope`](../b6-organization-scope/README.md).
 
 ## History: the registration gap found while building this example
 

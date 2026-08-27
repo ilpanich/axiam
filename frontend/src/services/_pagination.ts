@@ -34,6 +34,21 @@ interface PaginatedEnvelope<T> {
   limit?: number;
 }
 
+/**
+ * The wire shape of `PaginatedResult<T>`, with every field present.
+ *
+ * `PaginatedEnvelope` above is deliberately lax because `fetchAllPages` has to
+ * tolerate an endpoint that omits `total`. Callers that page explicitly want
+ * the strict shape, since a missing `total` means they cannot render a page
+ * count at all.
+ */
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 type ListResponse<T> = T[] | PaginatedEnvelope<T> | null | undefined;
 
 function isPaginated<T>(data: ListResponse<T>): data is PaginatedEnvelope<T> {

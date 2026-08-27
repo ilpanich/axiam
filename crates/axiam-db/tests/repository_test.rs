@@ -2,7 +2,7 @@
 //! implementations using in-memory SurrealDB.
 
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::repository::{SurrealOrganizationRepository, SurrealTenantRepository};
 use surrealdb::Surreal;
@@ -133,6 +133,7 @@ async fn list_organizations_with_pagination() {
         .list(Pagination {
             offset: 0,
             limit: 3,
+            search: None,
         })
         .await
         .unwrap();
@@ -146,6 +147,7 @@ async fn list_organizations_with_pagination() {
         .list(Pagination {
             offset: 3,
             limit: 3,
+            search: None,
         })
         .await
         .unwrap();
@@ -208,6 +210,7 @@ async fn create_and_get_tenant() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Dev Tenant".into(),
             slug: "dev".into(),
             metadata: None,
@@ -235,6 +238,7 @@ async fn get_tenant_by_slug() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Staging".into(),
             slug: "staging".into(),
             metadata: None,
@@ -260,6 +264,7 @@ async fn list_tenants_by_organization() {
         tenant_repo
             .create(CreateTenant {
                 organization_id: org1,
+                kind: TenantKind::Standard,
                 name: format!("Tenant {i}"),
                 slug: format!("t-{i}"),
                 metadata: None,
@@ -270,6 +275,7 @@ async fn list_tenants_by_organization() {
     tenant_repo
         .create(CreateTenant {
             organization_id: org2,
+            kind: TenantKind::Standard,
             name: "Other Tenant".into(),
             slug: "other".into(),
             metadata: None,
@@ -302,6 +308,7 @@ async fn delete_tenant() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Ephemeral".into(),
             slug: "ephemeral".into(),
             metadata: None,
@@ -326,6 +333,7 @@ async fn update_tenant() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Before".into(),
             slug: "upd-test".into(),
             metadata: None,

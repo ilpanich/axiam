@@ -48,7 +48,7 @@ jobs:
   # ---------------------------------------------------------------------
 
   shellcheck-bash-examples:
-    name: Lint — b1-deny-override / b2-iot-device-quickstart / b5 smoke script
+    name: Lint — example walkthroughs + the e2e seeding script
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -56,13 +56,17 @@ jobs:
       - name: bash -n (syntax)
         run: |
           bash -n examples/b1-deny-override/walkthrough.sh
+          bash -n examples/b6-organization-scope/walkthrough.sh
           bash -n examples/b2-iot-device-quickstart/device-quickstart.sh
           bash -n examples/b5-rp-logout-app/smoke-test.sh
+          bash -n scripts/e2e-bootstrap.sh
       - name: shellcheck
         run: |
           shellcheck examples/b1-deny-override/walkthrough.sh
+          shellcheck examples/b6-organization-scope/walkthrough.sh
           shellcheck examples/b2-iot-device-quickstart/device-quickstart.sh
           shellcheck examples/b5-rp-logout-app/smoke-test.sh
+          shellcheck scripts/e2e-bootstrap.sh
 
   build-b3-mesh-delegation-grpc:
     name: Build — b3-mesh-delegation-grpc (own Cargo workspace)
@@ -205,10 +209,18 @@ jobs:
         working-directory: examples/b3-mesh-delegation-grpc
         # E2E_ADMIN_PASSWORD is required and has no in-source default — the
         # example refuses to carry a credential literal. This is the same
-        # value scripts/e2e-bootstrap.sh seeds the stack with.
+        # value scripts/e2e-bootstrap.sh seeds the stack with; the tenant admin
+        # it provisions shares it, so one variable covers both accounts.
         env:
           E2E_ADMIN_PASSWORD: Test@Admin123!
         run: cargo run --locked
+
+      # b6 is the organization-scope example, so it signs in as the
+      # organization-level super-admin (no tenant named) rather than the
+      # tenant admin the others use. It creates its own tenants and tears
+      # nothing down, which is why it runs after the tenant-scoped examples.
+      - name: b6-organization-scope
+        run: ./examples/b6-organization-scope/walkthrough.sh
 
       - name: b5-rp-logout-app (build)
         working-directory: examples/b5-rp-logout-app

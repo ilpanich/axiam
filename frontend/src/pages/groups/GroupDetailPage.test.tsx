@@ -227,7 +227,7 @@ describe("GroupDetailPage", () => {
     routeGet(defaults());
     renderPage();
     const row = (await screen.findByText("Deploy")).closest("li")!;
-    expect(within(row).getByText("Global")).toBeInTheDocument();
+    expect(within(row).getByText("Tenant-wide")).toBeInTheDocument();
   });
 
   it("shows empty member/role states when nothing is present", async () => {

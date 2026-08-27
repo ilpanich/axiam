@@ -2,7 +2,7 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::tenant::{CreateTenant, Tenant, TenantStatus, UpdateTenant};
+use axiam_core::models::tenant::{CreateTenant, Tenant, TenantKind, TenantStatus, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -30,6 +30,28 @@ fn status_to_str(s: &TenantStatus) -> &'static str {
     }
 }
 
+/// An absent or empty `kind` is [`TenantKind::Standard`].
+///
+/// Every tenant row written before organization scope existed has no `kind` at
+/// all, and every one of them is an ordinary tenant — so the absent case is not
+/// a parse failure, it is the answer. An *unrecognised* value is still an
+/// error: that is a row from a future version, and guessing at it would be
+/// guessing about an authorization boundary.
+fn parse_kind(s: Option<&str>) -> Result<TenantKind, DbError> {
+    match s.unwrap_or("").trim() {
+        "" | "standard" => Ok(TenantKind::Standard),
+        "organization" => Ok(TenantKind::Organization),
+        other => Err(DbError::Migration(format!("unknown tenant kind: {other}"))),
+    }
+}
+
+fn kind_to_str(k: TenantKind) -> &'static str {
+    match k {
+        TenantKind::Standard => "standard",
+        TenantKind::Organization => "organization",
+    }
+}
+
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
 struct TenantRow {
@@ -37,6 +59,8 @@ struct TenantRow {
     name: String,
     slug: String,
     status: String,
+    #[surreal(default)]
+    kind: Option<String>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -52,6 +76,7 @@ impl TenantRow {
             name: self.name,
             slug: self.slug,
             status: parse_status(&self.status)?,
+            kind: parse_kind(self.kind.as_deref())?,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -67,6 +92,8 @@ struct TenantRowWithId {
     name: String,
     slug: String,
     status: String,
+    #[surreal(default)]
+    kind: Option<String>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -84,6 +111,7 @@ impl TenantRowWithId {
             name: self.name,
             slug: self.slug,
             status: parse_status(&self.status)?,
+            kind: parse_kind(self.kind.as_deref())?,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -116,14 +144,28 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // Create tenant record and relate to organization in one query.
         // RELATE requires literal record-id syntax, so we embed UUIDs
         // directly in the RELATE portion (they are safe — UUID format).
+        //
+        // An organization tenant also claims `organization_scope:<org_id>`,
+        // whose record id IS the constraint that there is only one of them. A
+        // second attempt fails on that CREATE rather than quietly producing a
+        // second place organization-level principals could live — see
+        // `SCHEMA_V50` for why this is a marker row and not a partial unique
+        // index.
+        let claim_scope = if input.kind.is_organization() {
+            " CREATE type::record('organization_scope', $org_id) \
+              SET tenant_id = $id;"
+        } else {
+            ""
+        };
         let query = format!(
             "CREATE type::record('tenant', $id) SET \
              organization_id = $org_id, \
              name = $name, slug = $slug, \
              status = 'Active', \
+             kind = $kind, \
              metadata = $metadata; \
              RELATE organization:`{org_id_str}` \
-             -> has_tenant -> tenant:`{id_str}`;"
+             -> has_tenant -> tenant:`{id_str}`;{claim_scope}"
         );
 
         let result = self
@@ -134,6 +176,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .bind(("org_id", org_id_str))
             .bind(("name", input.name))
             .bind(("slug", input.slug))
+            .bind(("kind", kind_to_str(input.kind)))
             .bind(("metadata", metadata))
             .await
             .map_err(DbError::from)?;
@@ -188,6 +231,31 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             rows,
             "tenant",
             &format!("org={organization_id},slug={slug}"),
+        )?;
+
+        Ok(row.try_into_tenant()?)
+    }
+
+    async fn get_organization_tenant(&self, organization_id: Uuid) -> AxiamResult<Tenant> {
+        let org_id_str = organization_id.to_string();
+
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM tenant \
+                 WHERE organization_id = $org_id AND kind = 'organization'",
+            )
+            .bind(("org_id", org_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<TenantRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = take_first_or_not_found(
+            rows,
+            "tenant",
+            &format!("org={organization_id},kind=organization"),
         )?;
 
         Ok(row.try_into_tenant()?)

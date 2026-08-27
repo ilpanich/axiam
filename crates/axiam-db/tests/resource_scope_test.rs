@@ -3,7 +3,7 @@
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::scope::CreateScope;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, ResourceRepository, ScopeRepository, TenantRepository,
 };
@@ -41,6 +41,7 @@ async fn setup() -> (Surreal<surrealdb::engine::local::Db>, uuid::Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -79,6 +80,7 @@ async fn serialising_setup() -> (common::SerialisingDb, uuid::Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -534,6 +536,7 @@ async fn list_resources_with_pagination() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -548,6 +551,7 @@ async fn list_resources_with_pagination() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await

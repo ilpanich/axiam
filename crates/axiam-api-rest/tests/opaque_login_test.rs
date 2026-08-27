@@ -24,7 +24,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::system_defaults;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
@@ -147,6 +147,7 @@ async fn setup_db(slug: &str) -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "OPAQUE Tenant".into(),
             slug: format!("{slug}-tenant"),
             metadata: None,

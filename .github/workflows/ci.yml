@@ -674,7 +674,10 @@ jobs:
         env:
           KEYCLOAK_URL: "http://localhost:8180"
 
-      - name: Bootstrap E2E fixture (org + tenant + admin)
+      # Seeds two administrators: the organization-level super-admin bootstrap
+      # creates, and a tenant-level admin inside `default`. The Playwright
+      # suite signs in as the latter — see frontend/e2e/helpers/auth.ts.
+      - name: Bootstrap E2E fixture (org + organization scope + tenant + admins)
         run: bash scripts/e2e-bootstrap.sh
         env:
           E2E_ORG_SLUG: "test-org"

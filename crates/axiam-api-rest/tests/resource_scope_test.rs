@@ -8,7 +8,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -69,6 +69,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,
@@ -518,13 +519,19 @@ async fn list_scopes_returns_scopes() {
     assert_eq!(names.len(), 3, "got {names:?}");
     assert!(names.contains(&"read:users"));
     assert!(names.contains(&"write:users"));
+    // The seeded name carries the resource id, so two resources with the same
+    // name no longer seed two scopes that read identically in policy.
+    let expected_default =
+        axiam_core::models::scope::default_scope_name("API", resource_id.parse().unwrap())
+            .expect("a non-empty resource name yields a default scope name");
     assert!(
-        names.contains(&"API"),
+        names.contains(&expected_default.as_str()),
         "the resource's default scope must be present, got {names:?}"
     );
 }
 
-/// Creating a resource seeds one scope named after it, spaces to hyphens.
+/// Creating a resource seeds one scope named after it: spaces to hyphens,
+/// then the resource id so the name is unique across the deployment.
 #[actix_rt::test]
 async fn creating_a_resource_seeds_a_default_scope() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -560,7 +567,9 @@ async fn creating_a_resource_seeds_a_default_scope() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     let scopes = body.as_array().unwrap();
     assert_eq!(scopes.len(), 1);
-    assert_eq!(scopes[0]["name"], "Customer-Billing");
+    // Hyphens for the spaces, then `_` and the resource id: the underscore is
+    // the one separator a UUID's own hyphens cannot be confused with.
+    assert_eq!(scopes[0]["name"], format!("Customer-Billing_{resource_id}"));
 }
 
 #[actix_rt::test]

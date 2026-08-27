@@ -17,7 +17,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
 use axiam_core::repository::{
@@ -73,6 +73,7 @@ async fn setup_tenant(db: &Surreal<TestDb>, slug_suffix: &str) -> (Uuid, Uuid, U
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: format!("Tenant {slug_suffix}"),
             slug: format!("tenant-wp-{slug_suffix}"),
             metadata: None,

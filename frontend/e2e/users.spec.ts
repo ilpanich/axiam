@@ -40,12 +40,17 @@ test.describe("Users list page", () => {
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
     await usersLoaded;
-    // The bootstrap fixture creates an admin user — it must appear in the
-    // users table. Scope to the table and match the admin's unique email so
-    // the assertion is unambiguous (the bare text "admin" also matches the
+    // The seeded fixture creates this tenant's administrator — it must appear
+    // in the users table. Scope to the table and match its unique email so the
+    // assertion is unambiguous (the bare text "admin" also matches the
     // user-menu button, the username <code>, and the display-name cell).
+    //
+    // The organization-level super-admin is deliberately NOT here: it lives in
+    // the organization's own scope, and this list is this tenant's users.
+    const tenantAdminEmail =
+      process.env["E2E_TENANT_ADMIN_EMAIL"] ?? "tenant-admin@axiam.dev";
     await expect(
-      page.getByRole("table").getByText("admin@axiam.dev")
+      page.getByRole("table").getByText(tenantAdminEmail)
     ).toBeVisible({ timeout: 30_000 });
   });
 

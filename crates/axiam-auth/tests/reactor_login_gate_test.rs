@@ -24,7 +24,7 @@ use axiam_core::models::reactor::{
     DynReactorGate, ReactorOutcome, SharedReactorGate, noop_reactor_gate,
 };
 use axiam_core::models::settings::MfaPolicy;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -146,6 +146,7 @@ async fn fixture(gate: SharedReactorGate, mfa_enabled: bool) -> Fixture {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "test-tenant".into(),
             metadata: None,

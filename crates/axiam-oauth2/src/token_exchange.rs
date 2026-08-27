@@ -1116,11 +1116,19 @@ mod tests {
         }
 
         impl TenantRepository for StubTenantRepo {
+            async fn get_organization_tenant(
+                &self,
+                _organization_id: uuid::Uuid,
+            ) -> axiam_core::error::AxiamResult<Tenant> {
+                unimplemented!("this stub has no organization scope")
+            }
+
             async fn create(&self, _input: CreateTenant) -> AxiamResult<Tenant> {
                 unimplemented!()
             }
             async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
                 Ok(Tenant {
+                    kind: axiam_core::models::tenant::TenantKind::Standard,
                     id,
                     organization_id: self.org_id,
                     name: "t".into(),

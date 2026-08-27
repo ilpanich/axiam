@@ -122,6 +122,7 @@ async fn scim_members<C: Connection + Clone>(
             Pagination {
                 offset: 0,
                 limit: MEMBER_EMBED_CAP,
+                search: None,
             },
         )
         .await?;
@@ -166,7 +167,14 @@ pub async fn list<C: Connection + Clone>(
         None => {
             let result = state
                 .group_repo
-                .list(user.tenant_id(), Pagination { offset, limit })
+                .list(
+                    user.tenant_id(),
+                    Pagination {
+                        offset,
+                        limit,
+                        search: None,
+                    },
+                )
                 .await?;
             let mut resources = Vec::with_capacity(result.items.len());
             for g in &result.items {
@@ -190,6 +198,7 @@ pub async fn list<C: Connection + Clone>(
                     Pagination {
                         offset: 0,
                         limit: MEMBER_EMBED_CAP,
+                        search: None,
                     },
                 )
                 .await?;
@@ -320,6 +329,7 @@ pub async fn replace<C: Connection + Clone>(
             Pagination {
                 offset: 0,
                 limit: MEMBER_EMBED_CAP,
+                search: None,
             },
         )
         .await?
@@ -414,6 +424,7 @@ pub async fn patch<C: Connection + Clone>(
                         Pagination {
                             offset: 0,
                             limit: MEMBER_EMBED_CAP,
+                            search: None,
                         },
                     )
                     .await?;

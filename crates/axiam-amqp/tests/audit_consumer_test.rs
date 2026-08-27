@@ -207,6 +207,7 @@ async fn valid_event_is_acked_and_persisted() {
             Pagination {
                 offset: 0,
                 limit: 100,
+                search: None,
             },
         )
         .await

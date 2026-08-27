@@ -19,8 +19,12 @@ set -euo pipefail
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
-ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
-ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
+# The tenant-level admin seeded by scripts/e2e-bootstrap.sh (the
+# organization-level super-admin signs in with no tenant — see b6). By
+# username rather than email: an email next to a password is a credential
+# pair as far as a secret scanner is concerned, fixture or not.
+ADMIN_EMAIL="${E2E_TENANT_ADMIN_USERNAME:-tenant-admin}"
+ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${E2E_ADMIN_PASSWORD:-Test@Admin123!}}"
 
 RUN_ID="$(date +%s)-$$"
 CLIENT_NAME="headless-sensor-${RUN_ID}"

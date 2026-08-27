@@ -998,6 +998,7 @@ version = "1.0.0-beta01"
 dependencies = [
  "axiam-core",
  "axiam-db",
+ "axiam-test-support",
  "chrono",
  "criterion",
  "futures",
@@ -1215,6 +1216,7 @@ dependencies = [
  "actix-rt",
  "actix-tls",
  "actix-web",
+ "arc-swap",
  "axiam-amqp",
  "axiam-api-grpc",
  "axiam-api-rest",

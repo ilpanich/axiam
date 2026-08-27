@@ -1,4 +1,5 @@
 import { Globe, Target } from "lucide-react";
+import { useIsOrganizationScope } from "@/lib/grantReach";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { cn } from "@/lib/utils";
 
@@ -24,14 +25,19 @@ export function AssignmentScopeBadge({
   resourceId,
   nameFor,
 }: AssignmentScopeBadgeProps) {
+  const organizationScope = useIsOrganizationScope();
   if (!resourceId) {
     return (
       <span
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-white/5 text-muted-foreground border border-white/15"
-        title="Applies everywhere — this assignment is not scoped to a resource"
+        title={
+          organizationScope
+            ? "Applies to every resource in every tenant of this organization — this assignment is not scoped to a resource"
+            : "Applies to every resource in this tenant — this assignment is not scoped to a resource"
+        }
       >
         <Globe size={9} aria-hidden="true" />
-        Global
+        {organizationScope ? "Organization-wide" : "Tenant-wide"}
       </span>
     );
   }
@@ -69,6 +75,7 @@ export function ResourceScopePicker({
   subject,
   disabled,
 }: ResourceScopePickerProps) {
+  const organizationScope = useIsOrganizationScope();
   const { resources } = useResourceNames();
 
   return (
@@ -91,7 +98,11 @@ export function ResourceScopePicker({
           disabled && "opacity-50"
         )}
       >
-        <option value="">Global — applies everywhere</option>
+        <option value="">
+          {organizationScope
+            ? "Organization-wide — every resource in every tenant"
+            : "Tenant-wide — every resource in this tenant"}
+        </option>
         {resources.map((r) => (
           <option key={r.id} value={r.id}>
             {r.name}

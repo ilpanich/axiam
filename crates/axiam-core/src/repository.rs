@@ -69,6 +69,28 @@ where
     Ok(raw.clamp(1, 200))
 }
 
+/// Normalise a free-text search term at deserialization time.
+///
+/// Trimmed, and blank becomes `None`. A UI that sends `?search=` on every
+/// keystroke — including after the box is cleared — should not thereby ask for
+/// "rows whose name contains the empty string", which is a different query
+/// plan for the same intent.
+///
+/// Length-capped because the term reaches a `string::contains` over every row
+/// in the tenant: an unbounded one is CPU an unauthenticated-adjacent caller
+/// gets to spend. The cap is generous enough for a full UUID, which is the
+/// longest thing anyone pastes in.
+fn normalize_search<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const MAX_SEARCH_LEN: usize = 128;
+    let raw = Option::<String>::deserialize(de)?;
+    Ok(raw
+        .map(|s| s.trim().chars().take(MAX_SEARCH_LEN).collect::<String>())
+        .filter(|s| !s.is_empty()))
+}
+
 /// Pagination parameters for list queries.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(default)]
@@ -76,6 +98,22 @@ pub struct Pagination {
     pub offset: u64,
     #[serde(deserialize_with = "clamp_pagination_limit")]
     pub limit: u64,
+    /// Free-text filter applied before paging.
+    ///
+    /// Matched case-insensitively against the identifying fields of whatever is
+    /// being listed — a name or username, plus the record id, so an operator
+    /// who has a UUID from a log line can paste it into the same box.
+    /// Which fields exactly is each repository's business; the shape is shared
+    /// so every list endpoint spells it the same way.
+    ///
+    /// **Applied before `offset`/`limit`, and `total` counts matches, not
+    /// rows.** Any other order gives a pager whose page count belongs to a
+    /// different result set than the page it is showing.
+    ///
+    /// `None` means no filter. Blank and whitespace-only values deserialize to
+    /// `None` — see [`normalize_search`].
+    #[serde(default, deserialize_with = "normalize_search")]
+    pub search: Option<String>,
 }
 
 impl Default for Pagination {
@@ -83,7 +121,32 @@ impl Default for Pagination {
         Self {
             offset: 0,
             limit: 50,
+            search: None,
         }
+    }
+}
+
+impl Pagination {
+    /// The search term — trimmed, lowercased — or `None` when there is nothing
+    /// to search for.
+    ///
+    /// Lowercasing here rather than in each repository means "case-insensitive"
+    /// is decided once. A repository that compared raw would be
+    /// case-*sensitive* for exactly as long as nobody noticed.
+    ///
+    /// Trimming here as well as in [`normalize_search`] is not redundant. That
+    /// one runs on the serde path only, so it catches a query string and misses
+    /// every `Pagination` built in code — a test, an internal caller, an SDK
+    /// assembling the struct. `Some("   ")` reaching a repository asks for rows
+    /// containing three spaces, which is not what any caller meant and returns
+    /// nothing while looking like a working filter. This is the accessor every
+    /// repository actually calls, so making it authoritative is what makes the
+    /// rule true rather than usually true.
+    pub fn search_term(&self) -> Option<String> {
+        self.search
+            .as_ref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -138,6 +201,24 @@ pub trait TenantRepository: Send + Sync {
         organization_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<Tenant>>> + Send;
+
+    /// The organization's own tenant — where organization-level principals
+    /// live.
+    ///
+    /// A lookup rather than a convention: the scope is identified by
+    /// `kind = organization`, which a unique index makes singular, so nothing
+    /// depends on its slug or on it being the oldest row. An operator who
+    /// renames it does not thereby detach every organization-level
+    /// administrator from their grants.
+    ///
+    /// `NotFound` for an organization that predates the migration and has not
+    /// been backfilled. Callers on the authorization path treat that as "this
+    /// deployment has no organization scope yet" and fall back to
+    /// tenant-scoped behaviour, which is what such a deployment had.
+    fn get_organization_tenant(
+        &self,
+        organization_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Tenant>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,16 +1644,28 @@ pub trait CaCertificateRepository: Send + Sync {
     /// Vault keep issuing from the CAs it already had. Moving a key is therefore
     /// two acts — copy the material, then update this — and this is the second.
     ///
-    /// `encrypted_private_key` is cleared unconditionally. A key that has been
-    /// copied into Vault and *also* left sealed in its row has not been moved
-    /// out of the database at all; it has been duplicated, which is strictly
-    /// worse than either state alone.
+    /// `encrypted_private_key` is set to exactly what is passed, and the two
+    /// arguments are how a custodian says where the key went: a referencing
+    /// custodian (Vault) supplies `key_locator` and no ciphertext, an inlining
+    /// one (database) supplies ciphertext and no locator.
+    ///
+    /// Passing `None` for both is what clears a key out of the row, and is the
+    /// right call when moving *into* Vault: a key copied into Vault and also
+    /// left sealed in its row has not been moved out of the database at all, it
+    /// has been duplicated, which is strictly worse than either state alone.
+    /// But it is only right in that direction. This took an unconditional
+    /// `encrypted_private_key = NONE` until a migration test drove the other
+    /// one, where clearing the column is how the key gets destroyed: the
+    /// database custodian has nowhere but this column to put it, so a move into
+    /// database custody wrote `custody = database` with no key beside it and
+    /// then released the source copy.
     fn update_key_custody(
         &self,
         organization_id: Uuid,
         id: Uuid,
         custody: crate::ca_keys::CaKeyCustody,
         key_locator: Option<String>,
+        encrypted_private_key: Option<Vec<u8>>,
     ) -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
 
     /// Every active CA flagged as an mTLS trust anchor, across all organizations.
@@ -1621,6 +1714,23 @@ pub trait CertificateRepository: Send + Sync {
         cert_id: Uuid,
         sa_id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+    /// The service account each of `cert_ids` is bound to, for those that are
+    /// bound at all.
+    ///
+    /// The bulk form of [`Self::get_bound_service_account`], and the reason it
+    /// exists is a list page: whether a certificate is bound is a graph edge,
+    /// not a column, so a page of fifty certificates asking one at a time is
+    /// fifty round trips. That cost is why the admin UI showed the binding
+    /// nowhere at all, which in turn is why it was "almost impossible to
+    /// understand if a certificate was bound to the service account or not".
+    ///
+    /// Certificates with no binding are simply absent from the map rather than
+    /// present with a `None`, so a caller iterates what it got.
+    fn bound_service_accounts(
+        &self,
+        cert_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<std::collections::HashMap<Uuid, Uuid>>> + Send;
+
     fn get_bound_service_account(
         &self,
         cert_id: Uuid,
@@ -2510,8 +2620,75 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: 100_000,
+            search: None,
         };
         assert_eq!(p.limit, 100_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // `search` — normalised on the serde path, and again in `search_term`.
+    //
+    // The two are not redundant. `normalize_search` sees a query string;
+    // `search_term` is what every repository actually calls, and it also sees
+    // every `Pagination` built in code — a test, an internal caller, an SDK
+    // assembling the struct. A term that only the serde path cleaned would be
+    // clean "usually", which for a filter that decides what rows a caller sees
+    // is not a property worth having.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_blank_search_deserialises_to_no_search() {
+        // A UI sends `?search=` on every keystroke, including after the box is
+        // cleared. That must mean "no filter", not "rows containing the empty
+        // string" — a different query plan for the same intent.
+        assert_eq!(from_query(r#"{"search":""}"#).search, None);
+        assert_eq!(from_query(r#"{"search":"   "}"#).search, None);
+        assert_eq!(from_query(r#"{"search":"\t\n"}"#).search, None);
+        assert_eq!(from_query("{}").search, None);
+    }
+
+    #[test]
+    fn a_deserialised_search_is_trimmed() {
+        assert_eq!(
+            from_query(r#"{"search":"  admin  "}"#).search.as_deref(),
+            Some("admin")
+        );
+    }
+
+    #[test]
+    fn a_search_term_is_length_capped() {
+        // The term reaches a substring scan over every row in the tenant, so an
+        // unbounded one is CPU a caller gets to spend. The cap is generous
+        // enough for a full UUID, which is the longest thing anyone pastes.
+        let long = "a".repeat(10_000);
+        let p = from_query(&format!(r#"{{"search":"{long}"}}"#));
+        assert_eq!(p.search.as_deref().map(str::len), Some(128));
+    }
+
+    #[test]
+    fn search_term_lowercases_and_trims_however_the_struct_was_built() {
+        // Direct construction bypasses serde — deliberately, for `limit`. It
+        // must NOT bypass this: `Some("   ")` reaching a repository asks for
+        // rows containing three spaces, returns nothing, and looks like a
+        // working filter that found no matches.
+        let built = Pagination {
+            offset: 0,
+            limit: 50,
+            search: Some("  AdMiN \n".into()),
+        };
+        assert_eq!(built.search_term().as_deref(), Some("admin"));
+
+        let blank = Pagination {
+            offset: 0,
+            limit: 50,
+            search: Some("   ".into()),
+        };
+        assert_eq!(blank.search_term(), None);
+    }
+
+    #[test]
+    fn no_search_stays_no_search() {
+        assert_eq!(Pagination::default().search_term(), None);
     }
 
     #[test]

@@ -142,13 +142,11 @@ async fn setup_with_org_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
         })
         .await
         .unwrap();
+    // The organization's own reserved scope — where bootstrap puts the
+    // super-admin. Pre-seeding it (rather than an ordinary tenant) keeps the
+    // only contention in the race test the global bootstrap lock.
     let tenant = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant {
-            organization_id: org.id,
-            name: "Default".into(),
-            slug: "default".into(),
-            metadata: None,
-        })
+        .create(CreateTenant::organization_scope(org.id))
         .await
         .unwrap();
     (db, org.id, tenant.id)
@@ -307,20 +305,40 @@ async fn bootstrap_creates_org_tenant_admin() {
         body_json.get("organization_slug").and_then(Value::as_str),
         Some("first-org")
     );
+    // The organization's own reserved scope, not a tenant the request named.
+    // Bootstrap no longer creates an ordinary tenant: the administrator it
+    // provisions is organization-level, so it reaches every tenant created
+    // afterwards. `tenant_name`/`tenant_slug` in the request above are accepted
+    // and ignored, which is why "default" is not what comes back.
     assert_eq!(
         body_json.get("tenant_slug").and_then(Value::as_str),
-        Some("default")
+        Some(axiam_core::models::tenant::ORGANIZATION_TENANT_SLUG)
     );
 
-    // The org and tenant were actually created.
+    // The organization and its reserved scope were actually created.
     let org = SurrealOrganizationRepository::new(db.clone())
         .get_by_slug("first-org")
         .await
         .expect("bootstrap must create the organization");
-    SurrealTenantRepository::new(db.clone())
-        .get_by_slug(org.id, "default")
+    let scope = SurrealTenantRepository::new(db.clone())
+        .get_organization_tenant(org.id)
         .await
-        .expect("bootstrap must create the default tenant");
+        .expect("bootstrap must create the organization tenant");
+    assert!(
+        scope.is_organization_scope(),
+        "the tenant bootstrap creates must be the organization's own scope — an \
+         ordinary tenant here is what left every LATER tenant unreachable"
+    );
+
+    // And no ordinary tenant, whatever the request asked for.
+    assert!(
+        SurrealTenantRepository::new(db.clone())
+            .get_by_slug(org.id, "default")
+            .await
+            .is_err(),
+        "bootstrap must not create a tenant from `tenant_slug`; the field is \
+         accepted for wire compatibility and ignored"
+    );
 }
 
 /// `bootstrap_returns_409_after_admin`
@@ -456,6 +474,7 @@ async fn bootstrap_concurrent_race_single_admin() {
             Pagination {
                 offset: 0,
                 limit: 10,
+                search: None,
             },
         )
         .await
@@ -619,7 +638,7 @@ async fn bootstrap_admin_can_login() {
 
     let peer: SocketAddr = TEST_PEER.parse().unwrap();
 
-    // 1. Bootstrap — creates org "login-org", tenant "default" and the admin.
+    // 1. Bootstrap — creates org "login-org", its organization scope and the admin.
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
@@ -646,8 +665,11 @@ async fn bootstrap_admin_can_login() {
         .get_by_slug("login-org")
         .await
         .unwrap();
+    // The administrator bootstrap created is organization-level, so it lives in
+    // the organization's own reserved scope — not in a tenant named by the
+    // request. Logging in as it means presenting that scope's id.
     let tenant = SurrealTenantRepository::new(db.clone())
-        .get_by_slug(org.id, "default")
+        .get_organization_tenant(org.id)
         .await
         .unwrap();
 

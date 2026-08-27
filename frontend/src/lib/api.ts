@@ -5,6 +5,8 @@ import axios, {
   type AxiosError,
 } from "axios";
 import { useAuthStore } from "@/stores/auth";
+
+import { ACTIVE_TENANT_HEADER, getActiveTenant } from "@/lib/activeTenant";
 import { queryClient } from "@/lib/queryClient";
 
 const api: AxiosInstance = axios.create({
@@ -27,7 +29,8 @@ function getCookie(name: "axiam_csrf"): string | null {
 // State-changing HTTP methods that need CSRF token
 const CSRF_METHODS = new Set(["post", "put", "patch", "delete"]);
 
-// Request interceptor: inject X-CSRF-Token header on state-changing requests (per D-03, D-04)
+// Request interceptor: inject X-CSRF-Token header on state-changing requests
+// (per D-03, D-04), and the active tenant when one is selected.
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const method = (config.method || "get").toLowerCase();
@@ -36,6 +39,12 @@ api.interceptors.request.use(
       if (csrfToken) {
         config.headers["X-CSRF-Token"] = csrfToken;
       }
+    }
+        // The tenant an organization-level principal is acting on, when it has
+    // switched. Read here rather than held here — see `lib/activeTenant`.
+    const activeTenant = getActiveTenant();
+    if (activeTenant && config.headers) {
+      config.headers[ACTIVE_TENANT_HEADER] = activeTenant;
     }
     return config;
   },

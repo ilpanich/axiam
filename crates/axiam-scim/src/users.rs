@@ -294,6 +294,7 @@ pub async fn list<C: Connection + Clone>(
                     Pagination {
                         offset: 0,
                         limit: EXTERNAL_ID_SCAN_CAP,
+                        search: None,
                     },
                 )
                 .await?;
@@ -336,6 +337,7 @@ async fn list_unfiltered<C: Connection + Clone>(
                 Pagination {
                     offset: 0,
                     limit: 1,
+                    search: None,
                 },
             )
             .await?;
@@ -347,7 +349,14 @@ async fn list_unfiltered<C: Connection + Clone>(
     }
     let result = state
         .user_repo
-        .list(user.tenant_id(), Pagination { offset, limit })
+        .list(
+            user.tenant_id(),
+            Pagination {
+                offset,
+                limit,
+                search: None,
+            },
+        )
         .await?;
     let resources: Vec<ScimUser> = result
         .items

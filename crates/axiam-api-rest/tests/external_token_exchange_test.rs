@@ -43,7 +43,7 @@ use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, OAuth2ClientRepository,
@@ -226,6 +226,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "X4 Tenant".into(),
             slug: "tenant-x4".into(),
             metadata: None,

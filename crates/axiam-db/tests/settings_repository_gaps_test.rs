@@ -7,7 +7,7 @@
 
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::{SetOrgSettings, SetTenantOverride, system_defaults};
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, SettingsRepository, TenantRepository};
 use axiam_db::{SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository};
 use surrealdb::Surreal;
@@ -33,6 +33,7 @@ async fn setup() -> (
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,

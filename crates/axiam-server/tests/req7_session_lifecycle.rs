@@ -30,7 +30,7 @@ use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
 use axiam_core::models::settings::system_defaults;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, PasswordResetTokenRepository, RefreshTokenRepository,
@@ -94,6 +94,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: format!("req7-tenant-{}", Uuid::new_v4()),
             metadata: None,

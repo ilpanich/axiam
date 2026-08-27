@@ -119,7 +119,7 @@ describe("ProfilePage", () => {
     ).toBeInTheDocument();
   });
 
-  it("resends the verification email successfully", async () => {
+  it("resends the verification email through the authenticated endpoint", async () => {
     mockGetByUrl({
       "/api/v1/users/u1": { ...profile, email_verified: false },
       "/api/v1/users/u1/mfa-methods": [],
@@ -129,18 +129,54 @@ describe("ProfilePage", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "Resend verification email" })
     );
+    // `/auth/resend-verification` is the PUBLIC endpoint: it takes an address
+    // from an unauthenticated caller and therefore answers a constant 200
+    // whatever happens, which is why this button used to report success while
+    // doing nothing. The self-service route reads the address off the caller's
+    // own record and needs no body at all.
     await waitFor(() =>
-      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/auth/resend-verification", {
-        tenant_id: "t1",
-        email: "admin@x.io",
-      })
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/users/me/resend-verification"
+      )
     );
     expect(
-      await screen.findByText("Verification email sent. Please check your inbox.")
+      await screen.findByText(/Verification email sent/)
     ).toBeInTheDocument();
   });
 
-  it("shows a failure message when the resend mutation errors", async () => {
+  it("says the address is already verified rather than reporting success", async () => {
+    // The case that made the old button most misleading: nothing was sent, and
+    // the page said it had been.
+    mockGetByUrl({
+      "/api/v1/users/u1": { ...profile, email_verified: false },
+      "/api/v1/users/u1/mfa-methods": [],
+    });
+    apiMock.post.mockRejectedValue({ response: { status: 409 } });
+    renderWithProviders(<ProfilePage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Resend verification email" })
+    );
+    expect(
+      await screen.findByText(/already verified/)
+    ).toBeInTheDocument();
+  });
+
+  it("names the daily limit when one has been reached", async () => {
+    mockGetByUrl({
+      "/api/v1/users/u1": { ...profile, email_verified: false },
+      "/api/v1/users/u1/mfa-methods": [],
+    });
+    apiMock.post.mockRejectedValue({ response: { status: 429 } });
+    renderWithProviders(<ProfilePage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Resend verification email" })
+    );
+    expect(
+      await screen.findByText(/too many verification emails/)
+    ).toBeInTheDocument();
+  });
+
+  it("shows a generic failure for anything else", async () => {
     mockGetByUrl({
       "/api/v1/users/u1": { ...profile, email_verified: false },
       "/api/v1/users/u1/mfa-methods": [],
@@ -151,24 +187,30 @@ describe("ProfilePage", () => {
       await screen.findByRole("button", { name: "Resend verification email" })
     );
     expect(
-      await screen.findByText("Failed to resend verification email. Try again later.")
+      await screen.findByText("Could not send the verification email. Try again later.")
     ).toBeInTheDocument();
   });
 
-  it("rejects resend locally when tenant context/email is missing from the store", async () => {
+  it("no longer depends on tenant context being in the auth store", async () => {
+    // The old call needed `tenant_id` and `email` from the store and rejected
+    // locally without them — a failure mode that looked identical to a server
+    // error and had nothing to do with the server. The address now comes off
+    // the caller's own record, server-side.
     mockGetByUrl({
       "/api/v1/users/u1": { ...profile, email_verified: false },
       "/api/v1/users/u1/mfa-methods": [],
     });
     useAuthStore.setState({ user: { ...authUser, tenant_id: "", email: "" } });
+    apiMock.post.mockResolvedValue(res(undefined));
     renderWithProviders(<ProfilePage />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Resend verification email" })
     );
-    expect(
-      await screen.findByText("Failed to resend verification email. Try again later.")
-    ).toBeInTheDocument();
-    expect(apiMock.post).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/users/me/resend-verification"
+      )
+    );
   });
 
   it("enters edit mode, submits updated fields, and returns to view mode", async () => {

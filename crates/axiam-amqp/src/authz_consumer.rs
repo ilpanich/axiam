@@ -1,7 +1,7 @@
 //! AMQP consumer for async authorization requests.
 
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{
     AmqpNonceRepository, GroupRepository, PermissionRepository, ResourceRepository, RoleRepository,
@@ -158,6 +158,7 @@ where
     // Build access request and evaluate.
     let access_request = AccessRequest {
         tenant_id: request.tenant_id,
+        subject_scope: SubjectScope::Tenant,
         subject_id: request.subject_id,
         action: request.action,
         resource_id: request.resource_id,

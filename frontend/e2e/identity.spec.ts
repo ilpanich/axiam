@@ -34,8 +34,11 @@ test("profile page shows user info when authenticated", async ({ page }) => {
   await loginAsAdmin(page);
   await page.goto("/profile");
   await expect(page).not.toHaveURL(/\/login/);
-  // Admin email set by bootstrap
-  const adminEmail = process.env["E2E_ADMIN_EMAIL"] ?? "admin@axiam.dev";
+  // The tenant admin `loginAsAdmin` signs in as (seeded by e2e-bootstrap.sh).
+  // Its email, which the profile page shows — `loginAsAdmin` authenticates by
+  // username, but the record carries both.
+  const adminEmail =
+    process.env["E2E_TENANT_ADMIN_EMAIL"] ?? "tenant-admin@axiam.dev";
   await expect(page.getByText(adminEmail)).toBeVisible();
 });
 

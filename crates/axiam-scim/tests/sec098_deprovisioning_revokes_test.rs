@@ -26,7 +26,7 @@ use axiam_authz::AuthorizationEngine;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, RefreshTokenRepository, RoleRepository, SessionRepository,
@@ -116,6 +116,7 @@ async fn setup_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "SEC-098 Tenant".into(),
             slug: format!("tenant-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -163,6 +164,7 @@ async fn user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name: &str) 
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -389,4 +391,87 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
         AUD_USER,
     )
     .unwrap()
+}
+
+#[actix_rt::test]
+async fn a_scim_put_deactivation_revokes_every_live_credential() {
+    // RFC 7644 §3.5.1 spells deactivation two ways, and `users::replace`
+    // carries a comment promising the PUT one revokes "on the same terms as
+    // the PATCH one". Nothing asserted it: the three tests above all drive
+    // PATCH or DELETE, so the entire `replace` handler — the branch an IdP
+    // that pushes whole resources rather than patches actually takes — went
+    // unexercised. Okta and Entra both push full resources in some
+    // configurations, so this is the live half of the deprovisioning story
+    // for those deployments.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let provisioner = user_with_role(&db, tenant_id, "admin").await;
+    let token = mint_token(&auth, provisioner, tenant_id, org_id);
+    let target = user_with_role(&db, tenant_id, "viewer").await;
+    let raw_refresh = give_live_credentials(&db, tenant_id, target).await;
+
+    let req = test::TestRequest::put()
+        .peer_addr(peer())
+        .uri(&format!("/scim/v2/Users/{target}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "put-deactivated",
+            "emails": [{ "value": "put-deactivated@example.com", "primary": true }],
+            "active": false
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    assert_all_revoked(
+        &db,
+        tenant_id,
+        target,
+        &raw_refresh,
+        "a SCIM PUT carrying `active: false`",
+    )
+    .await;
+}
+
+#[actix_rt::test]
+async fn a_scim_put_that_keeps_the_user_active_revokes_nothing() {
+    // The other half of the same branch, and the one that would catch an
+    // over-eager fix: `replace` must revoke on the *status*, not on the fact
+    // that a PUT happened. An IdP that re-pushes an unchanged resource on
+    // every sync would otherwise sign the user out on a schedule.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let provisioner = user_with_role(&db, tenant_id, "admin").await;
+    let token = mint_token(&auth, provisioner, tenant_id, org_id);
+    let target = user_with_role(&db, tenant_id, "viewer").await;
+    let raw_refresh = give_live_credentials(&db, tenant_id, target).await;
+
+    let req = test::TestRequest::put()
+        .peer_addr(peer())
+        .uri(&format!("/scim/v2/Users/{target}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "still-active",
+            "emails": [{ "value": "still-active@example.com", "primary": true }],
+            "active": true
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    assert_eq!(
+        live_session_count(&db, tenant_id, target).await,
+        1,
+        "a PUT that leaves the user active must not revoke their session"
+    );
+    assert!(
+        refresh_token_is_spendable(&db, tenant_id, &raw_refresh).await,
+        "a PUT that leaves the user active must not revoke their refresh token"
+    );
 }

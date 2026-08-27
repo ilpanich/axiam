@@ -7,7 +7,7 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     GroupRepository, OrganizationRepository, RoleRepository, TenantRepository, UserRepository,
@@ -39,6 +39,7 @@ async fn setup() -> (Db, Uuid, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant-rrg".into(),
             metadata: None,
@@ -81,6 +82,7 @@ async fn other_tenant(db: &Db) -> Uuid {
     SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Other Tenant".into(),
             slug: format!("other-tenant-{}", Uuid::new_v4().simple()),
             metadata: None,

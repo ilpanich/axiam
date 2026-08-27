@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   groupService,
   type Group,
@@ -9,6 +9,8 @@ import {
 } from "@/services/users";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -66,10 +68,20 @@ export function GroupsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: groups = [], isLoading } = useQuery({
-    queryKey: ["groups"],
-    queryFn: groupService.list,
-  });
+  // Server-paged and server-searched. This page used to fetch the tenant's
+  // entire collection in one request and render all of it, which is fine at ten
+  // rows and unusable at two hundred with no way to find one by name.
+  const {
+    items: groups,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<Group>(["groups"], "/api/v1/groups");
 
   // ─── Create state ─────────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
@@ -252,12 +264,28 @@ export function GroupsPage() {
         }
       />
 
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        noun="groups"
+        className="mb-4 max-w-sm"
+        />
+
       <DataTable
         columns={columns}
         data={groups}
         isLoading={isLoading}
-        emptyMessage="No groups yet. Create your first one."
-      />
+        emptyMessage={
+          isFiltered ? "No groups match your search." : "No groups yet. Create your first one."
+        }
+        />
+
+      <PaginationControls
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
+        />
 
       {/* Create dialog */}
       <FormDialog

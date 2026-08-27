@@ -590,7 +590,7 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
     use axiam_api_rest::state::AppState;
     use axiam_auth::config::AuthConfig;
     use axiam_core::models::organization::CreateOrganization;
-    use axiam_core::models::tenant::CreateTenant;
+    use axiam_core::models::tenant::{CreateTenant, TenantKind};
     use axiam_core::models::user::CreateUser;
     use axiam_core::repository::{
         FederationLoginState, FederationLoginStateRepository, OrganizationRepository,
@@ -642,6 +642,7 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: "sechrd07-tenant".into(),
             metadata: None,

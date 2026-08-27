@@ -259,19 +259,23 @@ test.describe("Auth endpoint contract", () => {
   // ── Block B: Authenticated profile flows ───────────────────────────────
 
   test.describe("ProfilePage", () => {
-    test("resend-verification POST /api/v1/auth/resend-verification — not /auth/resend-verification", async ({ page }) => {
+    test("resend-verification POST /api/v1/users/me/resend-verification — the authenticated endpoint, not the public one", async ({ page }) => {
       let capturedUrl: string | undefined;
-      let capturedBody: Record<string, unknown> | null = null;
+      // Raw, not `postDataJSON()`: this request carries no body at all, and
+      // the JSON accessor is the wrong instrument for asserting that.
+      let capturedBody: string | null = null;
 
       // Mock auth init so the app treats us as authenticated
       await mockAuthMe(page);
       await mockUserProfile(page);
       await mockMfaMethods(page);
 
-      await page.route("**/auth/**", (route) => {
+      // The profile button now targets `/users/me/…`, so the `**/auth/**`
+      // pattern the other blocks use would never fire here.
+      await page.route("**/resend-verification", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
-          capturedBody = route.request().postDataJSON();
+          capturedBody = route.request().postData();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.fallback();
@@ -289,19 +293,21 @@ test.describe("Auth endpoint contract", () => {
       await page.waitForTimeout(500);
 
       expect(capturedUrl).toBeDefined();
-      expect(capturedUrl).toContain("/api/v1/auth/resend-verification");
-      // The versioned path necessarily *contains* the substring
-      // "/auth/resend-verification"; assert via exact pathname that the request
-      // targeted the VERSIONED endpoint and not the unversioned root path.
-      expect(new URL(capturedUrl!).pathname).toBe("/api/v1/auth/resend-verification");
+      // Exact pathname, so neither the unversioned root path nor the public
+      // `/api/v1/auth/resend-verification` can satisfy this by containment.
+      expect(new URL(capturedUrl!).pathname).toBe(
+        "/api/v1/users/me/resend-verification"
+      );
 
-      // 23-06 / Pitfall 4: ResendVerificationRequest requires BOTH tenant_id
-      // AND email — previously the frontend sent NO body at all (guaranteed
-      // 400). tenant_id/email come from the authenticated auth store
-      // (populated here via mockAuthMe).
-      expect(capturedBody).not.toBeNull();
-      expect(capturedBody?.tenant_id).toBe("11111111-1111-1111-1111-111111111111");
-      expect(capturedBody?.email).toBe("contract@test.example");
+      // And no body. The public endpoint needs `tenant_id` + `email` because
+      // anyone may call it; this one reads the address off the caller's own
+      // record. That is the point of the change: the public endpoint answers a
+      // constant 200 whatever happens — it must, or it would disclose which
+      // addresses have accounts — so the button reported success while doing
+      // nothing. Here the caller is authenticated and asking about itself, so
+      // the outcome is reported honestly (409 already verified, 429 daily
+      // limit).
+      expect(capturedBody).toBeFalsy();
     });
   });
 

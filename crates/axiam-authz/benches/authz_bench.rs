@@ -21,12 +21,12 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
+use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine, types::SubjectScope};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     OrganizationRepository, PermissionRepository, ResourceRepository, RoleRepository,
@@ -92,6 +92,7 @@ async fn seed(n: usize) -> (Surreal<TestDb>, Vec<AccessRequest>) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Bench Tenant".into(),
             slug: "bench-tenant".into(),
             metadata: None,
@@ -155,6 +156,7 @@ async fn seed(n: usize) -> (Surreal<TestDb>, Vec<AccessRequest>) {
             .unwrap();
         requests.push(AccessRequest {
             tenant_id: tenant.id,
+            subject_scope: SubjectScope::Tenant,
             subject_id: user.id,
             action: "read".into(),
             resource_id: resource.id,

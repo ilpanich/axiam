@@ -557,7 +557,7 @@ describe("RoleDetailPage", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "groups" }));
     const groupRow = (await screen.findByText("Admins")).closest("li")!;
-    expect(within(groupRow).getByText("Global")).toBeInTheDocument();
+    expect(within(groupRow).getByText("Tenant-wide")).toBeInTheDocument();
   });
 
   it("falls back to the resource id when the resource is not in the list", async () => {

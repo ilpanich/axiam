@@ -9,7 +9,7 @@ use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, UpdatePermission};
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::models::tenant::{CreateTenant, TenantStatus, UpdateTenant};
+use axiam_core::models::tenant::{CreateTenant, TenantKind, TenantStatus, UpdateTenant};
 use axiam_core::models::user::{CreateUser, UserStatus};
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook};
 use axiam_core::repository::{
@@ -45,6 +45,7 @@ async fn setup() -> (Db, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Tenant".into(),
             slug: "tenant".into(),
             metadata: None,
@@ -212,6 +213,7 @@ async fn permission_grant_to_role_cross_tenant_denied() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b".into(),
             metadata: None,
@@ -253,6 +255,7 @@ async fn permission_revoke_from_role_cross_tenant_denied() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: "tenant-b".into(),
             metadata: None,

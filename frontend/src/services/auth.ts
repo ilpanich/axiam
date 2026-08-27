@@ -121,6 +121,24 @@ export const authService = {
    * requires BOTH `tenant_id` (a UUID) AND `email` in the body (23-RESEARCH
    * Pitfall 4). The caller must supply both from the current auth context.
    */
+  /**
+   * Resend the *signed-in* user's verification email, and report what happened.
+   *
+   * `resendVerification` below is the public, unauthenticated endpoint, and it
+   * answers a constant 200 whatever the outcome — it has to, since a caller
+   * supplies an arbitrary address and any variation would say which addresses
+   * have accounts. That made the profile page's button report success while
+   * doing nothing: already verified, account locked, daily limit reached and
+   * "mail enqueued" all looked identical.
+   *
+   * Here the caller is authenticated and asking about its own record, so
+   * nothing is disclosed by answering honestly. Rejects with a 409 when the
+   * address is already verified or the account may not be sent one, and a 429
+   * at the daily limit.
+   */
+  resendOwnVerification: (): Promise<void> =>
+    api.post<void>("/api/v1/users/me/resend-verification").then(() => undefined),
+
   resendVerification: (tenantId: string, email: string): Promise<void> =>
     api
       .post<void>("/api/v1/auth/resend-verification", {

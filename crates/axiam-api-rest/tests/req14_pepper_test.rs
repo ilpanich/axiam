@@ -17,7 +17,7 @@ use axiam_api_rest::state::AppState;
 use axiam_api_rest::{RateLimitConfig, register_api_v1_routes};
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
@@ -86,6 +86,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: format!("test-tenant-{}", Uuid::new_v4()),
             metadata: None,

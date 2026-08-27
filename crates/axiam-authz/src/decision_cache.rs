@@ -185,7 +185,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::types::{AccessDecision, AccessRequest};
+use crate::types::{AccessDecision, AccessRequest, SubjectScope};
 
 /// Number of independent tenant-map mutexes. Fixed (not CPU-derived) so the
 /// structure is deterministic across hosts and reproducible in benchmarks.
@@ -225,6 +225,17 @@ impl Default for DecisionCacheConfig {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct SubKey {
     subject_id: Uuid,
+    /// Whose grants answered, and how far they reached.
+    ///
+    /// Part of the key because it is part of the question. The same subject
+    /// asking about the same resource gets a different answer depending on
+    /// whether its grants came from this tenant or from the organization
+    /// tenant, since only global grants cross that boundary. A subject's home
+    /// tenant is in practice a fixed property of the subject, so this rarely
+    /// distinguishes two live keys — it is here so that correctness does not
+    /// *depend* on that being true, which is the sort of invariant that holds
+    /// until someone adds a feature.
+    subject_scope: SubjectScope,
     resource_id: Uuid,
     action: String,
     scope: Option<String>,
@@ -234,6 +245,7 @@ impl SubKey {
     fn from_request(request: &AccessRequest) -> Self {
         Self {
             subject_id: request.subject_id,
+            subject_scope: request.subject_scope,
             resource_id: request.resource_id,
             action: request.action.clone(),
             scope: request.scope.clone(),
@@ -599,10 +611,33 @@ impl DecisionCache {
     /// Cost is proportional to **that subject's** cached entries (via the
     /// `by_subject` index), not to the tenant shard, and it holds only the
     /// stripe that owns `tenant_id` — other tenants' checks are unaffected.
-    pub fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
-        let mut stripe = self.stripe(tenant_id);
-        if let Some(shard) = stripe.get_mut(&tenant_id) {
-            shard.invalidate_subject(subject_id);
+    pub fn invalidate_subject(&self, _tenant_id: Uuid, subject_id: Uuid) {
+        // Every shard, not the one named.
+        //
+        // Shards are keyed by the tenant a decision was *about*, and an
+        // organization-level principal accumulates decisions in every tenant it
+        // touches while its roles live in exactly one — the organization
+        // tenant. A handler revoking such a role calls this with the tenant the
+        // mutation happened in, so clearing only that shard would leave a
+        // freshly revoked administrator holding cached allows in every other
+        // tenant until the TTL expired. Revocation that is correct for
+        // ordinary principals and silently late for privileged ones is the
+        // wrong way round.
+        //
+        // Sweeping is not over-invalidation: a subject id is unique across the
+        // deployment, so this removes exactly that subject's entries wherever
+        // they are. Cost is bounded by the `by_subject` index in each shard,
+        // and role mutations are not a hot path.
+        //
+        // `_tenant_id` is kept in the signature because ~20 call sites pass it
+        // and it still says which tenant the mutation happened in, which is
+        // worth keeping legible at those call sites even though the sweep no
+        // longer needs it.
+        for stripe in &self.stripes {
+            let mut guard = stripe.lock().unwrap_or_else(|p| p.into_inner());
+            for shard in guard.values_mut() {
+                shard.invalidate_subject(subject_id);
+            }
         }
     }
 
@@ -678,6 +713,7 @@ mod tests {
     fn req(tenant: Uuid, subject: Uuid, resource: Uuid, action: &str) -> AccessRequest {
         AccessRequest {
             tenant_id: tenant,
+            subject_scope: SubjectScope::Tenant,
             subject_id: subject,
             action: action.to_string(),
             resource_id: resource,

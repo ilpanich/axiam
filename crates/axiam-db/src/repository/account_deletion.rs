@@ -348,6 +348,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiam_core::models::tenant::TenantKind;
     use axiam_test_support::test_password;
     use chrono::Duration;
     use surrealdb::Surreal;
@@ -534,6 +535,7 @@ mod tests {
         let tenant = SurrealTenantRepository::new(db.clone())
             .create(axiam_core::models::tenant::CreateTenant {
                 organization_id: org.id,
+                kind: TenantKind::Standard,
                 name: "Tenant".into(),
                 slug: "tenant".into(),
                 metadata: None,

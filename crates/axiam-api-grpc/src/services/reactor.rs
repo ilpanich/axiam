@@ -23,7 +23,7 @@ use axiam_amqp::reactor::gate::{
 };
 use axiam_auth::token::ValidatedClaims;
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::AccessRequest;
+use axiam_authz::types::{AccessRequest, SubjectScope};
 use axiam_core::models::reactor::{
     CreateReactor, DEFAULT_TIMEOUT_MS, EVENT_REGISTRY, FailurePolicy, Reactor, ReactorMode,
     UpdateReactor, default_failure_policy_for, validate_registration,
@@ -134,6 +134,7 @@ where
             .engine
             .check_access(&AccessRequest {
                 tenant_id,
+                subject_scope: SubjectScope::Tenant,
                 subject_id,
                 action: action.to_string(),
                 resource_id: Uuid::nil(),
@@ -337,6 +338,7 @@ where
                 Pagination {
                     offset: req.offset,
                     limit: req.limit,
+                    search: None,
                 },
             )
             .await

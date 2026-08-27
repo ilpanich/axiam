@@ -518,11 +518,13 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
         id: Uuid,
         custody: CaKeyCustody,
         key_locator: Option<String>,
+        encrypted_private_key: Option<Vec<u8>>,
     ) -> AxiamResult<CaCertificate> {
-        // `encrypted_private_key = NONE` in the same statement as the new
-        // custody. Two statements would leave a window in which the row names
-        // Vault *and* still holds the ciphertext — a key that is in both places
-        // is not a key that has been moved.
+        // Custody, locator and ciphertext move in ONE statement. Two would
+        // leave a window in which the row names Vault *and* still holds the
+        // ciphertext — a key that is in both places is not a key that has been
+        // moved — and, in the other direction, a window in which it names the
+        // database and holds nothing.
         let result = self
             .db
             .current()
@@ -530,13 +532,17 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 "UPDATE type::record('ca_certificate', $id) SET \
                  key_custody = $custody, \
                  key_locator = $key_locator, \
-                 encrypted_private_key = NONE \
+                 encrypted_private_key = $encrypted_private_key \
                  WHERE organization_id = $org_id",
             )
             .bind(("id", id.to_string()))
             .bind(("org_id", organization_id.to_string()))
             .bind(("custody", custody.to_string()))
             .bind(("key_locator", key_locator))
+            .bind((
+                "encrypted_private_key",
+                encrypted_private_key.map(surrealdb_types::Bytes::from),
+            ))
             .await
             .map_err(DbError::from)?;
 

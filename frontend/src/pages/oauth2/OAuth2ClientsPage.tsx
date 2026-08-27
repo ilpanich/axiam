@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   oauth2ClientService,
@@ -18,6 +18,8 @@ import {
 } from "@/services/oauth2clients";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
+import { PaginationControls, SearchBox } from "@/components/ListToolbar";
+import { usePaginatedList } from "@/hooks/usePaginatedList";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SecretRevealModal } from "@/components/SecretRevealModal";
@@ -734,10 +736,20 @@ function parseUris(raw: string): string[] {
 export function OAuth2ClientsPage() {
   const queryClient = useQueryClient();
 
-  const { data: clients = [], isLoading } = useQuery({
-    queryKey: ["oauth2-clients"],
-    queryFn: () => oauth2ClientService.list(),
-  });
+  // Server-paged and server-searched. This page used to fetch the tenant's
+  // entire collection in one request and render all of it, which is fine at ten
+  // rows and unusable at two hundred with no way to find one by name.
+  const {
+    items: clients,
+    isLoading,
+    search,
+    setSearch,
+    page,
+    totalPages,
+    total,
+    setPage,
+    isFiltered,
+  } = usePaginatedList<OAuth2Client>(["oauth2-clients"], "/api/v1/oauth2/clients");
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
@@ -976,12 +988,28 @@ export function OAuth2ClientsPage() {
         }
       />
 
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        noun="clients"
+        className="mb-4 max-w-sm"
+        />
+
       <DataTable
         columns={columns}
         data={clients}
         isLoading={isLoading}
-        emptyMessage="No OAuth2 clients registered."
-      />
+        emptyMessage={
+          isFiltered ? "No clients match your search." : "No OAuth2 clients registered."
+        }
+        />
+
+      <PaginationControls
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
+        />
 
       {/* Create dialog */}
       <FormDialog

@@ -28,8 +28,6 @@ export function BootstrapPage() {
 
   const [orgName, setOrgName] = useState("");
   const [orgSlug, setOrgSlug] = useState("");
-  const [tenantName, setTenantName] = useState("Default");
-  const [tenantSlug, setTenantSlug] = useState("default");
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -45,7 +43,6 @@ export function BootstrapPage() {
   );
 
   const [orgSlugTouched, setOrgSlugTouched] = useState(false);
-  const [tenantSlugTouched, setTenantSlugTouched] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
@@ -65,18 +62,12 @@ export function BootstrapPage() {
     if (!orgSlugTouched) setOrgSlug(slugify(v));
   };
 
-  const handleTenantNameChange = (v: string) => {
-    setTenantName(v);
-    if (!tenantSlugTouched) setTenantSlug(slugify(v));
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setEmailError(null);
     setFormError(null);
 
     const effectiveOrgSlug = orgSlug.trim() || slugify(orgName);
-    const effectiveTenantSlug = tenantSlug.trim() || slugify(tenantName) || "default";
 
     if (
       !orgName.trim() ||
@@ -99,18 +90,22 @@ export function BootstrapPage() {
       await api.post("/api/v1/admin/bootstrap", {
         organization_name: orgName.trim(),
         organization_slug: effectiveOrgSlug,
-        tenant_name: tenantName.trim() || "Default",
-        tenant_slug: effectiveTenantSlug,
+        // No tenant. Bootstrap provisions the organization's own scope and the
+        // administrator inside it, so that administrator can reach every tenant
+        // created afterwards. Choosing a tenant here is what used to leave
+        // every *later* tenant unreachable by everybody.
         email: email.trim(),
         username: username.trim(),
         password,
         ...(setupToken.trim() ? { setup_token: setupToken.trim() } : {}),
         ...opaquePolicy,
       });
+      // No `tenant` param: the administrator just created is
+      // organization-level, and the login page reads a blank tenant as
+      // "sign in at organization level".
       const params = new URLSearchParams({
         bootstrapped: "1",
         org: effectiveOrgSlug,
-        tenant: effectiveTenantSlug,
       });
       navigate(`/login?${params.toString()}`);
     } catch (err) {
@@ -162,7 +157,7 @@ export function BootstrapPage() {
           Initialize AXIAM
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Create your organization, its default tenant and the first
+          Create your organization and the first
           administrator to get started.
         </p>
       </div>
@@ -212,36 +207,17 @@ export function BootstrapPage() {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="bootstrap-tenant-name">Tenant name</Label>
-              <Input
-                id="bootstrap-tenant-name"
-                type="text"
-                placeholder="Default"
-                value={tenantName}
-                onChange={(e) => handleTenantNameChange(e.target.value)}
-                autoComplete="off"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="bootstrap-tenant-slug">Tenant slug</Label>
-              <Input
-                id="bootstrap-tenant-slug"
-                type="text"
-                placeholder="default"
-                value={tenantSlug}
-                onChange={(e) => {
-                  setTenantSlugTouched(true);
-                  setTenantSlug(slugify(e.target.value));
-                }}
-                autoComplete="off"
-                required
-              />
-            </div>
-          </div>
+          {/* No tenant fields.
 
+              The administrator created here is organization-level: its grants
+              live in the organization's own scope and apply to every tenant the
+              organization ever has. Creating a tenant at this step is what
+              produced the opposite — the administrator's roles were rows in one
+              tenant, and every tenant created later was reachable by nobody,
+              not even them.
+
+              Tenants are created after signing in, from Organization →
+              Tenants. */}
           <div className="space-y-2">
             <Label htmlFor="bootstrap-email">Email address</Label>
             <Input

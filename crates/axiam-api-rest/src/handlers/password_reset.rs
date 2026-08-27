@@ -717,6 +717,13 @@ mod tests {
     struct UnreachableTenantRepo;
 
     impl TenantRepository for UnreachableTenantRepo {
+        async fn get_organization_tenant(
+            &self,
+            _organization_id: uuid::Uuid,
+        ) -> axiam_core::error::AxiamResult<axiam_core::models::tenant::Tenant> {
+            unimplemented!("this stub has no organization scope")
+        }
+
         async fn create(
             &self,
             _input: axiam_core::models::tenant::CreateTenant,

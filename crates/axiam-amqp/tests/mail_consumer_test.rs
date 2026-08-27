@@ -179,6 +179,7 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
             Pagination {
                 offset: 0,
                 limit: 100,
+                search: None,
             },
         )
         .await
@@ -399,7 +400,7 @@ async fn successful_send_via_mock_config_returns_delivered() {
 
 use axiam_amqp::mail_consumer::identity_context;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 
@@ -416,6 +417,7 @@ async fn seed_identity(db: &Surreal<Db>) -> (Uuid, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Acme Production".into(),
             slug: "prod".into(),
             metadata: None,

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, parse_uuid};
+use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, search_filter};
 
 /// DB-side row struct for queries where the UUID is already known.
 ///
@@ -622,6 +622,14 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     ) -> AxiamResult<PaginatedResult<User>> {
         let tenant_id_str = tenant_id.to_string();
 
+        // Free-text filter, applied to BOTH queries below so the total counts
+        // matches rather than rows — a pager whose page count belongs to a
+        // different result set than the page it shows is worse than no pager.
+        // Empty when unsearched, so an unfiltered list runs exactly the query
+        // it always ran.
+        let search = search_filter(&pagination, &["username", "email"]);
+        let search_term = search_bind(&pagination);
+
         // `status != 'Deleted'` here and in the page query below, and the two
         // MUST agree: a count that includes tombstones with a page that excludes
         // them gives the admin UI a total it can never fill, so the last page
@@ -630,11 +638,12 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut count_result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "SELECT count() AS total FROM user \
-                 WHERE tenant_id = $tenant_id AND status != 'Deleted' GROUP ALL",
-            )
+                 WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} GROUP ALL"
+            ))
             .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("search", search_term.clone()))
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
@@ -643,7 +652,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 // SEC-043: explicit column projection — mfa_secret and
                 // totp_last_used_step are intentionally excluded so they are
                 // never hydrated into list responses.
@@ -655,11 +664,12 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         deletion_pending, scheduled_purge_at, \
                         metadata, created_at, updated_at \
                  FROM user \
-                 WHERE tenant_id = $tenant_id AND status != 'Deleted' \
+                 WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} \
                  ORDER BY created_at ASC \
-                 LIMIT $limit START $offset",
-            )
+                 LIMIT $limit START $offset"
+            ))
             .bind(("tenant_id", tenant_id_str))
+            .bind(("search", search_term))
             .bind(("limit", pagination.limit))
             .bind(("offset", pagination.offset))
             .await

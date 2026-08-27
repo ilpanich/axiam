@@ -22,7 +22,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_M2M, AUD_USER, issue_access_token, issue_client_credentials_token};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::system_defaults;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
@@ -81,6 +81,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: format!("aud-tenant-{}", Uuid::new_v4()),
             metadata: None,

@@ -118,6 +118,7 @@ async fn export_audit_pagination_covers_all_entries() {
                 Pagination {
                     offset,
                     limit: PAGE_SIZE,
+                    search: None,
                 },
             )
             .await

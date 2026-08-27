@@ -165,6 +165,7 @@ async fn list_by_organization_paginates_and_isolates() {
             Pagination {
                 offset: 0,
                 limit: 3,
+                search: None,
             },
         )
         .await
@@ -178,6 +179,7 @@ async fn list_by_organization_paginates_and_isolates() {
             Pagination {
                 offset: 3,
                 limit: 3,
+                search: None,
             },
         )
         .await

@@ -22,7 +22,7 @@ use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::role::CreateRole;
-use axiam_core::models::tenant::CreateTenant;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, PermissionRepository, RoleRepository, TenantRepository,
@@ -146,6 +146,7 @@ async fn setup_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
+            kind: TenantKind::Standard,
             name: "Test Tenant".into(),
             slug: format!("tenant-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -210,6 +211,7 @@ async fn create_user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name:
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -249,6 +251,7 @@ async fn least_privilege_scim_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uui
             Pagination {
                 offset: 0,
                 limit: 1000,
+                search: None,
             },
         )
         .await
@@ -809,6 +812,7 @@ async fn cross_tenant_get_user_is_not_found() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -925,6 +929,7 @@ async fn cross_tenant_group_mutation_is_not_found() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -1006,6 +1011,7 @@ async fn cross_tenant_list_and_filter_never_leak() {
     let tenant_b = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_b.id,
+            kind: TenantKind::Standard,
             name: "Tenant B".into(),
             slug: format!("tenant-b-{}", Uuid::new_v4().simple()),
             metadata: None,
@@ -1083,4 +1089,1023 @@ async fn cross_tenant_list_and_filter_never_leak() {
         list["totalResults"], 0,
         "tenant A must not find tenant B's user by externalId"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Group collection + full-replace surface
+//
+// `GET /Groups` had no test at all — neither the unfiltered branch nor the
+// `externalId eq` one — and `PUT /Groups/{id}`, whose whole job is to compute
+// a membership add/remove diff against the current set, was reached only
+// through `create`. These drive the handlers an IdP's group-push actually
+// uses.
+// ---------------------------------------------------------------------------
+
+/// Create a group through the API and return its id.
+///
+/// A macro rather than a function for the same reason `test_app!` is one: the
+/// service type `test::init_service` returns is unnameable here without
+/// pulling `actix-http` in as a dev-dependency just to spell one bound.
+macro_rules! make_group {
+    ($app:expr, $token:expr, $display_name:expr, $external_id:expr, $members:expr) => {{
+        let mut body = json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": $display_name,
+            "members": $members
+                .iter()
+                .map(|m: &Uuid| json!({ "value": m.to_string() }))
+                .collect::<Vec<_>>(),
+        });
+        let ext: Option<&str> = $external_id;
+        if let Some(ext) = ext {
+            body["externalId"] = json!(ext);
+        }
+        let req = test::TestRequest::post()
+            .peer_addr(bench_peer())
+            .uri("/scim/v2/Groups")
+            .insert_header(bearer($token))
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service($app, req).await;
+        assert_eq!(resp.status().as_u16(), 201, "group create must succeed");
+        let created: Value = test::read_body_json(resp).await;
+        Uuid::parse_str(created["id"].as_str().unwrap()).unwrap()
+    }};
+}
+
+/// Create a SCIM user through the API and return its id.
+macro_rules! make_user {
+    ($app:expr, $token:expr, $user_name:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(bench_peer())
+            .uri("/scim/v2/Users")
+            .insert_header(bearer($token))
+            .set_json(json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "userName": $user_name,
+                "emails": [{
+                    "value": format!("{}@example.com", $user_name),
+                    "primary": true,
+                }],
+            }))
+            .to_request();
+        let resp = test::call_service($app, req).await;
+        assert_eq!(resp.status().as_u16(), 201, "user create must succeed");
+        let created: Value = test::read_body_json(resp).await;
+        Uuid::parse_str(created["id"].as_str().unwrap()).unwrap()
+    }};
+}
+
+/// Assert a group resource carries no members.
+///
+/// `ScimGroup::members` is `skip_serializing_if = "Vec::is_empty"`, so an empty
+/// membership is spelled by *omitting* the key, not by sending `[]` — which is
+/// what RFC 7644 §3.4.1 asks for ("unassigned attributes SHALL be omitted").
+/// Accept either spelling so the assertion pins the meaning rather than the
+/// encoding.
+macro_rules! assert_no_members {
+    ($group:expr, $what:expr) => {{
+        let members = $group.get("members");
+        assert!(
+            members.is_none_or(|m| m.as_array().is_some_and(|a| a.is_empty())),
+            "{} must leave the group with no members, got {:?}",
+            $what,
+            members
+        );
+    }};
+}
+
+/// `GET` a SCIM URI, returning the status and decoded body together.
+macro_rules! get_json {
+    ($app:expr, $token:expr, $uri:expr) => {{
+        let req = test::TestRequest::get()
+            .peer_addr(bench_peer())
+            .uri($uri)
+            .insert_header(bearer($token))
+            .to_request();
+        let resp = test::call_service($app, req).await;
+        let status = resp.status().as_u16();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+#[actix_rt::test]
+async fn group_list_embeds_members_and_pages() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let alice = make_user!(&app, &token, "alice");
+    make_group!(&app, &token, "Engineering", Some("ext-eng"), &[alice]);
+    make_group!(&app, &token, "Sales", Some("ext-sales"), &[]);
+
+    let (status, list) = get_json!(&app, &token, "/scim/v2/Groups");
+    assert_eq!(status, 200);
+    assert_eq!(list["totalResults"], 2);
+    assert_eq!(
+        list["schemas"][0],
+        "urn:ietf:params:scim:api:messages:2.0:ListResponse"
+    );
+
+    // The members embed is what makes this handler more than a table dump:
+    // each group carries its resolved membership, not just ids.
+    let eng = list["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["displayName"] == "Engineering")
+        .expect("Engineering must be listed");
+    assert_eq!(eng["members"][0]["value"], alice.to_string());
+    assert_eq!(eng["members"][0]["display"], "alice");
+    assert_eq!(eng["members"][0]["type"], "User");
+
+    let sales = list["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["displayName"] == "Sales")
+        .expect("Sales must be listed");
+    assert_no_members!(sales, "a group created with no members");
+
+    // startIndex is 1-based (RFC 7644 §3.4.2.4) and is echoed back as sent.
+    let (_, page) = get_json!(&app, &token, "/scim/v2/Groups?startIndex=2&count=1");
+    assert_eq!(page["startIndex"], 2);
+    assert_eq!(page["itemsPerPage"], 1);
+    assert_eq!(
+        page["totalResults"], 2,
+        "totalResults counts the whole collection, not the page"
+    );
+}
+
+#[actix_rt::test]
+async fn group_list_filters_by_external_id() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let wanted = make_group!(&app, &token, "Engineering", Some("ext-eng"), &[]);
+    make_group!(&app, &token, "Sales", Some("ext-sales"), &[]);
+
+    let (status, list) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Groups?filter=externalId%20eq%20%22ext-eng%22"
+    );
+    assert_eq!(status, 200);
+    assert_eq!(list["totalResults"], 1);
+    assert_eq!(list["Resources"][0]["id"], wanted.to_string());
+
+    // A filter that matches nothing is an empty 200, not a 404 — RFC 7644
+    // §3.4.2: a query returning no results is still a successful query.
+    let (status, empty) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Groups?filter=externalId%20eq%20%22nobody%22"
+    );
+    assert_eq!(status, 200);
+    assert_eq!(empty["totalResults"], 0);
+    assert!(empty["Resources"].as_array().unwrap().is_empty());
+
+    // `displayName eq` is a User-only attribute here: Groups accept only
+    // `externalId`, and anything else is a 400 rather than a silent full scan.
+    let (status, err) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Groups?filter=displayName%20eq%20%22Engineering%22"
+    );
+    assert_eq!(status, 400);
+    assert_eq!(err["scimType"], "invalidFilter");
+}
+
+#[actix_rt::test]
+async fn group_put_replaces_membership_as_a_diff() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let stays = make_user!(&app, &token, "stays");
+    let leaves = make_user!(&app, &token, "leaves");
+    let joins = make_user!(&app, &token, "joins");
+    let group = make_group!(
+        &app,
+        &token,
+        "Engineering",
+        Some("ext-eng"),
+        &[stays, leaves]
+    );
+
+    // PUT is a *full* replace of membership: `stays` is in both sets and must
+    // survive untouched, `leaves` is dropped, `joins` is added. Asserting all
+    // three at once is what distinguishes a real diff from a clear-then-add.
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": "Engineering Renamed",
+            "externalId": "ext-eng-2",
+            "members": [
+                { "value": stays.to_string() },
+                { "value": joins.to_string() },
+            ],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+
+    assert_eq!(body["displayName"], "Engineering Renamed");
+    assert_eq!(body["externalId"], "ext-eng-2");
+
+    let members: std::collections::HashSet<String> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["value"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        members,
+        [stays.to_string(), joins.to_string()].into_iter().collect(),
+        "PUT membership must be exactly the requested set"
+    );
+}
+
+#[actix_rt::test]
+async fn group_put_with_empty_members_clears_the_group() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let member = make_user!(&app, &token, "member");
+    let group = make_group!(&app, &token, "Engineering", None, &[member]);
+
+    // The removal side of the diff on its own. An empty `members` array is a
+    // legitimate instruction ("this group has nobody in it"), distinct from
+    // omitting the attribute, and it is the shape an IdP sends when the last
+    // person leaves a group.
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": "Engineering",
+            "members": [],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_no_members!(body, "a PUT with an empty members array");
+
+    let (_, refetched) = get_json!(&app, &token, &format!("/scim/v2/Groups/{group}"));
+    assert_no_members!(
+        refetched,
+        "the clear must be durable, not just reflected in the PUT response —"
+    );
+}
+
+#[actix_rt::test]
+async fn group_patch_replace_members_is_clear_then_add() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let old = make_user!(&app, &token, "old");
+    let new = make_user!(&app, &token, "new");
+    let group = make_group!(&app, &token, "Engineering", None, &[old]);
+
+    // `replace` on the whole `members` attribute means "the set is now exactly
+    // this", which `parse_group_patch` lowers to RemoveAll + Add. The
+    // RemoveAll arm re-reads the current membership to remove it, and was the
+    // one member action with no test.
+    let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:PatchOp"],
+            "Operations": [{
+                "op": "replace",
+                "path": "members",
+                "value": [{ "value": new.to_string() }],
+            }],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+
+    let members: Vec<&str> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(members, vec![new.to_string().as_str()]);
+}
+
+#[actix_rt::test]
+async fn group_patch_remove_all_members_empties_the_group() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let a = make_user!(&app, &token, "a");
+    let b = make_user!(&app, &token, "b");
+    let group = make_group!(&app, &token, "Engineering", None, &[a, b]);
+
+    // `remove` on `members` with no value filter — RFC 7644 §3.5.2.2's "clear
+    // every value of a multi-valued attribute". Distinct from the single-member
+    // `members[value eq "..."]` removal the Okta fixture already covers.
+    let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:PatchOp"],
+            "Operations": [{ "op": "remove", "path": "members" }],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_no_members!(body, "a `remove` on the whole members attribute");
+}
+
+#[actix_rt::test]
+async fn group_patch_renames_and_sets_external_id() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let group = make_group!(&app, &token, "Engineering", None, &[]);
+
+    let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:PatchOp"],
+            "Operations": [
+                { "op": "replace", "path": "displayName", "value": "Platform" },
+                { "op": "replace", "path": "externalId", "value": "ext-platform" },
+            ],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["displayName"], "Platform");
+    assert_eq!(body["externalId"], "ext-platform");
+
+    // externalId is stored in `metadata`, so it is the attribute most likely
+    // to be lost by a rename that rebuilds the object — check it survives a
+    // second, unrelated patch.
+    let req = test::TestRequest::patch()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:PatchOp"],
+            "Operations": [{ "op": "replace", "path": "displayName", "value": "Platform Eng" }],
+        }))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body["displayName"], "Platform Eng");
+    assert_eq!(
+        body["externalId"], "ext-platform",
+        "a displayName-only patch must not drop externalId"
+    );
+}
+
+#[actix_rt::test]
+async fn group_delete_of_an_unknown_id_is_not_found() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    // SEC-104 moved the existence guard into the repository's own transaction;
+    // this is the assertion that the 404 still reaches the client as RFC 7644
+    // §3.6 requires, rather than a 204 for a group that was never there.
+    let req = test::TestRequest::delete()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{}", Uuid::new_v4()))
+        .insert_header(bearer(&token))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+
+    // And the happy path stays a 204 with no body.
+    let group = make_group!(&app, &token, "Engineering", None, &[]);
+    let req = test::TestRequest::delete()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Groups/{group}"))
+        .insert_header(bearer(&token))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+}
+
+// ---------------------------------------------------------------------------
+// User collection paging
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn user_list_unfiltered_pages_and_counts() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let bearer_user = scim_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, bearer_user, tenant_id, org_id);
+
+    make_user!(&app, &token, "u1");
+    make_user!(&app, &token, "u2");
+
+    // The bearer principal is itself a user in this tenant, so the collection
+    // is the two provisioned users plus them.
+    let (status, list) = get_json!(&app, &token, "/scim/v2/Users");
+    assert_eq!(status, 200);
+    assert_eq!(list["totalResults"], 3);
+    assert_eq!(list["Resources"].as_array().unwrap().len(), 3);
+
+    // `count=0` is RFC 7644 §3.4.2.4's "tell me how many there are without
+    // sending any": an accurate totalResults with an empty Resources array.
+    // It takes a separate probe path in the handler precisely so the total
+    // stays right, which is the only thing the caller asked for.
+    let (status, counted) = get_json!(&app, &token, "/scim/v2/Users?count=0");
+    assert_eq!(status, 200);
+    assert_eq!(counted["totalResults"], 3);
+    assert!(
+        counted["Resources"].as_array().unwrap().is_empty(),
+        "count=0 must return no resources"
+    );
+
+    let (_, page) = get_json!(&app, &token, "/scim/v2/Users?startIndex=3&count=10");
+    assert_eq!(page["startIndex"], 3);
+    assert_eq!(
+        page["Resources"].as_array().unwrap().len(),
+        1,
+        "startIndex is 1-based, so 3 of 3 is the last single item"
+    );
+}
+
+#[actix_rt::test]
+async fn user_put_replaces_the_whole_scim_representation() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let user = make_user!(&app, &token, "before");
+
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{user}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "after",
+            "externalId": "ext-after",
+            "name": { "givenName": "Ada", "familyName": "Lovelace" },
+            "emails": [{ "value": "after@example.com", "primary": true }],
+            "active": true,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+
+    assert_eq!(body["userName"], "after");
+    assert_eq!(body["externalId"], "ext-after");
+    assert_eq!(body["name"]["givenName"], "Ada");
+    assert_eq!(body["name"]["familyName"], "Lovelace");
+    assert_eq!(body["emails"][0]["value"], "after@example.com");
+    assert_eq!(body["active"], true);
+    assert_eq!(body["id"], user.to_string(), "PUT must not re-key the user");
+}
+
+#[actix_rt::test]
+async fn user_put_without_emails_is_invalid_value() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let user = make_user!(&app, &token, "before");
+
+    // `emails` is `#[serde(default)]`, so an omitted array deserializes fine
+    // and only the handler's own check stands between that and a user row with
+    // no email. The error must be RFC 7644's `invalidValue`, not a 500.
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{user}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "after",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["scimType"], "invalidValue");
+}
+
+#[actix_rt::test]
+async fn user_put_on_an_unknown_id_is_not_found() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{}", Uuid::new_v4()))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "ghost",
+            "emails": [{ "value": "ghost@example.com", "primary": true }],
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning-token authentication
+//
+// `ScimPrincipal`'s token arm — the credential shape an IdP actually presents,
+// as opposed to the JWT every test above mints — was entirely unexercised:
+// `auth.rs` sat at 58% with the whole `is_provisioning_token` branch, both
+// 401s, and `ScimPrincipal::{tenant_id, user_id, token_id}`'s `Token` match
+// arms among the uncovered. These drive it through the real extractor.
+// ---------------------------------------------------------------------------
+
+use axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A resolver that accepts exactly one handle.
+///
+/// Counts `touch` calls so the test can assert the `last_used_at` stamp is
+/// attempted on an accepted request — it is best-effort and returns nothing,
+/// so a counter is the only way to observe it.
+struct StubResolver {
+    handle: String,
+    principal: ScimTokenPrincipal,
+    touched: Arc<AtomicUsize>,
+}
+
+impl ScimTokenResolver for StubResolver {
+    fn resolve<'a>(
+        &'a self,
+        raw_token: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ScimTokenPrincipal>> + Send + 'a>>
+    {
+        let hit = raw_token == self.handle;
+        let principal = self.principal;
+        Box::pin(async move { hit.then_some(principal) })
+    }
+
+    fn touch<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _token_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.touched.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+}
+
+/// Like `test_app!`, but with a provisioning-token resolver registered — the
+/// wiring a deployment that has enabled SCIM tokens has.
+macro_rules! test_app_with_resolver {
+    ($db:expr, $auth:expr, $authz:expr, $resolver:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new($authz.clone()))
+                .app_data(web::Data::new($resolver))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
+                .configure(axiam_scim::scim_routes::<TestDb>),
+        )
+        .await
+    };
+}
+
+const GOOD_HANDLE: &str = "axiam_scim_goodhandle";
+
+#[actix_rt::test]
+async fn a_provisioning_token_authenticates_and_is_stamped() {
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let bearer_user = scim_admin_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: bearer_user,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    // No JWT anywhere: the handle alone must carry the request, and RBAC is
+    // then evaluated against the user the token is bound to.
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    assert_eq!(
+        touched.load(Ordering::SeqCst),
+        1,
+        "an accepted provisioning token must have its last_used_at stamped"
+    );
+}
+
+#[actix_rt::test]
+async fn an_unknown_provisioning_token_is_unauthorized() {
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let bearer_user = scim_admin_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: bearer_user,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer("axiam_scim_wronghandle"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+
+    assert_eq!(
+        touched.load(Ordering::SeqCst),
+        0,
+        "a rejected handle must not be stamped as used"
+    );
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_fails_closed_with_no_resolver_registered() {
+    // The deployment has not enabled SCIM tokens. The handle must NOT fall
+    // through to the JWT arm — that would report a malformed JWT and send an
+    // operator looking in the wrong place — it must say tokens are not
+    // enabled here.
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let _ = scim_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not enabled"),
+        "the 401 must name the missing resolver, not a malformed JWT: {body}"
+    );
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_without_the_permission_is_forbidden() {
+    // Authentication and authorization are separate: a perfectly valid handle
+    // bound to a user who lacks `scim:provision` is a 403, not a 401. This is
+    // the token-arm counterpart of
+    // `unprivileged_tenant_user_is_forbidden_on_every_verb`.
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let unprivileged = scim_unprivileged_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: unprivileged,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 403);
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_is_scoped_to_its_own_tenant() {
+    // The token row names the tenant; nothing in the request path or body
+    // does. A handle bound to tenant A must not reach a user that exists only
+    // in tenant B, even when the caller names that user's real UUID.
+    let (db, _org_a, tenant_a) = setup_tenant().await;
+    let provisioner_a = scim_admin_user(&db, tenant_a).await;
+
+    let org_b = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: format!("org-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_b = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            kind: TenantKind::Standard,
+            name: "Tenant B".into(),
+            slug: format!("tenant-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    seed_permissions(&db, tenant_b.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(&db, tenant_b.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let victim_in_b = scim_admin_user(&db, tenant_b.id).await;
+
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: provisioner_a,
+            tenant_id: tenant_a,
+        },
+        touched: Arc::new(AtomicUsize::new(0)),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{victim_in_b}"))
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        404,
+        "a tenant-A token must not resolve a tenant-B user by UUID"
+    );
+
+    let req = test::TestRequest::delete()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{victim_in_b}"))
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        404,
+        "nor delete one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Filter parsing at the HTTP edge
+//
+// The filter string is caller-supplied text, and `parse_eq_filter` is the only
+// thing between it and a repository call. Its rejections and its one piece of
+// real parsing — the quoted value, which may contain escaped quotes — are
+// exercised here through the endpoint rather than the function, because the
+// status code and `scimType` are the half a provisioning client acts on.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn malformed_filters_are_invalid_filter_not_five_hundreds() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    // Each of these is a *shape* the parser refuses, not a value it fails to
+    // find: an attribute with no value, an operator that is not `eq`, an
+    // unterminated quote, and an escape outside the supported subset.
+    for (query, what) in [
+        ("filter=userName", "an attribute with no operator or value"),
+        (
+            "filter=userName%20ne%20%22a%22",
+            "an operator that is not eq",
+        ),
+        (
+            "filter=userName%20eq%20%22unterminated",
+            "an unterminated quote",
+        ),
+        (
+            "filter=userName%20eq%20%22bad%5Cnescape%22",
+            "an escape outside the supported subset",
+        ),
+        ("filter=userName%20eq%20", "an operator with no value"),
+    ] {
+        let (status, body) = get_json!(&app, &token, &format!("/scim/v2/Users?{query}"));
+        assert_eq!(status, 400, "{what} must be a 400, got {body}");
+        assert_eq!(
+            body["scimType"], "invalidFilter",
+            "{what} must carry scimType invalidFilter, got {body}"
+        );
+    }
+}
+
+#[actix_rt::test]
+async fn a_filter_value_may_contain_escaped_quotes() {
+    // The one case the hand-rolled unquoting exists for. A value containing a
+    // quote is legal per RFC 7644 §3.4.2.2, and treating the escaped quote as
+    // the terminator would silently search for a truncated string — a wrong
+    // answer rather than an error, which is the worse failure.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let (status, body) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22a%5C%22b%22"
+    );
+    assert_eq!(status, 200, "an escaped quote is a legal value, got {body}");
+    assert_eq!(
+        body["totalResults"], 0,
+        "no such user exists, but the filter parsed"
+    );
+}
+
+#[actix_rt::test]
+async fn a_username_filter_past_the_end_reports_the_total_without_the_row() {
+    // `userName eq` resolves at most one user, so paging it is degenerate —
+    // and degenerate is exactly where an off-by-one lives. `startIndex=2` and
+    // `count=0` must both still report `totalResults: 1`: the match exists,
+    // this page just does not contain it. Answering 0 would tell a client the
+    // user does not exist.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    make_user!(&app, &token, "solo");
+
+    let (_, first) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22"
+    );
+    assert_eq!(first["totalResults"], 1);
+    assert_eq!(first["Resources"].as_array().unwrap().len(), 1);
+
+    let (_, past) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22&startIndex=2"
+    );
+    assert_eq!(
+        past["totalResults"], 1,
+        "the match exists; this page just does not contain it"
+    );
+    assert!(past["Resources"].as_array().unwrap().is_empty());
+
+    let (_, counted) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22&count=0"
+    );
+    assert_eq!(counted["totalResults"], 1);
+    assert!(counted["Resources"].as_array().unwrap().is_empty());
+
+    // And a userName that matches nobody is 0, not 1 — the arm above must not
+    // have been reached by reporting a total for a user who is not there.
+    let (_, missing) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22nobody%22"
+    );
+    assert_eq!(missing["totalResults"], 0);
 }

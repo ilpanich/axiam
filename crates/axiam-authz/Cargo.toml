@@ -26,6 +26,7 @@ futures = "0.3"
 
 [dev-dependencies]
 axiam-db = { path = "../axiam-db" }
+axiam-test-support = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = "0.4"
 serde_json = { workspace = true }

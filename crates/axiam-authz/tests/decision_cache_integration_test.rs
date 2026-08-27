@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_authz::{
     AuthorizationEngine, BatchStrategy, DecisionCache, DecisionCacheConfig,
     InvalidationBroadcaster, InvalidationEvent,
@@ -441,6 +441,7 @@ fn cache(ttl: Duration) -> Arc<DecisionCache> {
 fn req(tenant: Uuid, subject: Uuid, resource: Uuid, action: &str) -> AccessRequest {
     AccessRequest {
         tenant_id: tenant,
+        subject_scope: SubjectScope::Tenant,
         subject_id: subject,
         action: action.into(),
         resource_id: resource,

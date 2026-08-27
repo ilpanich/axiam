@@ -126,12 +126,13 @@ pub trait InvalidationBroadcaster: Send + Sync {
 mod tests {
     use super::*;
     use crate::decision_cache::DecisionCacheConfig;
-    use crate::types::{AccessDecision, AccessRequest};
+    use crate::types::{AccessDecision, AccessRequest, SubjectScope};
     use std::time::Duration;
 
     fn request(tenant_id: Uuid, subject_id: Uuid) -> AccessRequest {
         AccessRequest {
             tenant_id,
+            subject_scope: SubjectScope::Tenant,
             subject_id,
             action: "read".into(),
             resource_id: Uuid::nil(),

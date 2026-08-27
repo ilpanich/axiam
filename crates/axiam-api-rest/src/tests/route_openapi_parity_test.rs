@@ -38,6 +38,15 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     "/api/v1/auth/mfa/enroll",
     "/api/v1/auth/mfa/confirm",
     "/api/v1/auth/password/change",
+    // Resend the *caller's own* verification email. Deliberately not
+    // permission-gated: it acts on the caller's own record and reads the
+    // address off it, so there is nothing here an operator could sensibly
+    // grant or withhold as a capability. Its public sibling
+    // `/api/v1/auth/resend-verification` takes an arbitrary address and is in
+    // PUBLIC_PATHS; this one exists because that sibling must answer a
+    // constant 200 (or it would disclose which addresses have accounts), which
+    // made the profile button report success while nothing happened.
+    "/api/v1/users/me/resend-verification",
     // Federation OIDC account-linking (authenticated user, no role permission)
     "/api/v1/federation/oidc/authorize",
     // Federation SAML SP-initiated AuthnRequest (authenticated user, no role

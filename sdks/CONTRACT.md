@@ -373,6 +373,38 @@ fail at runtime.
 `400 "must provide org_id or org_slug"` and every `refresh` fails request
 deserialization. All AXIAM SDKs expose this field uniformly.
 
+### §5.2 Organization-level principals (contract 1.31)
+
+Every organization has one reserved tenant holding the principals that operate across
+all of its tenants. A principal whose record lives there is **organization-level**: its
+global grants apply in every tenant of the organization, while an ordinary tenant
+principal is a principal of exactly one tenant and of no other.
+
+The distinction is visible on the wire as one boolean:
+
+- **`LoginUserInfo.organization_level`** (`boolean`) — present on the user object of the
+  login response and of `GET /api/v1/auth/me`. An SDK that models that user object MUST
+  expose the field, and MUST default it to `false` when it is absent, which is what a
+  server older than contract 1.31 answers and is the safe direction in both cases.
+
+Two rules follow, and both are about not inventing capability the server did not grant:
+
+1. **`organization_level` is the only thing that makes switching the acting tenant
+   meaningful.** Such a principal changes the tenant it acts on by sending a different
+   `X-Tenant-ID` on the next request — no re-login, because it already is a principal of
+   every tenant in its organization. An SDK MAY offer a helper that rebinds the header on
+   an existing client; where it does, the helper MUST be reachable only when the flag is
+   true, and MUST NOT be presented as a general capability. For an ordinary tenant
+   principal the same header change produces a `403`, and an SDK that offers the switch
+   anyway has turned a type-level distinction into a runtime failure.
+2. **It is derived, never asserted.** The flag is resolved server-side from the caller's
+   own tenant record. An SDK MUST NOT accept it as constructor input, MUST NOT infer it
+   from a slug or a name, and MUST NOT send it — it is a response field in one direction
+   only.
+
+Nothing else about §5 changes: `X-Tenant-ID` is still required on every request (rule 2),
+and there is still no default tenant.
+
 ---
 
 ## §6 TLS Policy
@@ -3142,6 +3174,28 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-08 (§5.2, §25.7, §27.4 rule 4, §27.11 — organization scope, truthful resend, and
+  list search, contract 1.31)** — **not breaking.** Everything in this revision is
+  additive, and a caller written against contract 1.30 compiles and behaves identically.
+  Recorded because it is the first revision to change a rule that already had SDK code
+  behind it — §27.4 rule 4's page request grows a third field — and an SDK author reading
+  only the naming maps would take the rest for server-side detail:
+  - `resend_own_verification` (§25.1, §25.7) is the one **new server route**,
+    `POST /api/v1/users/me/resend-verification`. It does not replace
+    `resend_verification`; §25.7 rule 2 forbids routing either to the other.
+  - `search` (§27.4 rule 4) is a third optional field on the page request of all twenty
+    paginated operations. Adding a field to a struct is source-compatible everywhere the
+    struct is constructed by name or by builder; an SDK whose page request is a
+    positional tuple or a fixed-arity constructor should add the term as a trailing
+    optional rather than reorder anything.
+  - `organization_level` (§5.2) and the three §27.11 model fields are optional response
+    fields, absent from older servers and defaulted on read.
+
+  Nothing is renamed and nothing changes meaning. `is_global` in particular keeps its
+  wire name and its semantics — what an organization-level principal's global grant now
+  *reaches* is wider, but that is a server-side authorization property, not a change to
+  any field an SDK sends or decodes.
+
 - **2026-08 (§27 — management API, contract 1.30)** — **not breaking.** Recorded here
   because of its size rather than its risk: it is the largest single addition this
   contract has taken, and an SDK author reading only this log would otherwise miss it.
@@ -5363,8 +5417,12 @@ only by hand-rolling a POST against a path the SDK also knows — which is the e
 divergence §1 exists to prevent, arrived at through omission rather than through
 disagreement.
 
-Nine operations. None of them is new server surface; all nine have been live and
-undocumented-for-SDKs since before §1 was written.
+Ten operations. Nine of them are not new server surface; they have been live and
+undocumented-for-SDKs since before §1 was written. The tenth,
+`resend_own_verification`, **is** new server surface (2026-08, contract 1.31), and it
+exists because reusing the ninth for a signed-in caller is what made a profile page's
+"resend" button report success while doing nothing — see
+[§25.7](#§257-resend_own_verification-and-why-it-is-not-resend_verification).
 
 ### §25.1 Canonical operation set and endpoint map
 
@@ -5376,6 +5434,7 @@ undocumented-for-SDKs since before §1 was written.
 | `mfa_setup_confirm` | `POST /api/v1/auth/mfa/setup/confirm` | none (setup token) | `MfaSetupConfirmRequest` | `200` `LoginSuccessResponse` |
 | `verify_email` | `POST /api/v1/auth/verify-email` | none | `VerifyEmailRequest` | `200`, empty body |
 | `resend_verification` | `POST /api/v1/auth/resend-verification` | none | `ResendVerificationRequest` | `200`, empty body |
+| `resend_own_verification` | `POST /api/v1/users/me/resend-verification` | **session** | no body | `200` `{ "sent": true }` |
 | `request_password_reset` | `POST /api/v1/auth/reset` | none | `RequestResetBody` | `200`, empty body |
 | `confirm_password_reset` | `POST /api/v1/auth/reset/confirm` | none | `ConfirmResetBody` | `200`, empty body |
 | `password_reset_context` | `GET /api/v1/auth/reset/context?token=<t>` | none | no body | `200` `ResetContextResponse` |
@@ -5386,7 +5445,12 @@ is a **body field** on `verify_email`, `resend_verification` and
 query-parameter convention does not reach them. `request_password_reset` accepts
 the workspace in slug form as well, like `login`.
 
-Six of the nine are **deliberately unauthenticated**: a user who cannot log in is
+`resend_own_verification` takes **no body at all** — not even an address. The server
+reads the address off the caller's own record, and an SDK MUST NOT add a parameter
+for it: a signature that accepts an address is a signature that lets an authenticated
+session mail an arbitrary one.
+
+Six of the ten are **deliberately unauthenticated**: a user who cannot log in is
 the entire audience for a password reset, and a user whose email is unverified may
 have no session at all.
 
@@ -5486,6 +5550,7 @@ the enumeration oracle the uniform response exists to prevent.
 | `mfa_setup_confirm` | `mfa_setup_confirm` | `mfaSetupConfirm` | `mfa_setup_confirm` | `mfaSetupConfirm` | `mfaSetupConfirm` | `MfaSetupConfirmAsync` | `mfaSetupConfirm` | `MfaSetupConfirm` | `mfaSetupConfirm` | `axiam_mfa_setup_confirm` | `mfa_setup_confirm` |
 | `verify_email` | `verify_email` | `verifyEmail` | `verify_email` | `verifyEmail` | `verifyEmail` | `VerifyEmailAsync` | `verifyEmail` | `VerifyEmail` | `verifyEmail` | `axiam_verify_email` | `verify_email` |
 | `resend_verification` | `resend_verification` | `resendVerification` | `resend_verification` | `resendVerification` | `resendVerification` | `ResendVerificationAsync` | `resendVerification` | `ResendVerification` | `resendVerification` | `axiam_resend_verification` | `resend_verification` |
+| `resend_own_verification` | `resend_own_verification` | `resendOwnVerification` | `resend_own_verification` | `resendOwnVerification` | `resendOwnVerification` | `ResendOwnVerificationAsync` | `resendOwnVerification` | `ResendOwnVerification` | `resendOwnVerification` | `axiam_resend_own_verification` | `resend_own_verification` |
 | `request_password_reset` | `request_password_reset` | `requestPasswordReset` | `request_password_reset` | `requestPasswordReset` | `requestPasswordReset` | `RequestPasswordResetAsync` | `requestPasswordReset` | `RequestPasswordReset` | `requestPasswordReset` | `axiam_request_password_reset` | `request_password_reset` |
 | `confirm_password_reset` | `confirm_password_reset` | `confirmPasswordReset` | `confirm_password_reset` | `confirmPasswordReset` | `confirmPasswordReset` | `ConfirmPasswordResetAsync` | `confirmPasswordReset` | `ConfirmPasswordReset` | `confirmPasswordReset` | `axiam_confirm_password_reset` | `confirm_password_reset` |
 | `password_reset_context` | `password_reset_context` | `passwordResetContext` | `password_reset_context` | `passwordResetContext` | `passwordResetContext` | `PasswordResetContextAsync` | `passwordResetContext` | `PasswordResetContext` | `passwordResetContext` | `axiam_password_reset_context` | `password_reset_context` |
@@ -5521,6 +5586,56 @@ and breaking those callers to close it faster would be a poor trade.
   `new_password`.
 - `setup_token`, the verification token and the reset token are `Sensitive<T>`
   where the SDK has it, and absent from serialized output.
+- `resend_own_verification` sends **no caller-supplied data** — assert on the
+  serialized request that it carries no address field, not merely that the method
+  signature has no parameter for one. An SDK that sends an empty body, or the empty
+  JSON object its `mfa_enroll` already sends, is conformant; one that sends
+  `{"email": …}` is not, whatever it does with the value.
+- `resend_own_verification` against a `409` raises the §2 mapping of `409` and does
+  **not** resolve successfully; the same against a `429` raises the §2 mapping of
+  `429`. Both assertions matter more than they look: the bug this operation exists to
+  fix was a success return on a request that sent nothing.
+- `resend_own_verification` with no token raises `AuthError` with **zero** wire calls,
+  like every other session-authenticated operation.
+- `resend_verification` and `resend_own_verification` are distinct operations that hit
+  distinct paths — assert the path of each, because an SDK that aliases one to the
+  other reintroduces exactly the defect §25.7 describes.
+
+### §25.7 `resend_own_verification`, and why it is not `resend_verification`
+
+The two look like the same operation and are not. Reusing one for the other is a
+defect that shipped, survived a beta, and was invisible from the client side, so the
+distinction is stated here rather than left to a reader of the endpoint map.
+
+`resend_verification` takes an address from an **unauthenticated** caller. It must
+answer a constant `200 {"sent": true}` whatever happens — a `404` for "no such user"
+or a `429` for "rate limited" would tell an anonymous caller which addresses have
+accounts. That constancy is a security property, and §25's D-15 tests pin it.
+
+`resend_own_verification` is asked by a caller that is **signed in to the account it
+is asking about**. It already knows the account exists. None of the three outcomes
+discloses anything the caller did not bring with it, so this endpoint says which one
+happened:
+
+| Status | Meaning | §2 mapping |
+|---|---|---|
+| `200` `{ "sent": true }` | A token was minted and the mail enqueued. | success |
+| `409` | Already verified, or the account is in a state that must not be sent a live token. | `AuthzError` (the `ConflictError` sub-type where the SDK has §27's) |
+| `429` | The daily resend limit is reached. | `NetworkError` |
+
+Three rules, normative:
+
+1. **An SDK MUST expose both operations.** They are not alternatives; they serve
+   callers in different states. A sign-up screen has no session and needs the
+   enumeration-safe one; a profile page has a session and needs the truthful one.
+2. **An SDK MUST NOT route one to the other**, in either direction, and MUST NOT
+   "helpfully" fall back from the authenticated one to the public one on `409` or
+   `429`. That fallback turns both failures back into `200 {"sent": true}` and
+   restores the original bug with an extra round-trip.
+3. **`sent: true` means enqueued, not delivered.** Delivery is asynchronous and can
+   still fail at the provider. An SDK MUST NOT document or name this operation as
+   though the mail has arrived — a mail queue that accepts everything in front of a
+   provider that rejects it looks identical to this operation working.
 
 ---
 
@@ -5873,8 +5988,8 @@ synchronous and asynchronous twins ships them for all 146 operations or for none
    - The `X-Tenant-ID` header of §5 rule 2 is still sent on every request regardless, and
      is **not** a substitute for the path parameter.
 
-4. **Pagination.** Twenty operations take `offset`/`limit` and return the envelope
-   `{ items, total, offset, limit }`. An SDK MUST:
+4. **Pagination.** Twenty operations take `offset`/`limit`/`search` and return the
+   envelope `{ items, total, offset, limit }`. An SDK MUST:
    - return a typed `Page<T>` (or the language's equivalent) exposing all four fields —
      never a bare list, which throws away `total` and leaves the caller unable to tell a
      complete result from a truncated one;
@@ -5887,6 +6002,35 @@ synchronous and asynchronous twins ships them for all 146 operations or for none
    (`scopes.list`, `users.list_roles`, `roles.list_permissions`, …). An SDK MUST NOT
    invent pagination for them, and MUST NOT model them as `Page<T>` — the registry's
    `paginated` flag says which is which.
+
+   **`search` (contract 1.31).** All twenty paginated operations additionally accept an
+   optional free-text `search` term, matched case-insensitively by the server against the
+   identifying fields of whatever is being listed — a name or username, plus the record
+   id, so an operator holding a UUID from a log line can paste it into the same box.
+   Which fields exactly is the server's business and is not part of this contract; the
+   *shape* is, because twenty endpoints spelling it twenty ways is the divergence §27
+   exists to prevent.
+
+   - It belongs on the **same page-request type** as `offset`/`limit`, not as a separate
+     positional argument on twenty generated methods. An SDK whose page request is a
+     struct/record adds a third field; one whose `list` takes loose arguments adds a
+     third optional argument in the same position everywhere.
+   - **It is applied before `offset`/`limit`, and `total` counts matches, not rows.** An
+     SDK MUST NOT filter client-side after fetching a page: that gives a pager whose page
+     count belongs to a different result set than the page it is showing, and it re-reads
+     `total` as something it is not.
+   - **The auto-paging form MUST carry the same term on every request it issues.** A walk
+     that sends `search` on the first page and drops it on the second silently returns the
+     unfiltered tail, which looks like a server bug from the caller's side.
+   - **Absent and blank are the same request.** An SDK MUST omit the parameter entirely
+     when the term is unset, and MUST treat an empty or whitespace-only term as unset —
+     a UI that sends `?search=` on every keystroke, including after the box is cleared,
+     must not thereby ask a different question. The server normalises the same way
+     (trim, then blank becomes absent) and caps the term's length; an SDK MUST NOT
+     re-implement that cap, because a client-side truncation the server would not have
+     made is a silently different query.
+   - It is **additive**: an existing call that passes no term sends no `search` parameter
+     and behaves exactly as it did before contract 1.31.
 
 5. **Update has two shapes, and confusing them destroys data.** The registry's
    `update_style` distinguishes them:
@@ -6154,6 +6298,13 @@ this section.
 - The auto-paging form walks to exhaustion and issues exactly the expected number of
   requests, with the expected `offset` on each.
 - A bare-array operation (`scopes.list`) is **not** modelled as a page.
+- A page request carrying a `search` term puts it on the **query string** — assert on the
+  request URI, not on the arguments, because a term the SDK accepts and never sends is the
+  failure mode this test exists for.
+- A page request with **no** term sends **no** `search` key at all, and an empty or
+  whitespace-only term is treated identically to none — assert on the exact query key set.
+- The auto-paging form carries the term on **every** request of the walk, not only the
+  first — assert the term on each recorded request, not just on the count of requests.
 
 **Update shapes** — the two assertions this section most needs
 - A sparse update carrying one field serializes a body with **exactly that one key**.
@@ -6228,6 +6379,61 @@ specifies, and requires the two to return equivalent handles where an SDK offers
 Five SDKs first shipped the addition without the baseline — reading "additionally" as
 "instead" — and now ship both, with the direct accessors delegating to `management()` so
 the equivalence is structural rather than a promise two code paths have to keep.
+
+### §27.11 Model additions (contract 1.31)
+
+Three of the management models grew a field, and one list projection grew one. All four
+are **additive and optional**: a caller that ignores them compiles and behaves as before,
+and an SDK reading a response from a server older than contract 1.31 finds them absent.
+They are recorded here rather than left to `openapi.json` because every SDK hand-writes
+these model types, and a field nobody notices is a field nobody exposes.
+
+| Model | Field | Type | Absent means |
+|---|---|---|---|
+| `Tenant` | `kind` | `TenantKind` — `"standard"` \| `"organization"` | `"standard"` |
+| `LoginUserInfo` | `organization_level` | `boolean` | `false` (see [§5.2](#§52-organization-level-principals-contract-131)) |
+| `MtlsTrustAnchorResponse` | `trusted_anchors` | `integer \| null` | `null` |
+| `Certificate`, **in the `certificates.list` projection only** | `bound_service_account_id` | `uuid \| null` | `null` |
+
+Four rules, one per row, each stating the way the field is got wrong:
+
+1. **`TenantKind` is an open enum to a client, and a defaulted one.** An SDK MUST decode
+   an unrecognised value without failing the whole response — a closed enum turns the
+   next kind the server adds into a parse error on `tenants.list`, which takes down
+   reading tenants that have nothing to do with it. Where the language has no natural
+   "unknown" carrier, keep the raw string. The field is `#[serde(default)]` server-side,
+   so a tenant row written before organization scope existed decodes as `Standard`; an
+   SDK MUST default the same way rather than making `kind` required.
+
+2. **`kind` is read-only.** It is not on `CreateTenant` or `UpdateTenant`, and an SDK
+   MUST NOT put it there. An organization's scope tenant is reserved at organization
+   creation and enforced by a unique index; a client that could set the field would be
+   able to ask for a second one, and the request would be refused at the database rather
+   than at the type.
+
+3. **`trusted_anchors` counts what the *live listener* now trusts, and only when it was
+   reloaded.** `null` is not zero — it means nothing was reloaded (a plaintext
+   deployment, or `client_auth` off), which is exactly the case `restart_required: true`
+   already reports. An SDK MUST model it as nullable and MUST NOT coalesce it to `0`,
+   because "the listener trusts no CAs" and "there was no listener to ask" are different
+   operational states and only one of them is a problem.
+
+4. **`bound_service_account_id` is a projection, not a property of the certificate.** It
+   is resolved from a graph edge and returned by `certificates.list` alone. An SDK MAY
+   model the list item as a distinct type or as the certificate type with an extra
+   optional field; whichever it picks, the field MUST be `null` — never absent-as-zero,
+   never an empty UUID — on `certificates.get`, and the SDK MUST NOT synthesise it there
+   with a second request. A `get` that silently costs two round-trips is the same
+   behaviour §27.4 rule 3 forbids for slug resolution, for the same reason.
+
+   The registry says which operations project and what they add:
+   `response.projected_fields`, present only where there is something to project. The
+   server expresses a projection as an `allOf` of the named base and an anonymous
+   object, and a generator that reads only for a `$ref` sees a response with **no
+   element name at all** — which is what happened here between the field landing in
+   `openapi.json` and this revision: `certificates.list` went untyped over one added
+   property, and the field reached no SDK. A generator MUST resolve the base through the
+   `allOf` rather than treating the composition as anonymous.
 
 ---
 

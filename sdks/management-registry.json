@@ -1832,7 +1832,18 @@
           "response": {
             "status": 200,
             "kind": "page",
-            "schema": null
+            "schema": "Certificate",
+            "projected_fields": [
+              {
+                "name": "bound_service_account_id",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "required": false
+              }
+            ]
           },
           "sensitive_response_fields": [],
           "sensitive_request_fields": [],

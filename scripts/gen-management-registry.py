@@ -530,6 +530,30 @@ def _structural_index(spec: dict[str, Any]) -> dict[str, str]:
     return {json.dumps(v, sort_keys=True): k for k, v in spec["components"]["schemas"].items()}
 
 
+def _projection_adds(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The properties an ``allOf`` projection adds on top of its named base.
+
+    ``GET /api/v1/certificates`` answers ``Certificate`` plus one resolved graph
+    edge, ``bound_service_account_id``, and the server expresses that as an
+    ``allOf`` of the ``$ref`` and an anonymous object. Without this, a generator
+    sees only the base name and the extra field is invisible -- which is how the
+    field shipped in ``openapi.json`` and reached no SDK.
+    """
+    if not schema or "allOf" not in schema:
+        return []
+    adds: list[dict[str, Any]] = []
+    for sub in schema["allOf"]:
+        if "$ref" in sub:
+            continue
+        for name, prop in sub.get("properties", {}).items():
+            entry: dict[str, Any] = {"name": name, "type": prop.get("type")}
+            if "format" in prop:
+                entry["format"] = prop["format"]
+            entry["required"] = name in sub.get("required", [])
+            adds.append(entry)
+    return adds
+
+
 def _schema_name(
     schema: dict[str, Any] | None, index: dict[str, str] | None = None
 ) -> str | None:
@@ -541,9 +565,37 @@ def _schema_name(
     if schema.get("type") == "array":
         inner = _schema_name(schema.get("items"), index)
         return f"[]{inner}" if inner else None
+    if "allOf" in schema:
+        # A projection: one named base plus anonymous additions. Name the base,
+        # because that is the type a caller passes onward; `_projection_adds`
+        # carries what the projection put on top of it. Returning `None` here --
+        # which is what happened before `certificates.list` grew its extra
+        # field -- makes the whole operation untyped over one added property,
+        # and crashes a generator that assumes a page has an element name.
+        named = [_schema_name(sub, index) for sub in schema["allOf"]]
+        named = [n for n in named if n]
+        if len(named) == 1:
+            return named[0]
+        return None
     if index is not None:
         return index.get(json.dumps(schema, sort_keys=True))
     return None
+
+
+def _shape(
+    status: int, kind: str, element: dict[str, Any] | None, index: dict[str, str]
+) -> dict[str, Any]:
+    """One response shape, with any ``allOf`` projection recorded beside its base.
+
+    ``projected_fields`` is omitted entirely when empty, so the 145 operations
+    that are not projections keep the shape they had -- a key present on every
+    entry with an empty list would rewrite the whole registry to say nothing.
+    """
+    shape: dict[str, Any] = {"status": status, "kind": kind, "schema": _schema_name(element, index)}
+    adds = _projection_adds(element)
+    if adds:
+        shape["projected_fields"] = adds
+    return shape
 
 
 def _response_shape(
@@ -563,23 +615,11 @@ def _response_shape(
         else:
             resolved = schema
         if resolved.get("type") == "array":
-            return {
-                "status": int(status),
-                "kind": "array",
-                "schema": _schema_name(resolved.get("items"), index),
-            }
+            return _shape(int(status), "array", resolved.get("items"), index)
         props = resolved.get("properties", {})
         if {"items", "total", "offset", "limit"} <= set(props):
-            return {
-                "status": int(status),
-                "kind": "page",
-                "schema": _schema_name(props["items"].get("items"), index),
-            }
-        return {
-                "status": int(status),
-                "kind": "object",
-                "schema": _schema_name(schema, index),
-            }
+            return _shape(int(status), "page", props["items"].get("items"), index)
+        return _shape(int(status), "object", schema, index)
     raise SystemExit(f"no success response on {op.get('operationId')!r}")
 
 
@@ -747,6 +787,9 @@ _FIXTURE_BASE: dict[str, Any] = {
                                                 "properties": {"id": {"type": "string"}},
                                             },
                                         },
+                                        # (case 6 swaps this element for a
+                                        # projection; the base fixture keeps the
+                                        # plain inlined form case 1 asserts on.)
                                         "total": {"type": "integer"},
                                         "offset": {"type": "integer"},
                                         "limit": {"type": "integer"},
@@ -848,13 +891,50 @@ def _self_test() -> int:
     spec["paths"]["/api/v1/things"]["post"]["tags"] = ["auth"]
     expect_ok("gate 2 respects EXCLUDED_TAGS", spec)
 
+    # 5. A page whose element is an `allOf` PROJECTION -- a named base plus
+    #    fields the list resolves and the `get` does not. This is what
+    #    `GET /api/v1/certificates` became when it started returning
+    #    `bound_service_account_id`, and until `_schema_name` followed `allOf`
+    #    the element name came back `None`: the whole operation went untyped
+    #    over one added property, and a downstream generator that assumes a page
+    #    has an element name crashed on it. Both halves are asserted, because
+    #    naming the base while dropping the addition is the other way to be
+    #    wrong -- it is how the field reached `openapi.json` and no SDK.
+    use({"things": {"doc": "fixture", "operations": [
+        ("list", "GET", "/api/v1/things"),
+        ("create", "POST", "/api/v1/things"),
+    ]}})
+    spec = copy.deepcopy(_FIXTURE_BASE)
+    envelope = spec["paths"]["/api/v1/things"]["get"]["responses"]["200"]
+    envelope["content"]["application/json"]["schema"]["properties"]["items"]["items"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/Thing"},
+            {"type": "object", "properties": {"bound_id": {"type": "string", "format": "uuid"}}},
+        ]
+    }
+    reg = expect_ok("projected page element", spec)
+    if reg is not None:
+        resp = reg["namespaces"]["things"]["operations"]["list"]["response"]
+        if resp.get("schema") != "Thing":
+            failures.append(f"allOf projection lost its base name: {resp}")
+        if resp.get("projected_fields") != [
+            {"name": "bound_id", "type": "string", "format": "uuid", "required": False}
+        ]:
+            failures.append(f"allOf projection lost its added field: {resp}")
+
+    # 6. A non-projected response carries no `projected_fields` key at all. An
+    #    empty list on all 145 of them would be churn saying nothing.
+    reg = expect_ok("no projection, no key", copy.deepcopy(_FIXTURE_BASE))
+    if reg is not None and "projected_fields" in reg["namespaces"]["things"]["operations"]["list"]["response"]:
+        failures.append("projected_fields emitted on a response that projects nothing")
+
     use(saved)
     SENSITIVE_FIELDS = saved_sensitive
     if failures:
         for f in failures:
             print(f"FAIL: {f}", file=sys.stderr)
         return 1
-    print("OK: self-test passed (6 cases)")
+    print("OK: self-test passed (8 cases)")
     return 0
 
 

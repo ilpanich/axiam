@@ -5586,9 +5586,11 @@ and breaking those callers to close it faster would be a poor trade.
   `new_password`.
 - `setup_token`, the verification token and the reset token are `Sensitive<T>`
   where the SDK has it, and absent from serialized output.
-- `resend_own_verification` sends **no request body** — assert on the serialized
-  request, not on the method signature, because a language whose serializer emits an
-  empty object still emits one.
+- `resend_own_verification` sends **no caller-supplied data** — assert on the
+  serialized request that it carries no address field, not merely that the method
+  signature has no parameter for one. An SDK that sends an empty body, or the empty
+  JSON object its `mfa_enroll` already sends, is conformant; one that sends
+  `{"email": …}` is not, whatever it does with the value.
 - `resend_own_verification` against a `409` raises the §2 mapping of `409` and does
   **not** resolve successfully; the same against a `429` raises the §2 mapping of
   `429`. Both assertions matter more than they look: the bug this operation exists to

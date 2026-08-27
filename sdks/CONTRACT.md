@@ -6424,6 +6424,15 @@ Four rules, one per row, each stating the way the field is got wrong:
    with a second request. A `get` that silently costs two round-trips is the same
    behaviour §27.4 rule 3 forbids for slug resolution, for the same reason.
 
+   The registry says which operations project and what they add:
+   `response.projected_fields`, present only where there is something to project. The
+   server expresses a projection as an `allOf` of the named base and an anonymous
+   object, and a generator that reads only for a `$ref` sees a response with **no
+   element name at all** — which is what happened here between the field landing in
+   `openapi.json` and this revision: `certificates.list` went untyped over one added
+   property, and the field reached no SDK. A generator MUST resolve the base through the
+   `allOf` rather than treating the composition as anonymous.
+
 ---
 
 ### OpenAPI Export Feature Flag

@@ -1972,3 +1972,140 @@ async fn a_provisioning_token_is_scoped_to_its_own_tenant() {
         "nor delete one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Filter parsing at the HTTP edge
+//
+// The filter string is caller-supplied text, and `parse_eq_filter` is the only
+// thing between it and a repository call. Its rejections and its one piece of
+// real parsing — the quoted value, which may contain escaped quotes — are
+// exercised here through the endpoint rather than the function, because the
+// status code and `scimType` are the half a provisioning client acts on.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn malformed_filters_are_invalid_filter_not_five_hundreds() {
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    // Each of these is a *shape* the parser refuses, not a value it fails to
+    // find: an attribute with no value, an operator that is not `eq`, an
+    // unterminated quote, and an escape outside the supported subset.
+    for (query, what) in [
+        ("filter=userName", "an attribute with no operator or value"),
+        (
+            "filter=userName%20ne%20%22a%22",
+            "an operator that is not eq",
+        ),
+        (
+            "filter=userName%20eq%20%22unterminated",
+            "an unterminated quote",
+        ),
+        (
+            "filter=userName%20eq%20%22bad%5Cnescape%22",
+            "an escape outside the supported subset",
+        ),
+        ("filter=userName%20eq%20", "an operator with no value"),
+    ] {
+        let (status, body) = get_json!(&app, &token, &format!("/scim/v2/Users?{query}"));
+        assert_eq!(status, 400, "{what} must be a 400, got {body}");
+        assert_eq!(
+            body["scimType"], "invalidFilter",
+            "{what} must carry scimType invalidFilter, got {body}"
+        );
+    }
+}
+
+#[actix_rt::test]
+async fn a_filter_value_may_contain_escaped_quotes() {
+    // The one case the hand-rolled unquoting exists for. A value containing a
+    // quote is legal per RFC 7644 §3.4.2.2, and treating the escaped quote as
+    // the terminator would silently search for a truncated string — a wrong
+    // answer rather than an error, which is the worse failure.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let (status, body) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22a%5C%22b%22"
+    );
+    assert_eq!(status, 200, "an escaped quote is a legal value, got {body}");
+    assert_eq!(
+        body["totalResults"], 0,
+        "no such user exists, but the filter parsed"
+    );
+}
+
+#[actix_rt::test]
+async fn a_username_filter_past_the_end_reports_the_total_without_the_row() {
+    // `userName eq` resolves at most one user, so paging it is degenerate —
+    // and degenerate is exactly where an off-by-one lives. `startIndex=2` and
+    // `count=0` must both still report `totalResults: 1`: the match exists,
+    // this page just does not contain it. Answering 0 would tell a client the
+    // user does not exist.
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    make_user!(&app, &token, "solo");
+
+    let (_, first) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22"
+    );
+    assert_eq!(first["totalResults"], 1);
+    assert_eq!(first["Resources"].as_array().unwrap().len(), 1);
+
+    let (_, past) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22&startIndex=2"
+    );
+    assert_eq!(
+        past["totalResults"], 1,
+        "the match exists; this page just does not contain it"
+    );
+    assert!(past["Resources"].as_array().unwrap().is_empty());
+
+    let (_, counted) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22solo%22&count=0"
+    );
+    assert_eq!(counted["totalResults"], 1);
+    assert!(counted["Resources"].as_array().unwrap().is_empty());
+
+    // And a userName that matches nobody is 0, not 1 — the arm above must not
+    // have been reached by reporting a total for a user who is not there.
+    let (_, missing) = get_json!(
+        &app,
+        &token,
+        "/scim/v2/Users?filter=userName%20eq%20%22nobody%22"
+    );
+    assert_eq!(missing["totalResults"], 0);
+}

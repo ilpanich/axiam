@@ -1130,22 +1130,29 @@ mod vault_endpoint_tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    /// A frozen environment, boxed so it coerces to the `&dyn Fn` the seam
+    /// takes.
+    type Lookup = Box<dyn Fn(&str) -> Option<String>>;
+
+    fn env(pairs: &[(&str, &str)]) -> Lookup {
         let map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
-        move |name: &str| map.get(name).cloned()
+        Box::new(move |name: &str| map.get(name).cloned())
     }
 
     #[test]
     fn the_secret_providers_vault_is_inherited_when_no_pki_pair_is_set() {
         // The 1.0.0-beta01 regression: these two were set, the log said
         // `provider=vault`, and every CA key went into a database row anyway.
-        let e = vault_endpoint_from(env(&[
-            (AUTH_VAULT_ADDR_ENV, "https://vault:8200"),
-            (AUTH_VAULT_TOKEN_ENV, "not-a-real-token"),
-        ]))
+        let e = vault_endpoint_from(
+            env(&[
+                (AUTH_VAULT_ADDR_ENV, "https://vault:8200"),
+                (AUTH_VAULT_TOKEN_ENV, "not-a-real-token"),
+            ])
+            .as_ref(),
+        )
         .unwrap();
         assert_eq!(e.address.as_deref(), Some("https://vault:8200"));
         assert_eq!(e.token.as_deref(), Some("not-a-real-token"));
@@ -1156,12 +1163,15 @@ mod vault_endpoint_tests {
     fn a_pki_specific_vault_wins_over_the_secret_providers() {
         // A deployment genuinely running two Vaults keeps addressing them
         // separately; inheritance must never silently redirect the PKI one.
-        let e = vault_endpoint_from(env(&[
-            (AUTH_VAULT_ADDR_ENV, "https://secrets:8200"),
-            (AUTH_VAULT_TOKEN_ENV, "not-a-real-secrets-token"),
-            (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
-        ]))
+        let e = vault_endpoint_from(
+            env(&[
+                (AUTH_VAULT_ADDR_ENV, "https://secrets:8200"),
+                (AUTH_VAULT_TOKEN_ENV, "not-a-real-secrets-token"),
+                (CA_VAULT_ADDR_ENV, "https://pki:8200"),
+                (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
+            ])
+            .as_ref(),
+        )
         .unwrap();
         assert_eq!(e.address.as_deref(), Some("https://pki:8200"));
         assert_eq!(e.token.as_deref(), Some("not-a-real-pki-token"));
@@ -1172,23 +1182,29 @@ mod vault_endpoint_tests {
     fn the_pki_pair_inherits_only_the_trust_anchor() {
         // A separate token against the same listener still needs the same CA
         // bundle, so the anchor falls back where the credentials do not.
-        let e = vault_endpoint_from(env(&[
-            (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
-            (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
-        ]))
+        let e = vault_endpoint_from(
+            env(&[
+                (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
+                (CA_VAULT_ADDR_ENV, "https://pki:8200"),
+                (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
+            ])
+            .as_ref(),
+        )
         .unwrap();
         assert_eq!(
             e.ca_cert_path.as_deref(),
             Some(std::path::Path::new("/etc/axiam/vault-ca.pem"))
         );
         // An explicit PKI anchor still wins over the inherited one.
-        let e = vault_endpoint_from(env(&[
-            (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
-            (CA_VAULT_CA_CERT_ENV, "/etc/axiam/pki-ca.pem"),
-            (CA_VAULT_ADDR_ENV, "https://pki:8200"),
-            (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
-        ]))
+        let e = vault_endpoint_from(
+            env(&[
+                (AUTH_VAULT_CA_CERT_ENV, "/etc/axiam/vault-ca.pem"),
+                (CA_VAULT_CA_CERT_ENV, "/etc/axiam/pki-ca.pem"),
+                (CA_VAULT_ADDR_ENV, "https://pki:8200"),
+                (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
+            ])
+            .as_ref(),
+        )
         .unwrap();
         assert_eq!(
             e.ca_cert_path.as_deref(),
@@ -1199,13 +1215,13 @@ mod vault_endpoint_tests {
     #[test]
     fn nothing_configured_stays_nothing_configured() {
         // A deployment that issues no certificates must still boot.
-        let e = vault_endpoint_from(env(&[])).unwrap();
+        let e = vault_endpoint_from(env(&[]).as_ref()).unwrap();
         assert!(e.address.is_none() && e.token.is_none());
     }
 
     #[test]
     fn a_half_configured_pair_names_the_pair_the_operator_touched() {
-        let err = vault_endpoint_from(env(&[(AUTH_VAULT_ADDR_ENV, "https://vault:8200")]))
+        let err = vault_endpoint_from(env(&[(AUTH_VAULT_ADDR_ENV, "https://vault:8200")]).as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains(AUTH_VAULT_TOKEN_ENV), "{err}");
@@ -1214,19 +1230,19 @@ mod vault_endpoint_tests {
             "must not name the PKI variable the operator never touched: {err}"
         );
 
-        let err = vault_endpoint_from(env(&[(CA_VAULT_TOKEN_ENV, "not-a-real-pki-token")]))
-            .unwrap_err()
-            .to_string();
+        let err =
+            vault_endpoint_from(env(&[(CA_VAULT_TOKEN_ENV, "not-a-real-pki-token")]).as_ref())
+                .unwrap_err()
+                .to_string();
         assert!(err.contains(CA_VAULT_ADDR_ENV), "{err}");
     }
 
     #[test]
     fn a_blank_value_is_not_a_configured_value() {
         // Compose files spell "unset" as an empty string constantly.
-        let e = vault_endpoint_from(env(&[
-            (AUTH_VAULT_ADDR_ENV, "   "),
-            (AUTH_VAULT_TOKEN_ENV, ""),
-        ]))
+        let e = vault_endpoint_from(
+            env(&[(AUTH_VAULT_ADDR_ENV, "   "), (AUTH_VAULT_TOKEN_ENV, "")]).as_ref(),
+        )
         .unwrap();
         assert!(e.address.is_none() && e.token.is_none());
     }
@@ -1261,6 +1277,29 @@ mod vault_endpoint_tests {
         )
         .unwrap();
         assert!(!plain.database_custody_despite_vault());
+    }
+
+    /// A token must never reach a log an operator is about to paste into an
+    /// issue. `VaultEndpoint`'s `Debug` is hand-written for exactly this.
+    #[test]
+    fn the_endpoint_debug_redacts_the_token() {
+        let e = vault_endpoint_from(
+            env(&[
+                (CA_VAULT_ADDR_ENV, "https://pki-vault:8200"),
+                (CA_VAULT_TOKEN_ENV, "not-a-real-pki-token"),
+            ])
+            .as_ref(),
+        )
+        .unwrap();
+
+        let rendered = format!("{e:?}");
+        assert!(
+            !rendered.contains("not-a-real-pki-token"),
+            "the token must never render: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        // The address is not a secret and is what makes the line useful.
+        assert!(rendered.contains("pki-vault"), "{rendered}");
     }
 }
 
@@ -1305,17 +1344,13 @@ impl std::fmt::Debug for VaultEndpoint {
 /// the pair the operator actually touched — being told to set
 /// `AXIAM__PKI__VAULT_TOKEN` when you set `AXIAM__AUTH__VAULT_ADDR` is a worse
 /// error than none.
-fn vault_endpoint_from_env() -> AxiamResult<VaultEndpoint> {
-    vault_endpoint_from(|name| std::env::var(name).ok())
-}
-
-/// [`vault_endpoint_from_env`] against an arbitrary lookup.
 ///
-/// Split out so the precedence rules can be tested as a function of their
-/// inputs. Driving them through the real environment would mean mutating
-/// process-global state from tests that the harness runs on many threads at
-/// once — which is how a suite starts passing or failing by run order.
-fn vault_endpoint_from(lookup: impl Fn(&str) -> Option<String>) -> AxiamResult<VaultEndpoint> {
+/// Takes a lookup rather than reading the environment directly so the
+/// precedence rules can be tested as a function of their inputs. Driving them
+/// through the real environment would mean mutating process-global state from
+/// tests the harness runs on many threads at once — which is how a suite
+/// starts passing or failing by run order.
+fn vault_endpoint_from(lookup: &dyn Fn(&str) -> Option<String>) -> AxiamResult<VaultEndpoint> {
     let read = |name: &str| lookup(name).filter(|v| !v.trim().is_empty());
     let path = |name: &str| read(name).map(std::path::PathBuf::from);
 
@@ -1368,26 +1403,46 @@ fn vault_endpoint_from(lookup: impl Fn(&str) -> Option<String>) -> AxiamResult<V
 }
 
 pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKeyCustodians> {
+    custodians_from(encryption_key, &|name| std::env::var(name).ok())
+}
+
+/// [`custodians_from_env`] against an arbitrary lookup.
+///
+/// `pub` because it is also the honest entry point for an embedder whose
+/// configuration does not live in the process environment.
+///
+/// `&dyn Fn` rather than `impl Fn`: a generic seam is monomorphised once per
+/// closure type, and coverage instrumentation counts every instantiation's
+/// lines separately. A test suite calling this with a dozen different closures
+/// would multiply this function's line count by twelve and its *uncovered*
+/// lines with it — the tests would measurably worsen the very number they
+/// exist to improve. One instantiation, one count.
+///
+/// The same seam, and for the same reason, as [`vault_endpoint_from`]: this
+/// function decides which custodian a deployment gets, and that decision is
+/// the one the 1.0.0-beta01 report caught getting silently wrong. Driving it
+/// through the real environment would mean mutating process-global state from
+/// a multi-threaded harness, so the rules are tested as a function of their
+/// inputs instead.
+pub fn custodians_from(
+    encryption_key: Option<[u8; 32]>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> AxiamResult<CaKeyCustodians> {
+    let env = |name: &str| lookup(name).filter(|v| !v.is_empty());
     let database = encryption_key.map(DatabaseCaKeyStore::new);
     let VaultEndpoint {
         address: vault_addr,
         token: vault_token,
         ca_cert_path: vault_ca_cert,
         inherited: vault_inherited,
-    } = vault_endpoint_from_env()?;
+    } = vault_endpoint_from(lookup)?;
 
     let vault = match (vault_addr.clone(), vault_token.clone()) {
         (Some(address), Some(token)) => Some(VaultCaKeyStore::new(VaultCaKeyConfig {
             address,
             token,
-            mount: std::env::var(CA_VAULT_MOUNT_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| DEFAULT_CA_VAULT_MOUNT.to_string()),
-            prefix: std::env::var(CA_VAULT_PREFIX_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| DEFAULT_CA_VAULT_PREFIX.to_string()),
+            mount: env(CA_VAULT_MOUNT_ENV).unwrap_or_else(|| DEFAULT_CA_VAULT_MOUNT.to_string()),
+            prefix: env(CA_VAULT_PREFIX_ENV).unwrap_or_else(|| DEFAULT_CA_VAULT_PREFIX.to_string()),
             ca_cert_path: vault_ca_cert.clone(),
         })?),
         // An address with no token, or the reverse, is a half-finished
@@ -1395,9 +1450,9 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         // from not having configured Vault at all, right up until the default
         // custodian check fails with a message about a variable that *is* set.
         (Some(_), None) | (None, Some(_)) => {
-            // Unreachable: `vault_endpoint_from_env` already rejects a
+            // Unreachable: `vault_endpoint_from` already rejects a
             // half-configured pair, naming whichever pair the operator set.
-            unreachable!("vault_endpoint_from_env rejects half-configured pairs")
+            unreachable!("vault_endpoint_from rejects half-configured pairs")
         }
         (None, None) => None,
     };
@@ -1411,13 +1466,9 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         (Some(address), Some(token)) => Some(VaultPkiCaKeyStore::new(VaultPkiConfig {
             address,
             token,
-            root_mount: std::env::var(CA_VAULT_PKI_ROOT_MOUNT_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
+            root_mount: env(CA_VAULT_PKI_ROOT_MOUNT_ENV)
                 .unwrap_or_else(|| DEFAULT_PKI_ROOT_MOUNT.to_string()),
-            int_mount: std::env::var(CA_VAULT_PKI_INT_MOUNT_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
+            int_mount: env(CA_VAULT_PKI_INT_MOUNT_ENV)
                 .unwrap_or_else(|| DEFAULT_PKI_INT_MOUNT.to_string()),
             ca_cert_path: vault_ca_cert,
         })?),
@@ -1426,11 +1477,11 @@ pub fn custodians_from_env(encryption_key: Option<[u8; 32]>) -> AxiamResult<CaKe
         _ => None,
     };
 
-    let default_custody = match std::env::var(CA_KEY_STORE_ENV) {
+    let default_custody = match lookup(CA_KEY_STORE_ENV) {
         // An explicit request. `CaKeyCustodians::new` refuses it when the named
         // custodian is not actually configured — the one case worth stopping
         // the process for.
-        Ok(raw) if !raw.trim().is_empty() => {
+        Some(raw) if !raw.trim().is_empty() => {
             Some(raw.trim().parse::<CaKeyCustody>().map_err(|e| {
                 AxiamError::Internal(format!(
                     "{CA_KEY_STORE_ENV}: {e} — expected `database`, `vault` or `vault_pki`"

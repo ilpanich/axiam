@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta02",
-    "x-axiam-spec-digest": "sha256:b5cc414403057815c8626630df6fd17176fade8c59a8d3d55105891044739c8e"
+    "x-axiam-spec-digest": "sha256:5ecae76c44138df731753ae7babea5c3fa5c9e5c6669ce8e606a8ffa79ce1c69"
   },
   "paths": {
     "/.well-known/openid-configuration": {

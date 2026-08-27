@@ -57,14 +57,16 @@
 #
 # What "everywhere the version is declared" means, per repo (see bump_versions):
 #   axiam (platform)   Cargo.toml [workspace.package] version; all axiam-*
-#                      entries in Cargo.lock; sdks/openapi.json info.version
-#                      (the OpenAPI drift gate — the spec is byte-for-byte
-#                      identical apart from this field, so a targeted rewrite
-#                      keeps the gate green with no rebuild; docs/api/openapi.json
-#                      is a symlink to it); the frontend Sidebar version string
-#                      and its test; the two k8s deployment image tags; and
-#                      crates/axiam-opaque-wasm/Cargo.toml, which is outside
-#                      the workspace and so inherits nothing.
+#                      entries in Cargo.lock; sdks/openapi.json info.version AND
+#                      its info.x-axiam-spec-digest, which is a SHA-256 over the
+#                      document with that field removed and therefore MOVES when
+#                      the version does (see restamp_openapi_digest);
+#                      sdks/management-registry.json, regenerated because it
+#                      mirrors both of those fields; docs/api/openapi.json is a
+#                      symlink to the spec and follows; the frontend Sidebar
+#                      version string and its test; the two k8s deployment image
+#                      tags; and crates/axiam-opaque-wasm/Cargo.toml, which is
+#                      outside the workspace and so inherits nothing.
 #   axiam-opaque       NOT a repo — the shared OPAQUE client core inside the
 #                      platform clone, released on its own `axiam-opaque-v*`
 #                      tag (see TAG NAMES). Bumps exactly the same files as
@@ -512,6 +514,99 @@ bump_cargo_lock_axiam() {
   BUMP_FILES+=("Cargo.lock")
 }
 
+# Re-stamp sdks/openapi.json's info.x-axiam-spec-digest after the version bump.
+#
+# WHY THIS EXISTS. Until contract 1.30 the header's claim was true: the exported
+# spec was byte-for-byte identical apart from info.version, so rewriting that one
+# literal kept the OpenAPI drift gate green with no rebuild. PR #384 added
+# info.x-axiam-spec-digest -- a SHA-256 over the document with that field absent
+# -- and put info.version INSIDE it, deliberately: stamp_spec_digest() argues that
+# "same document" is checkable where "same API" would need an argument about
+# whether a description, a tag or an example counts.
+#
+# So from that point a targeted rewrite of info.version alone did not merely fail
+# to help, it GUARANTEED the gate would go red -- and it did, on 1.0.0-beta02,
+# taking the §27 registry gate with it. Worse than a red gate: the committed
+# document asserted a digest of itself that was not its own, so the question the
+# digest exists to answer ("are these two exports the same document?") silently
+# could not be answered at all.
+#
+# Recomputed here rather than by rebuilding, which keeps the no-rebuild property
+# the surrounding design depends on -- mass-tag runs across twelve repos on a
+# developer machine, and requiring a full cargo build of axiam-server (plus
+# protoc, plus the swagger-ui fetch) to cut a release would be a much larger
+# change than this one. The equivalence is exact and checkable: the canonical
+# form is serde_json's compact serialization, which is json.dumps with no
+# separators padding and no ASCII escaping, over the same key order the file
+# already carries (it came from serde in the first place).
+#
+# The substitution is targeted, like every other bump here: only the digest
+# LITERAL is rewritten, so the file's pretty-printing is untouched and the drift
+# gate still compares equal to a fresh --dump-openapi.
+restamp_openapi_digest() {
+  local file="sdks/openapi.json" gate="scripts/check-spec-digest.py"
+  [[ -f "$file" ]] || return 0
+  [[ -f "$gate" ]] || die \
+    "$gate is missing; it is what re-stamps $file's spec digest after a version
+   bump. Without it the release would ship a spec whose digest does not match
+   its own content -- the defect the step exists to prevent. Restore the script,
+   or re-run with --no-bump and bump the platform repo by hand."
+  command -v python3 >/dev/null 2>&1 || die \
+    "python3 is required to run $gate. See the note above; the same applies."
+
+  # --write is idempotent (the digest is taken over the document with the
+  # digest field absent), so the dry-run path can ask the same question by
+  # checking instead of writing.
+  if $DRY_RUN; then
+    if python3 "$gate" >/dev/null 2>&1; then
+      printf '      [dry-run] %s: spec digest already current\n' "$file"
+      return 0
+    fi
+    printf '      [dry-run] %s: spec digest would be re-stamped\n' "$file"
+    BUMP_FILES+=("$file")
+    return 0
+  fi
+
+  local out
+  out="$(python3 "$gate" --write)" || die "$gate --write failed; $file would ship a stale digest"
+  printf '      %s\n' "$out"
+  [[ "$out" == *"already current"* ]] || BUMP_FILES+=("$file")
+}
+
+# Regenerate sdks/management-registry.json after the spec has been bumped and
+# re-stamped.
+#
+# It records spec_version and spec_digest straight off the spec, so both move
+# with a release and a stale registry fails CI's Architecture Invariants job
+# ("management-registry.json is stale"). Generated wholesale by its own script
+# rather than substituted, because that is the file's contract -- its $comment
+# says "GENERATED ... Do not edit by hand".
+#
+# The operation and namespace counts do not change on a version bump, so no
+# SDK's generated surface moves; only the two metadata fields do.
+regen_management_registry() {
+  local file="sdks/management-registry.json" gen="scripts/gen-management-registry.py"
+  [[ -f "$file" && -f "$gen" ]] || return 0
+  if $DRY_RUN; then
+    printf '      [dry-run] %s: regenerate via %s\n' "$file" "$gen"
+    return 0
+  fi
+  # Checksummed around the call rather than compared against git: `git diff`
+  # would also report a file some earlier step in this same run had already
+  # touched, so it answers "does this differ from HEAD" when the question is
+  # "did THIS call change it".
+  local before after
+  before="$(cksum <"$file")"
+  python3 "$gen" >/dev/null || die "$gen failed; $file would be left stale"
+  after="$(cksum <"$file")"
+  if [[ "$before" == "$after" ]]; then
+    printf '      %s: already current\n' "$file"
+  else
+    printf '      %s: regenerated from the bumped spec\n' "$file"
+    BUMP_FILES+=("$file")
+  fi
+}
+
 # Rewrite the release version everywhere repo $1 declares it, to version $2.
 # Runs from inside the repo's directory. Populates BUMP_FILES.
 bump_versions() {
@@ -525,6 +620,10 @@ bump_versions() {
       # would leave the tree half-bumped for the other.
       sub_literal Cargo.toml                                       "$old" "$version"
       sub_literal sdks/openapi.json                                "$old" "$version"
+      # MUST follow the line above and precede the registry: the digest covers
+      # info.version, and the registry mirrors both.
+      restamp_openapi_digest
+      regen_management_registry
       sub_literal frontend/src/components/layout/Sidebar.tsx       "$old" "$version"
       sub_literal frontend/src/components/layout/Sidebar.test.tsx  "$old" "$version"
       sub_literal k8s/server/deployment.yml                        "$old" "$version"

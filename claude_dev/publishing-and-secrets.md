@@ -588,18 +588,29 @@ for last.
 
 ## 8. Keeping the SDK repos in sync with this one
 
-Three files are authored here and **vendored** into every SDK repo:
+These files are authored here and **vendored** into every SDK repo:
 
 | Source (in `ilpanich/axiam`) | Copy (in each `axiam-<lang>-sdk`) |
 |---|---|
 | `sdks/CONTRACT.md` | `CONTRACT.md` |
 | `sdks/openapi.json` | `openapi.json` |
+| `sdks/management-registry.json` | `management-registry.json` |
+| `sdks/opaque-test-vectors.json` | `opaque-test-vectors.json` |
 | `proto/` | `proto/` |
 | `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` | `testdata/v2_reference_vectors.json` (Rust/TS/Python/Go; C#/Java/PHP carry their own equivalent fixture in their test tree) |
 
 This repo's CI still guards the **sources**: `sdk-openapi-drift.yml` fails if
 `sdks/openapi.json` drifts from a fresh `--dump-openapi` export, and `sdk-buf-gates.yml` runs
 buf lint/breaking/format on `proto/`.
+
+The OpenAPI gate needs a full server build, so it is path-filtered — and until 1.0.0-beta02 it
+watched only the crates that *generate* the spec. A release commit edits `sdks/openapi.json`
+and nothing else, so it slipped past, and the release shipped a spec whose own
+`info.x-axiam-spec-digest` no longer described it. The gate now watches the committed spec as
+well, and `scripts/check-spec-digest.py` re-asks the same question on **every** commit in the
+Architecture Invariants job — no toolchain, no build, so there is nothing to path-filter it
+for. `scripts/mass-tag.sh` runs that script with `--write` right after it bumps
+`info.version`, which is what stops a release from reintroducing the drift.
 
 A stale copy **downstream** is now detected by `sdk-artifact-drift.yml`, which runs
 `scripts/check-sdk-artifact-drift.py` daily. It compares the git **blob hash** of
@@ -609,7 +620,7 @@ artifact that drifted. This is the single sharpest edge introduced by the multi-
 a silently stale `proto/` in one SDK produces stubs that compile fine and talk to the server
 incorrectly.
 
-Treat any change to the three files above as a change that must be propagated: open a
+Treat any change to the files above as a change that must be propagated: open a
 follow-up PR in each SDK repo re-copying them, and re-run that SDK's codegen. The gate tells
 you when you forgot; it does not do the propagation.
 

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AccessDecision"],"struct":["AccessRequest"]};
+window.SIDEBAR_ITEMS = {"enum":["AccessDecision","SubjectScope"],"struct":["AccessRequest"]};

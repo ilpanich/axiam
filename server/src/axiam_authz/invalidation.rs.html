@@ -126,74 +126,75 @@
 <a href=#126 id=126 data-nosnippet>126</a></span><span class="kw">mod </span>tests {
 <a href=#127 id=127 data-nosnippet>127</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">use </span><span class="kw">crate</span>::decision_cache::DecisionCacheConfig;
-<a href=#129 id=129 data-nosnippet>129</a>    <span class="kw">use </span><span class="kw">crate</span>::types::{AccessDecision, AccessRequest};
+<a href=#129 id=129 data-nosnippet>129</a>    <span class="kw">use </span><span class="kw">crate</span>::types::{AccessDecision, AccessRequest, SubjectScope};
 <a href=#130 id=130 data-nosnippet>130</a>    <span class="kw">use </span>std::time::Duration;
 <a href=#131 id=131 data-nosnippet>131</a>
 <a href=#132 id=132 data-nosnippet>132</a>    <span class="kw">fn </span>request(tenant_id: Uuid, subject_id: Uuid) -&gt; AccessRequest {
 <a href=#133 id=133 data-nosnippet>133</a>        AccessRequest {
 <a href=#134 id=134 data-nosnippet>134</a>            tenant_id,
-<a href=#135 id=135 data-nosnippet>135</a>            subject_id,
-<a href=#136 id=136 data-nosnippet>136</a>            action: <span class="string">"read"</span>.into(),
-<a href=#137 id=137 data-nosnippet>137</a>            resource_id: Uuid::nil(),
-<a href=#138 id=138 data-nosnippet>138</a>            scope: <span class="prelude-val">None</span>,
-<a href=#139 id=139 data-nosnippet>139</a>        }
-<a href=#140 id=140 data-nosnippet>140</a>    }
-<a href=#141 id=141 data-nosnippet>141</a>
-<a href=#142 id=142 data-nosnippet>142</a>    <span class="kw">fn </span>cache() -&gt; DecisionCache {
-<a href=#143 id=143 data-nosnippet>143</a>        DecisionCache::new(DecisionCacheConfig {
-<a href=#144 id=144 data-nosnippet>144</a>            ttl: Duration::from_secs(<span class="number">60</span>),
-<a href=#145 id=145 data-nosnippet>145</a>            max_entries_per_tenant: <span class="number">100</span>,
-<a href=#146 id=146 data-nosnippet>146</a>        })
-<a href=#147 id=147 data-nosnippet>147</a>    }
-<a href=#148 id=148 data-nosnippet>148</a>
-<a href=#149 id=149 data-nosnippet>149</a>    <span class="attr">#[test]
-<a href=#150 id=150 data-nosnippet>150</a>    </span><span class="kw">fn </span>subject_event_applies_only_to_that_subject() {
-<a href=#151 id=151 data-nosnippet>151</a>        <span class="kw">let </span>cache = cache();
-<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#153 id=153 data-nosnippet>153</a>        <span class="kw">let </span>alice = Uuid::new_v4();
-<a href=#154 id=154 data-nosnippet>154</a>        <span class="kw">let </span>bob = Uuid::new_v4();
-<a href=#155 id=155 data-nosnippet>155</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, alice), AccessDecision::Allow);
-<a href=#156 id=156 data-nosnippet>156</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, bob), AccessDecision::Allow);
-<a href=#157 id=157 data-nosnippet>157</a>
-<a href=#158 id=158 data-nosnippet>158</a>        InvalidationEvent::Subject {
-<a href=#159 id=159 data-nosnippet>159</a>            tenant_id: tenant,
-<a href=#160 id=160 data-nosnippet>160</a>            subject_id: alice,
-<a href=#161 id=161 data-nosnippet>161</a>        }
-<a href=#162 id=162 data-nosnippet>162</a>        .apply(<span class="kw-2">&amp;</span>cache);
-<a href=#163 id=163 data-nosnippet>163</a>
-<a href=#164 id=164 data-nosnippet>164</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>request(tenant, alice)).is_none());
-<a href=#165 id=165 data-nosnippet>165</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>request(tenant, bob)).is_some());
-<a href=#166 id=166 data-nosnippet>166</a>    }
-<a href=#167 id=167 data-nosnippet>167</a>
-<a href=#168 id=168 data-nosnippet>168</a>    <span class="attr">#[test]
-<a href=#169 id=169 data-nosnippet>169</a>    </span><span class="kw">fn </span>tenant_event_applies_to_the_whole_tenant() {
-<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">let </span>cache = cache();
-<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
-<a href=#172 id=172 data-nosnippet>172</a>        <span class="kw">let </span>other = Uuid::new_v4();
-<a href=#173 id=173 data-nosnippet>173</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, Uuid::new_v4()), AccessDecision::Allow);
+<a href=#135 id=135 data-nosnippet>135</a>            subject_scope: SubjectScope::Tenant,
+<a href=#136 id=136 data-nosnippet>136</a>            subject_id,
+<a href=#137 id=137 data-nosnippet>137</a>            action: <span class="string">"read"</span>.into(),
+<a href=#138 id=138 data-nosnippet>138</a>            resource_id: Uuid::nil(),
+<a href=#139 id=139 data-nosnippet>139</a>            scope: <span class="prelude-val">None</span>,
+<a href=#140 id=140 data-nosnippet>140</a>        }
+<a href=#141 id=141 data-nosnippet>141</a>    }
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a>    <span class="kw">fn </span>cache() -&gt; DecisionCache {
+<a href=#144 id=144 data-nosnippet>144</a>        DecisionCache::new(DecisionCacheConfig {
+<a href=#145 id=145 data-nosnippet>145</a>            ttl: Duration::from_secs(<span class="number">60</span>),
+<a href=#146 id=146 data-nosnippet>146</a>            max_entries_per_tenant: <span class="number">100</span>,
+<a href=#147 id=147 data-nosnippet>147</a>        })
+<a href=#148 id=148 data-nosnippet>148</a>    }
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="attr">#[test]
+<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">fn </span>subject_event_applies_only_to_that_subject() {
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">let </span>cache = cache();
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="kw">let </span>alice = Uuid::new_v4();
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">let </span>bob = Uuid::new_v4();
+<a href=#156 id=156 data-nosnippet>156</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, alice), AccessDecision::Allow);
+<a href=#157 id=157 data-nosnippet>157</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, bob), AccessDecision::Allow);
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>        InvalidationEvent::Subject {
+<a href=#160 id=160 data-nosnippet>160</a>            tenant_id: tenant,
+<a href=#161 id=161 data-nosnippet>161</a>            subject_id: alice,
+<a href=#162 id=162 data-nosnippet>162</a>        }
+<a href=#163 id=163 data-nosnippet>163</a>        .apply(<span class="kw-2">&amp;</span>cache);
+<a href=#164 id=164 data-nosnippet>164</a>
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>request(tenant, alice)).is_none());
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>request(tenant, bob)).is_some());
+<a href=#167 id=167 data-nosnippet>167</a>    }
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="attr">#[test]
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="kw">fn </span>tenant_event_applies_to_the_whole_tenant() {
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let </span>cache = cache();
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="kw">let </span>tenant = Uuid::new_v4();
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="kw">let </span>other = Uuid::new_v4();
 <a href=#174 id=174 data-nosnippet>174</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, Uuid::new_v4()), AccessDecision::Allow);
-<a href=#175 id=175 data-nosnippet>175</a>        <span class="kw">let </span>keep = request(other, Uuid::new_v4());
-<a href=#176 id=176 data-nosnippet>176</a>        cache.insert(<span class="kw-2">&amp;</span>keep, AccessDecision::Allow);
-<a href=#177 id=177 data-nosnippet>177</a>
-<a href=#178 id=178 data-nosnippet>178</a>        InvalidationEvent::Tenant { tenant_id: tenant }.apply(<span class="kw-2">&amp;</span>cache);
-<a href=#179 id=179 data-nosnippet>179</a>
-<a href=#180 id=180 data-nosnippet>180</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>, <span class="string">"only the other tenant's entry survives"</span>);
-<a href=#181 id=181 data-nosnippet>181</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>keep).is_some());
-<a href=#182 id=182 data-nosnippet>182</a>    }
-<a href=#183 id=183 data-nosnippet>183</a>
-<a href=#184 id=184 data-nosnippet>184</a>    <span class="attr">#[test]
-<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">fn </span>accessors_agree_with_variants() {
-<a href=#186 id=186 data-nosnippet>186</a>        <span class="kw">let </span>t = Uuid::new_v4();
-<a href=#187 id=187 data-nosnippet>187</a>        <span class="kw">let </span>s = Uuid::new_v4();
-<a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">let </span>ev = InvalidationEvent::Tenant { tenant_id: t };
-<a href=#189 id=189 data-nosnippet>189</a>        <span class="macro">assert_eq!</span>(ev.tenant_id(), t);
-<a href=#190 id=190 data-nosnippet>190</a>        <span class="macro">assert_eq!</span>(ev.subject_id(), <span class="prelude-val">None</span>);
-<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span>ev = InvalidationEvent::Subject {
-<a href=#192 id=192 data-nosnippet>192</a>            tenant_id: t,
-<a href=#193 id=193 data-nosnippet>193</a>            subject_id: s,
-<a href=#194 id=194 data-nosnippet>194</a>        };
-<a href=#195 id=195 data-nosnippet>195</a>        <span class="macro">assert_eq!</span>(ev.tenant_id(), t);
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="macro">assert_eq!</span>(ev.subject_id(), <span class="prelude-val">Some</span>(s));
-<a href=#197 id=197 data-nosnippet>197</a>    }
-<a href=#198 id=198 data-nosnippet>198</a>}
+<a href=#175 id=175 data-nosnippet>175</a>        cache.insert(<span class="kw-2">&amp;</span>request(tenant, Uuid::new_v4()), AccessDecision::Allow);
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span>keep = request(other, Uuid::new_v4());
+<a href=#177 id=177 data-nosnippet>177</a>        cache.insert(<span class="kw-2">&amp;</span>keep, AccessDecision::Allow);
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>        InvalidationEvent::Tenant { tenant_id: tenant }.apply(<span class="kw-2">&amp;</span>cache);
+<a href=#180 id=180 data-nosnippet>180</a>
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>, <span class="string">"only the other tenant's entry survives"</span>);
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="macro">assert!</span>(cache.get(<span class="kw-2">&amp;</span>keep).is_some());
+<a href=#183 id=183 data-nosnippet>183</a>    }
+<a href=#184 id=184 data-nosnippet>184</a>
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="attr">#[test]
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">fn </span>accessors_agree_with_variants() {
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="kw">let </span>t = Uuid::new_v4();
+<a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">let </span>s = Uuid::new_v4();
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">let </span>ev = InvalidationEvent::Tenant { tenant_id: t };
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="macro">assert_eq!</span>(ev.tenant_id(), t);
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="macro">assert_eq!</span>(ev.subject_id(), <span class="prelude-val">None</span>);
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="kw">let </span>ev = InvalidationEvent::Subject {
+<a href=#193 id=193 data-nosnippet>193</a>            tenant_id: t,
+<a href=#194 id=194 data-nosnippet>194</a>            subject_id: s,
+<a href=#195 id=195 data-nosnippet>195</a>        };
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="macro">assert_eq!</span>(ev.tenant_id(), t);
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="macro">assert_eq!</span>(ev.subject_id(), <span class="prelude-val">Some</span>(s));
+<a href=#198 id=198 data-nosnippet>198</a>    }
+<a href=#199 id=199 data-nosnippet>199</a>}
 </code></pre></div></section></main></body></html>

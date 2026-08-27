@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AnchorPlan"],"fn":["apply","plan"]};
+window.SIDEBAR_ITEMS = {"enum":["AnchorPlan"],"fn":["apply","bundle_path","plan"],"struct":["TrustAnchorReload"]};

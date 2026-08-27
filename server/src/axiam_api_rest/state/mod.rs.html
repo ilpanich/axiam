@@ -707,76 +707,80 @@
 <a href=#707 id=707 data-nosnippet>707</a>                ca_cert_repo: axiam_db::SurrealCaCertificateRepository::new(db.clone()),
 <a href=#708 id=708 data-nosnippet>708</a>                pgp_service,
 <a href=#709 id=709 data-nosnippet>709</a>                device_auth_service,
-<a href=#710 id=710 data-nosnippet>710</a>            },
-<a href=#711 id=711 data-nosnippet>711</a>            webauthn: bundles::WebauthnState {
-<a href=#712 id=712 data-nosnippet>712</a>                webauthn_service,
-<a href=#713 id=713 data-nosnippet>713</a>                webauthn_credential_repo: webauthn_cred_repo.clone(),
-<a href=#714 id=714 data-nosnippet>714</a>                webauthn_attestation_policy_repo,
-<a href=#715 id=715 data-nosnippet>715</a>                mds_repo,
-<a href=#716 id=716 data-nosnippet>716</a>                attestation_metadata_source,
-<a href=#717 id=717 data-nosnippet>717</a>                attestation_ca_cache: Arc::new(AttestationCaCache::new()),
-<a href=#718 id=718 data-nosnippet>718</a>                pki_config,
-<a href=#719 id=719 data-nosnippet>719</a>            },
-<a href=#720 id=720 data-nosnippet>720</a>            gdpr: bundles::GdprState {
-<a href=#721 id=721 data-nosnippet>721</a>                consent_repo: axiam_db::SurrealConsentRepository::new(db.clone()),
-<a href=#722 id=722 data-nosnippet>722</a>                account_deletion_repo: SurrealAccountDeletionRepository::new(db.clone()),
-<a href=#723 id=723 data-nosnippet>723</a>                export_job_repo: SurrealExportJobRepository::new(db.clone()),
-<a href=#724 id=724 data-nosnippet>724</a>                erasure_proof_repo: SurrealErasureProofRepository::new(db.clone()),
-<a href=#725 id=725 data-nosnippet>725</a>            },
-<a href=#726 id=726 data-nosnippet>726</a>            mail: bundles::MailState {
-<a href=#727 id=727 data-nosnippet>727</a>                mail_outbound_publisher: Arc::new(NoopMailPublisher),
-<a href=#728 id=728 data-nosnippet>728</a>                email_config_repo: <span class="prelude-val">None</span>,
-<a href=#729 id=729 data-nosnippet>729</a>                email_encryption_key: <span class="prelude-val">None</span>,
-<a href=#730 id=730 data-nosnippet>730</a>                email_verification_service,
-<a href=#731 id=731 data-nosnippet>731</a>                password_reset_service,
-<a href=#732 id=732 data-nosnippet>732</a>            },
-<a href=#733 id=733 data-nosnippet>733</a>            events: bundles::EventsState {
-<a href=#734 id=734 data-nosnippet>734</a>                reactor_repo,
-<a href=#735 id=735 data-nosnippet>735</a>                <span class="comment">// A test harness gets the no-op gate, which is also what a
-<a href=#736 id=736 data-nosnippet>736</a>                // production deployment without AMQP gets — so a handler test
-<a href=#737 id=737 data-nosnippet>737</a>                // exercises exactly the composition an un-hooked deployment runs.
-<a href=#738 id=738 data-nosnippet>738</a>                // A test that needs a live gate overrides this field (the same
-<a href=#739 id=739 data-nosnippet>739</a>                // pattern `email_encryption_key` documents above).
-<a href=#740 id=740 data-nosnippet>740</a>                </span>reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
-<a href=#741 id=741 data-nosnippet>741</a>                reactor_routing_invalidator: <span class="prelude-val">None</span>,
-<a href=#742 id=742 data-nosnippet>742</a>                webhook_repo,
-<a href=#743 id=743 data-nosnippet>743</a>                webhook_delivery,
-<a href=#744 id=744 data-nosnippet>744</a>                webhook_publisher: <span class="prelude-val">None</span>,
-<a href=#745 id=745 data-nosnippet>745</a>                notification_rule_repo: SurrealNotificationRuleRepository::new(db.clone()),
-<a href=#746 id=746 data-nosnippet>746</a>            },
-<a href=#747 id=747 data-nosnippet>747</a>            oauth2: bundles::OAuth2State {
-<a href=#748 id=748 data-nosnippet>748</a>                authorize_service,
-<a href=#749 id=749 data-nosnippet>749</a>                token_service,
-<a href=#750 id=750 data-nosnippet>750</a>                device_authorization_service,
-<a href=#751 id=751 data-nosnippet>751</a>                token_exchange_service,
-<a href=#752 id=752 data-nosnippet>752</a>                par_service,
-<a href=#753 id=753 data-nosnippet>753</a>                permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
-<a href=#754 id=754 data-nosnippet>754</a>                <span class="comment">// X2: the protocol default is the ceiling until an operator lowers
-<a href=#755 id=755 data-nosnippet>755</a>                // it. Raising it past `DEFAULT_RPT_MAX_LIFETIME_SECS` buys nothing
-<a href=#756 id=756 data-nosnippet>756</a>                // — the effective lifetime is a minimum over all three bounds.
-<a href=#757 id=757 data-nosnippet>757</a>                </span>rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
-<a href=#758 id=758 data-nosnippet>758</a>                session_client_repo,
-<a href=#759 id=759 data-nosnippet>759</a>                device_grant_repo,
-<a href=#760 id=760 data-nosnippet>760</a>                proof_replay_repo,
-<a href=#761 id=761 data-nosnippet>761</a>                oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
-<a href=#762 id=762 data-nosnippet>762</a>                oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
-<a href=#763 id=763 data-nosnippet>763</a>            },
-<a href=#764 id=764 data-nosnippet>764</a>            federation: bundles::FederationState {
-<a href=#765 id=765 data-nosnippet>765</a>                federation_config_repo: federation_config_repo.clone(),
-<a href=#766 id=766 data-nosnippet>766</a>                federation_link_repo: federation_link_repo.clone(),
-<a href=#767 id=767 data-nosnippet>767</a>                federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
-<a href=#768 id=768 data-nosnippet>768</a>                assertion_replay_repo: assertion_replay_repo.clone(),
-<a href=#769 id=769 data-nosnippet>769</a>                oidc_federation_service: <span class="prelude-val">None</span>,
-<a href=#770 id=770 data-nosnippet>770</a>                <span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#771 id=771 data-nosnippet>771</a>                </span>saml_federation_service: SamlFederationService::new(
-<a href=#772 id=772 data-nosnippet>772</a>                    federation_config_repo,
-<a href=#773 id=773 data-nosnippet>773</a>                    federation_link_repo,
-<a href=#774 id=774 data-nosnippet>774</a>                    user_repo,
-<a href=#775 id=775 data-nosnippet>775</a>                    assertion_replay_repo,
-<a href=#776 id=776 data-nosnippet>776</a>                    reqwest::Client::new(),
-<a href=#777 id=777 data-nosnippet>777</a>                ),
-<a href=#778 id=778 data-nosnippet>778</a>            },
-<a href=#779 id=779 data-nosnippet>779</a>        }
-<a href=#780 id=780 data-nosnippet>780</a>    }
-<a href=#781 id=781 data-nosnippet>781</a>}
+<a href=#710 id=710 data-nosnippet>710</a>                <span class="comment">// No listener in a test harness, so a trust-anchor toggle
+<a href=#711 id=711 data-nosnippet>711</a>                // reports that a restart is required — which is what a
+<a href=#712 id=712 data-nosnippet>712</a>                // deployment with no TLS listener genuinely gets.
+<a href=#713 id=713 data-nosnippet>713</a>                </span>trust_anchor_reloader: <span class="prelude-val">None</span>,
+<a href=#714 id=714 data-nosnippet>714</a>            },
+<a href=#715 id=715 data-nosnippet>715</a>            webauthn: bundles::WebauthnState {
+<a href=#716 id=716 data-nosnippet>716</a>                webauthn_service,
+<a href=#717 id=717 data-nosnippet>717</a>                webauthn_credential_repo: webauthn_cred_repo.clone(),
+<a href=#718 id=718 data-nosnippet>718</a>                webauthn_attestation_policy_repo,
+<a href=#719 id=719 data-nosnippet>719</a>                mds_repo,
+<a href=#720 id=720 data-nosnippet>720</a>                attestation_metadata_source,
+<a href=#721 id=721 data-nosnippet>721</a>                attestation_ca_cache: Arc::new(AttestationCaCache::new()),
+<a href=#722 id=722 data-nosnippet>722</a>                pki_config,
+<a href=#723 id=723 data-nosnippet>723</a>            },
+<a href=#724 id=724 data-nosnippet>724</a>            gdpr: bundles::GdprState {
+<a href=#725 id=725 data-nosnippet>725</a>                consent_repo: axiam_db::SurrealConsentRepository::new(db.clone()),
+<a href=#726 id=726 data-nosnippet>726</a>                account_deletion_repo: SurrealAccountDeletionRepository::new(db.clone()),
+<a href=#727 id=727 data-nosnippet>727</a>                export_job_repo: SurrealExportJobRepository::new(db.clone()),
+<a href=#728 id=728 data-nosnippet>728</a>                erasure_proof_repo: SurrealErasureProofRepository::new(db.clone()),
+<a href=#729 id=729 data-nosnippet>729</a>            },
+<a href=#730 id=730 data-nosnippet>730</a>            mail: bundles::MailState {
+<a href=#731 id=731 data-nosnippet>731</a>                mail_outbound_publisher: Arc::new(NoopMailPublisher),
+<a href=#732 id=732 data-nosnippet>732</a>                email_config_repo: <span class="prelude-val">None</span>,
+<a href=#733 id=733 data-nosnippet>733</a>                email_encryption_key: <span class="prelude-val">None</span>,
+<a href=#734 id=734 data-nosnippet>734</a>                email_verification_service,
+<a href=#735 id=735 data-nosnippet>735</a>                password_reset_service,
+<a href=#736 id=736 data-nosnippet>736</a>            },
+<a href=#737 id=737 data-nosnippet>737</a>            events: bundles::EventsState {
+<a href=#738 id=738 data-nosnippet>738</a>                reactor_repo,
+<a href=#739 id=739 data-nosnippet>739</a>                <span class="comment">// A test harness gets the no-op gate, which is also what a
+<a href=#740 id=740 data-nosnippet>740</a>                // production deployment without AMQP gets — so a handler test
+<a href=#741 id=741 data-nosnippet>741</a>                // exercises exactly the composition an un-hooked deployment runs.
+<a href=#742 id=742 data-nosnippet>742</a>                // A test that needs a live gate overrides this field (the same
+<a href=#743 id=743 data-nosnippet>743</a>                // pattern `email_encryption_key` documents above).
+<a href=#744 id=744 data-nosnippet>744</a>                </span>reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+<a href=#745 id=745 data-nosnippet>745</a>                reactor_routing_invalidator: <span class="prelude-val">None</span>,
+<a href=#746 id=746 data-nosnippet>746</a>                webhook_repo,
+<a href=#747 id=747 data-nosnippet>747</a>                webhook_delivery,
+<a href=#748 id=748 data-nosnippet>748</a>                webhook_publisher: <span class="prelude-val">None</span>,
+<a href=#749 id=749 data-nosnippet>749</a>                notification_rule_repo: SurrealNotificationRuleRepository::new(db.clone()),
+<a href=#750 id=750 data-nosnippet>750</a>            },
+<a href=#751 id=751 data-nosnippet>751</a>            oauth2: bundles::OAuth2State {
+<a href=#752 id=752 data-nosnippet>752</a>                authorize_service,
+<a href=#753 id=753 data-nosnippet>753</a>                token_service,
+<a href=#754 id=754 data-nosnippet>754</a>                device_authorization_service,
+<a href=#755 id=755 data-nosnippet>755</a>                token_exchange_service,
+<a href=#756 id=756 data-nosnippet>756</a>                par_service,
+<a href=#757 id=757 data-nosnippet>757</a>                permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
+<a href=#758 id=758 data-nosnippet>758</a>                <span class="comment">// X2: the protocol default is the ceiling until an operator lowers
+<a href=#759 id=759 data-nosnippet>759</a>                // it. Raising it past `DEFAULT_RPT_MAX_LIFETIME_SECS` buys nothing
+<a href=#760 id=760 data-nosnippet>760</a>                // — the effective lifetime is a minimum over all three bounds.
+<a href=#761 id=761 data-nosnippet>761</a>                </span>rpt_max_lifetime_secs: axiam_core::models::uma::DEFAULT_RPT_MAX_LIFETIME_SECS,
+<a href=#762 id=762 data-nosnippet>762</a>                session_client_repo,
+<a href=#763 id=763 data-nosnippet>763</a>                device_grant_repo,
+<a href=#764 id=764 data-nosnippet>764</a>                proof_replay_repo,
+<a href=#765 id=765 data-nosnippet>765</a>                oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
+<a href=#766 id=766 data-nosnippet>766</a>                oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
+<a href=#767 id=767 data-nosnippet>767</a>            },
+<a href=#768 id=768 data-nosnippet>768</a>            federation: bundles::FederationState {
+<a href=#769 id=769 data-nosnippet>769</a>                federation_config_repo: federation_config_repo.clone(),
+<a href=#770 id=770 data-nosnippet>770</a>                federation_link_repo: federation_link_repo.clone(),
+<a href=#771 id=771 data-nosnippet>771</a>                federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
+<a href=#772 id=772 data-nosnippet>772</a>                assertion_replay_repo: assertion_replay_repo.clone(),
+<a href=#773 id=773 data-nosnippet>773</a>                oidc_federation_service: <span class="prelude-val">None</span>,
+<a href=#774 id=774 data-nosnippet>774</a>                <span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#775 id=775 data-nosnippet>775</a>                </span>saml_federation_service: SamlFederationService::new(
+<a href=#776 id=776 data-nosnippet>776</a>                    federation_config_repo,
+<a href=#777 id=777 data-nosnippet>777</a>                    federation_link_repo,
+<a href=#778 id=778 data-nosnippet>778</a>                    user_repo,
+<a href=#779 id=779 data-nosnippet>779</a>                    assertion_replay_repo,
+<a href=#780 id=780 data-nosnippet>780</a>                    reqwest::Client::new(),
+<a href=#781 id=781 data-nosnippet>781</a>                ),
+<a href=#782 id=782 data-nosnippet>782</a>            },
+<a href=#783 id=783 data-nosnippet>783</a>        }
+<a href=#784 id=784 data-nosnippet>784</a>    }
+<a href=#785 id=785 data-nosnippet>785</a>}
 </code></pre></div></section></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["resend_verification","verify_email"],"struct":["ResendVerificationRequest","VerifyEmailRequest"]};
+window.SIDEBAR_ITEMS = {"fn":["resend_own_verification","resend_verification","verify_email"],"struct":["ResendVerificationRequest","VerifyEmailRequest"]};

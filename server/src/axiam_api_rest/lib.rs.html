@@ -23,18 +23,59 @@
 <a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub use </span>authz::{AuthzChecker, AuthzData, RequirePermission};
 <a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub use </span>config::{RateLimitConfig, RateLimitPosture, RateLimitProfile, ServerConfig};
 <a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub use </span>error::AxiamApiError;
-<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>extractors::auth::{AuthenticatedUser, SessionValidator};
-<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>extractors::cert_auth::{CertificateAuthenticated, VerifiedClientCert};
-<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver, SurrealScimTokenResolver};
-<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>extractors::tenant::TenantContext;
-<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>health::HealthChecker;
-<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub use </span>openapi::ApiDoc;
-<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>server::{
-<a href=#33 id=33 data-nosnippet>33</a>    api_v1_routes, build_cors, build_governor, health_routes, openapi_routes,
-<a href=#34 id=34 data-nosnippet>34</a>    register_api_v1_routes,
-<a href=#35 id=35 data-nosnippet>35</a>};
-<a href=#36 id=36 data-nosnippet>36</a><span class="kw">pub use </span>state::AppState;
-<a href=#37 id=37 data-nosnippet>37</a>
-<a href=#38 id=38 data-nosnippet>38</a><span class="attr">#[cfg(test)]
-<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">mod </span>tests;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>extractors::auth::{
+<a href=#27 id=27 data-nosnippet>27</a>    ACTIVE_TENANT_HEADER, AuthenticatedUser, SessionValidator, TenantScope, TenantScopeResolver,
+<a href=#28 id=28 data-nosnippet>28</a>};
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>extractors::cert_auth::{CertificateAuthenticated, VerifiedClientCert};
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver, SurrealScimTokenResolver};
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub use </span>extractors::tenant::TenantContext;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>health::HealthChecker;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub use </span>openapi::ApiDoc;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub use </span>server::{
+<a href=#35 id=35 data-nosnippet>35</a>    api_v1_routes, build_cors, build_governor, health_routes, openapi_routes,
+<a href=#36 id=36 data-nosnippet>36</a>    register_api_v1_routes,
+<a href=#37 id=37 data-nosnippet>37</a>};
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">pub use </span>state::AppState;
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a><span class="attr">#[cfg(test)]
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">mod </span>tests;
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a><span class="doccomment">/// Re-applies the mTLS trust anchor bundle to the running TLS listener.
+<a href=#44 id=44 data-nosnippet>44</a>///
+<a href=#45 id=45 data-nosnippet>45</a>/// # Why a trait here rather than a call there
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// The handler that flags a CA as a trust anchor runs *inside* the server that
+<a href=#48 id=48 data-nosnippet>48</a>/// would have to reload, and `axiam-api-rest` sits below `axiam-server` in the
+<a href=#49 id=49 data-nosnippet>49</a>/// crate layering, so it cannot name the listener. This is the seam: the server
+<a href=#50 id=50 data-nosnippet>50</a>/// registers an implementation at startup, and the handler asks for one.
+<a href=#51 id=51 data-nosnippet>51</a>///
+<a href=#52 id=52 data-nosnippet>52</a>/// Boxed future because the implementation reads the CA rows, and the
+<a href=#53 id=53 data-nosnippet>53</a>/// repository methods are native `async fn` — the same reason
+<a href=#54 id=54 data-nosnippet>54</a>/// [`crate::authz::AuthzChecker`] is shaped this way.
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">pub trait </span>TrustAnchorReloader: Send + Sync {
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="doccomment">/// Rebuild the anchor set from the database, write the bundle, and install
+<a href=#57 id=57 data-nosnippet>57</a>    /// it on the live listener.
+<a href=#58 id=58 data-nosnippet>58</a>    ///
+<a href=#59 id=59 data-nosnippet>59</a>    /// Returns how many anchors are now trusted, or `None` when this process
+<a href=#60 id=60 data-nosnippet>60</a>    /// has no TLS listener doing client authentication — a plaintext
+<a href=#61 id=61 data-nosnippet>61</a>    /// deployment, or one whose operator set `client_auth = off`. `None` is not
+<a href=#62 id=62 data-nosnippet>62</a>    /// a failure: there is nothing to reload into, and the caller reports that
+<a href=#63 id=63 data-nosnippet>63</a>    /// the change is stored and will apply when TLS is enabled.
+<a href=#64 id=64 data-nosnippet>64</a>    ///
+<a href=#65 id=65 data-nosnippet>65</a>    /// # Errors
+<a href=#66 id=66 data-nosnippet>66</a>    ///
+<a href=#67 id=67 data-nosnippet>67</a>    /// A bundle that cannot be parsed or an anchor webpki refuses. The live
+<a href=#68 id=68 data-nosnippet>68</a>    /// anchor set is left unchanged in that case — the replacement is built
+<a href=#69 id=69 data-nosnippet>69</a>    /// completely before anything is swapped, so a bad reload cannot leave the
+<a href=#70 id=70 data-nosnippet>70</a>    /// listener trusting nothing.
+<a href=#71 id=71 data-nosnippet>71</a>    </span><span class="kw">fn </span>reload&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#72 id=72 data-nosnippet>72</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#73 id=73 data-nosnippet>73</a>    ) -&gt; std::pin::Pin&lt;
+<a href=#74 id=74 data-nosnippet>74</a>        Box&lt;
+<a href=#75 id=75 data-nosnippet>75</a>            <span class="kw">dyn </span>std::future::Future&lt;Output = axiam_core::error::AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;usize&gt;&gt;&gt;
+<a href=#76 id=76 data-nosnippet>76</a>                + Send
+<a href=#77 id=77 data-nosnippet>77</a>                + <span class="lifetime">'a</span>,
+<a href=#78 id=78 data-nosnippet>78</a>        &gt;,
+<a href=#79 id=79 data-nosnippet>79</a>    &gt;;
+<a href=#80 id=80 data-nosnippet>80</a>}
 </code></pre></div></section></main></body></html>

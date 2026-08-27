@@ -11,7 +11,7 @@
 <a href=#11 id=11 data-nosnippet>11</a>
 <a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, take_first_or_not_found};
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
 <a href=#15 id=15 data-nosnippet>15</a>
 <a href=#16 id=16 data-nosnippet>16</a><span class="attr">#[derive(Debug, SurrealValue)]
 <a href=#17 id=17 data-nosnippet>17</a></span><span class="kw">struct </span>ResourceRow {
@@ -598,119 +598,129 @@
 <a href=#598 id=598 data-nosnippet>598</a>    ) -&gt; AxiamResult&lt;PaginatedResult&lt;Resource&gt;&gt; {
 <a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
 <a href=#600 id=600 data-nosnippet>600</a>
-<a href=#601 id=601 data-nosnippet>601</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
-<a href=#602 id=602 data-nosnippet>602</a>            </span>.db
-<a href=#603 id=603 data-nosnippet>603</a>            .current()
-<a href=#604 id=604 data-nosnippet>604</a>            .query(
-<a href=#605 id=605 data-nosnippet>605</a>                <span class="string">"SELECT count() AS total FROM resource \
-<a href=#606 id=606 data-nosnippet>606</a>                 WHERE tenant_id = $tenant_id GROUP ALL"</span>,
-<a href=#607 id=607 data-nosnippet>607</a>            )
-<a href=#608 id=608 data-nosnippet>608</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str.clone()))
-<a href=#609 id=609 data-nosnippet>609</a>            .<span class="kw">await
-<a href=#610 id=610 data-nosnippet>610</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#612 id=612 data-nosnippet>612</a>
-<a href=#613 id=613 data-nosnippet>613</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#614 id=614 data-nosnippet>614</a>            </span>.db
-<a href=#615 id=615 data-nosnippet>615</a>            .current()
-<a href=#616 id=616 data-nosnippet>616</a>            .query(
-<a href=#617 id=617 data-nosnippet>617</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM resource \
-<a href=#618 id=618 data-nosnippet>618</a>                 WHERE tenant_id = $tenant_id \
-<a href=#619 id=619 data-nosnippet>619</a>                 ORDER BY created_at ASC \
-<a href=#620 id=620 data-nosnippet>620</a>                 LIMIT $limit START $offset"</span>,
-<a href=#621 id=621 data-nosnippet>621</a>            )
-<a href=#622 id=622 data-nosnippet>622</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#623 id=623 data-nosnippet>623</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
-<a href=#624 id=624 data-nosnippet>624</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
-<a href=#625 id=625 data-nosnippet>625</a>            .<span class="kw">await
-<a href=#626 id=626 data-nosnippet>626</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#627 id=627 data-nosnippet>627</a>
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#629 id=629 data-nosnippet>629</a>
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">let </span>items = rows
-<a href=#631 id=631 data-nosnippet>631</a>            .into_iter()
-<a href=#632 id=632 data-nosnippet>632</a>            .map(|row| row.try_into_resource())
-<a href=#633 id=633 data-nosnippet>633</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
-<a href=#634 id=634 data-nosnippet>634</a>
-<a href=#635 id=635 data-nosnippet>635</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
-<a href=#636 id=636 data-nosnippet>636</a>    }
+<a href=#601 id=601 data-nosnippet>601</a>        <span class="comment">// Free-text filter, applied to BOTH queries below so the
+<a href=#602 id=602 data-nosnippet>602</a>        // total counts matches rather than rows — a pager whose page
+<a href=#603 id=603 data-nosnippet>603</a>        // count belongs to a different result set than the page it
+<a href=#604 id=604 data-nosnippet>604</a>        // shows is worse than no pager. Empty when unsearched, so an
+<a href=#605 id=605 data-nosnippet>605</a>        // unfiltered list runs exactly the query it always ran.
+<a href=#606 id=606 data-nosnippet>606</a>        </span><span class="kw">let </span>search = search_filter(<span class="kw-2">&amp;</span>pagination, <span class="kw-2">&amp;</span>[<span class="string">"name"</span>, <span class="string">"resource_type"</span>]);
+<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw">let </span>search_term = search_bind(<span class="kw-2">&amp;</span>pagination);
+<a href=#608 id=608 data-nosnippet>608</a>
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
+<a href=#610 id=610 data-nosnippet>610</a>            </span>.db
+<a href=#611 id=611 data-nosnippet>611</a>            .current()
+<a href=#612 id=612 data-nosnippet>612</a>            .query(<span class="macro">format!</span>(
+<a href=#613 id=613 data-nosnippet>613</a>                <span class="string">"SELECT count() AS total FROM resource \
+<a href=#614 id=614 data-nosnippet>614</a>                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+<a href=#615 id=615 data-nosnippet>615</a>            </span>))
+<a href=#616 id=616 data-nosnippet>616</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str.clone()))
+<a href=#617 id=617 data-nosnippet>617</a>            .bind((<span class="string">"search"</span>, search_term.clone()))
+<a href=#618 id=618 data-nosnippet>618</a>            .<span class="kw">await
+<a href=#619 id=619 data-nosnippet>619</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#620 id=620 data-nosnippet>620</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#621 id=621 data-nosnippet>621</a>
+<a href=#622 id=622 data-nosnippet>622</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#623 id=623 data-nosnippet>623</a>            </span>.db
+<a href=#624 id=624 data-nosnippet>624</a>            .current()
+<a href=#625 id=625 data-nosnippet>625</a>            .query(<span class="macro">format!</span>(
+<a href=#626 id=626 data-nosnippet>626</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM resource \
+<a href=#627 id=627 data-nosnippet>627</a>                 WHERE tenant_id = $tenant_id{search} \
+<a href=#628 id=628 data-nosnippet>628</a>                 ORDER BY created_at ASC \
+<a href=#629 id=629 data-nosnippet>629</a>                 LIMIT $limit START $offset"
+<a href=#630 id=630 data-nosnippet>630</a>            </span>))
+<a href=#631 id=631 data-nosnippet>631</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#632 id=632 data-nosnippet>632</a>            .bind((<span class="string">"search"</span>, search_term))
+<a href=#633 id=633 data-nosnippet>633</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
+<a href=#634 id=634 data-nosnippet>634</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
+<a href=#635 id=635 data-nosnippet>635</a>            .<span class="kw">await
+<a href=#636 id=636 data-nosnippet>636</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#637 id=637 data-nosnippet>637</a>
-<a href=#638 id=638 data-nosnippet>638</a>    <span class="kw">async fn </span>get_children(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, parent_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Resource&gt;&gt; {
-<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
-<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>parent_id_str = parent_id.to_string();
-<a href=#641 id=641 data-nosnippet>641</a>
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#643 id=643 data-nosnippet>643</a>            </span>.db
-<a href=#644 id=644 data-nosnippet>644</a>            .current()
-<a href=#645 id=645 data-nosnippet>645</a>            .query(
-<a href=#646 id=646 data-nosnippet>646</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM resource \
-<a href=#647 id=647 data-nosnippet>647</a>                 WHERE tenant_id = $tenant_id AND parent_id = $parent_id"</span>,
-<a href=#648 id=648 data-nosnippet>648</a>            )
-<a href=#649 id=649 data-nosnippet>649</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#650 id=650 data-nosnippet>650</a>            .bind((<span class="string">"parent_id"</span>, parent_id_str))
-<a href=#651 id=651 data-nosnippet>651</a>            .<span class="kw">await
-<a href=#652 id=652 data-nosnippet>652</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#653 id=653 data-nosnippet>653</a>
-<a href=#654 id=654 data-nosnippet>654</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>        rows.into_iter()
-<a href=#657 id=657 data-nosnippet>657</a>            .map(|row| row.try_into_resource())
-<a href=#658 id=658 data-nosnippet>658</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()
-<a href=#659 id=659 data-nosnippet>659</a>            .map_err(Into::into)
-<a href=#660 id=660 data-nosnippet>660</a>    }
-<a href=#661 id=661 data-nosnippet>661</a>
-<a href=#662 id=662 data-nosnippet>662</a>    <span class="kw">async fn </span>get_ancestors(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Resource&gt;&gt; {
-<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>id_str = id.to_string();
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#639 id=639 data-nosnippet>639</a>
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>items = rows
+<a href=#641 id=641 data-nosnippet>641</a>            .into_iter()
+<a href=#642 id=642 data-nosnippet>642</a>            .map(|row| row.try_into_resource())
+<a href=#643 id=643 data-nosnippet>643</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#644 id=644 data-nosnippet>644</a>
+<a href=#645 id=645 data-nosnippet>645</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
+<a href=#646 id=646 data-nosnippet>646</a>    }
+<a href=#647 id=647 data-nosnippet>647</a>
+<a href=#648 id=648 data-nosnippet>648</a>    <span class="kw">async fn </span>get_children(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, parent_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Resource&gt;&gt; {
+<a href=#649 id=649 data-nosnippet>649</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
+<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">let </span>parent_id_str = parent_id.to_string();
+<a href=#651 id=651 data-nosnippet>651</a>
+<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#653 id=653 data-nosnippet>653</a>            </span>.db
+<a href=#654 id=654 data-nosnippet>654</a>            .current()
+<a href=#655 id=655 data-nosnippet>655</a>            .query(
+<a href=#656 id=656 data-nosnippet>656</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM resource \
+<a href=#657 id=657 data-nosnippet>657</a>                 WHERE tenant_id = $tenant_id AND parent_id = $parent_id"</span>,
+<a href=#658 id=658 data-nosnippet>658</a>            )
+<a href=#659 id=659 data-nosnippet>659</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#660 id=660 data-nosnippet>660</a>            .bind((<span class="string">"parent_id"</span>, parent_id_str))
+<a href=#661 id=661 data-nosnippet>661</a>            .<span class="kw">await
+<a href=#662 id=662 data-nosnippet>662</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#663 id=663 data-nosnippet>663</a>
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#665 id=665 data-nosnippet>665</a>
-<a href=#666 id=666 data-nosnippet>666</a>        <span class="comment">// CQ-B13: walk the hierarchy in a SINGLE recursive graph query instead of
-<a href=#667 id=667 data-nosnippet>667</a>        // one SELECT per level. The `child_of` edge points child -&gt; parent, so
-<a href=#668 id=668 data-nosnippet>668</a>        // `-&gt;child_of-&gt;resource` climbs one level; `.{..N+path}` follows that edge
-<a href=#669 id=669 data-nosnippet>669</a>        // up to N times and yields the ordered path of ancestor records
-<a href=#670 id=670 data-nosnippet>670</a>        // (nearest-first, EXCLUDING the starting resource — matching the previous
-<a href=#671 id=671 data-nosnippet>671</a>        // loop's output). The `(resource WHERE tenant_id = $tenant_id)` node filter
-<a href=#672 id=672 data-nosnippet>672</a>        // enforces tenant scoping: an ancestor in another tenant terminates the
-<a href=#673 id=673 data-nosnippet>673</a>        // walk, exactly like the old per-level `WHERE tenant_id` guard.
-<a href=#674 id=674 data-nosnippet>674</a>        //
-<a href=#675 id=675 data-nosnippet>675</a>        // CQ-B08 preserved: `+path` does NOT deduplicate, so both a
-<a href=#676 id=676 data-nosnippet>676</a>        // pathologically deep chain AND a cycle traverse until the depth cap and
-<a href=#677 id=677 data-nosnippet>677</a>        // return exactly MAX_ANCESTOR_DEPTH records. The original loop errored as
-<a href=#678 id=678 data-nosnippet>678</a>        // soon as it would step onto the MAX_ANCESTOR_DEPTH-th ancestor (i.e. when
-<a href=#679 id=679 data-nosnippet>679</a>        // there are &gt;= MAX_ANCESTOR_DEPTH ancestors), so we recurse to
-<a href=#680 id=680 data-nosnippet>680</a>        // MAX_ANCESTOR_DEPTH and treat a result of that length as an
-<a href=#681 id=681 data-nosnippet>681</a>        // overflow/cycle — surfacing the same error rather than silently
-<a href=#682 id=682 data-nosnippet>682</a>        // truncating.
-<a href=#683 id=683 data-nosnippet>683</a>        </span><span class="kw">let </span>query = <span class="macro">format!</span>(
-<a href=#684 id=684 data-nosnippet>684</a>            <span class="string">"SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
-<a href=#685 id=685 data-nosnippet>685</a>                    parent_id, metadata, created_at, updated_at \
-<a href=#686 id=686 data-nosnippet>686</a>             FROM array::flatten(\
-<a href=#687 id=687 data-nosnippet>687</a>                 type::record('resource', $id).{{..{depth}+path}}(\
-<a href=#688 id=688 data-nosnippet>688</a>                     -&gt;child_of-&gt;(resource WHERE tenant_id = $tenant_id)));"</span>,
-<a href=#689 id=689 data-nosnippet>689</a>            depth = MAX_ANCESTOR_DEPTH,
-<a href=#690 id=690 data-nosnippet>690</a>        );
-<a href=#691 id=691 data-nosnippet>691</a>
-<a href=#692 id=692 data-nosnippet>692</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#693 id=693 data-nosnippet>693</a>            </span>.db
-<a href=#694 id=694 data-nosnippet>694</a>            .current()
-<a href=#695 id=695 data-nosnippet>695</a>            .query(query)
-<a href=#696 id=696 data-nosnippet>696</a>            .bind((<span class="string">"id"</span>, id_str))
-<a href=#697 id=697 data-nosnippet>697</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#698 id=698 data-nosnippet>698</a>            .<span class="kw">await
-<a href=#699 id=699 data-nosnippet>699</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#700 id=700 data-nosnippet>700</a>
-<a href=#701 id=701 data-nosnippet>701</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#702 id=702 data-nosnippet>702</a>
-<a href=#703 id=703 data-nosnippet>703</a>        <span class="kw">if </span>rows.len() &gt;= MAX_ANCESTOR_DEPTH {
-<a href=#704 id=704 data-nosnippet>704</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::Migration(
-<a href=#705 id=705 data-nosnippet>705</a>                <span class="string">"resource hierarchy exceeds maximum depth — possible cycle"</span>.into(),
-<a href=#706 id=706 data-nosnippet>706</a>            )
-<a href=#707 id=707 data-nosnippet>707</a>            .into());
-<a href=#708 id=708 data-nosnippet>708</a>        }
-<a href=#709 id=709 data-nosnippet>709</a>
-<a href=#710 id=710 data-nosnippet>710</a>        rows.into_iter()
-<a href=#711 id=711 data-nosnippet>711</a>            .map(|row| row.try_into_resource())
-<a href=#712 id=712 data-nosnippet>712</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()
-<a href=#713 id=713 data-nosnippet>713</a>            .map_err(Into::into)
-<a href=#714 id=714 data-nosnippet>714</a>    }
-<a href=#715 id=715 data-nosnippet>715</a>}
+<a href=#666 id=666 data-nosnippet>666</a>        rows.into_iter()
+<a href=#667 id=667 data-nosnippet>667</a>            .map(|row| row.try_into_resource())
+<a href=#668 id=668 data-nosnippet>668</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()
+<a href=#669 id=669 data-nosnippet>669</a>            .map_err(Into::into)
+<a href=#670 id=670 data-nosnippet>670</a>    }
+<a href=#671 id=671 data-nosnippet>671</a>
+<a href=#672 id=672 data-nosnippet>672</a>    <span class="kw">async fn </span>get_ancestors(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Resource&gt;&gt; {
+<a href=#673 id=673 data-nosnippet>673</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>id_str = id.to_string();
+<a href=#675 id=675 data-nosnippet>675</a>
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="comment">// CQ-B13: walk the hierarchy in a SINGLE recursive graph query instead of
+<a href=#677 id=677 data-nosnippet>677</a>        // one SELECT per level. The `child_of` edge points child -&gt; parent, so
+<a href=#678 id=678 data-nosnippet>678</a>        // `-&gt;child_of-&gt;resource` climbs one level; `.{..N+path}` follows that edge
+<a href=#679 id=679 data-nosnippet>679</a>        // up to N times and yields the ordered path of ancestor records
+<a href=#680 id=680 data-nosnippet>680</a>        // (nearest-first, EXCLUDING the starting resource — matching the previous
+<a href=#681 id=681 data-nosnippet>681</a>        // loop's output). The `(resource WHERE tenant_id = $tenant_id)` node filter
+<a href=#682 id=682 data-nosnippet>682</a>        // enforces tenant scoping: an ancestor in another tenant terminates the
+<a href=#683 id=683 data-nosnippet>683</a>        // walk, exactly like the old per-level `WHERE tenant_id` guard.
+<a href=#684 id=684 data-nosnippet>684</a>        //
+<a href=#685 id=685 data-nosnippet>685</a>        // CQ-B08 preserved: `+path` does NOT deduplicate, so both a
+<a href=#686 id=686 data-nosnippet>686</a>        // pathologically deep chain AND a cycle traverse until the depth cap and
+<a href=#687 id=687 data-nosnippet>687</a>        // return exactly MAX_ANCESTOR_DEPTH records. The original loop errored as
+<a href=#688 id=688 data-nosnippet>688</a>        // soon as it would step onto the MAX_ANCESTOR_DEPTH-th ancestor (i.e. when
+<a href=#689 id=689 data-nosnippet>689</a>        // there are &gt;= MAX_ANCESTOR_DEPTH ancestors), so we recurse to
+<a href=#690 id=690 data-nosnippet>690</a>        // MAX_ANCESTOR_DEPTH and treat a result of that length as an
+<a href=#691 id=691 data-nosnippet>691</a>        // overflow/cycle — surfacing the same error rather than silently
+<a href=#692 id=692 data-nosnippet>692</a>        // truncating.
+<a href=#693 id=693 data-nosnippet>693</a>        </span><span class="kw">let </span>query = <span class="macro">format!</span>(
+<a href=#694 id=694 data-nosnippet>694</a>            <span class="string">"SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
+<a href=#695 id=695 data-nosnippet>695</a>                    parent_id, metadata, created_at, updated_at \
+<a href=#696 id=696 data-nosnippet>696</a>             FROM array::flatten(\
+<a href=#697 id=697 data-nosnippet>697</a>                 type::record('resource', $id).{{..{depth}+path}}(\
+<a href=#698 id=698 data-nosnippet>698</a>                     -&gt;child_of-&gt;(resource WHERE tenant_id = $tenant_id)));"</span>,
+<a href=#699 id=699 data-nosnippet>699</a>            depth = MAX_ANCESTOR_DEPTH,
+<a href=#700 id=700 data-nosnippet>700</a>        );
+<a href=#701 id=701 data-nosnippet>701</a>
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#703 id=703 data-nosnippet>703</a>            </span>.db
+<a href=#704 id=704 data-nosnippet>704</a>            .current()
+<a href=#705 id=705 data-nosnippet>705</a>            .query(query)
+<a href=#706 id=706 data-nosnippet>706</a>            .bind((<span class="string">"id"</span>, id_str))
+<a href=#707 id=707 data-nosnippet>707</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#708 id=708 data-nosnippet>708</a>            .<span class="kw">await
+<a href=#709 id=709 data-nosnippet>709</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#710 id=710 data-nosnippet>710</a>
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>rows: Vec&lt;ResourceRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#712 id=712 data-nosnippet>712</a>
+<a href=#713 id=713 data-nosnippet>713</a>        <span class="kw">if </span>rows.len() &gt;= MAX_ANCESTOR_DEPTH {
+<a href=#714 id=714 data-nosnippet>714</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::Migration(
+<a href=#715 id=715 data-nosnippet>715</a>                <span class="string">"resource hierarchy exceeds maximum depth — possible cycle"</span>.into(),
+<a href=#716 id=716 data-nosnippet>716</a>            )
+<a href=#717 id=717 data-nosnippet>717</a>            .into());
+<a href=#718 id=718 data-nosnippet>718</a>        }
+<a href=#719 id=719 data-nosnippet>719</a>
+<a href=#720 id=720 data-nosnippet>720</a>        rows.into_iter()
+<a href=#721 id=721 data-nosnippet>721</a>            .map(|row| row.try_into_resource())
+<a href=#722 id=722 data-nosnippet>722</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()
+<a href=#723 id=723 data-nosnippet>723</a>            .map_err(Into::into)
+<a href=#724 id=724 data-nosnippet>724</a>    }
+<a href=#725 id=725 data-nosnippet>725</a>}
 </code></pre></div></section></main></body></html>

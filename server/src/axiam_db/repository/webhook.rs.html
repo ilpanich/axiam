@@ -11,7 +11,7 @@
 <a href=#11 id=11 data-nosnippet>11</a>
 <a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, take_first_or_not_found};
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
 <a href=#15 id=15 data-nosnippet>15</a>
 <a href=#16 id=16 data-nosnippet>16</a><span class="comment">// ---------------------------------------------------------------------------
 <a href=#17 id=17 data-nosnippet>17</a>// Row structs
@@ -271,71 +271,78 @@
 <a href=#271 id=271 data-nosnippet>271</a>    ) -&gt; AxiamResult&lt;PaginatedResult&lt;Webhook&gt;&gt; {
 <a href=#272 id=272 data-nosnippet>272</a>        <span class="kw">let </span>tid = tenant_id.to_string();
 <a href=#273 id=273 data-nosnippet>273</a>
-<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span>count_result = <span class="self">self
-<a href=#275 id=275 data-nosnippet>275</a>            </span>.db
-<a href=#276 id=276 data-nosnippet>276</a>            .current()
-<a href=#277 id=277 data-nosnippet>277</a>            .query(
-<a href=#278 id=278 data-nosnippet>278</a>                <span class="string">"SELECT count() AS total FROM webhook \
-<a href=#279 id=279 data-nosnippet>279</a>                 WHERE tenant_id = $tenant_id GROUP ALL"</span>,
-<a href=#280 id=280 data-nosnippet>280</a>            )
-<a href=#281 id=281 data-nosnippet>281</a>            .bind((<span class="string">"tenant_id"</span>, tid.clone()))
-<a href=#282 id=282 data-nosnippet>282</a>            .<span class="kw">await
-<a href=#283 id=283 data-nosnippet>283</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = count_result
-<a href=#285 id=285 data-nosnippet>285</a>            .check()
-<a href=#286 id=286 data-nosnippet>286</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#288 id=288 data-nosnippet>288</a>
-<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">let </span>data_result = <span class="self">self
-<a href=#290 id=290 data-nosnippet>290</a>            </span>.db
-<a href=#291 id=291 data-nosnippet>291</a>            .current()
-<a href=#292 id=292 data-nosnippet>292</a>            .query(
-<a href=#293 id=293 data-nosnippet>293</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM webhook \
-<a href=#294 id=294 data-nosnippet>294</a>                 WHERE tenant_id = $tenant_id \
-<a href=#295 id=295 data-nosnippet>295</a>                 ORDER BY created_at DESC \
-<a href=#296 id=296 data-nosnippet>296</a>                 LIMIT $limit START $offset"</span>,
-<a href=#297 id=297 data-nosnippet>297</a>            )
-<a href=#298 id=298 data-nosnippet>298</a>            .bind((<span class="string">"tenant_id"</span>, tid))
-<a href=#299 id=299 data-nosnippet>299</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
-<a href=#300 id=300 data-nosnippet>300</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
-<a href=#301 id=301 data-nosnippet>301</a>            .<span class="kw">await
-<a href=#302 id=302 data-nosnippet>302</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span><span class="kw-2">mut </span>data_result = data_result
-<a href=#304 id=304 data-nosnippet>304</a>            .check()
-<a href=#305 id=305 data-nosnippet>305</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">let </span>rows: Vec&lt;WebhookRowWithId&gt; = data_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#307 id=307 data-nosnippet>307</a>
-<a href=#308 id=308 data-nosnippet>308</a>        <span class="kw">let </span>items: Vec&lt;Webhook&gt; = rows
-<a href=#309 id=309 data-nosnippet>309</a>            .into_iter()
-<a href=#310 id=310 data-nosnippet>310</a>            .map(|r| r.try_into_entry())
-<a href=#311 id=311 data-nosnippet>311</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;<span class="kw">_</span>, <span class="kw">_</span>&gt;&gt;()<span class="question-mark">?</span>;
-<a href=#312 id=312 data-nosnippet>312</a>
-<a href=#313 id=313 data-nosnippet>313</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
-<a href=#314 id=314 data-nosnippet>314</a>    }
-<a href=#315 id=315 data-nosnippet>315</a>
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="kw">async fn </span>get_by_event(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, event_type: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;Vec&lt;Webhook&gt;&gt; {
-<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#318 id=318 data-nosnippet>318</a>            </span>.db
-<a href=#319 id=319 data-nosnippet>319</a>            .current()
-<a href=#320 id=320 data-nosnippet>320</a>            .query(
-<a href=#321 id=321 data-nosnippet>321</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM webhook \
-<a href=#322 id=322 data-nosnippet>322</a>                 WHERE tenant_id = $tenant_id \
-<a href=#323 id=323 data-nosnippet>323</a>                 AND enabled = true \
-<a href=#324 id=324 data-nosnippet>324</a>                 AND events CONTAINS $event_type"</span>,
-<a href=#325 id=325 data-nosnippet>325</a>            )
-<a href=#326 id=326 data-nosnippet>326</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#327 id=327 data-nosnippet>327</a>            .bind((<span class="string">"event_type"</span>, event_type.to_string()))
-<a href=#328 id=328 data-nosnippet>328</a>            .<span class="kw">await
-<a href=#329 id=329 data-nosnippet>329</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#330 id=330 data-nosnippet>330</a>
-<a href=#331 id=331 data-nosnippet>331</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
-<a href=#332 id=332 data-nosnippet>332</a>            .check()
-<a href=#333 id=333 data-nosnippet>333</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#334 id=334 data-nosnippet>334</a>        <span class="kw">let </span>rows: Vec&lt;WebhookRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#335 id=335 data-nosnippet>335</a>
-<a href=#336 id=336 data-nosnippet>336</a>        rows.into_iter()
-<a href=#337 id=337 data-nosnippet>337</a>            .map(|r| r.try_into_entry().map_err(Into::into))
-<a href=#338 id=338 data-nosnippet>338</a>            .collect()
-<a href=#339 id=339 data-nosnippet>339</a>    }
-<a href=#340 id=340 data-nosnippet>340</a>}
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="comment">// See `SurrealUserRepository::list` for why the filter is applied to
+<a href=#275 id=275 data-nosnippet>275</a>        // both the count and the page.
+<a href=#276 id=276 data-nosnippet>276</a>        </span><span class="kw">let </span>search = search_filter(<span class="kw-2">&amp;</span>pagination, <span class="kw-2">&amp;</span>[<span class="string">"name"</span>, <span class="string">"url"</span>]);
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>search_term = search_bind(<span class="kw-2">&amp;</span>pagination);
+<a href=#278 id=278 data-nosnippet>278</a>
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="kw">let </span>count_result = <span class="self">self
+<a href=#280 id=280 data-nosnippet>280</a>            </span>.db
+<a href=#281 id=281 data-nosnippet>281</a>            .current()
+<a href=#282 id=282 data-nosnippet>282</a>            .query(<span class="macro">format!</span>(
+<a href=#283 id=283 data-nosnippet>283</a>                <span class="string">"SELECT count() AS total FROM webhook \
+<a href=#284 id=284 data-nosnippet>284</a>                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+<a href=#285 id=285 data-nosnippet>285</a>            </span>))
+<a href=#286 id=286 data-nosnippet>286</a>            .bind((<span class="string">"tenant_id"</span>, tid.clone()))
+<a href=#287 id=287 data-nosnippet>287</a>            .bind((<span class="string">"search"</span>, search_term.clone()))
+<a href=#288 id=288 data-nosnippet>288</a>            .<span class="kw">await
+<a href=#289 id=289 data-nosnippet>289</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = count_result
+<a href=#291 id=291 data-nosnippet>291</a>            .check()
+<a href=#292 id=292 data-nosnippet>292</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#293 id=293 data-nosnippet>293</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#294 id=294 data-nosnippet>294</a>
+<a href=#295 id=295 data-nosnippet>295</a>        <span class="kw">let </span>data_result = <span class="self">self
+<a href=#296 id=296 data-nosnippet>296</a>            </span>.db
+<a href=#297 id=297 data-nosnippet>297</a>            .current()
+<a href=#298 id=298 data-nosnippet>298</a>            .query(<span class="macro">format!</span>(
+<a href=#299 id=299 data-nosnippet>299</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM webhook \
+<a href=#300 id=300 data-nosnippet>300</a>                 WHERE tenant_id = $tenant_id{search} \
+<a href=#301 id=301 data-nosnippet>301</a>                 ORDER BY created_at DESC \
+<a href=#302 id=302 data-nosnippet>302</a>                 LIMIT $limit START $offset"
+<a href=#303 id=303 data-nosnippet>303</a>            </span>))
+<a href=#304 id=304 data-nosnippet>304</a>            .bind((<span class="string">"tenant_id"</span>, tid))
+<a href=#305 id=305 data-nosnippet>305</a>            .bind((<span class="string">"search"</span>, search_term))
+<a href=#306 id=306 data-nosnippet>306</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
+<a href=#307 id=307 data-nosnippet>307</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
+<a href=#308 id=308 data-nosnippet>308</a>            .<span class="kw">await
+<a href=#309 id=309 data-nosnippet>309</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="kw">let </span><span class="kw-2">mut </span>data_result = data_result
+<a href=#311 id=311 data-nosnippet>311</a>            .check()
+<a href=#312 id=312 data-nosnippet>312</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">let </span>rows: Vec&lt;WebhookRowWithId&gt; = data_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a>        <span class="kw">let </span>items: Vec&lt;Webhook&gt; = rows
+<a href=#316 id=316 data-nosnippet>316</a>            .into_iter()
+<a href=#317 id=317 data-nosnippet>317</a>            .map(|r| r.try_into_entry())
+<a href=#318 id=318 data-nosnippet>318</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;<span class="kw">_</span>, <span class="kw">_</span>&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#319 id=319 data-nosnippet>319</a>
+<a href=#320 id=320 data-nosnippet>320</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
+<a href=#321 id=321 data-nosnippet>321</a>    }
+<a href=#322 id=322 data-nosnippet>322</a>
+<a href=#323 id=323 data-nosnippet>323</a>    <span class="kw">async fn </span>get_by_event(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, event_type: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;Vec&lt;Webhook&gt;&gt; {
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#325 id=325 data-nosnippet>325</a>            </span>.db
+<a href=#326 id=326 data-nosnippet>326</a>            .current()
+<a href=#327 id=327 data-nosnippet>327</a>            .query(
+<a href=#328 id=328 data-nosnippet>328</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM webhook \
+<a href=#329 id=329 data-nosnippet>329</a>                 WHERE tenant_id = $tenant_id \
+<a href=#330 id=330 data-nosnippet>330</a>                 AND enabled = true \
+<a href=#331 id=331 data-nosnippet>331</a>                 AND events CONTAINS $event_type"</span>,
+<a href=#332 id=332 data-nosnippet>332</a>            )
+<a href=#333 id=333 data-nosnippet>333</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#334 id=334 data-nosnippet>334</a>            .bind((<span class="string">"event_type"</span>, event_type.to_string()))
+<a href=#335 id=335 data-nosnippet>335</a>            .<span class="kw">await
+<a href=#336 id=336 data-nosnippet>336</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#337 id=337 data-nosnippet>337</a>
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#339 id=339 data-nosnippet>339</a>            .check()
+<a href=#340 id=340 data-nosnippet>340</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="kw">let </span>rows: Vec&lt;WebhookRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>        rows.into_iter()
+<a href=#344 id=344 data-nosnippet>344</a>            .map(|r| r.try_into_entry().map_err(Into::into))
+<a href=#345 id=345 data-nosnippet>345</a>            .collect()
+<a href=#346 id=346 data-nosnippet>346</a>    }
+<a href=#347 id=347 data-nosnippet>347</a>}
 </code></pre></div></section></main></body></html>

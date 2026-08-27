@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["TenantStatus"],"struct":["CreateTenant","Tenant","UpdateTenant"]};
+window.SIDEBAR_ITEMS = {"constant":["ORGANIZATION_TENANT_SLUG"],"enum":["TenantKind","TenantStatus"],"struct":["CreateTenant","Tenant","UpdateTenant"]};

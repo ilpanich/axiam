@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuthenticatedPrincipal","AuthenticatedServiceAccount","AuthenticatedUser"],"trait":["SessionValidator"]};
+window.SIDEBAR_ITEMS = {"constant":["ACTIVE_TENANT_HEADER"],"struct":["AuthenticatedPrincipal","AuthenticatedServiceAccount","AuthenticatedUser","TenantScope"],"trait":["SessionValidator","TenantScopeResolver"]};

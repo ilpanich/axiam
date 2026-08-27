@@ -15,7 +15,7 @@
 <a href=#15 id=15 data-nosnippet>15</a>
 <a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, take_first_or_not_found};
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
 <a href=#19 id=19 data-nosnippet>19</a>
 <a href=#20 id=20 data-nosnippet>20</a><span class="doccomment">/// Generate a random client ID with the `oa_` prefix (32 hex chars).
 <a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">fn </span>generate_client_id() -&gt; String {
@@ -582,79 +582,89 @@
 <a href=#582 id=582 data-nosnippet>582</a>    ) -&gt; AxiamResult&lt;PaginatedResult&lt;OAuth2Client&gt;&gt; {
 <a href=#583 id=583 data-nosnippet>583</a>        <span class="kw">let </span>tenant_id_str = tenant_id.to_string();
 <a href=#584 id=584 data-nosnippet>584</a>
-<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
-<a href=#586 id=586 data-nosnippet>586</a>            </span>.db
-<a href=#587 id=587 data-nosnippet>587</a>            .current()
-<a href=#588 id=588 data-nosnippet>588</a>            .query(
-<a href=#589 id=589 data-nosnippet>589</a>                <span class="string">"SELECT count() AS total FROM oauth2_client \
-<a href=#590 id=590 data-nosnippet>590</a>                 WHERE tenant_id = $tenant_id GROUP ALL"</span>,
-<a href=#591 id=591 data-nosnippet>591</a>            )
-<a href=#592 id=592 data-nosnippet>592</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str.clone()))
-<a href=#593 id=593 data-nosnippet>593</a>            .<span class="kw">await
-<a href=#594 id=594 data-nosnippet>594</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#595 id=595 data-nosnippet>595</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#596 id=596 data-nosnippet>596</a>
-<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#598 id=598 data-nosnippet>598</a>            </span>.db
-<a href=#599 id=599 data-nosnippet>599</a>            .current()
-<a href=#600 id=600 data-nosnippet>600</a>            .query(
-<a href=#601 id=601 data-nosnippet>601</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM oauth2_client \
-<a href=#602 id=602 data-nosnippet>602</a>                 WHERE tenant_id = $tenant_id \
-<a href=#603 id=603 data-nosnippet>603</a>                 ORDER BY created_at ASC \
-<a href=#604 id=604 data-nosnippet>604</a>                 LIMIT $limit START $offset"</span>,
-<a href=#605 id=605 data-nosnippet>605</a>            )
-<a href=#606 id=606 data-nosnippet>606</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
-<a href=#607 id=607 data-nosnippet>607</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
-<a href=#608 id=608 data-nosnippet>608</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
-<a href=#609 id=609 data-nosnippet>609</a>            .<span class="kw">await
-<a href=#610 id=610 data-nosnippet>610</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#611 id=611 data-nosnippet>611</a>
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw">let </span>rows: Vec&lt;OAuth2ClientRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#613 id=613 data-nosnippet>613</a>
-<a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">let </span>items = rows
-<a href=#615 id=615 data-nosnippet>615</a>            .into_iter()
-<a href=#616 id=616 data-nosnippet>616</a>            .map(|row| row.try_into_client())
-<a href=#617 id=617 data-nosnippet>617</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
-<a href=#618 id=618 data-nosnippet>618</a>
-<a href=#619 id=619 data-nosnippet>619</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
-<a href=#620 id=620 data-nosnippet>620</a>    }
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="comment">// Free-text filter, applied to BOTH queries below so the
+<a href=#586 id=586 data-nosnippet>586</a>        // total counts matches rather than rows — a pager whose page
+<a href=#587 id=587 data-nosnippet>587</a>        // count belongs to a different result set than the page it
+<a href=#588 id=588 data-nosnippet>588</a>        // shows is worse than no pager. Empty when unsearched, so an
+<a href=#589 id=589 data-nosnippet>589</a>        // unfiltered list runs exactly the query it always ran.
+<a href=#590 id=590 data-nosnippet>590</a>        </span><span class="kw">let </span>search = search_filter(<span class="kw-2">&amp;</span>pagination, <span class="kw-2">&amp;</span>[<span class="string">"name"</span>, <span class="string">"client_id"</span>]);
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">let </span>search_term = search_bind(<span class="kw-2">&amp;</span>pagination);
+<a href=#592 id=592 data-nosnippet>592</a>
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
+<a href=#594 id=594 data-nosnippet>594</a>            </span>.db
+<a href=#595 id=595 data-nosnippet>595</a>            .current()
+<a href=#596 id=596 data-nosnippet>596</a>            .query(<span class="macro">format!</span>(
+<a href=#597 id=597 data-nosnippet>597</a>                <span class="string">"SELECT count() AS total FROM oauth2_client \
+<a href=#598 id=598 data-nosnippet>598</a>                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+<a href=#599 id=599 data-nosnippet>599</a>            </span>))
+<a href=#600 id=600 data-nosnippet>600</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str.clone()))
+<a href=#601 id=601 data-nosnippet>601</a>            .bind((<span class="string">"search"</span>, search_term.clone()))
+<a href=#602 id=602 data-nosnippet>602</a>            .<span class="kw">await
+<a href=#603 id=603 data-nosnippet>603</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#605 id=605 data-nosnippet>605</a>
+<a href=#606 id=606 data-nosnippet>606</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#607 id=607 data-nosnippet>607</a>            </span>.db
+<a href=#608 id=608 data-nosnippet>608</a>            .current()
+<a href=#609 id=609 data-nosnippet>609</a>            .query(<span class="macro">format!</span>(
+<a href=#610 id=610 data-nosnippet>610</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM oauth2_client \
+<a href=#611 id=611 data-nosnippet>611</a>                 WHERE tenant_id = $tenant_id{search} \
+<a href=#612 id=612 data-nosnippet>612</a>                 ORDER BY created_at ASC \
+<a href=#613 id=613 data-nosnippet>613</a>                 LIMIT $limit START $offset"
+<a href=#614 id=614 data-nosnippet>614</a>            </span>))
+<a href=#615 id=615 data-nosnippet>615</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id_str))
+<a href=#616 id=616 data-nosnippet>616</a>            .bind((<span class="string">"search"</span>, search_term))
+<a href=#617 id=617 data-nosnippet>617</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
+<a href=#618 id=618 data-nosnippet>618</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
+<a href=#619 id=619 data-nosnippet>619</a>            .<span class="kw">await
+<a href=#620 id=620 data-nosnippet>620</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#621 id=621 data-nosnippet>621</a>
-<a href=#622 id=622 data-nosnippet>622</a>    <span class="doccomment">/// Compare-and-swap upgrade of a legacy `client_secret_hash` (OBS-1).
-<a href=#623 id=623 data-nosnippet>623</a>    ///
-<a href=#624 id=624 data-nosnippet>624</a>    /// `WHERE ... AND client_secret_hash = $expected_hash` is the CAS: if a
-<a href=#625 id=625 data-nosnippet>625</a>    /// secret rotation landed between the read that produced `expected_hash`
-<a href=#626 id=626 data-nosnippet>626</a>    /// and this write, no row matches, nothing is written, and `false` is
-<a href=#627 id=627 data-nosnippet>627</a>    /// returned — the rotated secret is never clobbered back to the old one.
-<a href=#628 id=628 data-nosnippet>628</a>    </span><span class="kw">async fn </span>upgrade_client_secret_hash(
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#630 id=630 data-nosnippet>630</a>        tenant_id: Uuid,
-<a href=#631 id=631 data-nosnippet>631</a>        client_id: <span class="kw-2">&amp;</span>str,
-<a href=#632 id=632 data-nosnippet>632</a>        expected_hash: <span class="kw-2">&amp;</span>str,
-<a href=#633 id=633 data-nosnippet>633</a>        new_hash: <span class="kw-2">&amp;</span>str,
-<a href=#634 id=634 data-nosnippet>634</a>    ) -&gt; AxiamResult&lt;bool&gt; {
-<a href=#635 id=635 data-nosnippet>635</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#636 id=636 data-nosnippet>636</a>            </span>.db
-<a href=#637 id=637 data-nosnippet>637</a>            .current()
-<a href=#638 id=638 data-nosnippet>638</a>            .query(
-<a href=#639 id=639 data-nosnippet>639</a>                <span class="string">"UPDATE oauth2_client SET \
-<a href=#640 id=640 data-nosnippet>640</a>                 client_secret_hash = $new_hash \
-<a href=#641 id=641 data-nosnippet>641</a>                 WHERE tenant_id = $tenant_id \
-<a href=#642 id=642 data-nosnippet>642</a>                 AND client_id = $client_id \
-<a href=#643 id=643 data-nosnippet>643</a>                 AND client_secret_hash = $expected_hash"</span>,
-<a href=#644 id=644 data-nosnippet>644</a>            )
-<a href=#645 id=645 data-nosnippet>645</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#646 id=646 data-nosnippet>646</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
-<a href=#647 id=647 data-nosnippet>647</a>            .bind((<span class="string">"expected_hash"</span>, expected_hash.to_string()))
-<a href=#648 id=648 data-nosnippet>648</a>            .bind((<span class="string">"new_hash"</span>, new_hash.to_string()))
-<a href=#649 id=649 data-nosnippet>649</a>            .<span class="kw">await
-<a href=#650 id=650 data-nosnippet>650</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#651 id=651 data-nosnippet>651</a>
-<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
-<a href=#653 id=653 data-nosnippet>653</a>            .check()
-<a href=#654 id=654 data-nosnippet>654</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>        <span class="kw">let </span>rows: Vec&lt;OAuth2ClientRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#657 id=657 data-nosnippet>657</a>        <span class="prelude-val">Ok</span>(!rows.is_empty())
-<a href=#658 id=658 data-nosnippet>658</a>    }
-<a href=#659 id=659 data-nosnippet>659</a>}
+<a href=#622 id=622 data-nosnippet>622</a>        <span class="kw">let </span>rows: Vec&lt;OAuth2ClientRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#623 id=623 data-nosnippet>623</a>
+<a href=#624 id=624 data-nosnippet>624</a>        <span class="kw">let </span>items = rows
+<a href=#625 id=625 data-nosnippet>625</a>            .into_iter()
+<a href=#626 id=626 data-nosnippet>626</a>            .map(|row| row.try_into_client())
+<a href=#627 id=627 data-nosnippet>627</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#628 id=628 data-nosnippet>628</a>
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
+<a href=#630 id=630 data-nosnippet>630</a>    }
+<a href=#631 id=631 data-nosnippet>631</a>
+<a href=#632 id=632 data-nosnippet>632</a>    <span class="doccomment">/// Compare-and-swap upgrade of a legacy `client_secret_hash` (OBS-1).
+<a href=#633 id=633 data-nosnippet>633</a>    ///
+<a href=#634 id=634 data-nosnippet>634</a>    /// `WHERE ... AND client_secret_hash = $expected_hash` is the CAS: if a
+<a href=#635 id=635 data-nosnippet>635</a>    /// secret rotation landed between the read that produced `expected_hash`
+<a href=#636 id=636 data-nosnippet>636</a>    /// and this write, no row matches, nothing is written, and `false` is
+<a href=#637 id=637 data-nosnippet>637</a>    /// returned — the rotated secret is never clobbered back to the old one.
+<a href=#638 id=638 data-nosnippet>638</a>    </span><span class="kw">async fn </span>upgrade_client_secret_hash(
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#640 id=640 data-nosnippet>640</a>        tenant_id: Uuid,
+<a href=#641 id=641 data-nosnippet>641</a>        client_id: <span class="kw-2">&amp;</span>str,
+<a href=#642 id=642 data-nosnippet>642</a>        expected_hash: <span class="kw-2">&amp;</span>str,
+<a href=#643 id=643 data-nosnippet>643</a>        new_hash: <span class="kw-2">&amp;</span>str,
+<a href=#644 id=644 data-nosnippet>644</a>    ) -&gt; AxiamResult&lt;bool&gt; {
+<a href=#645 id=645 data-nosnippet>645</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#646 id=646 data-nosnippet>646</a>            </span>.db
+<a href=#647 id=647 data-nosnippet>647</a>            .current()
+<a href=#648 id=648 data-nosnippet>648</a>            .query(
+<a href=#649 id=649 data-nosnippet>649</a>                <span class="string">"UPDATE oauth2_client SET \
+<a href=#650 id=650 data-nosnippet>650</a>                 client_secret_hash = $new_hash \
+<a href=#651 id=651 data-nosnippet>651</a>                 WHERE tenant_id = $tenant_id \
+<a href=#652 id=652 data-nosnippet>652</a>                 AND client_id = $client_id \
+<a href=#653 id=653 data-nosnippet>653</a>                 AND client_secret_hash = $expected_hash"</span>,
+<a href=#654 id=654 data-nosnippet>654</a>            )
+<a href=#655 id=655 data-nosnippet>655</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#656 id=656 data-nosnippet>656</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
+<a href=#657 id=657 data-nosnippet>657</a>            .bind((<span class="string">"expected_hash"</span>, expected_hash.to_string()))
+<a href=#658 id=658 data-nosnippet>658</a>            .bind((<span class="string">"new_hash"</span>, new_hash.to_string()))
+<a href=#659 id=659 data-nosnippet>659</a>            .<span class="kw">await
+<a href=#660 id=660 data-nosnippet>660</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#661 id=661 data-nosnippet>661</a>
+<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#663 id=663 data-nosnippet>663</a>            .check()
+<a href=#664 id=664 data-nosnippet>664</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#665 id=665 data-nosnippet>665</a>
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">let </span>rows: Vec&lt;OAuth2ClientRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="prelude-val">Ok</span>(!rows.is_empty())
+<a href=#668 id=668 data-nosnippet>668</a>    }
+<a href=#669 id=669 data-nosnippet>669</a>}
 </code></pre></div></section></main></body></html>

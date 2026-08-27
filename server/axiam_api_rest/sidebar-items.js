@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["authz","backchannel_logout","config","error","extractors","handlers","health","middleware","openapi","permissions","reactor_hooks","server","state","tenant_org_cache","token_exchange","uma","webhook","webhook_consumer"]};
+window.SIDEBAR_ITEMS = {"mod":["authz","backchannel_logout","config","error","extractors","handlers","health","middleware","openapi","permissions","reactor_hooks","server","state","tenant_org_cache","token_exchange","uma","webhook","webhook_consumer"],"trait":["TrustAnchorReloader"]};

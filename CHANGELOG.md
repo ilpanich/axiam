@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta02] - 2026-08-27
+
+### Added
+
+- Search and paging on every list, and say what a grant reaches
+
+- Organization-level principals
+
+### Changed
+
+- Say what "no body" has to be asserted on
+
+- Contract 1.31 — the PR #383 surface, stated for the SDKs
+
+- Pin filter parsing and the degenerate userName page
+
+- Cover CA import validation and the SCIM token principal
+
+- Cover the Groups collection and the PUT deprovisioning path
+
+- Pin the CA custody decision the beta got wrong
+
+- Cover the mTLS trust-anchor hot reload
+
+- Record §27 as implemented in all eleven SDKs (#385)
+
+- Update three assertions to the behaviour this PR ships
+
+- Give every OpenAPI export a content digest, so two can be told apart (#384)
+
+- Update three Playwright specs to the behaviour this PR ships
+
+- Regenerate the OpenAPI spec and management registry
+
+- Import SubjectScope where the suites construct it
+
+- Thread TenantKind and SubjectScope through the suites
+
+- Organization scope, Vault inheritance, mTLS hot reload
+
+### Fixed
+
+- A projected list element is not an anonymous type
+
+- Stop migrating a CA into database custody from destroying its key
+
+- Drop two unused SubjectScope imports
+
+- Assign b6's tenant admin through the role, not the user
+
+- Sign the fixture admin in by username, drop the new password literal
+
+- Wire the tenant resolver and reseat the examples on organization scope
+
+- Build clean under -D warnings, and cover the new frontend modules
+
+- Satisfy oxlint on the paginated pages
+
+- A resend button that says what happened
+
+- Make cross-tenant reach a claim, not a coincidence
+
+- Resend verification, unique seeded scopes, quiet shutdown
+
+- Inherit the configured Vault for CA signing key custody
+
 ## [1.0.0-beta01] - 2026-08-26
 
 ### Added

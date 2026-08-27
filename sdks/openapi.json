@@ -9,7 +9,7 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.0.0-beta01",
+    "version": "1.0.0-beta02",
     "x-axiam-spec-digest": "sha256:b5cc414403057815c8626630df6fd17176fade8c59a8d3d55105891044739c8e"
   },
   "paths": {

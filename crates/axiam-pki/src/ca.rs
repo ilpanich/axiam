@@ -834,11 +834,16 @@ impl<R: CaCertificateRepository> CaService<R> {
                 &private_key_pem,
             )
             .await?;
-        let (_, locator) = split_stored(stored);
+        // Both halves, not just the locator: an inlining custodian (database)
+        // hands back ciphertext and no locator, and the row's column is the
+        // only place it has to live. Discarding it here wrote `custody =
+        // database` beside an empty key column and then released the source
+        // copy, which destroyed the signing key.
+        let (ciphertext, locator) = split_stored(stored);
 
         let updated = self
             .repo
-            .update_key_custody(organization_id, id, target.custody(), locator)
+            .update_key_custody(organization_id, id, target.custody(), locator, ciphertext)
             .await?;
 
         if let Err(e) = source.delete(&key_ref).await {

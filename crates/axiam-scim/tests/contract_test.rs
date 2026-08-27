@@ -1706,3 +1706,269 @@ async fn user_put_on_an_unknown_id_is_not_found() {
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
 }
+
+// ---------------------------------------------------------------------------
+// Provisioning-token authentication
+//
+// `ScimPrincipal`'s token arm — the credential shape an IdP actually presents,
+// as opposed to the JWT every test above mints — was entirely unexercised:
+// `auth.rs` sat at 58% with the whole `is_provisioning_token` branch, both
+// 401s, and `ScimPrincipal::{tenant_id, user_id, token_id}`'s `Token` match
+// arms among the uncovered. These drive it through the real extractor.
+// ---------------------------------------------------------------------------
+
+use axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A resolver that accepts exactly one handle.
+///
+/// Counts `touch` calls so the test can assert the `last_used_at` stamp is
+/// attempted on an accepted request — it is best-effort and returns nothing,
+/// so a counter is the only way to observe it.
+struct StubResolver {
+    handle: String,
+    principal: ScimTokenPrincipal,
+    touched: Arc<AtomicUsize>,
+}
+
+impl ScimTokenResolver for StubResolver {
+    fn resolve<'a>(
+        &'a self,
+        raw_token: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ScimTokenPrincipal>> + Send + 'a>>
+    {
+        let hit = raw_token == self.handle;
+        let principal = self.principal;
+        Box::pin(async move { hit.then_some(principal) })
+    }
+
+    fn touch<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _token_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.touched.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+}
+
+/// Like `test_app!`, but with a provisioning-token resolver registered — the
+/// wiring a deployment that has enabled SCIM tokens has.
+macro_rules! test_app_with_resolver {
+    ($db:expr, $auth:expr, $authz:expr, $resolver:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new($authz.clone()))
+                .app_data(web::Data::new($resolver))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
+                .configure(axiam_scim::scim_routes::<TestDb>),
+        )
+        .await
+    };
+}
+
+const GOOD_HANDLE: &str = "axiam_scim_goodhandle";
+
+#[actix_rt::test]
+async fn a_provisioning_token_authenticates_and_is_stamped() {
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let bearer_user = scim_admin_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: bearer_user,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    // No JWT anywhere: the handle alone must carry the request, and RBAC is
+    // then evaluated against the user the token is bound to.
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    assert_eq!(
+        touched.load(Ordering::SeqCst),
+        1,
+        "an accepted provisioning token must have its last_used_at stamped"
+    );
+}
+
+#[actix_rt::test]
+async fn an_unknown_provisioning_token_is_unauthorized() {
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let bearer_user = scim_admin_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: bearer_user,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer("axiam_scim_wronghandle"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+
+    assert_eq!(
+        touched.load(Ordering::SeqCst),
+        0,
+        "a rejected handle must not be stamped as used"
+    );
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_fails_closed_with_no_resolver_registered() {
+    // The deployment has not enabled SCIM tokens. The handle must NOT fall
+    // through to the JWT arm — that would report a malformed JWT and send an
+    // operator looking in the wrong place — it must say tokens are not
+    // enabled here.
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let _ = scim_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not enabled"),
+        "the 401 must name the missing resolver, not a malformed JWT: {body}"
+    );
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_without_the_permission_is_forbidden() {
+    // Authentication and authorization are separate: a perfectly valid handle
+    // bound to a user who lacks `scim:provision` is a 403, not a 401. This is
+    // the token-arm counterpart of
+    // `unprivileged_tenant_user_is_forbidden_on_every_verb`.
+    let (db, _org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let unprivileged = scim_unprivileged_user(&db, tenant_id).await;
+
+    let touched = Arc::new(AtomicUsize::new(0));
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: unprivileged,
+            tenant_id,
+        },
+        touched: touched.clone(),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 403);
+}
+
+#[actix_rt::test]
+async fn a_provisioning_token_is_scoped_to_its_own_tenant() {
+    // The token row names the tenant; nothing in the request path or body
+    // does. A handle bound to tenant A must not reach a user that exists only
+    // in tenant B, even when the caller names that user's real UUID.
+    let (db, _org_a, tenant_a) = setup_tenant().await;
+    let provisioner_a = scim_admin_user(&db, tenant_a).await;
+
+    let org_b = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: format!("org-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_b = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            kind: TenantKind::Standard,
+            name: "Tenant B".into(),
+            slug: format!("tenant-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    seed_permissions(&db, tenant_b.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(&db, tenant_b.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let victim_in_b = scim_admin_user(&db, tenant_b.id).await;
+
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let resolver: Arc<dyn ScimTokenResolver> = Arc::new(StubResolver {
+        handle: GOOD_HANDLE.into(),
+        principal: ScimTokenPrincipal {
+            token_id: Uuid::new_v4(),
+            user_id: provisioner_a,
+            tenant_id: tenant_a,
+        },
+        touched: Arc::new(AtomicUsize::new(0)),
+    });
+    let app = test_app_with_resolver!(db, auth, authz, resolver);
+
+    let req = test::TestRequest::get()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{victim_in_b}"))
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        404,
+        "a tenant-A token must not resolve a tenant-B user by UUID"
+    );
+
+    let req = test::TestRequest::delete()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{victim_in_b}"))
+        .insert_header(bearer(GOOD_HANDLE))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        404,
+        "nor delete one"
+    );
+}

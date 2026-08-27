@@ -1644,16 +1644,28 @@ pub trait CaCertificateRepository: Send + Sync {
     /// Vault keep issuing from the CAs it already had. Moving a key is therefore
     /// two acts — copy the material, then update this — and this is the second.
     ///
-    /// `encrypted_private_key` is cleared unconditionally. A key that has been
-    /// copied into Vault and *also* left sealed in its row has not been moved
-    /// out of the database at all; it has been duplicated, which is strictly
-    /// worse than either state alone.
+    /// `encrypted_private_key` is set to exactly what is passed, and the two
+    /// arguments are how a custodian says where the key went: a referencing
+    /// custodian (Vault) supplies `key_locator` and no ciphertext, an inlining
+    /// one (database) supplies ciphertext and no locator.
+    ///
+    /// Passing `None` for both is what clears a key out of the row, and is the
+    /// right call when moving *into* Vault: a key copied into Vault and also
+    /// left sealed in its row has not been moved out of the database at all, it
+    /// has been duplicated, which is strictly worse than either state alone.
+    /// But it is only right in that direction. This took an unconditional
+    /// `encrypted_private_key = NONE` until a migration test drove the other
+    /// one, where clearing the column is how the key gets destroyed: the
+    /// database custodian has nowhere but this column to put it, so a move into
+    /// database custody wrote `custody = database` with no key beside it and
+    /// then released the source copy.
     fn update_key_custody(
         &self,
         organization_id: Uuid,
         id: Uuid,
         custody: crate::ca_keys::CaKeyCustody,
         key_locator: Option<String>,
+        encrypted_private_key: Option<Vec<u8>>,
     ) -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
 
     /// Every active CA flagged as an mTLS trust anchor, across all organizations.

@@ -9,7 +9,6 @@
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::SubjectScope;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;

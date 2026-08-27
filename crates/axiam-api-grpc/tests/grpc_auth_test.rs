@@ -10,7 +10,6 @@
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::SubjectScope;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};

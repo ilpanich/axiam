@@ -22,18 +22,28 @@ class SecretPresence(unittest.TestCase):
 
     def test_every_expected_secret_is_reported(self):
         result = secret_presence({"data": {"data": {}}})
-        self.assertEqual([name for name, _ in result], EXPECTED)
-        self.assertTrue(all(present is False for _, present in result))
+        self.assertEqual(list(result), EXPECTED)
+        self.assertTrue(all(present is False for present in result.values()))
 
     def test_a_set_secret_is_reported_present(self):
         body = {"data": {"data": {"auth_pepper": "anything"}}}
-        self.assertIn(("auth_pepper", True), secret_presence(body))
+        self.assertIs(secret_presence(body)["auth_pepper"], True)
 
     def test_an_empty_string_counts_as_missing(self):
         # A field Vault holds but whose value is empty would fail at startup
         # just as surely as an absent one.
         body = {"data": {"data": {"auth_pepper": ""}}}
-        self.assertIn(("auth_pepper", False), secret_presence(body))
+        self.assertIs(secret_presence(body)["auth_pepper"], False)
+
+    def test_only_a_boolean_crosses_the_boundary(self):
+        # The property the CodeQL alert of 2026-08-28 was about: nothing
+        # derived from Vault's response leaves this function except a flag, so
+        # no value — and no name taken from the response — can reach a print.
+        body = {"data": {"data": {"auth_pepper": "s3cr3t", "surprise": "x"}}}
+        result = secret_presence(body)
+        self.assertEqual(list(result), EXPECTED)
+        self.assertTrue(all(isinstance(v, bool) for v in result.values()))
+        self.assertNotIn("surprise", result)
 
     def test_fields_axiam_does_not_read_are_listed_separately(self):
         body = {"data": {"data": {"auth_pepper": "x", "someone_elses_key": "y"}}}

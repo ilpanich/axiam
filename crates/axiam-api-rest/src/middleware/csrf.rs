@@ -283,51 +283,41 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
 // the response, and makes the removal itself depend on transport the setters
 // explicitly do not trust: browsers refuse to let a non-`Secure` cookie from an
 // insecure origin overwrite a `Secure` one ("Leave Secure Cookies Alone").
-// `cookie_secure` therefore threads through here exactly as it does through
-// `access_cookie` / `refresh_cookie` / `csrf_cookie`.
+//
+// Rather than restate each setter's attributes here — a second copy that can
+// drift from the first, which is precisely the bug being fixed — every removal
+// is built by calling its own setter and then expiring the result.
+// `Cookie::make_removal` rewrites only value, `Max-Age` and `Expires`, so
+// `HttpOnly`, `Secure`, `SameSite` and `Path` are mirrored by construction.
 
 /// Clear the `axiam_access` cookie (Max-Age=0, per D-08).
 ///
-/// Mirrors [`access_cookie`]'s attributes; `cookie_secure` must be the same
-/// `AuthConfig::cookie_secure` value used to set it (D-18).
+/// Built from [`access_cookie`], so it mirrors its attributes; `cookie_secure`
+/// must be the same `AuthConfig::cookie_secure` value used to set it (D-18).
 pub fn clear_access_cookie(cookie_secure: bool) -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_ACCESS, "")
-        .http_only(true)
-        .secure(cookie_secure)
-        .same_site(SameSite::Strict)
-        .path("/")
-        .finish();
+    let mut c = access_cookie("", 0, cookie_secure);
     c.make_removal();
     c
 }
 
 /// Clear the `axiam_refresh` cookie.
 ///
-/// Mirrors [`refresh_cookie`]'s attributes, including its `/api/v1/auth/refresh`
-/// path scope — a removal on a different path would not match the cookie.
+/// Built from [`refresh_cookie`], so it mirrors its attributes — including the
+/// `/api/v1/auth/refresh` path scope, since a removal on a different path would
+/// not match the cookie.
 pub fn clear_refresh_cookie(cookie_secure: bool) -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_REFRESH, "")
-        .http_only(true)
-        .secure(cookie_secure)
-        .same_site(SameSite::Strict)
-        .path("/api/v1/auth/refresh")
-        .finish();
+    let mut c = refresh_cookie("", 0, cookie_secure);
     c.make_removal();
     c
 }
 
 /// Clear the `axiam_csrf` cookie.
 ///
-/// Mirrors [`csrf_cookie`]'s attributes — including `httpOnly(false)`, which is
-/// deliberate there (D-07: JavaScript reads this one to populate
-/// `X-CSRF-Token`) and is kept here for symmetry.
+/// Built from [`csrf_cookie`], so it mirrors its attributes — including
+/// `httpOnly(false)`, which is deliberate there (D-07: JavaScript reads this one
+/// to populate `X-CSRF-Token`) and is therefore kept here too.
 pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_CSRF, "")
-        .http_only(false)
-        .secure(cookie_secure)
-        .same_site(SameSite::Strict)
-        .path("/")
-        .finish();
+    let mut c = csrf_cookie("", 0, cookie_secure);
     c.make_removal();
     c
 }

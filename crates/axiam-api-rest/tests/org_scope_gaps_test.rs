@@ -20,7 +20,7 @@
 //!   `tenant_id`, which is all the unauthenticated password-reset page has.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use actix_web::{App, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
@@ -55,8 +55,22 @@ const ORG_SLUG: &str = "org-scope-gaps";
 const CHILD_SLUG: &str = "child";
 const ADMIN_USERNAME: &str = "super-admin";
 const ADMIN_EMAIL: &str = "super-admin@example.com";
-const ADMIN_PASSWORD: &str = "OrgScopeAdm1nPassw0rd!"; // gitleaks:allow
-const ROTATED_PASSWORD: &str = "OrgScopeR0tatedPassw0rd!"; // gitleaks:allow
+/// Test credentials are minted at runtime rather than written as literals.
+///
+/// These two have to satisfy the default password policy — `system_defaults()`
+/// asks for 12+ characters, an uppercase and a digit — and a constant that does
+/// is indistinguishable from a real credential to a scanner. Generating them
+/// keeps the property the tests need without putting a password-shaped literal
+/// in the tree, the same reason `test_auth_config()` below mints its signing
+/// key here instead of embedding one.
+static ADMIN_PASSWORD: LazyLock<String> = LazyLock::new(|| generated_password("adm"));
+static ROTATED_PASSWORD: LazyLock<String> = LazyLock::new(|| generated_password("rot"));
+
+/// A random password satisfying the default policy: 36 characters, an uppercase
+/// and a digit in the fixed prefix, the rest from a fresh UUID.
+fn generated_password(tag: &str) -> String {
+    format!("Pw1-{tag}-{}", Uuid::new_v4().simple())
+}
 
 /// Generates a fresh Ed25519 JWT signing keypair at test runtime, so no literal
 /// key material appears in source.
@@ -158,7 +172,7 @@ async fn setup() -> Fixture {
             tenant_id: org_tenant.id,
             username: ADMIN_USERNAME.into(),
             email: ADMIN_EMAIL.into(),
-            password: ADMIN_PASSWORD.into(),
+            password: ADMIN_PASSWORD.clone(),
             metadata: None,
         })
         .await
@@ -403,7 +417,7 @@ async fn an_org_admin_can_change_their_own_password_while_acting_on_a_child_tena
     let state = AppState::for_test(f.db.clone(), auth.clone());
     let app = test_app!(f, auth, state);
 
-    let (access, csrf) = login_at_org_scope(&app, ADMIN_PASSWORD).await;
+    let (access, csrf) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
 
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
@@ -419,8 +433,8 @@ async fn an_org_admin_can_change_their_own_password_while_acting_on_a_child_tena
         .insert_header(("X-CSRF-Token", csrf))
         .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
         .set_json(json!({
-            "current_password": ADMIN_PASSWORD,
-            "new_password": ROTATED_PASSWORD,
+            "current_password": ADMIN_PASSWORD.as_str(),
+            "new_password": ROTATED_PASSWORD.as_str(),
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -432,7 +446,7 @@ async fn an_org_admin_can_change_their_own_password_while_acting_on_a_child_tena
     );
 
     // And the new password is the one that now signs in.
-    let (_, _) = login_at_org_scope(&app, ROTATED_PASSWORD).await;
+    let (_, _) = login_at_org_scope(&app, ROTATED_PASSWORD.as_str()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +480,7 @@ async fn opaque_register_start_accepts_a_tenant_id_without_an_organization() {
     let state = AppState::for_test(f.db.clone(), auth.clone());
     let app = test_app!(f, auth, state);
 
-    let (_, request) = axiam_opaque::ClientRegistrationState::start(ROTATED_PASSWORD).unwrap();
+    let (_, request) = axiam_opaque::ClientRegistrationState::start(ROTATED_PASSWORD.as_str()).unwrap();
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/opaque/register/start")

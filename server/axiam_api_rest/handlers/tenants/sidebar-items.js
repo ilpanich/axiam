@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","update"],"struct":["CreateTenantRequest","OrgPath","TenantPath"]};
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_EXPORT_ACTION","AUDIT_EXPORT_MAX_AGE_HOURS","TENANT_DELETED_ACTION"],"fn":["create","delete","export_audit","get","list","update"],"struct":["CreateTenantRequest","OrgPath","TenantPath"]};

@@ -124,6 +124,33 @@ tags (`actions/checkout@v4`, `gradle/actions/setup-gradle@v4`), which means a
 compromised tag in any of four upstream actions runs inside the job that holds
 the Portal token. Pinning is part of the same H-1 pass.
 
+## What landed, and what did not
+
+Recorded here rather than left to be inferred from eleven pull requests:
+
+| Control | Java | Kotlin | Where |
+|---|---|---|---|
+| 1. Protected environment | **owner action** | **owner action** | repository settings; the requirement is written into each repo's `RELEASING.md` and into the publish job as a comment |
+| 2. Sigstore bundles | **not done** | **not done** | needs a build-file change on the release path; see below |
+| 3. `attest-build-provenance` | done | done | the publish job, before the Portal forwarding step on Kotlin (which stages first) and after `mvn deploy` on Java (which deploys in one lifecycle pass) |
+| 4. Rotation cadence | done (documented) | done (documented) | `RELEASING.md`, with a table to record each rotation in |
+| 5. Digest-pinned actions | already true | done — fourteen references | the workflows |
+
+**Sigstore is the one that did not ship, and deliberately.** Both plugins configure on the
+*release* path, so a misconfiguration is invisible until the next tag and then breaks it.
+The plan's own rule applies — "workflow changes get a validation run before they meet a
+real tag" — and no throwaway-version validation run was possible in the session that did
+this work. It stays the remaining half of H-1 rather than being shipped untested; both
+`RELEASING.md` files name it as open so it is not quietly forgotten.
+
+**One thing worth carrying forward from control 5.** Pinning
+`dtolnay/rust-toolchain` by digest silently *removes* an input: the action reads the
+toolchain to install from the ref it was called by, so `@stable` → `@6c977a6…` means
+rustup is asked for a toolchain named after a hex string. It is not a YAML error and no
+linter catches it; the Go SDK's OPAQUE-interop job failed on the first CI run and was
+fixed by passing `toolchain: stable` explicitly. Any future pinning pass should check for
+actions that read `github.action_ref`.
+
 ## What this leaves open
 
 T-148 stays **Open** after all five land, with a narrower residual, stated

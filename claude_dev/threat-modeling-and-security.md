@@ -17,9 +17,22 @@
 > **Status: published, source and section both current as of 2026-08-28
 > (`1.0.0-beta03`).**
 >
+> **Beta03 hardening pass (model 2.9.0).** Three mitigations changed after the
+> wave below, and one threat closed. T-118 (audit trail deleted along with the
+> tenant) is **Mitigated**: deleting a tenant now requires its audit trail to
+> have been exported in the previous six hours, and the deletion is recorded in
+> the system audit log naming the export that authorised it. T-180 (Vault
+> concentrates every long-lived secret) and T-148 (compromised release pipeline)
+> stay Open with narrower residuals — `just vault-status` now reports the token's
+> real capabilities rather than only which secrets exist, and every release
+> workflow in the fleet pins its actions by digest and attests the artifacts it
+> publishes. The model is **199 threats, 184 mitigated / 15 open**; `npm run
+> gen:threat-model` has been re-run.
+>
 > The 1.0.0-beta03 pass records the beta01…beta03 wave as thirteen new mitigated
 > threats, T-187…T-199, bringing the model to **199 threats, 183 mitigated / 16
-> open** (model 2.8.0): organization-level principals and the explicit
+> open** (model 2.8.0 — see the beta03 hardening note above for the three
+> mitigations that moved after it): organization-level principals and the explicit
 > `SubjectScope` cross-tenant claim on the authorization diagram (T-190…T-193);
 > tenant signing CAs, per-CA Vault key custody with inheritance, the
 > custody-migration key-destruction fix, CSR constraint enforcement and the mTLS

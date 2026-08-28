@@ -118,6 +118,11 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("get", "GET", "/api/v1/organizations/{org_id}/tenants/{tenant_id}"),
             ("update", "PUT", "/api/v1/organizations/{org_id}/tenants/{tenant_id}"),
             ("delete", "DELETE", "/api/v1/organizations/{org_id}/tenants/{tenant_id}"),
+            # T-118: `delete` refuses unless this ran in the last six hours, so
+            # it is management surface in the strongest sense -- an SDK that
+            # cannot call it cannot delete a tenant at all.
+            ("export_audit", "POST",
+             "/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export"),
         ],
     },
     "users": {

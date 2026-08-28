@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta02",
-    "x-axiam-spec-digest": "sha256:3550b9fc6fa75770ff90d3c6f620facd369658acffdbbbbc2dad77eac59d1b2f"
+    "x-axiam-spec-digest": "sha256:7a717964b0d38a18483f90d15f924494688b9f6ba8ac22599bf6880722b13110"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -4965,6 +4965,54 @@
         "responses": {
           "204": {
             "description": "Tenant deleted"
+          },
+          "404": {
+            "description": "Tenant not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export": {
+      "post": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "`POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export`",
+        "description": "Streams the tenant's complete audit trail as newline-delimited JSON, one\n[`axiam_core::models::audit::AuditLogEntry`] per line, newest first, and\nrecords the export in that tenant's audit log — which is what\n[`delete`] then requires (T-118).\n\nThe last line is not an entry but a manifest object carrying\n`record_count`, the SHA-256 `digest` over the entry lines that precede it,\nand `receipt_id` — the id of the audit entry this export wrote. An archive\ncan therefore be tied back to the receipt that authorised the deletion, and\nre-hashing the file proves it is the export the receipt describes.\n\n`POST` rather than `GET`: it is not safe and not idempotent — every call\nappends a receipt.",
+        "operationId": "export_audit",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newline-delimited audit entries, then a manifest line",
+            "content": {
+              "application/x-ndjson": {}
+            }
           },
           "404": {
             "description": "Tenant not found"

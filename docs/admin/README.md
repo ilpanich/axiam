@@ -110,6 +110,62 @@ Creating a tenant automatically seeds its default permission registry so RBAC
 works immediately — you do not need to manually create the baseline
 permission set before assigning roles in a new tenant.
 
+## Deleting a tenant: export its audit trail first
+
+Everything inside a tenant is tenant-scoped, and `audit_log` is no exception —
+the rows recording what happened inside a tenant carry its id and go when it
+goes. The server therefore refuses to delete a tenant whose audit trail has not
+just been exported (threat T-118):
+
+```
+POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export
+```
+
+The response is `application/x-ndjson`: one audit entry per line, newest first,
+then a final **manifest** line —
+
+```json
+{"axiam_export":"tenant_audit","tenant_id":"…","exported_by":"…",
+ "exported_through":"2026-08-28T12:00:00Z","record_count":41,
+ "digest":"sha256:…","receipt_id":"…","receipt_valid_for_hours":6}
+```
+
+`digest` is a SHA-256 over the entry lines before it, so re-hashing an archived
+file proves it is the export the receipt describes. Redirect the body to a file
+and put that file wherever your retention obligations say it goes:
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+    "$AXIAM/api/v1/organizations/$ORG/tenants/$TENANT/audit-export" \
+    -o "audit-$TENANT.ndjson"
+```
+
+Then, **within six hours**:
+
+```
+DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}
+```
+
+Outside that window — or with no export at all — the delete answers `409` and
+changes nothing. There is no override parameter and the window is not
+configurable: an export taken last quarter is not evidence that anyone thought
+about *this* deletion.
+
+Two permissions are involved: `tenants:export_audit` for the export and
+`tenants:delete` for the deletion. A role that has the second and not the first
+cannot delete a tenant at all, so grant both together.
+
+What this does and does not give you: it proves a named principal asked the
+server for the whole trail minutes before the deletion, and it records that
+twice — once as the receipt inside the tenant, and once as a
+`tenants.deleted` entry in the **system** audit log (`GET
+/api/v1/audit-logs/system`), which survives the tenant and names the receipt
+that authorised it. It cannot prove you kept the file. Streaming the export to
+`/dev/null` is possible and is exactly as deliberate an act as it looks.
+
+The admin UI does this for you: confirming **Delete Tenant** downloads the
+trail to your browser and then deletes.
+
 ## Creating users
 
 To create a user in your tenant (requires the `users:create` permission):

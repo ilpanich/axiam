@@ -645,6 +645,13 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::get().to(handlers::tenants::list::<C>)),
             )
             .service(
+                // Registered BEFORE the bare `/tenants/{tenant_id}` resource:
+                // a literal trailing segment is a different resource, and
+                // actix matches in registration order.
+                web::resource("/organizations/{org_id}/tenants/{tenant_id}/audit-export")
+                    .route(web::post().to(handlers::tenants::export_audit::<C>)),
+            )
+            .service(
                 web::resource("/organizations/{org_id}/tenants/{tenant_id}")
                     .route(web::get().to(handlers::tenants::get::<C>))
                     .route(web::put().to(handlers::tenants::update::<C>))

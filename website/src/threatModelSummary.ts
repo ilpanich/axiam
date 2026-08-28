@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.8.0",
+ "version": "2.9.0",
  "diagramCount": 9,
  "total": 199,
- "open": 16,
- "mitigated": 183,
+ "open": 15,
+ "mitigated": 184,
  "areas": [
   {
    "id": 0,
@@ -99,7 +99,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 18,
-   "open": 3
+   "open": 2
   },
   {
    "id": 7,
@@ -123,7 +123,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Tampering",
    "total": 39,
-   "open": 2
+   "open": 1
   },
   {
    "name": "Repudiation",
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 75,
-   "open": 7
+   "open": 6
   },
   {
    "name": "Low",
@@ -177,7 +177,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 8,
    "area": "Client SDKs & admin UI integration surface",
    "element": "Public package registries",
-   "residualRisk": "Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere — pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin."
+   "residualRisk": "Partially enacted, and narrowed at beta03. Nine of the eleven pipelines carry no long-lived registry credential: Rust, TypeScript, Python and C# and the shared axiam-opaque core publish via Trusted Publishing (OIDC); PHP through Packagist's webhook; Go, Swift, C and C++ from git tags. Every release workflow in the fleet now pins its actions by commit digest, and every published artifact — the server's binary tarballs and CycloneDX SBOMs, the container images, and each SDK's release artifacts — carries a GitHub build-provenance attestation, so an integrator can verify build origin with `gh attestation verify`. Maven Central (Java, Kotlin) still requires a stored Portal user token: Central has no trusted-publishing equivalent, and its OIDC surfaces are account sign-in and Sigstore signing, neither of which authorises an upload — see claude_dev/maven-central-publishing-decision.md. Those two are bounded by compensating controls instead: the credential is an environment secret behind a required-reviewer GitHub environment restricted to v* tags, artifacts carry Sigstore bundles alongside the PGP signatures, and the token rotates quarterly. Open because a stored bearer credential still exists for two of eleven registries."
   },
   {
    "number": 18,
@@ -247,7 +247,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
-   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: just vault-status reports presence only, never values, and the seeder never rewrites a secret that already exists."
+   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists."
   },
   {
    "number": 9,
@@ -278,16 +278,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Audit, webhooks, email & notifications",
    "element": "Audit middleware & service",
    "residualRisk": "Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject rather than deleting audit records, and a default retention sweep bounds the log at 730 days — the table's only deletion path, configurable and disableable with 0 (T-119). What remains open is the collection side: nothing prevents a deployment from writing personal data into fields the sweep will hold for the full window, so the retention period must still be set consistent with the deployment's lawful basis."
-  },
-  {
-   "number": 118,
-   "title": "Audit trail deleted along with the tenant",
-   "category": "Tampering",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "audit_log (append-only, signed)",
-   "residualRisk": "Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink before deletion if your retention obligations require it."
   },
   {
    "number": 123,

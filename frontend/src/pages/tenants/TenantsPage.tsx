@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import { formatDate } from "@/lib/utils";
+import { downloadTextFile } from "@/lib/download";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { invalidateEntity } from "@/lib/queryInvalidation";
@@ -354,9 +355,34 @@ export function TenantsPage() {
   // ─── Delete state ──────────────────────────────────────────────────────────
   const [deleteTenant, setDeleteTenant] = useState<TenantWithOrg | null>(null);
 
+  /**
+   * T-118: deleting a tenant destroys its audit trail, so the server refuses
+   * unless the trail was exported in the last six hours. The dialog therefore
+   * exports first and hands the file to the operator, then deletes — one
+   * confirmation, two steps, and the operator ends up holding the evidence
+   * rather than being told after the fact that they should have kept it.
+   *
+   * If the export fails, the delete is not attempted: `onError` fires and the
+   * tenant is left exactly as it was.
+   */
   const deleteMutation = useMutation({
-    mutationFn: ({ orgId, tenantId }: { orgId: string; tenantId: string }) =>
-      tenantService.remove(orgId, tenantId),
+    mutationFn: async ({
+      orgId,
+      tenantId,
+      slug,
+    }: {
+      orgId: string;
+      tenantId: string;
+      slug: string;
+    }) => {
+      const ndjson = await tenantService.exportAudit(orgId, tenantId);
+      downloadTextFile(
+        `axiam-audit-${slug}-${new Date().toISOString().replace(/[:.]/g, "-")}.ndjson`,
+        ndjson,
+        "application/x-ndjson"
+      );
+      await tenantService.remove(orgId, tenantId);
+    },
     onSuccess: () => {
       invalidateEntity(queryClient, "tenants");
       setDeleteTenant(null);
@@ -549,10 +575,11 @@ export function TenantsPage() {
           deleteMutation.mutate({
             orgId: deleteTenant.organization_id,
             tenantId: deleteTenant.id,
+            slug: deleteTenant.slug,
           })
         }
         title="Delete Tenant"
-        description={`Are you sure you want to delete "${deleteTenant?.name}"? This will remove all data within this tenant. This action cannot be undone.`}
+        description={`Delete "${deleteTenant?.name}"? This removes all data within this tenant, including its audit trail, and cannot be undone. Its audit trail will be downloaded to this browser first — keep that file if your retention obligations require it.`}
         isLoading={deleteMutation.isPending}
       />
     </div>

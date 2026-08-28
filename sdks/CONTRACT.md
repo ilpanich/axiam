@@ -3206,6 +3206,21 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-08 (§27.1, §27.12 — `tenants.export_audit` and the delete precondition,
+  contract 1.33)** — **breaking for callers that delete tenants.** Recorded as breaking
+  even though nothing is removed or renamed, because working code stops working:
+  `tenants.delete` now answers `409` unless `tenants.export_audit` ran against the same
+  tenant in the previous six hours, and a caller that deletes tenants today will start
+  failing against a beta03 server without any change on its side.
+
+  The management surface grows from 146 operations to 147; the new one is generated from
+  `management-registry.json` like every other (§27.8), so an SDK's only work is to
+  re-vendor the registry and regenerate. §27.12 states the flow and the two things an SDK
+  MUST NOT do with it.
+
+  Deployments also need to grant `tenants:export_audit` to whichever role holds
+  `tenants:delete`, or deletion becomes unreachable.
+
 - **2026-08 (§5.2.1 — signing in an organization-level principal, contract 1.32)** —
   **not breaking.** Additive, and for most SDKs a no-op: an SDK already requires a tenant
   at construction (§5), so it already sends one and already reaches the reserved tenant by
@@ -5859,7 +5874,7 @@ runtime hand-rolled HTTP against paths its SDK already knew.
 
 That is the same gap [§25](#§25-account-lifecycle-and-mfa-enrolment-w2) closed for the
 nine account-lifecycle endpoints, at sixteen times the surface area. This section closes
-it for the rest: **146 operations across 24 namespaces**, which is the entire server API
+it for the rest: **147 operations across 24 namespaces**, which is the entire server API
 minus the routes other sections already own and minus the two the
 [§27.0](#§270-the-boundary) boundary deliberately excludes.
 
@@ -5904,7 +5919,7 @@ excluded by tag:
 | `device` | §14 device-grant user-interaction endpoints |
 
 **The vocabulary is derived, not declared.** §1 locks eight method names in a table a
-human reviews. That does not scale to 146 across eleven languages: the table would be
+human reviews. That does not scale to 147 across eleven languages: the table would be
 wrong by the next release. So an SDK's §27 surface **MUST** be generated from
 `management-registry.json` and **MUST NOT** be hand-maintained. Two gates in the AXIAM
 repository's CI enforce the registry's own correctness — one fails when it names a route
@@ -5922,7 +5937,7 @@ the server mints key material the caller never supplies.
 | Namespace | Ops | Operations |
 |-----------|-----|------------|
 | `organizations` | 3 | `list`, `get`, `update` |
-| `tenants` | 5 | `list`, `create`, `get`, `update`, `delete` |
+| `tenants` | 6 | `list`, `create`, `get`, `update`, `delete`, `export_audit` |
 | `users` | 10 | `list`, `create`, `get`, `update`, `delete`, `list_mfa_methods`, `delete_mfa_method`, `reset_mfa`, `unlock`, `list_roles` |
 | `groups` | 9 | `list`, `create`, `get`, `update`, `delete`, `list_members`, `add_member`, `remove_member`, `list_roles` |
 | `roles` | 14 | `list`, `create`, `get`, `update`, `delete`, `list_users`, `assign_to_user`, `unassign_from_user`, `list_groups`, `assign_to_group`, `unassign_from_group`, `list_permissions`, `grant_permission`, `revoke_permission` |
@@ -5948,7 +5963,7 @@ the server mints key material the caller never supplies.
 
 ### §27.2 The surface is namespaced, not flat
 
-§1's eight operations sit directly on the client. This section's 146 **MUST NOT**. An SDK
+§1's eight operations sit directly on the client. This section's 147 **MUST NOT**. An SDK
 exposes each namespace as a handle reached from the client, and the operations on that
 handle:
 
@@ -5963,7 +5978,7 @@ Three reasons this is normative rather than stylistic:
    every one needs a disambiguating prefix, and `listUsers`/`listRoles`/`listRolePermissions`
    is a naming scheme that has to be invented once per operation and remembered by every
    caller. Namespaced, `list` means `list` everywhere.
-2. **146 methods on one object is not an API.** It is a wall. Every SDK's client already
+2. **147 methods on one object is not an API.** It is a wall. Every SDK's client already
    carries §1, §12, §14, §15, §20, §24, §25 and §26; adding the management surface flat
    would roughly quintuple it and bury the eight operations most callers actually want.
 3. **It keeps §1's vocabulary lock meaningful.** §1 forbids new login/auth/authz method
@@ -6012,7 +6027,7 @@ fragments.
 
 The §1.1 async-naming rule applies unchanged: a language whose §1 surface is
 `suspend`/`async`/`*Async` keeps that discipline here, and an SDK that ships both
-synchronous and asynchronous twins ships them for all 146 operations or for none.
+synchronous and asynchronous twins ships them for all 147 operations or for none.
 
 ### §27.4 Semantics (normative, identical in all SDKs)
 
@@ -6028,7 +6043,7 @@ synchronous and asynchronous twins ships them for all 146 operations or for none
    work before the caller knows any UUID. An SDK MUST reject a non-UUID identifier
    client-side (§2 `NetworkError`, "SDK programming error"), with no wire call.
 
-3. **Implicit path context.** `{org_id}` and `{tenant_id}` appear in 30 of the 146 routes,
+3. **Implicit path context.** `{org_id}` and `{tenant_id}` appear in 31 of the 147 routes,
    and in almost every call they are the client's own. An SDK MUST default them from the
    client's configured `org_id`/`tenant_id`, and MUST accept an explicit argument that
    overrides the default (a platform-admin token legitimately administers a tenant other
@@ -6196,7 +6211,7 @@ property of the surface rather than a list somebody remembers to update.
 
 ### §27.6 Declarative management — the manifest
 
-**Requirement level: SHOULD where the SDK ships §27.** The 146 imperative operations are
+**Requirement level: SHOULD where the SDK ships §27.** The 147 imperative operations are
 the floor, not the ceiling. Almost nobody actually wants to call them one at a time:
 what an application does at start-up, in a migration, or in a test fixture is *assert a
 shape* — this tenant has these resources, with these scopes, these permissions, these
@@ -6250,7 +6265,7 @@ wrong the second time it runs. The declarative layer is one object and one call.
    plan whose actions are all `NoChange`. An SDK that cannot make that assertion pass has
    a drift-detection bug, and the test is worth more than any other in this section.
 
-7. **There is no transaction, and the SDK MUST NOT pretend otherwise.** These are 146
+7. **There is no transaction, and the SDK MUST NOT pretend otherwise.** These are 147
    independent HTTP endpoints; nothing spans them. If action 12 of 30 fails, actions 1–11
    have happened and will not be undone. `apply` MUST therefore return the outcome of
    *every* action attempted, MUST stop at the first failure rather than continuing
@@ -6296,7 +6311,7 @@ second implementation of §27.6, and the two will disagree.
 
 ### §27.8 How an SDK builds this
 
-**Generated core, hand-written facade.** The 146 operations and their model types are
+**Generated core, hand-written facade.** The 147 operations and their model types are
 **generated** from `management-registry.json`; the ergonomics are not.
 
 Generated, and regenerated whenever the registry changes:
@@ -6315,7 +6330,7 @@ Hand-written, once, per SDK:
 — and MUST NOT open its own connection, build its own client, or re-implement any of §3
 (CSRF), §4 (cookie jar), §5 (tenant/org headers), §6 (TLS), §9 (single-flight refresh),
 §16 (retry) or §19 (telemetry). Everything in this section inherits all of it by
-construction; an SDK whose management layer has its own HTTP client has 146 endpoints
+construction; an SDK whose management layer has its own HTTP client has 147 endpoints
 outside its own refresh guard.
 
 Generated files MUST be committed (not produced at build time), MUST carry a
@@ -6329,7 +6344,7 @@ when wrong. Coverage MUST NOT fall in the SDK's existing modules as a result of 
 this section.
 
 **Surface and generation**
-- The generated surface covers **all 146** operations — assert the count and the namespace
+- The generated surface covers **all 147** operations — assert the count and the namespace
   set against `management-registry.json`, so a partial regeneration fails rather than
   quietly shipping 140.
 - Regenerating from the committed registry produces no diff (the CI gate of §27.8).
@@ -6432,6 +6447,47 @@ specifies, and requires the two to return equivalent handles where an SDK offers
 Five SDKs first shipped the addition without the baseline — reading "additionally" as
 "instead" — and now ship both, with the direct accessors delegating to `management()` so
 the equivalence is structural rather than a promise two code paths have to keep.
+
+### §27.12 `tenants.delete` requires a fresh audit export (contract 1.33)
+
+Deleting a tenant destroys its audit trail along with everything else in it. From server
+1.0.0-beta03 the server refuses to do that unless the trail was exported first:
+
+1. **`tenants.export_audit(org_id, tenant_id)`** streams the tenant's complete audit
+   trail as `application/x-ndjson` — one audit entry per line, newest first — and, once
+   the whole trail has been written, appends a receipt to that tenant's own audit log.
+   The final line of the body is not an entry but a manifest:
+
+   ```json
+   {"axiam_export":"tenant_audit","tenant_id":"…","exported_by":"…",
+    "exported_through":"2026-08-28T12:00:00Z","record_count":41,
+    "digest":"sha256:…","receipt_id":"…","receipt_valid_for_hours":6}
+   ```
+
+   `digest` is a SHA-256 over the entry lines that precede the manifest, so an archived
+   file can be re-hashed and matched to the receipt named in `receipt_id`.
+
+2. **`tenants.delete(org_id, tenant_id)`** answers `409` (`ConflictError`, per §27.4
+   rule 8 **not** retried) unless a successful receipt for *that* tenant exists and is
+   less than **six hours** old. The window is fixed server-side and there is no
+   force/override parameter.
+
+**What an SDK MUST do:** nothing beyond generating the new operation from
+`management-registry.json` — the surface is derived (§27.8) and this is one more row.
+The two normative points are for the SDK's *documentation*, not its code:
+
+- `export_audit` is `response.kind: "none"` in the registry, exactly like
+  `privacy.download_export`, so the generated method performs the export and returns no
+  body. An SDK whose users need the bytes **SHOULD** document its raw-request escape
+  hatch on this operation; an SDK that can return the raw body from a generated
+  no-content operation **MAY** do so.
+- An SDK **MUST NOT** paper over the `409` by calling `export_audit` automatically inside
+  `delete`. The point of the gate is that a human decided to keep the trail; a client
+  that exports-and-discards on the caller's behalf reproduces the failure the gate
+  exists to prevent.
+
+**Callers that delete tenants need one new permission**, `tenants:export_audit`, in
+addition to `tenants:delete`.
 
 ### §27.11 Model additions (contract 1.31)
 

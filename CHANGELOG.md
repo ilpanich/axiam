@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta04] - 2026-08-28
+
+### Changed
+
+- Record what H-1 actually landed per repo, and the pinning gotcha
+
+### Fixed
+
+- Re-vendor the spec into every SDK repo as part of the release
+
+- Keep secret names out of the response-derived data flow
+
 ## [1.0.0-beta03] - 2026-08-28
 
 ### Added

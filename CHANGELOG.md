@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta03] - 2026-08-28
+
+### Added
+
+- Close T-118, make the Vault posture checkable, attest release artifacts
+
+### Changed
+
+- Answer the pre-beta03 question — no fix required, plan the hardening
+
+- Plan the docs-section beta03 catch-up, wave by wave
+
+- Record the beta01…beta03 wave — T-187…T-199, model 2.8.0
+
+### Fixed
+
+- Build each removal cookie from the setter it mirrors
+
+- A removal cookie must mirror the cookie it clears
+
+- Let an organization-level principal sign in again
+
+- Re-stamp the spec digest the release bump invalidated (#387)
+
 ## [1.0.0-beta02] - 2026-08-27
 
 ### Added

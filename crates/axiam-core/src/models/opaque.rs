@@ -524,10 +524,13 @@ pub struct OpaqueRegisterStartRequest {
     /// Organization UUID. Either this or `org_slug` is required.
     #[serde(default)]
     pub org_id: Option<Uuid>,
-    /// Tenant slug. Either this or `tenant_id` is required.
+    /// Tenant slug. Naming no tenant — neither this nor `tenant_id` —
+    /// resolves the organization's own reserved scope, which is where
+    /// organization-level principals live, exactly as `POST /auth/login` does.
+    /// An empty string is read as naming none.
     #[serde(default)]
     pub tenant_slug: Option<String>,
-    /// Tenant UUID. Either this or `tenant_slug` is required.
+    /// Tenant UUID. See `tenant_slug` for what naming neither means.
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
     /// Lowercase-hex serialized RFC 9807 `RegistrationRequest` (a blinded
@@ -605,10 +608,13 @@ pub struct OpaqueLoginStartRequest {
     /// Organization UUID. Either this or `org_slug` is required.
     #[serde(default)]
     pub org_id: Option<Uuid>,
-    /// Tenant slug. Either this or `tenant_id` is required.
+    /// Tenant slug. Naming no tenant — neither this nor `tenant_id` —
+    /// resolves the organization's own reserved scope, which is where
+    /// organization-level principals live, exactly as `POST /auth/login` does.
+    /// An empty string is read as naming none.
     #[serde(default)]
     pub tenant_slug: Option<String>,
-    /// Tenant UUID. Either this or `tenant_slug` is required.
+    /// Tenant UUID. See `tenant_slug` for what naming neither means.
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
     /// Username or email, as typed by the human.

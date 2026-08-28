@@ -402,6 +402,38 @@ Two rules follow, and both are about not inventing capability the server did not
    from a slug or a name, and MUST NOT send it — it is a response field in one direction
    only.
 
+#### §5.2.1 Signing one in (contract 1.32)
+
+The reserved tenant has a fixed slug, `"organization"`, the same in every deployment, so
+the ordinary §5.1 login body reaches it with nothing new:
+
+```json
+{ "org_slug": "acme", "tenant_slug": "organization",
+  "username_or_email": "root", "password": "…" }
+```
+
+An SDK constructed with `tenant_slug: "organization"` therefore needs no new surface, and
+that is the form an SDK SHOULD use, because §5 rule 2 requires a tenant on the
+`X-Tenant-ID` header of every subsequent request regardless.
+
+Two rules govern what happens when the tenant is *not* named, which is what a login form
+with an empty tenant field produces:
+
+1. **Naming no tenant means the organization's own scope.** `POST /auth/login`,
+   `POST /auth/opaque/login/start`, `POST /auth/opaque/register/start` and
+   `POST /auth/webauthn/authenticate/discoverable/start` all resolve the reserved tenant
+   when neither `tenant_id` nor `tenant_slug` is present. A tenant principal that omits
+   its tenant is simply not found there and gets the ordinary enumeration-safe `401` — a
+   tenant principal must name its tenant, and learns nothing by failing to.
+
+2. **An SDK MUST NOT send an empty-string slug.** A field the caller left blank is
+   omitted from the body, never serialized as `""`. No row can carry an empty slug, so
+   `""` resolves nothing; on the four routes above it also takes rule 1 away, and on
+   `/auth/opaque/login/start` it does so *before* the tenant's OPAQUE mode is read — so
+   the `404` of §23.4 rule 10 never arrives and the client has no fallback to take. This
+   is the shape of a real outage: an organization-level administrator who could not sign
+   in at all, on a deployment with OPAQUE **disabled**.
+
 Nothing else about §5 changes: `X-Tenant-ID` is still required on every request (rule 2),
 and there is still no default tenant.
 
@@ -3174,6 +3206,22 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-08 (§5.2.1 — signing in an organization-level principal, contract 1.32)** —
+  **not breaking.** Additive, and for most SDKs a no-op: an SDK already requires a tenant
+  at construction (§5), so it already sends one and already reaches the reserved tenant by
+  naming its slug, `"organization"`.
+
+  It is recorded because one of its two rules is a **MUST** that existing code can
+  violate: an SDK that serializes a blank tenant slug as `""` rather than omitting the
+  field breaks organization-level sign-in on four routes, and on
+  `/auth/opaque/login/start` it does so before the tenant's OPAQUE mode is read — the
+  `404` of §23.4 rule 10 never arrives, so the client has no fallback and sign-in fails
+  even where OPAQUE is disabled. An SDK that builds its login body from optional fields
+  and drops the absent ones already conforms; one that builds it from a struct with
+  `String` defaults should check.
+
+  No field is added, removed or renamed, and no response shape changes.
+
 - **2026-08 (§5.2, §25.7, §27.4 rule 4, §27.11 — organization scope, truthful resend, and
   list search, contract 1.31)** — **not breaking.** Everything in this revision is
   additive, and a caller written against contract 1.30 compiles and behaves identically.
@@ -4813,6 +4861,11 @@ The `opaque` enrolment object, accepted by `POST /api/v1/users`,
 { "org_slug": "acme", "tenant_slug": "default",
   "username_or_email": "alice", "ke1": "<hex>" }
 ```
+
+Both endpoints take the workspace exactly as `POST /auth/login` does, §5.2.1 included:
+`org_slug`/`org_id` is required, the tenant pair is optional, and omitting the tenant
+resolves the organization's own scope. An empty-string slug is not a slug — see §5.2.1
+rule 2, which is the rule that keeps the `404` below reachable.
 
 Response `200`: as `register/start`, with `ke2` in place of
 `registration_response`, plus a `mode` field carrying the tenant's

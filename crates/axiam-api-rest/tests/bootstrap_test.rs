@@ -981,3 +981,209 @@ async fn bootstrap_without_opaque_leaves_it_disabled() {
         axiam_core::models::opaque::OpaqueMode::Disabled
     );
 }
+
+// ---------------------------------------------------------------------------
+// Signing in the way the browser actually does, after a first-run bootstrap
+// ---------------------------------------------------------------------------
+//
+// Bootstrap creates an **organization-level** administrator and sends the
+// browser to `/login?bootstrapped=1&org=<slug>` with no tenant, because there
+// is no tenant yet — the whole point of the organization scope is that the
+// first admin is an administrator of every tenant created later.
+//
+// The login page then probes OPAQUE before it tries the password endpoint.
+// That order is deliberate (`optional` mode would otherwise never produce a
+// single OPAQUE login), and it is only safe because "OPAQUE is not offered
+// here" is a `404` the client can fall back from.
+//
+// These two tests pin the seam between those facts: `/auth/opaque/login/start`
+// must resolve a workspace exactly as `/auth/login` does, or the probe fails
+// on the workspace *before* the policy is read, answers `401`, and the only
+// administrator of a fresh deployment cannot sign in at all — including, and
+// most confusingly, when OPAQUE was left disabled.
+
+/// With OPAQUE disabled, the browser's probe must answer `404` — the one
+/// status the client falls back from — and the password login that follows it
+/// must succeed naming only the organization.
+#[actix_rt::test]
+async fn organization_level_login_survives_the_opaque_probe_when_disabled() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "probe@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "organization_name": "Probe Org",
+            "organization_slug": "probe-org",
+            "email": "probe@example.com",
+            "username": "probeadmin",
+            "password": TEST_PASSWORD,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    assert_eq!(resp.status().as_u16(), 201, "bootstrap must succeed");
+
+    // 1. The probe, byte for byte as the login page sends it: the organization
+    //    slug from the redirect, no tenant, and a real KE1.
+    let (_state, ke1) = axiam_opaque::ClientLoginState::start(TEST_PASSWORD).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/start")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_slug": "probe-org",
+            "username_or_email": "probeadmin",
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "an organization-level probe under `disabled` must report the policy, \
+         not fail on the workspace — 401 here is a fallback the client will not take"
+    );
+
+    // 2. A client that posts its empty tenant field verbatim must get the same
+    //    answer. A blank slug matches no row, so reading it literally is only
+    //    ever a 401 — and here it would be the wrong one.
+    let (_state, ke1) = axiam_opaque::ClientLoginState::start(TEST_PASSWORD).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/start")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_slug": "probe-org",
+            "tenant_slug": "",
+            "username_or_email": "probeadmin",
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "a blank tenant slug is not a tenant"
+    );
+
+    // 3. The fallback the client takes on that 404 — and the same request with
+    //    a blank tenant field, which the password path must also tolerate.
+    for body in [
+        serde_json::json!({
+            "org_slug": "probe-org",
+            "username": "probeadmin",
+            "password": TEST_PASSWORD,
+        }),
+        serde_json::json!({
+            "org_slug": "probe-org",
+            "tenant_slug": "",
+            "username": "probeadmin",
+            "password": TEST_PASSWORD,
+        }),
+    ] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/login")
+            .peer_addr(peer)
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let out = test::read_body(resp).await;
+        assert_eq!(
+            status,
+            200,
+            "the bootstrapped administrator must sign in naming only the \
+             organization. body = {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+/// The same sequence with OPAQUE required: the probe must reach the exchange,
+/// naming only the organization, and carry it through to a session.
+#[actix_rt::test]
+async fn organization_level_opaque_login_by_slug_alone() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "slug@example.com");
+    }
+
+    let db = setup_empty_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "organization_name": "Slug Org",
+            "organization_slug": "slug-org",
+            "email": "slug@example.com",
+            "username": "slugadmin",
+            "password": TEST_PASSWORD,
+            "opaque_mode": "required",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    assert_eq!(resp.status().as_u16(), 201, "bootstrap must succeed");
+
+    let (state, ke1) = axiam_opaque::ClientLoginState::start(TEST_PASSWORD).unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/start")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_slug": "slug-org",
+            "username_or_email": "slugadmin",
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let started: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "started = {started}");
+
+    let ksf = axiam_opaque::AxiamKsf::argon2id(
+        started["memory_kib"].as_u64().unwrap() as u32,
+        started["iterations"].as_u64().unwrap() as u32,
+        started["parallelism"].as_u64().unwrap() as u32,
+    )
+    .unwrap();
+    let finished = state
+        .finish(TEST_PASSWORD, started["ke2"].as_str().unwrap(), &ksf)
+        .expect("the organization-level exchange must open under the admin's password");
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/opaque/login/finish")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "opaque_session": started["opaque_session"].as_str().unwrap(),
+            "ke3": finished.ke3,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "an organization-level principal must be able to authenticate through \
+         OPAQUE without naming a tenant"
+    );
+}

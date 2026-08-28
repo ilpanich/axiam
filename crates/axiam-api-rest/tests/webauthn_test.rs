@@ -521,3 +521,106 @@ async fn finish_authentication_peek_succeeds_but_service_rejects_invalid_jwt() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// ---------------------------------------------------------------------------
+// start_discoverable_authentication — workspace resolution
+// ---------------------------------------------------------------------------
+
+/// A usernameless ceremony must be reachable at organization level.
+///
+/// The login page collects the workspace in one step and starts this ceremony
+/// from it — behind the explicit "sign in with a passkey" button and again as
+/// passkey autofill — so for the principal a first-run bootstrap creates it
+/// arrives with the tenant blank. Demanding a tenant here made a passkey the
+/// one credential an organization-level administrator could not sign in with,
+/// and the autofill variant swallows its own errors, so it failed silently.
+///
+/// Both spellings are covered: the field omitted, and the field sent as the
+/// empty string a form binds to when the human left it blank.
+#[actix_web::test]
+async fn discoverable_authentication_starts_at_organization_level() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org WA Discoverable".into(),
+            slug: "org-wa-discoverable".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org.id))
+        .await
+        .unwrap();
+
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    for body in [
+        json!({ "org_slug": "org-wa-discoverable" }),
+        json!({ "org_slug": "org-wa-discoverable", "tenant_slug": "" }),
+    ] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/webauthn/authenticate/discoverable/start")
+            .peer_addr(TEST_PEER.parse().unwrap())
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let out = test::read_body(resp).await;
+        assert_eq!(
+            status,
+            200,
+            "the ceremony must resolve the organization's own scope. body = {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+/// Naming a tenant still resolves that tenant, and naming an organization with
+/// no organization scope is refused the same enumeration-safe way a wrong slug
+/// is — never a 400 that says which half was missing.
+#[actix_web::test]
+async fn discoverable_authentication_refuses_an_unreachable_workspace() {
+    let (db, _org, _tenant, _user) = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/webauthn/authenticate/discoverable/start")
+        .peer_addr(TEST_PEER.parse().unwrap())
+        .set_json(json!({ "org_slug": "org-wa-a", "tenant_slug": "tenant-wa-a" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        200,
+        "naming a tenant must still resolve that tenant"
+    );
+
+    // `setup` creates no organization scope, so omitting the tenant has nowhere
+    // to land.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/webauthn/authenticate/discoverable/start")
+        .peer_addr(TEST_PEER.parse().unwrap())
+        .set_json(json!({ "org_slug": "org-wa-a" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        401,
+        "an organization with no organization scope must refuse, not disclose"
+    );
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/webauthn/authenticate/discoverable/start")
+        .peer_addr(TEST_PEER.parse().unwrap())
+        .set_json(json!({ "tenant_slug": "tenant-wa-a" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        400,
+        "the organization is still required"
+    );
+}

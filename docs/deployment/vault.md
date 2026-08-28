@@ -258,6 +258,43 @@ path "secret/metadata/axiam" {
 EOF
 ```
 
+#### Checking that the policy is the one actually in force (T-180)
+
+Writing the policy and *attaching* it are two steps, and nothing in AXIAM can
+tell the difference between a token scoped like the above and a root token —
+both read the secret successfully. `just vault-status` asks Vault what the token
+it holds is allowed to do and says so:
+
+```
+  token scope (T-180):
+    ok           secret/data/axiam: read
+    ok           secret/metadata/axiam: read
+```
+
+Anything beyond `read` is reported as `OVER-SCOPED` with the reason. The scope
+report comes from `sys/capabilities-self`, so it reflects the token in hand
+rather than the policy you believe is attached to it; capabilities are not
+secrets and are printed in full, while secret values still never are.
+
+To make it fail rather than warn — in a deployment smoke test, say — add
+`--strict`:
+
+```sh
+curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" -X POST \
+    --data '{"paths":["secret/data/axiam","secret/metadata/axiam"]}' \
+    "$VAULT_ADDR/v1/sys/capabilities-self" > caps.json
+curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/axiam" \
+    | python3 scripts/vault-status.py --capabilities caps.json --strict
+```
+
+`just vault-status` deliberately does **not** pass `--strict`: the dev-mode
+Vault it points at runs on a fixed root token, so the warning there is expected
+and failing on it would train everyone to ignore the check.
+
+The seeding token is a different, short-lived credential — it needs
+`create`/`update` on `secret/data/axiam` and is not the token the server runs
+with. Do not widen the server's policy to seed.
+
 ### 5.5 Seed the secrets
 
 ```bash

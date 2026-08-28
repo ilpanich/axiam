@@ -373,6 +373,28 @@ export const tenantService = {
       )
       .then((r) => r.data),
 
+  /**
+   * Export the tenant's audit trail (T-118).
+   *
+   * The server streams newline-delimited JSON — one audit entry per line, then
+   * a manifest line carrying the record count, a SHA-256 digest over the
+   * entries and the id of the receipt the export just wrote. `remove` below
+   * refuses with 409 unless such a receipt exists and is under six hours old,
+   * so this is not an optional nicety: it is the first half of deleting a
+   * tenant.
+   *
+   * Returns the raw body so the caller can hand it to the operator; nothing is
+   * parsed here beyond keeping it a string.
+   */
+  exportAudit: (orgId: string, tenantId: string): Promise<string> =>
+    api
+      .post<string>(
+        `/api/v1/organizations/${orgId}/tenants/${tenantId}/audit-export`,
+        undefined,
+        { responseType: "text" }
+      )
+      .then((r) => r.data),
+
   remove: (orgId: string, tenantId: string): Promise<void> =>
     api
       .delete(`/api/v1/organizations/${orgId}/tenants/${tenantId}`)

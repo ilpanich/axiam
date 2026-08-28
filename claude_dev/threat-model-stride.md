@@ -9,7 +9,7 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
 | **Threats identified** | 199 |
-| **Mitigated / Open** | 183 / 16 |
+| **Mitigated / Open** | 184 / 15 |
 | **Owner** | ilpanich |
 
 ---
@@ -1412,7 +1412,7 @@ Flagging an organization CA as an mTLS trust anchor exports its public certifica
 
 The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.
 
-*18 threats — 2 high, 14 medium, 2 low; 3 open.*
+*18 threats — 2 high, 14 medium, 2 low; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1428,7 +1428,7 @@ The append-only audit trail and its OpenPGP batch signing, webhook delivery with
 | T-115 | Email service (SMTP / provider API, templates) <br/>*Process* | E | Template injection through user-controlled placeholders | Medium | Mitigated |
 | T-116 | Email service (SMTP / provider API, templates) <br/>*Process* | T | Header injection producing extra recipients | Medium | Mitigated |
 | T-117 | Notification rules (admin alerts) <br/>*Process* | D | Alert flooding buries a real incident | Medium | Mitigated |
-| T-118 | audit_log (append-only, signed) <br/>*Store* | T | Audit trail deleted along with the tenant | Medium | Open |
+| T-118 | audit_log (append-only, signed) <br/>*Store* | T | Audit trail deleted along with the tenant | Medium | Mitigated |
 | T-119 | audit_log (append-only, signed) <br/>*Store* | D | Unbounded audit growth degrades the datastore | Low | Mitigated |
 | T-120 | webhook (HMAC secrets) <br/>*Store* | I | Webhook secret leaked through derived Debug output | Medium | Mitigated |
 | T-121 | outbound mail queue (RabbitMQ) <br/>*Store* | I | Queued messages readable on the broker | Medium | Mitigated |
@@ -1523,18 +1523,18 @@ An attacker triggers thousands of notifiable events so the genuine signal is los
 > Notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest.
 
 **T-118 — Audit trail deleted along with the tenant**  
-`audit_log (append-only, signed)` (Store) · Tampering · Medium · Open
+`audit_log (append-only, signed)` (Store) · Tampering · Medium · Mitigated
 
 Deleting a tenant removes its data; if audit records go with it, the evidence of what happened disappears exactly when it matters most.
 
-> Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink before deletion if your retention obligations require it.
+> **CLOSED (T-118).** Deleting a tenant is now a two-step act. `POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export` streams the tenant's whole audit trail as newline-delimited JSON — paged from the datastore, so a large trail is bounded in memory rather than truncated — and, only after the last row has been written, appends a receipt to that tenant's own audit log. The export's final line is a manifest carrying the record count, a SHA-256 over the entry lines before it, and the receipt id, so an archived file can be re-hashed and matched to the deletion it authorised. `DELETE .../tenants/{tenant_id}` then answers `409` unless such a receipt exists and is under **six hours** old; an export that dies half way writes no receipt and unblocks nothing. The window is a constant, not a setting — a configurable freshness bound is one an operator can widen until it means nothing — and there is no override parameter. Because the tenant's own entries (the receipt included) go with it, the deletion is recorded in the **system** audit log, naming the actor, the tenant slug and the receipt that authorised it; that record is what outlives the tenant. Residual, stated rather than hidden: this proves an identified principal was handed the trail minutes before the deletion, not that they kept the bytes — custody of a file the server gave away is not something the server can attest. GDPR Art. 17 is unaffected: erasure is delayed by the length of one export, never refused.
 
 **T-119 — Unbounded audit growth degrades the datastore**  
 `audit_log (append-only, signed)` (Store) · Denial of service · Low · Mitigated
 
 An append-only table with no retention policy grows without limit, eventually affecting query latency across the datastore.
 
-> **CLOSED (T-119).** AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. `AuditLogRepository::prune_older_than` is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing, which is what stops "prune old records" becoming "delete the evidence" — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. `0` disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118).
+> **CLOSED (T-119).** AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. `AuditLogRepository::prune_older_than` is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing, which is what stops "prune old records" becoming "delete the evidence" — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. `0` disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice; the separate question of what happens to a trail when its *tenant* is deleted is closed by T-118.
 
 **T-120 — Webhook secret leaked through derived Debug output**  
 `webhook (HMAC secrets)` (Store) · Information disclosure · Medium · Mitigated
@@ -1774,7 +1774,7 @@ SurrealDB's in-memory datastore does not reliably arbitrate the write-write conf
 
 With `AXIAM__AUTH__SECRET_PROVIDER=vault` the production default, all ten long-lived secrets — the JWT signing key, `opaque_setup_key`, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.
 
-> Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: `just vault-status` reports presence only, never values, and the seeder never rewrites a secret that already exists.
+> Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since **H-4 it checks rather than merely advises**: `just vault-status` queries `sys/capabilities-self` and reports the capabilities the token in hand actually holds on AXIAM's KV path, marking anything beyond `read` as `OVER-SCOPED` and naming a root token as what it is; `--strict` turns that into a non-zero exit for a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists.
 
 </details>
 
@@ -1924,7 +1924,7 @@ The contract is where SDK security behaviour is actually specified — TLS polic
 
 A stolen registry token or a compromised release workflow publishes an SDK version that exfiltrates credentials from every integrator who upgrades.
 
-> Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere — pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin.
+> Partially enacted, and narrowed at beta03. Nine of the eleven pipelines carry no long-lived registry credential: Rust, TypeScript, Python and C# and the shared `axiam-opaque` core publish via Trusted Publishing (OIDC); PHP through Packagist's webhook; Go, Swift, C and C++ from git tags. Every release workflow in the fleet now pins its actions by commit digest, and every published artifact — the server's binary tarballs and CycloneDX SBOMs, the container images, and each SDK's release artifacts — carries a GitHub build-provenance attestation, so an integrator can verify build origin with `gh attestation verify`. Maven Central (Java, Kotlin) still requires a stored Portal user token: Central has no trusted-publishing equivalent, and its two OIDC surfaces are account sign-in and Sigstore *signing*, neither of which authorises an upload — the research is in [`maven-central-publishing-decision.md`](maven-central-publishing-decision.md). Those two are bounded by compensating controls instead: the credential is an environment secret behind a required-reviewer GitHub environment restricted to `v*` tags, artifacts carry Sigstore bundles alongside the PGP signatures, and the token rotates quarterly. Open because a stored bearer credential still exists for two of eleven registries.
 
 **T-149 — Unpinned SDK dependency pulls a malicious transitive update**  
 `install SDK package` (Flow) · Tampering · High · Mitigated
@@ -1972,22 +1972,21 @@ Eleven SDK repositories vendor openapi.json and the §27 management registry, an
 
 ## 6. Open risk register
 
-16 of 186 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+15 of 199 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
-| T-148 | Critical | Compromised release pipeline publishes a backdoored SDK | Public package registries <br/>*Client SDKs & admin UI integration surface* | Enable 2FA and trusted/OIDC publishing on every registry, pin and review release workflow actions by digest as this repository's CI already does, and publish provenance… |
+| T-148 | Critical | Compromised release pipeline publishes a backdoored SDK | Public package registries <br/>*Client SDKs & admin UI integration surface* | Narrowed at beta03: nine of eleven pipelines publish credential-free, every release workflow pins actions by digest and every artifact carries a build-provenance attestation. Open because Maven Central (Java, Kotlin) has no trusted-publishing equivalent, so two stored Portal tokens remain — behind a required-reviewer environment, with Sigstore bundles and quarterly rotation… |
 | T-18 | High | Backup or snapshot exfiltration | SurrealDB cluster (all tenant data) <br/>*System diagram* | Not addressed by AXIAM itself. Deployment guidance: encrypt backups at rest, restrict snapshot IAM, and treat backup media as in-scope for the same access review as the live… |
 | T-94 | High | Key extracted from device firmware or flash | IoT device <br/>*PKI, certificates & IoT device identity* | Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM… |
 | T-124 | High | Operator credentials grant unaudited data access | Cluster operator / SRE <br/>*Deployment & platform (Kubernetes)* | Outside the application boundary. Restrict RBAC on Secrets and exec, enable Kubernetes audit logging, and treat cluster-admin as equivalent to full AXIAM compromise in your threat… |
 | T-133 | High | Backup media accessible outside the cluster | Backups / volume snapshots <br/>*Deployment & platform (Kubernetes)* | Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data… |
 | T-135 | High | Dependency-confusion or typosquatted SDK package | Integrator / developer <br/>*Client SDKs & admin UI integration surface* | Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical… |
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
-| T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS, scope AXIAM's token to read-only on its… |
+| T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility — a token AXIAM is handed is a token AXIAM must use. Narrowed by H-4: `just vault-status` now reports the token's actual capabilities and flags anything beyond `read`, so the documented read-only policy is checkable rather than merely stated… |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
 | T-39 | Medium | Access token still valid after entitlement revocation | Token service EdDSA JWT + refresh rotation <br/>*Authentication & session management* | Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation… |
 | T-110 | Medium | Personal data over-collected into an immutable log | Audit middleware & service <br/>*Audit, webhooks, email & notifications* | Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject, and a default 730-day retention sweep bounds the log (T-119). What remains open is the collection side… |
-| T-118 | Medium | Audit trail deleted along with the tenant | audit_log (append-only, signed) <br/>*Audit, webhooks, email & notifications* | Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
@@ -2050,7 +2049,7 @@ Eleven SDK repositories vendor openapi.json and the §27 management registry, an
 |---|---|---|
 | Critical | 26 | 1 |
 | High | 91 | 7 |
-| Medium | 75 | 7 |
+| Medium | 75 | 6 |
 | Low | 7 | 1 |
 
 **By diagram**
@@ -2063,7 +2062,7 @@ Eleven SDK repositories vendor openapi.json and the §27 management registry, an
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 19 | 0 |
 | PKI, certificates & IoT device identity | 23 | 1 |
-| Audit, webhooks, email & notifications | 18 | 3 |
+| Audit, webhooks, email & notifications | 18 | 2 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
 | Client SDKs & admin UI integration surface | 22 | 4 |
 

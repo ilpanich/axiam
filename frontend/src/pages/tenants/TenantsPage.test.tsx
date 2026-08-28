@@ -6,6 +6,15 @@ import { setToastDispatch } from "@/hooks/useToast";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
+// T-118: deleting a tenant now exports its audit trail first and hands the
+// file to the browser. jsdom has no `URL.createObjectURL`, and what these
+// tests care about is the ORDER of the two calls, not the download plumbing
+// (which `lib/download.test.ts` covers).
+const downloadTextFile = vi.fn();
+vi.mock("@/lib/download", () => ({
+  downloadTextFile: (...args: unknown[]) => downloadTextFile(...args),
+}));
+
 const navigate = vi.fn();
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
@@ -19,6 +28,11 @@ const orgs = [
   { id: "o1", name: "Acme Corp", slug: "acme-corp", created_at: "2026-01-01T00:00:00Z" },
   { id: "o2", name: "Beta LLC", slug: "beta-llc", created_at: "2026-01-02T00:00:00Z" },
 ];
+
+/// One audit entry line plus the manifest line the server appends last.
+const EXPORT_NDJSON =
+  '{"id":"a1","action":"users.created"}\n' +
+  '{"axiam_export":"tenant_audit","record_count":1,"digest":"sha256:abc","receipt_id":"r1"}\n';
 
 const tenantsByOrg: Record<string, unknown[]> = {
   o1: [
@@ -201,22 +215,56 @@ describe("TenantsPage", () => {
     expect(apiMock.put).not.toHaveBeenCalled();
   });
 
-  it("deletes a tenant after confirmation", async () => {
+  it("exports the audit trail, then deletes the tenant (T-118)", async () => {
     mockDefaultGets();
+    apiMock.post.mockResolvedValue(res(EXPORT_NDJSON));
     apiMock.delete.mockResolvedValue(res(undefined));
     renderWithProviders(<TenantsPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Delete Staging" }));
     const dialog = screen.getByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
     await waitFor(() =>
       expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/organizations/o2/tenants/t2")
     );
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/organizations/o2/tenants/t2/audit-export",
+      undefined,
+      { responseType: "text" }
+    );
+    // The operator ends up holding the trail, not merely having triggered it.
+    expect(downloadTextFile).toHaveBeenCalledWith(
+      expect.stringContaining("axiam-audit-staging-"),
+      EXPORT_NDJSON,
+      "application/x-ndjson"
+    );
+  });
+
+  it("does not delete the tenant when the audit export fails (T-118)", async () => {
+    const toastFn = vi.fn();
+    setToastDispatch(toastFn);
+    mockDefaultGets();
+    apiMock.post.mockRejectedValue(new Error("audit export failed"));
+    renderWithProviders(<TenantsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Delete Staging" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(toastFn).toHaveBeenCalledWith({
+        description: "audit export failed",
+        variant: "destructive",
+      })
+    );
+    expect(apiMock.delete).not.toHaveBeenCalled();
+    setToastDispatch(null);
   });
 
   it("surfaces a delete error via toast (CQ-F09)", async () => {
     const toastFn = vi.fn();
     setToastDispatch(toastFn);
     mockDefaultGets();
+    apiMock.post.mockResolvedValue(res(EXPORT_NDJSON));
     apiMock.delete.mockRejectedValue(new Error("Tenant has active users"));
     renderWithProviders(<TenantsPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Delete Staging" }));

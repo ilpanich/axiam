@@ -177,6 +177,10 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("tenants:create", "Create a new tenant"),
     ("tenants:update", "Update a tenant"),
     ("tenants:delete", "Delete a tenant"),
+    (
+        "tenants:export_audit",
+        "Export a tenant's audit trail (required before deletion, T-118)",
+    ),
     // Organizations
     ("organizations:list", "List organizations"),
     ("organizations:get", "Retrieve a single organization"),
@@ -439,6 +443,11 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "DELETE",
         "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
         "tenants:delete",
+    ),
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export",
+        "tenants:export_audit",
     ),
     // CA Certificates
     (

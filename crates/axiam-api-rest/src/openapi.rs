@@ -56,6 +56,7 @@ use crate::handlers;
         handlers::tenants::get,
         handlers::tenants::update,
         handlers::tenants::delete,
+        handlers::tenants::export_audit,
         // Users
         handlers::users::create,
         handlers::users::list,

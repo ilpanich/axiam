@@ -112,13 +112,33 @@ tls-certs:
 vault-down:
     docker compose -f docker/docker-compose.dev.yml --profile vault down vault
 
-# Print which secrets the dev Vault holds, without printing their values.
+# Print which secrets the dev Vault holds, without printing their values,
+# and what the token presenting them is allowed to do (H-4 / T-180).
+#
+# The dev Vault runs on a fixed ROOT token on purpose, so the scope block below
+# will always report OVER-SCOPED here. That is the point: the same recipe, run
+# against a real Vault with the read-only policy from docs/deployment/vault.md
+# §5.4, prints `ok` — so the line is a check rather than decoration. Nothing is
+# `--strict` here; a production check that should FAIL on an over-scoped token
+# adds it (see §5.4).
 vault-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    curl -fsS --header "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}" \
-        http://127.0.0.1:8200/v1/secret/data/axiam \
-        | python3 scripts/vault-status.py
+    VAULT_ADDR_LOCAL="${VAULT_ADDR:-http://127.0.0.1:8200}"
+    TOKEN="${VAULT_TOKEN:-${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}}"
+    CAPS="$(mktemp)"
+    trap 'rm -f "$CAPS"' EXIT
+    # Capabilities are not secrets, so this response is safe to keep on disk
+    # for the length of one command. A Vault that will not answer it (an older
+    # version, a policy without `sys/capabilities-self`) leaves the file empty
+    # and the reporter says "not checked" rather than failing.
+    curl -fsS --header "X-Vault-Token: ${TOKEN}" \
+        --request POST \
+        --data '{"paths":["secret/data/axiam","secret/metadata/axiam"]}' \
+        "${VAULT_ADDR_LOCAL}/v1/sys/capabilities-self" > "$CAPS" || true
+    curl -fsS --header "X-Vault-Token: ${TOKEN}" \
+        "${VAULT_ADDR_LOCAL}/v1/secret/data/axiam" \
+        | python3 scripts/vault-status.py --capabilities "$CAPS"
 
 # Stop development dependencies
 dev-down:

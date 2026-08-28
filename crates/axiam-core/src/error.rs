@@ -10,6 +10,18 @@ pub enum AxiamError {
     #[error("Entity already exists: {entity}")]
     AlreadyExists { entity: String },
 
+    /// The request is well-formed and authorized, but the resource is not in a
+    /// state that permits it — a precondition the caller can satisfy and retry.
+    ///
+    /// Distinct from [`Self::Validation`] (400: the *request* is wrong, and
+    /// resending it unchanged will always fail) and from
+    /// [`Self::AlreadyExists`] (409, but specifically a uniqueness violation).
+    /// Maps to `409 Conflict`, which `sdks/CONTRACT.md` §27.4 already binds to
+    /// `ConflictError` and marks non-retriable — correct here: the caller must
+    /// *do something else first*, not resend.
+    #[error("{reason}")]
+    Conflict { reason: String },
+
     #[error("Authentication failed: {reason}")]
     AuthenticationFailed { reason: String },
 

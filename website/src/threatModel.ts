@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.8.0",
+ "version": "2.9.0",
  "diagramCount": 9,
  "total": 199,
- "open": 16,
- "mitigated": 183,
+ "open": 15,
+ "mitigated": 184,
  "diagrams": [
   {
    "id": 0,
@@ -4990,9 +4990,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Audit trail deleted along with the tenant",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Deleting a tenant removes its data; if audit records go with it, the evidence of what happened disappears exactly when it matters most.",
-       "mitigation": "Not resolved in-product: retention of audit records past tenant deletion is a deployment decision that conflicts with GDPR erasure. Export audit records to an external WORM sink before deletion if your retention obligations require it."
+       "mitigation": "SECHRD-T118: closed in-product. DELETE /organizations/{org_id}/tenants/{tenant_id} refuses with 409 unless the tenant's audit trail was exported in the previous six hours. POST .../tenants/{tenant_id}/audit-export streams the whole trail as newline-delimited JSON — bounded memory, no truncation — and, only after the last row has been written, appends a receipt to that tenant's own audit log; the export's final line is a manifest carrying the record count, a SHA-256 over the exported entries and the receipt id, so an archived file can be re-hashed and tied back to the deletion it authorised. An export that dies half way leaves no receipt and unblocks nothing. The six-hour window is a constant, not a setting: a configurable freshness bound is one an operator can widen until it means nothing. The deletion itself is recorded in the SYSTEM audit log (nil tenant), naming the actor and the receipt — the tenant's own entries are gone by then, so that record is what outlives it. Residual, stated rather than hidden: this proves an identified principal was handed the trail minutes before the deletion, not that they kept the bytes; custody of a file the server gave away is not something the server can attest. GDPR Art. 17 is unaffected — erasure is delayed by one export, never refused, and there is no override parameter."
       },
       {
        "number": 119,
@@ -5004,7 +5004,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CLOSED (T-119). AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. AuditLogRepository::prune_older_than is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. 0 disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118)."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "9883f81e-42c5-5275-81eb-22eeaa0782b9",
@@ -5282,7 +5282,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 18,
-   "open": 3,
+   "open": 2,
    "bySeverity": {
     "Medium": 14,
     "High": 2,
@@ -5586,7 +5586,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Open",
        "description": "With AXIAM__AUTH__SECRET_PROVIDER=vault the production default, all ten long-lived secrets — the JWT signing key, opaque_setup_key, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.",
-       "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help: just vault-status reports presence only, never values, and the seeder never rewrites a secret that already exists."
+       "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists."
       }
      ],
      "open": 1
@@ -6220,7 +6220,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Open",
        "description": "A stolen registry token or a compromised release workflow publishes an SDK version that exfiltrates credentials from every integrator who upgrades.",
-       "mitigation": "Partially enacted: the Rust, TypeScript, Python and C# SDKs and the shared axiam-opaque core publish via Trusted Publishing (OIDC), so no long-lived registry token exists to steal for them; PHP publishes through Packagist's webhook and Go, Swift, C and C++ from git tags. Maven Central (Java, Kotlin) still requires stored credentials, and a compromised release workflow remains a live risk everywhere — pin and review workflow actions by digest as this repository's CI already does, and publish provenance attestations so integrators can verify build origin."
+       "mitigation": "Partially enacted, and narrowed at beta03. Nine of the eleven pipelines carry no long-lived registry credential: Rust, TypeScript, Python and C# and the shared axiam-opaque core publish via Trusted Publishing (OIDC); PHP through Packagist's webhook; Go, Swift, C and C++ from git tags. Every release workflow in the fleet now pins its actions by commit digest, and every published artifact — the server's binary tarballs and CycloneDX SBOMs, the container images, and each SDK's release artifacts — carries a GitHub build-provenance attestation, so an integrator can verify build origin with `gh attestation verify`. Maven Central (Java, Kotlin) still requires a stored Portal user token: Central has no trusted-publishing equivalent, and its OIDC surfaces are account sign-in and Sigstore signing, neither of which authorises an upload — see claude_dev/maven-central-publishing-decision.md. Those two are bounded by compensating controls instead: the credential is an environment secret behind a required-reviewer GitHub environment restricted to v* tags, artifacts carry Sigstore bundles alongside the PGP signatures, and the token rotates quarterly. Open because a stored bearer credential still exists for two of eleven registries."
       }
      ],
      "open": 1

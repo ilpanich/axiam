@@ -58,7 +58,11 @@ test.describe("Service-account RBAC", () => {
 
   test("assigns a role directly to a service account", async ({ page }) => {
     await page.goto("/roles");
-    await page.getByText(ROLE_NAME).first().click();
+    // The row text is not a link: the list navigates from its own "View <name>"
+    // action, so clicking the name does nothing and the detail page — with the
+    // tab this test is about — never opens.
+    await page.getByRole("button", { name: `View ${ROLE_NAME}` }).click();
+    await expect(page).toHaveURL(/\/roles\/[0-9a-f-]{36}/);
 
     await page.getByRole("button", { name: "service accounts" }).click();
     await page.getByRole("button", { name: /Assign Service Account/ }).click();

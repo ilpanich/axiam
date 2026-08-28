@@ -24,6 +24,24 @@ test.use({ storageState: { cookies: [], origins: [] } });
 import type { Page } from "@playwright/test";
 
 /**
+ * Answer the OPAQUE registration preflight with 404, which is how the server
+ * says the tenant has OPAQUE off.
+ *
+ * Every page that sets a password — reset-password, change-password — now asks
+ * the server to open a registration session *before* it submits, so that a
+ * tenant running OPAQUE `optional` accumulates coverage instead of silently
+ * enrolling nobody. These contract tests are about which endpoint the password
+ * itself is posted to, so they take the OPAQUE-off path: without this, the
+ * preflight is the last request the route handler sees and the page never
+ * reaches the endpoint under test.
+ */
+async function mockOpaqueDisabled(page: Page): Promise<void> {
+  await page.route("**/api/v1/auth/opaque/**", (route) => {
+    route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+}
+
+/**
  * Mock GET /api/v1/auth/me so the app's auth-init hook resolves as authenticated.
  * Required for protected pages (Profile, ChangePassword, MfaManagement) to render
  * instead of redirecting to /login.
@@ -173,6 +191,8 @@ test.describe("Auth endpoint contract", () => {
       let capturedBody: Record<string, unknown> | null = null;
       const tenantId = "22222222-2222-2222-2222-222222222222";
 
+      await mockOpaqueDisabled(page);
+
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
@@ -316,6 +336,7 @@ test.describe("Auth endpoint contract", () => {
       let capturedUrl: string | undefined;
 
       await mockAuthMe(page);
+      await mockOpaqueDisabled(page);
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {

@@ -16,12 +16,21 @@ import { loginAsOrgAdmin } from "./helpers/auth";
 
 test.use({ storageState: { cookies: [], origins: [] } });
 
-/** Switch the tenant the admin UI is acting on, by visible tenant name. */
-async function selectTenant(page: import("@playwright/test").Page, name: string) {
+/**
+ * Switch the tenant the admin UI is acting on, by visible tenant name.
+ *
+ * The trigger's accessible name is `<org slug> / <tenant>`, which is what the
+ * slash matches. The entries inside the panel are `role="menuitem"` — matching
+ * them as `button` finds nothing, however the name is written.
+ */
+async function selectTenant(
+  page: import("@playwright/test").Page,
+  name: string | RegExp,
+) {
   await page.getByRole("button", { name: /\// }).first().click();
   const menu = page.getByRole("menu", { name: "Tenant selector" });
   await expect(menu).toBeVisible();
-  await menu.getByRole("button", { name }).first().click();
+  await menu.getByRole("menuitem", { name }).first().click();
   await expect(menu).toBeHidden();
 }
 
@@ -48,7 +57,7 @@ test.describe("Organization-level super-admin", () => {
     // from there too, so the array came back empty and the UI hid every control
     // for actions the server would in fact have allowed.
     await page.goto("/users");
-    await selectTenant(page, /default|E2E Default Tenant/.source);
+    await selectTenant(page, /E2E Default Tenant/);
 
     await expect(page).not.toHaveURL(/\/login/);
     // A control that only a permitted caller is shown. Its presence is the
@@ -66,7 +75,7 @@ test.describe("Organization-level super-admin", () => {
     const username = `e2e-child-${Date.now()}`;
 
     await page.goto("/users");
-    await selectTenant(page, /default|E2E Default Tenant/.source);
+    await selectTenant(page, /E2E Default Tenant/);
 
     await page.getByRole("button", { name: /New User/ }).click();
     const dialog = page.getByRole("dialog");
@@ -96,7 +105,7 @@ test.describe("Organization-level super-admin", () => {
     const rotated = "E2e@RotatedOrgAdmin456!";
 
     await page.goto("/profile/password");
-    await selectTenant(page, /default|E2E Default Tenant/.source);
+    await selectTenant(page, /E2E Default Tenant/);
 
     async function change(from: string, to: string) {
       await page.goto("/profile/password");

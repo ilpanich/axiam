@@ -99,27 +99,47 @@ test.describe("Organization-level super-admin", () => {
     // and failed with no visible cause — the only thing that had changed was
     // which row of the tenant switcher was highlighted.
     //
-    // Rotated and rotated back, so the fixture credential still works for every
-    // other spec in the suite whatever order they run in.
-    const current = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
-    const rotated = "E2e@RotatedOrgAdmin456!";
+    // The request is intercepted rather than executed, because this spec cannot
+    // put the fixture back. `password_history_count` defaults to 5, so changing
+    // the administrator's password back to the seeded one is *refused* — an
+    // earlier version of this test rotated and tried to restore, and when the
+    // restore failed it left the shared credential rotated and every later spec
+    // failed to sign in.
+    //
+    // What the browser uniquely decides is which endpoint the form posts to
+    // while a child tenant is selected. The two deeper properties are covered
+    // where they can be asserted honestly: that the server accepts the change
+    // at organization scope, by `org_scope_gaps_test::an_org_admin_can_change_
+    // their_own_password_while_acting_on_a_child_tenant`; that any OPAQUE record
+    // is sealed against the principal tenant rather than the acting one, by
+    // `opaqueEnrollment.test.ts`.
+    let changeUrl: string | undefined;
 
     await page.goto("/profile/change-password");
     await selectTenant(page, /E2E Default Tenant/);
 
-    async function change(from: string, to: string) {
-      await page.goto("/profile/change-password");
-      await page.getByLabel("Current Password").fill(from);
-      await page.getByLabel("New Password", { exact: true }).fill(to);
-      await page.getByLabel("Confirm New Password").fill(to);
-      await page.getByRole("button", { name: /Update Password/i }).click();
-      await expect(
-        page.getByText(/Password changed successfully/i)
-      ).toBeVisible({ timeout: 30_000 });
-    }
+    await page.route("**/api/v1/auth/password/change", (route) => {
+      changeUrl = route.request().url();
+      route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    // OPAQUE is off in the e2e stack; 404 is how the server says so.
+    await page.route("**/api/v1/auth/opaque/**", (route) => {
+      route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    });
 
-    await change(current, rotated);
-    await change(rotated, current);
+    const current = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
+    const next = "E2e@RotatedOrgAdmin456!";
+
+    await page.goto("/profile/change-password");
+    await page.getByLabel("Current Password").fill(current);
+    await page.getByLabel("New Password", { exact: true }).fill(next);
+    await page.getByLabel("Confirm New Password").fill(next);
+    await page.getByRole("button", { name: /Update Password/i }).click();
+
+    await expect(page.getByText(/Password changed successfully/i)).toBeVisible({
+      timeout: 30_000,
+    });
+    expect(changeUrl).toContain("/api/v1/auth/password/change");
   });
 
   test("offers the organization's CA certificates to a tenant", async ({

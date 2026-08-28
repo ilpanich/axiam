@@ -88,7 +88,10 @@ async fn raising_the_org_baseline_overtakes_a_weaker_tenant_override() {
     .await
     .unwrap();
 
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(effective.password.min_length, 12, "the tenant's own choice");
 
     // The organization now requires 16. The tenant's 12 is below that floor.
@@ -96,7 +99,10 @@ async fn raising_the_org_baseline_overtakes_a_weaker_tenant_override() {
         .await
         .unwrap();
 
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(
         effective.password.min_length, 16,
         "an org baseline the tenant override no longer satisfies must win — this \
@@ -129,7 +135,10 @@ async fn a_stricter_tenant_override_survives_the_org_baseline_moving() {
         .await
         .unwrap();
 
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(
         effective.password.min_length, 24,
         "a tenant that chose to go further keeps its choice; the baseline is a \
@@ -164,13 +173,19 @@ async fn enabling_opaque_at_the_org_reaches_a_tenant_that_recorded_disabled() {
     repo.set_org_settings(org_id, org_settings_with(8, OpaqueMode::Optional))
         .await
         .unwrap();
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(effective.opaque.opaque_mode, OpaqueMode::Optional);
 
     repo.set_org_settings(org_id, org_settings_with(8, OpaqueMode::Required))
         .await
         .unwrap();
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(
         effective.opaque.opaque_mode,
         OpaqueMode::Required,
@@ -201,7 +216,10 @@ async fn a_tenant_ahead_of_the_org_on_opaque_keeps_its_mode() {
         .await
         .unwrap();
 
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(effective.opaque.opaque_mode, OpaqueMode::Required);
 }
 
@@ -219,7 +237,10 @@ async fn a_tenant_with_no_override_still_tracks_the_baseline() {
         .await
         .unwrap();
 
-    let effective = repo.get_effective_settings(org_id, tenant_id).await.unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
     assert_eq!(effective.password.min_length, 20);
     assert_eq!(effective.opaque.opaque_mode, OpaqueMode::Optional);
 }

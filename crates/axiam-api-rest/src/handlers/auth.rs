@@ -969,7 +969,8 @@ pub async fn me<C: Connection + Clone>(
     let mut is_super_admin = false;
     let mut seen_roles: BTreeSet<Uuid> = BTreeSet::new();
     for assignment in &assignments {
-        if crosses_tenant_boundary && !(assignment.role.is_global && assignment.resource_id.is_none())
+        if crosses_tenant_boundary
+            && !(assignment.role.is_global && assignment.resource_id.is_none())
         {
             continue;
         }

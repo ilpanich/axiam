@@ -154,6 +154,17 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("add_member", "POST", "/api/v1/groups/{group_id}/members"),
             ("remove_member", "DELETE", "/api/v1/groups/{group_id}/members/{user_id}"),
             ("list_roles", "GET", "/api/v1/groups/{group_id}/roles"),
+            # A group is a collection of PRINCIPALS, and a machine identity
+            # inherits its roles exactly as a person does -- which is the shape a
+            # device fleet wants: granted and revoked as one thing rather than
+            # one edge per device.
+            ("list_service_accounts", "GET", "/api/v1/groups/{group_id}/service-accounts"),
+            ("add_service_account", "POST", "/api/v1/groups/{group_id}/service-accounts"),
+            (
+                "remove_service_account",
+                "DELETE",
+                "/api/v1/groups/{group_id}/service-accounts/{service_account_id}",
+            ),
         ],
     },
     "roles": {
@@ -174,6 +185,18 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("list_permissions", "GET", "/api/v1/roles/{role_id}/permissions"),
             ("grant_permission", "POST", "/api/v1/roles/{role_id}/permissions"),
             ("revoke_permission", "DELETE", "/api/v1/roles/{role_id}/permissions/{permission_id}"),
+            # The authorization engine has always applied RBAC to a service
+            # account exactly as it does to a user -- it takes no "is this a
+            # machine" flag to branch on. These are the operations that create
+            # the grant, without which a machine identity could authenticate and
+            # then do nothing.
+            ("list_service_accounts", "GET", "/api/v1/roles/{role_id}/service-accounts"),
+            ("assign_to_service_account", "POST", "/api/v1/roles/{role_id}/service-accounts"),
+            (
+                "unassign_from_service_account",
+                "DELETE",
+                "/api/v1/roles/{role_id}/service-accounts/{service_account_id}",
+            ),
         ],
     },
     "permissions": {
@@ -220,6 +243,11 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("delete", "DELETE", "/api/v1/service-accounts/{sa_id}"),
             ("rotate_secret", "POST", "/api/v1/service-accounts/{sa_id}/rotate-secret"),
             ("bind_certificate", "POST", "/api/v1/service-accounts/{sa_id}/bind-certificate"),
+            # Direct AND group-inherited, each carrying the resource scope of the
+            # grant -- which is what the revoke call needs: omitting
+            # `resource_id` removes the GLOBAL assignment specifically.
+            ("list_roles", "GET", "/api/v1/service-accounts/{service_account_id}/roles"),
+            ("list_groups", "GET", "/api/v1/service-accounts/{service_account_id}/groups"),
         ],
     },
     "certificates": {

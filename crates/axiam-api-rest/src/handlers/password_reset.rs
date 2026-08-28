@@ -109,7 +109,11 @@ where
     let org = org_repo.get_by_slug(org_slug).await.ok()?;
 
     match tenant_slug {
-        Some(slug) => tenant_repo.get_by_slug(org.id, slug).await.ok().map(|t| t.id),
+        Some(slug) => tenant_repo
+            .get_by_slug(org.id, slug)
+            .await
+            .ok()
+            .map(|t| t.id),
         None => tenant_repo
             .get_organization_tenant(org.id)
             .await

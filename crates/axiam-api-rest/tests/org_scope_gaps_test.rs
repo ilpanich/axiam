@@ -196,12 +196,14 @@ macro_rules! test_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new($state))
-                .app_data(web::Data::new(Arc::new(SurrealSessionRepository::new(
-                    $f.db.clone(),
-                )) as Arc<dyn SessionValidator>))
-                .app_data(web::Data::new(Arc::new(SurrealTenantRepository::new(
-                    $f.db.clone(),
-                )) as Arc<dyn TenantScopeResolver>))
+                .app_data(web::Data::new(
+                    Arc::new(SurrealSessionRepository::new($f.db.clone()))
+                        as Arc<dyn SessionValidator>,
+                ))
+                .app_data(web::Data::new(
+                    Arc::new(SurrealTenantRepository::new($f.db.clone()))
+                        as Arc<dyn TenantScopeResolver>,
+                ))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

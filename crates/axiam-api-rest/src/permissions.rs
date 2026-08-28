@@ -600,7 +600,11 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // granting one to a person, and takes the same permission. Splitting it out
     // would let a deployment hand out `roles:assign` while believing machine
     // grants were separately gated.
-    ("GET", "/api/v1/roles/{role_id}/service-accounts", "roles:get"),
+    (
+        "GET",
+        "/api/v1/roles/{role_id}/service-accounts",
+        "roles:get",
+    ),
     (
         "POST",
         "/api/v1/roles/{role_id}/service-accounts",

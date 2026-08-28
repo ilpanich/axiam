@@ -12,11 +12,11 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::repository::service_account::ServiceAccountRowWithId;
 use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
 };
+use crate::repository::service_account::ServiceAccountRowWithId;
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -601,9 +601,8 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .into());
         }
 
-        let query = format!(
-            "RELATE service_account:`{sa_id_str}` -> member_of -> group:`{group_id_str}`;"
-        );
+        let query =
+            format!("RELATE service_account:`{sa_id_str}` -> member_of -> group:`{group_id_str}`;");
         let result = self
             .db
             .current()

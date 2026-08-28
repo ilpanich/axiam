@@ -91,6 +91,23 @@
 #                      itself is tag-derived, like Go).
 #   axiam-c-sdk,       the CMake project() version, vcpkg.json version, conanfile.py
 #   axiam-cplusplus-sdk version, and the README install coords — kept in lockstep.
+#
+# EVERY SDK REPO ALSO GETS THE PLATFORM'S SPEC RE-VENDORED (revendor_spec_artifacts).
+# CONTRACT.md, openapi.json and management-registry.json are authored in the
+# platform repo and vendored into all eleven SDK clones, and a platform release
+# re-stamps two of them: openapi.json's info.version and the
+# info.x-axiam-spec-digest that covers it, mirrored into the registry. Before
+# this step every release therefore left eleven stale copies behind, fixed only
+# by eleven hand-opened pull requests — which is exactly what
+# sdk-artifact-drift.yml is for, and exactly what it caught after 1.0.0-beta03.
+# Copying here folds the re-vendor into the same commit the version bump already
+# makes, so a tagged SDK ships the spec its server was tagged from.
+#
+# ORDER MATTERS, and is enforced rather than documented: the helper refuses to
+# run when the platform clone's spec does not already say the version being
+# tagged. Tag the platform first (its own bump re-stamps the spec), then the
+# SDKs. A partial run like `--repos axiam-go-sdk` on a stale clone fails loudly
+# instead of vendoring a version nobody is releasing.
 # Each SDK's release workflow asserts the pushed tag equals the manifest
 # version; the bump above is what makes that assertion pass.
 #
@@ -609,10 +626,69 @@ regen_management_registry() {
 
 # Rewrite the release version everywhere repo $1 declares it, to version $2.
 # Runs from inside the repo's directory. Populates BUMP_FILES.
+revendor_spec_artifacts() {
+  # The three artifacts authored in the platform repo and vendored into every
+  # SDK clone (publishing-and-secrets.md §8).
+  local -a artifacts=(CONTRACT.md openapi.json management-registry.json)
+  local src="$ROOT/$PLATFORM_REPO/sdks" f from to changed=0
+
+  [[ -d "$src" ]] || die "cannot re-vendor: $src does not exist (wrong --root?)"
+
+  # Guard against a partial run. `--repo axiam-go-sdk` on its own would
+  # otherwise copy whatever the platform clone happens to hold, silently
+  # vendoring a version the SDK is not being tagged as. The platform's spec
+  # must already say what we are about to tag — either because this run bumped
+  # it a moment ago, or because a previous run did.
+  local spec_version
+  spec_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["version"])' \
+    "$src/openapi.json" 2>/dev/null)" || die "cannot read $src/openapi.json"
+  if [[ "$spec_version" != "$1" ]]; then
+    die "refusing to re-vendor: $PLATFORM_REPO's spec says $spec_version, but this is the $1 release.
+     Tag the platform repo first (it re-stamps sdks/openapi.json), then the SDKs."
+  fi
+
+  for f in "${artifacts[@]}"; do
+    from="$src/$f"; to="$f"
+    [[ -f "$from" ]] || die "cannot re-vendor: $from is missing"
+    # Only SDK repos that already vendor the artifact get it. axiam-c-sdk and
+    # axiam-cplusplus-sdk vendor no protos but do vendor these three; a repo
+    # that has never carried one is not given one by a release.
+    [[ -f "$to" ]] || continue
+    if cmp -s "$from" "$to"; then
+      continue
+    fi
+    if $DRY_RUN; then
+      printf '      [dry-run] %s: re-vendor from %s/sdks/\n' "$f" "$PLATFORM_REPO"
+    else
+      cp "$from" "$to" || die "failed to re-vendor $f"
+      printf '      %s: re-vendored from %s/sdks/\n' "$f" "$PLATFORM_REPO"
+    fi
+    BUMP_FILES+=("$f")
+    changed=1
+  done
+  if (( ! changed )); then
+    printf '      vendored spec artifacts: already current\n'
+  fi
+}
+
 bump_versions() {
   local repo="$1" version="$2" old
   BUMP_FILES=()
   old="$(current_version "$repo")"
+
+  # Every SDK repo carries a copy of the platform's contract, spec and
+  # management registry, and every platform release re-stamps two of them (the
+  # spec's info.version and the digest that covers it, mirrored into the
+  # registry). Before this step the copies went stale on every single release
+  # and stayed stale until somebody opened eleven pull requests — which is what
+  # sdk-artifact-drift.yml exists to notice, and which it duly did after
+  # 1.0.0-beta03. Re-vendoring here folds that into the same commit the version
+  # bump already makes, so a tagged SDK ships the spec its server was tagged
+  # from. The platform repo is skipped: it is the source.
+  if [[ "$repo" != "$PLATFORM_REPO" && "$repo" != "$OPAQUE_TARGET" ]]; then
+    revendor_spec_artifacts "$version"
+  fi
+
   case "$repo" in
     axiam|axiam-opaque)
       # Both targets bump the same clone — they differ only in the tag they

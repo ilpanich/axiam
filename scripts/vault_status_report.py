@@ -32,10 +32,23 @@ ALLOWED_CAPABILITIES = frozenset({"read", "deny"})
 ROOT_CAPABILITY = "root"
 
 
-def secret_presence(body: dict) -> list[tuple[str, bool]]:
-    """`(name, present)` for every secret AXIAM reads, in declaration order."""
+def secret_presence(body: dict) -> dict[str, bool]:
+    """Which of the secrets AXIAM reads are present, keyed by name.
+
+    Returns a `name -> bool` mapping rather than `(name, present)` pairs so the
+    caller loops over [`EXPECTED`] — a module constant — and only the boolean
+    comes from Vault's response. That is not a style preference: when the names
+    were carried out of here alongside the flags, CodeQL's taint tracking
+    followed `body` into the printed name and raised a high-severity
+    "clear-text logging of sensitive information" alert (2026-08-28). The alert
+    was a false positive — the names have always come from `EXPECTED` and no
+    value is ever printed — but a shape that makes a reader, or an analyser,
+    ask the question at all is the wrong shape for a script whose entire job is
+    to not print secrets. Now the only thing crossing this boundary is a
+    presence flag.
+    """
     fields = (body.get("data") or {}).get("data") or {}
-    return [(name, bool(fields.get(name))) for name in EXPECTED]
+    return {name: bool(fields.get(name)) for name in EXPECTED}
 
 
 def unexpected_fields(body: dict) -> list[str]:

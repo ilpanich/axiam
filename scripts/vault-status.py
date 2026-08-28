@@ -25,6 +25,7 @@ import json
 import sys
 
 from vault_status_report import (
+    EXPECTED,
     is_root,
     read_capabilities,
     scope_findings,
@@ -35,10 +36,15 @@ from vault_status_report import (
 
 def print_secrets(body: dict) -> list[str]:
     """Print presence for every expected field; return the missing names."""
+    present = secret_presence(body)
     missing = []
-    for name, present in secret_presence(body):
-        print(f"  {'set  ' if present else 'MISSING'}  {name}")
-        if not present:
+    # Iterating EXPECTED rather than the returned mapping is deliberate: the
+    # name printed here is then a module constant, and the only thing this loop
+    # takes from Vault's response is a boolean. See `secret_presence`.
+    for name in EXPECTED:
+        label = "set  " if present[name] else "MISSING"
+        print(f"  {label}  {name}")
+        if not present[name]:
             missing.append(name)
 
     extra = unexpected_fields(body)

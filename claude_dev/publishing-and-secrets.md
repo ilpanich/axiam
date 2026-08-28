@@ -51,11 +51,11 @@ reference.
 | Shared OPAQUE core | `axiam` | **crates.io** (`axiam-opaque`) + **npm** (`@axiam/opaque-wasm`) + **GitHub Releases** (C ABI) | Yes | **None** — Trusted Publishing (OIDC) on both registries, via the `production` environment; `GITHUB_TOKEN` attaches the C ABI binaries |
 | Python SDK | `axiam-python-sdk` | **PyPI** | Yes | **None** — Trusted Publishing (OIDC) + one-time PyPI config |
 | TypeScript SDK | `axiam-typescript-sdk` | **npm** | Yes | **None** — Trusted Publishing (OIDC) via the `production` environment |
-| Java SDK (+ BOM) | `axiam-java-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| Java SDK (+ BOM) | `axiam-java-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` — the Sigstore bundles alongside them are keyless and need none |
 | C# SDK | `axiam-csharp-sdk` | **NuGet.org** | Yes | **None** — Trusted Publishing (OIDC) via the `production` environment |
 | PHP SDK | `axiam-php-sdk` | **Packagist** | Yes | **None** — Packagist's own GitHub webhook |
 | Go SDK | `axiam-go-sdk` | **pkg.go.dev** | Yes | **None** — the module proxy pulls it from the git tag |
-| Kotlin SDK | `axiam-kotlin-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| Kotlin SDK | `axiam-kotlin-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` — the Sigstore bundles alongside them are keyless and need none |
 | Swift SDK | `axiam-swift-sdk` | **Swift Package Index** (+ CocoaPods trunk) | Yes | **None** for SwiftPM (git-tag) — `COCOAPODS_TRUNK_TOKEN` only if also pushing the podspec to CocoaPods trunk |
 | C SDK | `axiam-c-sdk` | **GitHub Releases** (+ vcpkg / Conan recipes in-repo) | Yes | **None** — `GITHUB_TOKEN` attaches the release artifacts |
 | C++ SDK | `axiam-cplusplus-sdk` | **GitHub Releases** (+ vcpkg / Conan recipes in-repo) | Yes | **None** — `GITHUB_TOKEN` attaches the release artifacts |
@@ -301,6 +301,16 @@ gh secret set GPG_PASSPHRASE --repo ilpanich/axiam-java-sdk
 The release deploys **both** the SDK artifact and the BOM. javadoc.io then serves the docs
 automatically from the `-javadoc.jar` the build attaches.
 
+**Step D — Sigstore bundles: nothing to set up.** Alongside each `.asc`, the release
+publishes a `.sigstore.json` Sigstore bundle (`dev.sigstore:sigstore-maven-plugin`, bound to
+`verify`, enabled with `-Dsigstore.skip=false` on the release path only). It is **keyless**:
+Fulcio issues a ten-minute certificate against the publish job's GitHub OIDC claim and Rekor
+records the signing, so there is **no fifth secret**, no account and no rotation clock — the
+Sigstore public good instance is free and requires no registration. The one requirement is
+`id-token: write` on the publish job, which it already declares for
+`attest-build-provenance`. A `verify-sigstore` pull-request job signs for real on every
+change, so the first time this runs is never a tag.
+
 ### 4.6 NuGet.org — C# SDK → **Trusted Publishing**, no secret (`axiam-csharp-sdk`)
 
 **This replaces the old `NUGET_API_KEY` flow.** NuGet now supports OIDC trusted publishing,
@@ -397,6 +407,11 @@ You can reuse the **same dedicated CI GPG key** created for Java (§4.5 Step C) 
 the keyserver — or generate a second one. Create the `maven-central` GitHub environment in the repo
 (§3.2). Docs are served automatically by **javadoc.io** from the released `-javadoc.jar` (Dokka emits
 a Javadoc-format jar).
+
+Sigstore bundles ship here too and, as with Java (§4.5 Step D), need **nothing set up**: the
+`dev.sigstore.sign` Gradle plugin is applied only under `-Psigstore.enabled=true`, which the
+publish job passes, and signs keyless against the job's existing `id-token: write` OIDC claim.
+A `sigstore-sign-gate` pull-request job signs for real on every change.
 
 ### 4.11 Swift Package Index + CocoaPods — Swift SDK → 0–1 secret in `axiam-swift-sdk`
 

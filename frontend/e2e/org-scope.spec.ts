@@ -104,15 +104,15 @@ test.describe("Organization-level super-admin", () => {
     const current = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
     const rotated = "E2e@RotatedOrgAdmin456!";
 
-    await page.goto("/profile/password");
+    await page.goto("/profile/change-password");
     await selectTenant(page, /E2E Default Tenant/);
 
     async function change(from: string, to: string) {
-      await page.goto("/profile/password");
+      await page.goto("/profile/change-password");
       await page.getByLabel("Current Password").fill(from);
       await page.getByLabel("New Password", { exact: true }).fill(to);
       await page.getByLabel("Confirm New Password").fill(to);
-      await page.getByRole("button", { name: /Change Password/i }).click();
+      await page.getByRole("button", { name: /Update Password/i }).click();
       await expect(
         page.getByText(/Password changed successfully/i)
       ).toBeVisible({ timeout: 30_000 });

@@ -191,8 +191,6 @@ test.describe("Auth endpoint contract", () => {
       let capturedBody: Record<string, unknown> | null = null;
       const tenantId = "22222222-2222-2222-2222-222222222222";
 
-      await mockOpaqueDisabled(page);
-
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
@@ -202,6 +200,9 @@ test.describe("Auth endpoint contract", () => {
           route.fallback();
         }
       });
+      // Registered last so it wins: Playwright matches routes in reverse
+      // registration order, and the catch-all above matches this URL too.
+      await mockOpaqueDisabled(page);
 
       // Provide token + tenant_id in the query string so the form renders
       // (not the "invalid reset link" state) — mirrors VerifyEmailPage's
@@ -336,7 +337,6 @@ test.describe("Auth endpoint contract", () => {
       let capturedUrl: string | undefined;
 
       await mockAuthMe(page);
-      await mockOpaqueDisabled(page);
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
@@ -346,6 +346,8 @@ test.describe("Auth endpoint contract", () => {
           route.fallback();
         }
       });
+      // Registered last so it wins — see the note in ResetPasswordPage.
+      await mockOpaqueDisabled(page);
 
       await page.goto("/profile/change-password");
 

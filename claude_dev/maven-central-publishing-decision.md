@@ -143,6 +143,23 @@ real tag" — and no throwaway-version validation run was possible in the sessio
 this work. It stays the remaining half of H-1 rather than being shipped untested; both
 `RELEASING.md` files name it as open so it is not quietly forgotten.
 
+**A second thing the H-1 pass turned up, in the release process rather than the
+pipelines.** `sdks/openapi.json` and `sdks/management-registry.json` are
+authored in the platform repo and vendored into all eleven SDK clones, and
+`mass-tag.sh` re-stamps two fields in them on every release — the spec's
+`info.version` and the `x-axiam-spec-digest` that covers it. It did not copy
+the result into the SDK repos, so **every** platform release left eleven stale
+vendored copies behind, fixed only by eleven hand-opened pull requests. That is
+what `sdk-artifact-drift.yml` exists to notice, and it is what happened at
+1.0.0-beta03: the SDK pull requests for this very hardening pass merged with the
+beta02 stamp, minutes before the beta03 tag re-stamped the source.
+
+`mass-tag.sh` now re-vendors the three artifacts into each SDK repo as part of
+the bump commit it already makes, and refuses to run when the platform clone's
+spec does not already carry the version being tagged — so "tag the platform
+first, then the SDKs" is enforced rather than remembered. Both paths were
+validated with `--dry-run` against the real clones.
+
 **One thing worth carrying forward from control 5.** Pinning
 `dtolnay/rust-toolchain` by digest silently *removes* an input: the action reads the
 toolchain to install from the ref it was called by, so `@stable` → `@6c977a6…` means

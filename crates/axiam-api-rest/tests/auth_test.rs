@@ -578,10 +578,16 @@ async fn logout_clears_cookies() {
         .expect("Set-Cookie for axiam_csrf must be present on logout");
 
     // Actix's `make_removal()` sets Max-Age=0; assert any of the clearing signals.
-    for (name, hdr) in [
-        ("axiam_access", &access_hdr),
-        ("axiam_refresh", &refresh_hdr),
-        ("axiam_csrf", &csrf_hdr),
+    // A removal must also carry the same attributes as the cookie it clears:
+    // it is a `Set-Cookie` in its own right, so a bare one leaves an
+    // empty-valued replacement weaker than the value it replaced — and a
+    // non-`Secure` removal cannot overwrite a `Secure` cookie from an insecure
+    // origin at all. `http_only` deliberately differs per cookie (D-07: the
+    // CSRF cookie is JS-readable, and its removal mirrors that).
+    for (name, hdr, http_only, path) in [
+        ("axiam_access", &access_hdr, true, "/"),
+        ("axiam_refresh", &refresh_hdr, true, "/api/v1/auth/refresh"),
+        ("axiam_csrf", &csrf_hdr, false, "/"),
     ] {
         let lower = hdr.to_lowercase();
         let cleared = lower.contains("max-age=0")
@@ -590,6 +596,23 @@ async fn logout_clears_cookies() {
         assert!(
             cleared,
             "{name} Set-Cookie header must indicate cookie removal (Max-Age=0 or past Expires): {hdr}"
+        );
+        assert!(
+            hdr.contains("Secure"),
+            "{name} removal must carry Secure, as the setter does: {hdr}"
+        );
+        assert!(
+            hdr.contains("SameSite=Strict"),
+            "{name} removal must carry SameSite=Strict, as the setter does: {hdr}"
+        );
+        assert_eq!(
+            hdr.contains("HttpOnly"),
+            http_only,
+            "{name} removal HttpOnly must match the setter's: {hdr}"
+        );
+        assert!(
+            hdr.contains(&format!("Path={path}")),
+            "{name} removal on a different path would not match the cookie: {hdr}"
         );
     }
 

@@ -275,16 +275,41 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
         .finish()
 }
 
+// A removal cookie is still a `Set-Cookie` the browser parses and stores until
+// it expires, so it must mirror **every** attribute of the cookie it clears —
+// not just `path`. Emitting a bare `Path=/` removal for a cookie that was set
+// `HttpOnly; Secure; SameSite=Strict` leaves the (empty-valued) cookie
+// JS-readable, cross-site-sendable and cleartext-transmissible for the life of
+// the response, and makes the removal itself depend on transport the setters
+// explicitly do not trust: browsers refuse to let a non-`Secure` cookie from an
+// insecure origin overwrite a `Secure` one ("Leave Secure Cookies Alone").
+// `cookie_secure` therefore threads through here exactly as it does through
+// `access_cookie` / `refresh_cookie` / `csrf_cookie`.
+
 /// Clear the `axiam_access` cookie (Max-Age=0, per D-08).
-pub fn clear_access_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_ACCESS, "").path("/").finish();
+///
+/// Mirrors [`access_cookie`]'s attributes; `cookie_secure` must be the same
+/// `AuthConfig::cookie_secure` value used to set it (D-18).
+pub fn clear_access_cookie(cookie_secure: bool) -> Cookie<'static> {
+    let mut c = Cookie::build(COOKIE_ACCESS, "")
+        .http_only(true)
+        .secure(cookie_secure)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .finish();
     c.make_removal();
     c
 }
 
 /// Clear the `axiam_refresh` cookie.
-pub fn clear_refresh_cookie() -> Cookie<'static> {
+///
+/// Mirrors [`refresh_cookie`]'s attributes, including its `/api/v1/auth/refresh`
+/// path scope — a removal on a different path would not match the cookie.
+pub fn clear_refresh_cookie(cookie_secure: bool) -> Cookie<'static> {
     let mut c = Cookie::build(COOKIE_REFRESH, "")
+        .http_only(true)
+        .secure(cookie_secure)
+        .same_site(SameSite::Strict)
         .path("/api/v1/auth/refresh")
         .finish();
     c.make_removal();
@@ -292,8 +317,17 @@ pub fn clear_refresh_cookie() -> Cookie<'static> {
 }
 
 /// Clear the `axiam_csrf` cookie.
-pub fn clear_csrf_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_CSRF, "").path("/").finish();
+///
+/// Mirrors [`csrf_cookie`]'s attributes — including `httpOnly(false)`, which is
+/// deliberate there (D-07: JavaScript reads this one to populate
+/// `X-CSRF-Token`) and is kept here for symmetry.
+pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
+    let mut c = Cookie::build(COOKIE_CSRF, "")
+        .http_only(false)
+        .secure(cookie_secure)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .finish();
     c.make_removal();
     c
 }
@@ -385,5 +419,71 @@ mod tests {
             !c.secure().unwrap_or(true),
             "expected Secure=false for HTTP dev"
         );
+    }
+
+    /// A removal cookie is a `Set-Cookie` in its own right: the browser stores
+    /// what it says until it expires. If it does not carry the same flags as
+    /// the cookie it clears, the empty-valued replacement is weaker than the
+    /// value it replaced — and a non-`Secure` removal cannot overwrite a
+    /// `Secure` cookie from an insecure origin at all.
+    #[test]
+    fn removal_cookies_mirror_the_attributes_of_the_cookies_they_clear() {
+        for secure in [true, false] {
+            let pairs = [
+                (
+                    access_cookie("tok", 900, secure),
+                    clear_access_cookie(secure),
+                ),
+                (
+                    refresh_cookie("tok", 86400, secure),
+                    clear_refresh_cookie(secure),
+                ),
+                (csrf_cookie("tok", 900, secure), clear_csrf_cookie(secure)),
+            ];
+
+            for (set, clear) in pairs {
+                let name = set.name().to_owned();
+                assert_eq!(clear.name(), name, "removal must target the same cookie");
+                assert_eq!(
+                    clear.path(),
+                    set.path(),
+                    "{name}: a removal on a different path does not match the cookie"
+                );
+                assert_eq!(
+                    clear.secure(),
+                    set.secure(),
+                    "{name}: removal Secure must match the setter's (secure={secure})"
+                );
+                assert_eq!(
+                    clear.http_only(),
+                    set.http_only(),
+                    "{name}: removal HttpOnly must match the setter's"
+                );
+                assert_eq!(
+                    clear.same_site(),
+                    set.same_site(),
+                    "{name}: removal SameSite must match the setter's"
+                );
+            }
+        }
+    }
+
+    /// `make_removal` is what actually expires the cookie; the attribute
+    /// mirroring above must not have displaced it.
+    #[test]
+    fn removal_cookies_are_still_expiring_removals() {
+        for c in [
+            clear_access_cookie(true),
+            clear_refresh_cookie(true),
+            clear_csrf_cookie(true),
+        ] {
+            let name = c.name().to_owned();
+            assert_eq!(c.value(), "", "{name}: removal must carry an empty value");
+            assert_eq!(
+                c.max_age(),
+                Some(Duration::seconds(0)),
+                "{name}: removal must set Max-Age=0"
+            );
+        }
     }
 }

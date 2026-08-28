@@ -2034,6 +2034,8 @@ pub async fn end_session<C: Connection + Clone>(
         None => Vec::new(),
     };
 
+    let cookie_secure = state.auth_config.cookie_secure;
+
     match axiam_oauth2::logout::resolve_post_logout_redirect(
         q.post_logout_redirect_uri.as_deref(),
         &allow_list,
@@ -2050,18 +2052,18 @@ pub async fn end_session<C: Connection + Clone>(
                 // error, not a user-facing one; render rather than emit a
                 // Location header we could not construct.
                 (Err(_), _) => {
-                    return logged_out_page();
+                    return logged_out_page(cookie_secure);
                 }
             };
             HttpResponse::Found()
                 .append_header(("Location", location))
                 .append_header(("Cache-Control", "no-store"))
-                .cookie(crate::middleware::csrf::clear_access_cookie())
-                .cookie(crate::middleware::csrf::clear_refresh_cookie())
-                .cookie(crate::middleware::csrf::clear_csrf_cookie())
+                .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
+                .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
+                .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
                 .finish()
         }
-        axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(),
+        axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(cookie_secure),
     }
 }
 
@@ -2070,13 +2072,16 @@ pub async fn end_session<C: Connection + Clone>(
 /// Deliberately carries no RP-supplied content — not the `state`, not the
 /// rejected URI. Echoing either would put an attacker-controlled string into
 /// a page served from AXIAM's own origin.
-fn logged_out_page() -> HttpResponse {
+///
+/// `cookie_secure` is `AuthConfig::cookie_secure` (D-18): the removal cookies
+/// must carry the same attributes as the ones they clear.
+fn logged_out_page(cookie_secure: bool) -> HttpResponse {
     HttpResponse::Ok()
         .append_header(("Cache-Control", "no-store"))
         .content_type("text/html; charset=utf-8")
-        .cookie(crate::middleware::csrf::clear_access_cookie())
-        .cookie(crate::middleware::csrf::clear_refresh_cookie())
-        .cookie(crate::middleware::csrf::clear_csrf_cookie())
+        .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
+        .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
+        .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
         .body(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <title>Signed out</title></head><body><h1>You are signed out.</h1>\

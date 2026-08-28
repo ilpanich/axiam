@@ -4821,7 +4821,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Open",
        "description": "The audit log is append-only by design, so any personal data written into it cannot later be erased — which is in direct tension with the GDPR Art. 17 erasure path AXIAM also offers.",
-       "mitigation": "Partially addressed: audit metadata is deliberately minimised and erasure anonymises the subject rather than deleting audit records. Deployments must set an audit retention period consistent with their lawful basis; AXIAM does not enforce one today."
+       "mitigation": "Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject rather than deleting audit records, and a default retention sweep bounds the log at 730 days — the table's only deletion path, configurable and disableable with 0 (T-119). What remains open is the collection side: nothing prevents a deployment from writing personal data into fields the sweep will hold for the full window, so the retention period must still be set consistent with the deployment's lawful basis."
       }
      ],
      "open": 1

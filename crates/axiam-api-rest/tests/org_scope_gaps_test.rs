@@ -480,7 +480,8 @@ async fn opaque_register_start_accepts_a_tenant_id_without_an_organization() {
     let state = AppState::for_test(f.db.clone(), auth.clone());
     let app = test_app!(f, auth, state);
 
-    let (_, request) = axiam_opaque::ClientRegistrationState::start(ROTATED_PASSWORD.as_str()).unwrap();
+    let (_, request) =
+        axiam_opaque::ClientRegistrationState::start(ROTATED_PASSWORD.as_str()).unwrap();
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/opaque/register/start")

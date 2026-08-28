@@ -453,6 +453,82 @@ async fn a_uri_not_on_the_allow_list_still_logs_out_but_never_redirects() {
     assert!(!session_is_live(&f, session).await, "still logged out");
 }
 
+/// The three logout removal cookies must carry the same attributes as the
+/// cookies they clear. A removal is a `Set-Cookie` in its own right: emitted
+/// bare, it leaves an empty-valued replacement that is weaker than the value
+/// it replaced, and a non-`Secure` removal cannot overwrite a `Secure` cookie
+/// from an insecure origin at all. `cookie_secure` is `true` here via
+/// `AuthConfig::default()`, exactly as in production.
+#[actix_web::test]
+async fn logout_removal_cookies_carry_the_same_flags_as_the_cookies_they_clear() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // Both branches of `end_session` clear cookies: the allow-listed redirect
+    // and AXIAM's own rendered page. Neither may skip the attributes.
+    for (query_suffix, expected_status) in [
+        (
+            format!("&post_logout_redirect_uri={}", enc(POST_LOGOUT_URI)),
+            302,
+        ),
+        (String::new(), 200),
+    ] {
+        let session = new_session(&f).await;
+        let hint = id_token_for(&f, &f.client_id, Some(session));
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!(
+                "/oauth2/end_session?tenant_id={}&id_token_hint={hint}{query_suffix}",
+                f.tenant_id
+            ))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), expected_status);
+
+        let set_cookies: Vec<String> = resp
+            .headers()
+            .get_all("Set-Cookie")
+            .filter_map(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .collect();
+
+        for (name, http_only, path) in [
+            ("axiam_access", true, "/"),
+            ("axiam_refresh", true, "/api/v1/auth/refresh"),
+            // D-07: the CSRF cookie is deliberately JS-readable, and its
+            // removal mirrors that rather than silently hardening it.
+            ("axiam_csrf", false, "/"),
+        ] {
+            let header = set_cookies
+                .iter()
+                .find(|c| c.starts_with(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("no Set-Cookie for {name} in {set_cookies:?}"));
+
+            assert!(
+                header.contains("Secure"),
+                "{name}: missing Secure in {header}"
+            );
+            assert!(
+                header.contains("SameSite=Strict"),
+                "{name}: missing SameSite=Strict in {header}"
+            );
+            assert_eq!(
+                header.contains("HttpOnly"),
+                http_only,
+                "{name}: HttpOnly must match the setter's in {header}"
+            );
+            assert!(
+                header.contains(&format!("Path={path}")),
+                "{name}: a removal on a different path does not match the cookie: {header}"
+            );
+            assert!(
+                header.contains("Max-Age=0"),
+                "{name}: removal must still expire the cookie: {header}"
+            );
+        }
+    }
+}
+
 #[actix_web::test]
 async fn a_prefix_of_an_allow_listed_uri_does_not_redirect() {
     let f = setup().await;

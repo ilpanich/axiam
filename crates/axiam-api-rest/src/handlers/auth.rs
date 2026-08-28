@@ -569,10 +569,11 @@ pub async fn logout<C: Connection + Clone>(
         .auth_service
         .logout(user.tenant_id, user.session_id)
         .await?;
+    let cookie_secure = state.auth_config.cookie_secure;
     Ok(HttpResponse::NoContent()
-        .cookie(clear_access_cookie())
-        .cookie(clear_refresh_cookie())
-        .cookie(clear_csrf_cookie())
+        .cookie(clear_access_cookie(cookie_secure))
+        .cookie(clear_refresh_cookie(cookie_secure))
+        .cookie(clear_csrf_cookie(cookie_secure))
         .finish())
 }
 
